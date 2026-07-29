@@ -1,0 +1,50 @@
+{
+    "name": "@peersyst/fiber-lsp-sdk",
+    "version": "0.0.0",
+    "description": "Device signer SDK for Fiber (Nervos Lightning) hosted-LSP integrations: key derivation, musig2 partial signatures, signing policy, signer session, and typed fiber RPC client.",
+    "type": "module",
+    "main": "./dist/index.js",
+    "module": "./dist/index.js",
+    "types": "./dist/index.d.ts",
+    "exports": {
+        ".": {
+            "types": "./dist/index.d.ts",
+            "import": "./dist/index.js"
+        }
+    },
+    "files": [
+        "dist"
+    ],
+    "sideEffects": false,
+    "engines": {
+        "node": ">=20.19.0"
+    },
+    "packageManager": "pnpm@10.29.3",
+    "scripts": {
+        "build": "tsup",
+        "test": "NODE_OPTIONS=--experimental-vm-modules jest",
+        "lint": "eslint src *.ts *.mjs",
+        "lint:fix": "eslint src *.ts *.mjs --fix",
+        "check-types": "tsc --noEmit",
+        "format": "prettier --write src .github *.md *.json *.ts *.mjs",
+        "format:check": "prettier --check src .github *.md *.json *.ts *.mjs"
+    },
+    "dependencies": {
+        "@noble/curves": "2.2.0",
+        "@noble/hashes": "2.2.0",
+        "@scure/bip32": "2.2.0",
+        "@scure/btc-signer": "2.2.0"
+    },
+    "devDependencies": {
+        "@eslint/js": "9.39.5",
+        "@types/jest": "30.0.0",
+        "eslint": "9.39.5",
+        "eslint-config-prettier": "10.1.8",
+        "jest": "30.4.2",
+        "prettier": "3.9.6",
+        "ts-jest": "29.4.12",
+        "tsup": "8.5.1",
+        "typescript": "5.9.3",
+        "typescript-eslint": "8.65.0"
+    }
+}
