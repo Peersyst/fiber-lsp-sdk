@@ -7,12 +7,12 @@ blind-signs.
 
 ## Key properties
 
-- **Runs anywhere**: framework-agnostic TypeScript, ESM only. The same code runs unmodified in Node, browsers, and React Native
-  (Hermes).
+- **Runs anywhere**: framework-agnostic TypeScript, shipped as both ESM and CommonJS. The same code runs unmodified in Node,
+  browsers, and React Native (Hermes).
 - **No I/O of its own**: the SDK performs no platform calls. The host injects every external effect: a `SignerStorage` (key-value
   persistence), a WebSocket factory, and `fetch`.
 - **Minimal, audited dependency surface**: the only runtime dependencies are `@noble/curves`, `@noble/hashes`, `@scure/bip32`, and
-  `@scure/btc-signer`, pinned to exact versions.
+  `@scure/btc-signer`, accepted as `^2.2.0` so they dedupe with the versions a host app already installs.
 - **Recoverable by design**: every derivation is a deterministic function of the master seed, so channels are recoverable from the
   wallet mnemonic alone.
 
@@ -42,6 +42,17 @@ pnpm build
 ```
 
 Node version: see `.nvmrc`.
+
+### Build output
+
+`pnpm build` emits a dual bundle in `dist/`: `index.js` + `index.d.ts` for `import`, `index.cjs` + `index.d.cts` for `require`,
+both with source maps. The runtime dependencies stay external and are ESM-only packages, so the CommonJS entry loads them through
+`require(esm)` — this is why the package requires Node >= 20.19.
+
+```js
+import { PROTOCOL_VERSION } from "@peersyst/fiber-lsp-sdk";
+const { PROTOCOL_VERSION } = require("@peersyst/fiber-lsp-sdk");
+```
 
 ## License
 

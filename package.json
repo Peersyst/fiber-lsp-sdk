@@ -3,13 +3,19 @@
     "version": "0.0.0",
     "description": "Device signer SDK for Fiber (Nervos Lightning) hosted-LSP integrations: key derivation, musig2 partial signatures, signing policy, signer session, and typed fiber RPC client.",
     "type": "module",
-    "main": "./dist/index.js",
+    "main": "./dist/index.cjs",
     "module": "./dist/index.js",
     "types": "./dist/index.d.ts",
     "exports": {
         ".": {
-            "types": "./dist/index.d.ts",
-            "import": "./dist/index.js"
+            "import": {
+                "types": "./dist/index.d.ts",
+                "default": "./dist/index.js"
+            },
+            "require": {
+                "types": "./dist/index.d.cts",
+                "default": "./dist/index.cjs"
+            }
         }
     },
     "files": [
@@ -30,10 +36,10 @@
         "format:check": "prettier --check src .github *.md *.json *.ts *.mjs"
     },
     "dependencies": {
-        "@noble/curves": "2.2.0",
-        "@noble/hashes": "2.2.0",
-        "@scure/bip32": "2.2.0",
-        "@scure/btc-signer": "2.2.0"
+        "@noble/curves": "^2.2.0",
+        "@noble/hashes": "^2.2.0",
+        "@scure/bip32": "^2.2.0",
+        "@scure/btc-signer": "^2.2.0"
     },
     "devDependencies": {
         "@eslint/js": "9.39.5",
