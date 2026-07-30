@@ -45,9 +45,9 @@ Node version: see `.nvmrc`.
 
 ### Build output
 
-`pnpm build` emits a dual bundle in `dist/`: `index.js` + `index.d.ts` for `import`, `index.cjs` + `index.d.cts` for `require`,
-both with source maps. The runtime dependencies stay external and are ESM-only packages, so the CommonJS entry loads them through
-`require(esm)` — this is why the package requires Node >= 20.19.
+`pnpm build` emits a dual bundle in `dist/`: `index.js` for `import`, `index.cjs` for `require`, both with source maps. Both
+conditions resolve types through a single `index.d.ts`. The runtime dependencies stay external and are ESM-only packages, so the
+CommonJS entry loads them through `require(esm)` — this is why the package requires Node >= 20.19.
 
 ```js
 import { PROTOCOL_VERSION } from "@peersyst/fiber-lsp-sdk";

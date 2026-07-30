@@ -34,7 +34,7 @@ pnpm install
 pnpm lint          # eslint (includes the no-platform-API guard)
 pnpm check-types   # tsc --noEmit
 pnpm test          # jest (ESM mode)
-pnpm build         # tsup -> dist/ (dual ESM + CJS, types per condition)
+pnpm build         # tsup -> dist/ (dual ESM + CJS, one shared index.d.ts)
 pnpm format        # prettier
 ```
 
