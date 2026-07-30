@@ -9,16 +9,16 @@ importers:
   .:
     dependencies:
       '@noble/curves':
-        specifier: 2.2.0
+        specifier: ^2.2.0
         version: 2.2.0
       '@noble/hashes':
-        specifier: 2.2.0
+        specifier: ^2.2.0
         version: 2.2.0
       '@scure/bip32':
-        specifier: 2.2.0
+        specifier: ^2.2.0
         version: 2.2.0
       '@scure/btc-signer':
-        specifier: 2.2.0
+        specifier: ^2.2.0
         version: 2.2.0
     devDependencies:
       '@eslint/js':

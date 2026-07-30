@@ -16,8 +16,10 @@ Upstream reference: `nervosnetwork/fiber` @ `b71a61c3` (v0.9.0-rc7). The key der
 - **Runtimes**: the SDK must run unmodified in Node, browsers, and React Native (Hermes). No platform APIs anywhere in `src/`
   (lint-enforced): no `node:*` imports, no globals like `process` or `window`. Every external effect is injected: `SignerStorage`,
   a WebSocket factory, `fetch`.
-- **Dependencies**: runtime deps are exactly `@noble/curves`, `@noble/hashes`, `@scure/bip32`, `@scure/btc-signer`, pinned. Do not
-  add runtime dependencies.
+- **Dependencies**: runtime deps are exactly `@noble/curves`, `@noble/hashes`, `@scure/bip32`, `@scure/btc-signer`, declared as
+  caret ranges (`^2.2.0`) so a host app that already depends on them dedupes to a single copy instead of installing a second one.
+  Do not add runtime dependencies, and do not pin these to exact versions; the caret floor must stay at the lowest version whose
+  API the SDK actually uses. Dev dependencies stay pinned exactly.
 - **Determinism**: every derivation (channel seeds, keys, nonces) is a deterministic function of the master seed. The derivation
   scheme is versioned and additive-only: changing it breaks recoverability of existing channels.
 - **Secrets**: the master seed enters once via the constructor and stays in SDK memory. No API returns a private key, except the
@@ -32,7 +34,7 @@ pnpm install
 pnpm lint          # eslint (includes the no-platform-API guard)
 pnpm check-types   # tsc --noEmit
 pnpm test          # jest (ESM mode)
-pnpm build         # tsup -> dist/
+pnpm build         # tsup -> dist/ (dual ESM + CJS, types per condition)
 pnpm format        # prettier
 ```
 
