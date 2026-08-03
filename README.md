@@ -9,7 +9,7 @@ blind-signs.
 
 - **Runs anywhere**: framework-agnostic TypeScript, shipped as both ESM and CommonJS. The same code runs unmodified in Node,
   browsers, and React Native (Hermes).
-- **No I/O of its own**: the SDK performs no platform calls. The host injects every external effect: a `SignerStorage` (key-value
+- **No I/O of its own**: the SDK performs no platform calls. The host injects every external effect: an `ISignerStorage` (key-value
   persistence), a WebSocket factory, and `fetch`.
 - **Minimal, audited dependency surface**: the only runtime dependencies are `@noble/curves`, `@noble/hashes`, `@scure/bip32`, and
   `@scure/btc-signer`, accepted as `^2.2.0` so they dedupe with the versions a host app already installs.
@@ -20,15 +20,34 @@ These properties reflect the current specification and may evolve with it while 
 
 ## Modules
 
-| Module       | Responsibility                                                                       |
-| ------------ | ------------------------------------------------------------------------------------ |
-| `derivation` | Fiber key scheme port + SDK-owned derivations (channel seed, device key, nonce seed) |
-| `signer`     | Dispatches signer-protocol methods, musig2 signing engine                            |
-| `policy`     | Policy engine + persisted per-channel records                                        |
-| `session`    | Signer session client: challenge auth, correlation, resume                           |
-| `protocol`   | Wire types of the remote signing protocol                                            |
-| `rpc`        | Typed fiber JSON-RPC client (Biscuit-authed)                                         |
-| `sdk`        | Public facade wiring the above                                                       |
+| Module                           | Responsibility                                                                                |
+| -------------------------------- | --------------------------------------------------------------------------------------------- |
+| [`derivation`](./src/derivation) | Fiber key scheme port + SDK-owned derivations (channel seed, wallet identity key, nonce seed) |
+| `signer`                         | Dispatches signer-protocol methods, musig2 signing engine                                     |
+| [`policy`](./src/policy)         | Policy engine + persisted per-channel records                                                 |
+| `session`                        | Signer session client: challenge auth, correlation, resume                                    |
+| [`protocol`](./src/protocol)     | Wire types of the remote signing protocol                                                     |
+| `rpc`                            | Typed fiber JSON-RPC client (Biscuit-authed)                                                  |
+| `sdk`                            | Public facade wiring the above                                                                |
+
+Only `derivation` is implemented today; the rest are placeholders.
+
+## Repository layout
+
+```text
+src/            SDK source, one folder per module (see above)
+test/tests/     Specs, mirroring the src tree one-to-one
+test/utils/     Shared test helpers
+docs/           Long-form documentation, indexed by docs/README.md
+interop/        Rust harness and the generated cross-implementation vectors
+```
+
+## Documentation
+
+- [How keys are derived](./docs/derivation.md) — what each channel key protects, the primitives behind the scheme, the full
+  derivation tree, and why nonces are deterministic.
+- [Cross-implementation harness](./interop/README.md) — how the vectors are generated and re-validated against a new fiber
+  release.
 
 ## Development
 
@@ -42,6 +61,13 @@ pnpm build
 ```
 
 Node version: see `.nvmrc`.
+
+### Cross-implementation vectors
+
+The key derivation is a compatibility contract with fiber's Rust implementation: the node derives the public halves of the same
+keys. `pnpm test` checks every derivation against `interop/vectors/vectors.json`, so the contract is verified on every run without
+a Rust toolchain; regenerating the vectors is what needs one. See [`interop/README.md`](./interop/README.md) and
+[`docs/derivation.md`](./docs/derivation.md).
 
 ### Build output
 

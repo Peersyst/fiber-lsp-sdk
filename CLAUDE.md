@@ -14,7 +14,7 @@ Upstream reference: `nervosnetwork/fiber` @ `b71a61c3` (v0.9.0-rc7). The key der
 ## Hard constraints
 
 - **Runtimes**: the SDK must run unmodified in Node, browsers, and React Native (Hermes). No platform APIs anywhere in `src/`
-  (lint-enforced): no `node:*` imports, no globals like `process` or `window`. Every external effect is injected: `SignerStorage`,
+  (lint-enforced): no `node:*` imports, no globals like `process` or `window`. Every external effect is injected: `ISignerStorage`,
   a WebSocket factory, `fetch`.
 - **Dependencies**: runtime deps are exactly `@noble/curves`, `@noble/hashes`, `@scure/bip32`, `@scure/btc-signer`, declared as
   caret ranges (`^2.2.0`) so a host app that already depends on them dedupes to a single copy instead of installing a second one.
@@ -27,15 +27,42 @@ Upstream reference: `nervosnetwork/fiber` @ `b71a61c3` (v0.9.0-rc7). The key der
 - **Signing safety**: deterministic nonces + persisted sign-once store; never sign two different messages for the same
   (channel, commitment number, context) slot. Policy checks run before every signature; no blind signing.
 
+## Layout
+
+```text
+src/
+  derivation/     Fiber key scheme port + SDK-owned derivations
+  signer/         Signer-protocol dispatch, musig2 signing engine
+  policy/         Policy engine + persisted per-channel records
+  session/        Signer session client: challenge auth, correlation, resume
+  protocol/       Wire types of the remote signing protocol
+  rpc/            Typed fiber JSON-RPC client
+  sdk/            Public facade wiring the above
+  index.ts        Public entrypoint; every export here is a published commitment
+
+test/
+  tests/          Specs mirroring the src tree one-to-one
+  utils/          Shared test helpers (vector loading, fixtures)
+
+docs/             Long-form docs, indexed by docs/README.md
+interop/          Rust harness + generated cross-implementation vectors
+```
+
+Inside a module: `<module>.constants.ts`, `<module>.types.ts`, `utils/`, `interfaces/`, and one file per cohesive unit of
+behavior. A module is only split further when a file stops having a single subject.
+
 ## Commands
 
 ```bash
 pnpm install
-pnpm lint          # eslint (includes the no-platform-API guard)
+pnpm lint          # eslint (no-platform-API guard + JSDoc conventions)
 pnpm check-types   # tsc --noEmit
 pnpm test          # jest (ESM mode)
 pnpm build         # tsup -> dist/ (dual ESM + CJS, one shared index.d.ts)
 pnpm format        # prettier
+
+# Regenerate the cross-implementation vectors (needs a Rust toolchain; `pnpm test` does not)
+cargo run --release --manifest-path interop/rust/Cargo.toml -- gen-vectors interop/vectors/vectors.json
 ```
 
 ## Code style
@@ -47,12 +74,50 @@ pnpm format        # prettier
 - String enums / literal unions for anything serialized; validate external data shapes, never trust them.
 - Amounts on the public surface are integer strings in shannons; conversion to fiber's 0x-hex u128 happens only in the `rpc`
   module. No native `number` for on-chain amounts.
-- Barrel `index.ts` files re-export the public API only.
-- Default to no code comments; when one is unavoidable, state a constraint the code cannot show.
+
+### File naming
+
+`kebab-case`, with a role suffix when the file holds one kind of thing: `*.constants.ts`, `*.types.ts`, `*.utils.ts`,
+`*.error.ts`. Interfaces live in `interfaces/` as `i-<name>.ts` and are named `I<Name>`. A file that _is_ a concept takes the
+concept's name with no suffix (`fiber-scheme.ts`, `device-scheme.ts`).
+
+### Barrels
+
+Every folder has an `index.ts`. Internal barrels (`utils/`, `interfaces/`) re-export wholesale with `export *`; module barrels
+(`src/derivation/index.ts`) and `src/index.ts` list their exports one by one, because those two lists are the SDK's surface and a
+test pins each of them. Never widen one without meaning to.
+
+### Comments
+
+All of the below is lint-enforced through `eslint-plugin-jsdoc`; `pnpm lint` is the source of truth. Never run `--fix` on a
+JSDoc error: it inserts empty tag stubs instead of writing the missing text.
+
+Block comments always span multiple lines, never `/** text */` on one line:
+
+```ts
+/**
+ * Port of fiber's `blake2b_hash_with_salt`.
+ * @param data Data to hash.
+ * @param salt Domain separator, hashed before the data, opposite to the argument order.
+ * @returns The 32-byte digest.
+ */
+```
+
+Exported functions carry JSDoc in that shape: a description that fits on one line, then `@param` per parameter and `@returns`.
+The description is the whole story: no extra paragraphs — when something more needs saying, it belongs in `docs/`, cross-linked,
+not in the JSDoc. `//` is only for a note inside a function body.
+
+Everything else — types, constants, interfaces, modules — takes a comment only when it earns one by saying what the code cannot:
+an upstream quirk, the reason a bound exists, an invariant a reader would otherwise break.
 
 ## Testing
 
-- Every module ships unit tests next to it (`*.spec.ts`).
-- Derivation changes must keep the cross-implementation vectors green; those vectors are the compatibility contract with fiber's
-  Rust implementation.
+- Specs live in `test/tests/`, mirroring `src/` one-to-one (`src/derivation/fiber-scheme.ts` →
+  `test/tests/derivation/fiber-scheme.spec.ts`). Shared helpers go in `test/utils/` and are never named `*.spec.ts`.
+- `test/` may use `node:*` imports and platform globals (it only ever runs under Node); `src/` may not, and lint enforces both
+  bans there.
+- Derivation changes must keep the cross-implementation vectors green (`interop/`, see its README): those vectors are the
+  compatibility contract with fiber's Rust implementation, and they are generated, never hand-edited.
+- The SDK-owned derivations are additionally pinned by hardcoded values in `test/tests/derivation/device-scheme.spec.ts`. They are
+  the recoverability contract, not a snapshot to update: changing them strands existing channels.
 - Policy: test every refusal path and the idempotent already-signed path, not just the happy path.

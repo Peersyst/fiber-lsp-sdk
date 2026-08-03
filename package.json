@@ -24,11 +24,11 @@
     "scripts": {
         "build": "tsup",
         "test": "NODE_OPTIONS=--experimental-vm-modules jest",
-        "lint": "eslint src *.ts *.mjs",
-        "lint:fix": "eslint src *.ts *.mjs --fix",
+        "lint": "eslint src test *.ts *.mjs",
+        "lint:fix": "eslint src test *.ts *.mjs --fix",
         "check-types": "tsc --noEmit",
-        "format": "prettier --write src .github *.md *.json *.ts *.mjs",
-        "format:check": "prettier --check src .github *.md *.json *.ts *.mjs"
+        "format": "prettier --write src test docs .github interop *.md *.json *.ts *.mjs",
+        "format:check": "prettier --check src test docs .github interop *.md *.json *.ts *.mjs"
     },
     "dependencies": {
         "@noble/curves": "^2.2.0",
@@ -39,8 +39,10 @@
     "devDependencies": {
         "@eslint/js": "9.39.5",
         "@types/jest": "30.0.0",
+        "@types/node": "20.19.43",
         "eslint": "9.39.5",
         "eslint-config-prettier": "10.1.8",
+        "eslint-plugin-jsdoc": "63.3.2",
         "jest": "30.4.2",
         "prettier": "3.9.6",
         "ts-jest": "29.4.12",
