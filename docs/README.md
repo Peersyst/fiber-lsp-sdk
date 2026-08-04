@@ -8,6 +8,7 @@ Long-form documentation that does not belong in code comments. For commands and 
 | Doc                                          | What it covers                                                                                                                                                                                                                                  |
 | -------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | [derivation.md](./derivation.md)             | The key derivation scheme end to end: what each channel key protects, the cryptographic primitives, the full derivation tree and normative table, inherited quirks, what the tests guarantee, design decisions, and the conventions still open. |
+| [persistence.md](./persistence.md)           | What the device persists: the storage keyspace, the per-channel policy record and why corruption throws, the per-key serialization the sign-once registry depends on and its limit, and the recovery model.                                     |
 | [../interop/README.md](../interop/README.md) | The cross-implementation harness: how the vectors are generated, regenerated, and re-validated against a new fiber release.                                                                                                                     |
 
 ## Conventions
