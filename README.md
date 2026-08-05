@@ -12,9 +12,10 @@ blind-signs.
 - **No I/O of its own**: the SDK performs no platform calls. The host injects every external effect: an `ISignerStorage` (key-value
   persistence), a WebSocket factory, and `fetch`.
 - **Minimal, audited dependency surface**: the only runtime dependencies are `@noble/curves`, `@noble/hashes`, `@scure/bip32`, and
-  `@scure/btc-signer`, accepted as `^2.2.0` so they dedupe with the versions a host app already installs.
+  `@scure/btc-signer`, accepted as `^2.2.0` so a host app on the same major converges on a single copy of each.
 - **Recoverable by design**: every derivation is a deterministic function of the master seed, so channels are recoverable from the
-  wallet mnemonic alone.
+  wallet mnemonic alone. `deriveMasterSeed` owns the step above that, the hardened BIP32 path the master seed comes from, so the
+  chain has no link left to host convention.
 
 These properties reflect the current specification and may evolve with it while the SDK is under active design.
 
@@ -35,7 +36,7 @@ Only `derivation` is implemented today; the rest are placeholders.
 ## Repository layout
 
 ```text
-src/            SDK source, one folder per module (see above)
+src/            SDK source, one folder per module (see above), plus common/ for helpers no single module owns
 test/tests/     Specs, mirroring the src tree one-to-one
 test/utils/     Shared test helpers
 docs/           Long-form documentation, indexed by docs/README.md
@@ -79,6 +80,19 @@ CommonJS entry loads them through `require(esm)` — this is why the package req
 import { PROTOCOL_VERSION } from "@peersyst/fiber-lsp-sdk";
 const { PROTOCOL_VERSION } = require("@peersyst/fiber-lsp-sdk");
 ```
+
+### Deriving the master seed
+
+The SDK never sees the mnemonic. The host expands it into a BIP39 seed and gets the 32 bytes the SDK is built from:
+
+```js
+import { deriveMasterSeed } from "@peersyst/fiber-lsp-sdk";
+
+const masterSeed = deriveMasterSeed(bip39Seed); // BIP32 m/1017'/309'/0', all levels hardened
+```
+
+The function is pure and keeps nothing: the BIP39 seed is an argument, and only the result crosses into the SDK. See
+[`docs/derivation.md`](./docs/derivation.md) for why that path and not another.
 
 ## License
 

@@ -1,4 +1,4 @@
-export { PROTOCOL_VERSION, SIGNER_ERROR_CODES } from "./protocol/index.js";
-export type { SignerErrorCode } from "./protocol/index.js";
-export { DERIVATION_SCHEME_VERSION } from "./derivation/index.js";
-export type { IAsyncSignerStorage, ISignerStorage } from "./policy/index.js";
+export { PROTOCOL_VERSION, SIGNER_ERROR_CODES } from "./protocol";
+export type { SignerErrorCode } from "./protocol";
+export { BIP39_SEED_LENGTH, DERIVATION_SCHEME_VERSION, MAX_ACCOUNT_INDEX, deriveMasterSeed } from "./derivation";
+export type { IAsyncSignerStorage, ISignerStorage } from "./policy";

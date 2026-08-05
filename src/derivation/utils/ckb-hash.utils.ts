@@ -1,6 +1,6 @@
 import { blake2b } from "@noble/hashes/blake2.js";
 import { concatBytes, utf8ToBytes } from "@noble/hashes/utils.js";
-import { DIGEST_LENGTH } from "../derivation.constants.js";
+import { DIGEST_LENGTH } from "../derivation.constants";
 
 const CKB_PERSONALIZATION = utf8ToBytes("ckb-default-hash");
 

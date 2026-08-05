@@ -162,31 +162,33 @@ This module derives the nonce **seed**. The nonce itself (BIP-327 `nonceGen`) be
 ```text
 user mnemonic                       (the SDK never sees it)
    │
-   └─ hardened BIP32, done by the host application
+   └─ BIP39, done by the host application
       │
-      └── masterSeed (32 bytes) ──────────────────── enters once, through the constructor
+      └── bip39Seed (64 bytes) ─────────────────────────── goes in and out of deriveMasterSeed, never retained
             │
-            ├── walletIdentityKey = ckbBlake2b(masterSeed ‖ "wallet identity")
-            │      └─ signs the session challenge
-            │
-            └── channelSeed(i) = ckbBlake2b(masterSeed ‖ "fiber channel {i}")     [i = channel index]
+            └── masterSeed = BIP32 m/1017'/309'/{a}'  ───── enters once, through the constructor   [a = account]
                   │
-                  │   ─── from here down it is fiber's scheme, byte for byte ───
+                  ├── walletIdentityKey = ckbBlake2b(masterSeed ‖ "wallet identity")
+                  │      └─ signs the session challenge
                   │
-                  └── seed = ckbBlake2b(channelSeed)
-                        ├── commitmentSeed  = ckbBlake2b(seed ‖ "commitment seed")
-                        │     └── commitmentSecret(n)  = 48-bit BOLT3 chain over commitmentSeed
-                        │           └── commitmentPoint(n) = commitmentSecret(n)·G
+                  └── channelSeed(i) = ckbBlake2b(masterSeed ‖ "fiber channel {i}")     [i = channel index]
                         │
-                        ├── fundingKey      = ckbBlake2b("funding key"   ‖ seed)
-                        │     └── musig2 partial signatures: commitment / revoke / close / announcement
+                        │   ─── from here down it is fiber's scheme, byte for byte ───
                         │
-                        ├── tlcBaseKey      = ckbBlake2b("HTLC base key" ‖ fundingKey)
-                        │     └── tlcKey(n) = tlcBaseKey + ckbBlake2b(commitmentPoint(n))   [settlement material]
-                        │
-                        └── musig2BaseNonce = ckbBlake2b("musig nocne"   ‖ tlcBaseKey)
-                              └── nonceSeckey(n) = musig2BaseNonce + ckbBlake2b(commitmentPoint(n))
-                                    └── nonceSeed(n, ctx) = ckbBlake2b(nonceSeckey(n) ‖ ctx)   [SDK-owned]
+                        └── seed = ckbBlake2b(channelSeed)
+                              ├── commitmentSeed  = ckbBlake2b(seed ‖ "commitment seed")
+                              │     └── commitmentSecret(n)  = 48-bit BOLT3 chain over commitmentSeed
+                              │           └── commitmentPoint(n) = commitmentSecret(n)·G
+                              │
+                              ├── fundingKey      = ckbBlake2b("funding key"   ‖ seed)
+                              │     └── musig2 partial signatures: commitment / revoke / close / announcement
+                              │
+                              ├── tlcBaseKey      = ckbBlake2b("HTLC base key" ‖ fundingKey)
+                              │     └── tlcKey(n) = tlcBaseKey + ckbBlake2b(commitmentPoint(n))   [settlement material]
+                              │
+                              └── musig2BaseNonce = ckbBlake2b("musig nocne"   ‖ tlcBaseKey)
+                                    └── nonceSeckey(n) = musig2BaseNonce + ckbBlake2b(commitmentPoint(n))
+                                          └── nonceSeed(n, ctx) = ckbBlake2b(nonceSeckey(n) ‖ ctx)   [SDK-owned]
 ```
 
 `‖` is byte concatenation; `+` on keys is modular scalar addition.
@@ -195,6 +197,7 @@ user mnemonic                       (the SDK never sees it)
 
 | Derivation                   | Formula                                                                   | Owner |
 | ---------------------------- | ------------------------------------------------------------------------- | ----- |
+| `masterSeed(a)`              | BIP32 private key at `m/1017'/309'/{a}'` over the BIP39 seed              | SDK   |
 | `walletIdentityKey`          | `ckbBlake2b(masterSeed ‖ "wallet identity")`                              | SDK   |
 | `channelSeed(i)`             | `ckbBlake2b(masterSeed ‖ "fiber channel {i}")`                            | SDK   |
 | `seed`                       | `ckbBlake2b(channelSeed)`                                                 | fiber |
@@ -213,6 +216,32 @@ user mnemonic                       (the SDK never sees it)
 Note the asymmetric concatenation: `commitmentSeed` hashes `seed ‖ label`, while the three keys hash `label ‖ data`. That is not
 a slip on our side, it is how fiber does it, and the code makes it visible by using two different functions — `ckbBlake2b(...)`
 against `blake2bHashWithSalt(data, salt)` — instead of hiding it in the order of two arguments.
+
+### Where the master seed comes from
+
+The SDK is constructed with a 32-byte master seed and the mnemonic never reaches it. That leaves one step above the tree, and
+`deriveMasterSeed(bip39Seed, account)` is the SDK owning it rather than leaving it to each host:
+
+```text
+masterSeed = BIP32 private key at m/1017'/309'/{account}'
+```
+
+Every level is hardened, so the branch cannot be walked from any public key the wallet publishes. The two fixed levels are what
+matter:
+
+- **Purpose 1017** is the BIP43 purpose lnd uses for its Lightning key tree, and lnd picked the number arbitrarily: nothing
+  registers purposes, so the precedent buys legibility rather than any guarantee. Other implementations do not follow it, since
+  they do not derive their channel keys this way at all. The argument that does the work is a different one: a wallet spends
+  on-chain from BIP44, BIP49 and BIP84, so picking a purpose none of them uses makes it impossible for one private key to serve
+  as both a spending key and this master seed, whatever accounts the wallet derives. The impossibility is structural, a different
+  purpose is a different hardened subtree; a test demonstrates it against nine paths under those three purposes.
+- **Coin type 309** is CKB's SLIP-44 registration.
+
+The function is pure and lives outside the SDK instance: the host calls it, gets 32 bytes, and passes those to the constructor.
+The BIP39 seed is an argument and nothing more, so the instance never holds the root of the wallet. A host that derives its own
+seed some other way can still do so; what the function buys is that the promise of recoverability now covers the whole chain,
+including the step the SDK used to leave undefined. If a host picks its own path and later changes it, the channels derived under
+the old one are gone, and no test in this repo would notice.
 
 ### Why the channel seed is derived, not random
 
@@ -240,30 +269,35 @@ must keep working forever.
 
 ## Where it lives
 
-| File                                     | Contents                                                                    |
-| ---------------------------------------- | --------------------------------------------------------------------------- |
-| `src/derivation/fiber-scheme.ts`         | The literal port of `crates/fiber-types/src/channel.rs`                     |
-| `src/derivation/device-scheme.ts`        | The SDK-owned derivations: wallet identity key, channel seed, nonce seed    |
-| `src/derivation/derivation.constants.ts` | Lengths, bounds, scheme version, nonce contexts                             |
-| `src/derivation/utils/ckb-hash.utils.ts` | CKB's blake2b-256 and the salted variant                                    |
-| `src/derivation/utils/assert.utils.ts`   | Input guards for lengths and ranges                                         |
-| `src/derivation/index.ts`                | The module surface; scheme internals stay unexported                        |
-| `interop/`                               | The Rust harness and the generated vectors ([README](../interop/README.md)) |
+| File                                     | Contents                                                                       |
+| ---------------------------------------- | ------------------------------------------------------------------------------ |
+| `src/derivation/fiber-scheme.ts`         | The literal port of `crates/fiber-types/src/channel.rs`                        |
+| `src/derivation/device-scheme.ts`        | The SDK-owned derivations: wallet identity key, channel seed, nonce seed       |
+| `src/derivation/master-seed.ts`          | The step above the tree: BIP39 seed to master seed, the boundary with the host |
+| `src/derivation/derivation.constants.ts` | Lengths, bounds, scheme version, nonce contexts                                |
+| `src/derivation/utils/ckb-hash.utils.ts` | CKB's blake2b-256 and the salted variant                                       |
+| `src/common/utils/assert.utils.ts`       | Input guards for lengths and ranges, shared with the rest of the SDK           |
+| `src/derivation/index.ts`                | The module surface; scheme internals stay unexported                           |
+| `interop/`                               | The Rust harness and the generated vectors ([README](../interop/README.md))    |
 
 Every function in `fiber-scheme.ts` carries the name of its Rust counterpart, so auditing against `channel.rs` is a matter of
 reading the two side by side.
 
 ## What the tests guarantee
 
-189 tests across 7 suites, in four layers with different jobs.
+187 tests across the 6 suites of `test/tests/derivation/`, in four layers with different jobs. The input guards the module leans
+on are generic and live in `common/`, tested alongside them.
 
 **Cross-implementation vectors** (`test/tests/derivation/interop-vectors.spec.ts`) compare every derivation against
 `interop/vectors/vectors.json`. This is _the_ contract: while it is green, the TypeScript produces the same bytes as an
 independent implementation. It covers 4 hashing KATs; the 4 channel keys and 2 of their public halves; 9 commitment numbers
-(0, 1, 2, 5, 1000, 65535, 2³²−1, 2⁴⁷, 2⁴⁸−1) across secret, point, TLC key by both paths and nonce seckey; the wallet identity key; 6
-channel seeds including `MAX_SAFE_INTEGER`; the full master seed → channel → keys chain; and 36 nonce seeds (9 numbers × 4
-contexts). The vector file is shape-checked when loaded, and a guard test demands the boundary cases are present so a
-regenerated, thinner file fails loudly instead of silently testing less.
+(0, 1, 2, 5, 1000, 65535, 2³²−1, 2⁴⁷, 2⁴⁸−1) across secret, point, TLC key by both paths and nonce seckey; 3 master seeds at accounts
+0, 1 and 2³¹−1; the wallet identity key; 6 channel seeds including `MAX_SAFE_INTEGER`; the full master seed → channel → keys chain;
+and 36 nonce seeds (9 numbers × 4 contexts). The vector file is shape-checked when loaded, and a guard test demands the boundary
+cases are present so a regenerated, thinner file fails loudly instead of silently testing less.
+
+The master seed half is worth a note: the Rust side implements BIP32 hardened derivation straight from the spec, so agreement
+with `@scure/bip32` is two independent implementations meeting, not one library checked against itself.
 
 **Invariants** hold whatever the input: the private and public derivation paths agree; the first 65 commitment secrets are all
 distinct; the first 101 channel seeds are all distinct; the four nonce seeds of one commitment differ; nothing mutates its
@@ -272,16 +306,18 @@ whenever the extra bits are lower — the property that lets the counterparty st
 
 **Refusal paths** get a test each — bad lengths, bad types, a value that is not a number, negative, fractional, `NaN`,
 `Infinity`, above the maximum, an uncompressed point, a point off the curve, the zero key, a key at the curve order, a tweak that
-cancels the key on either derivation path, malformed channel keys, an unknown context.
+cancels the key on either derivation path, malformed channel keys, an unknown context. The first group is exercised directly
+against the guards in `test/tests/common/utils/assert.utils.spec.ts`.
 
 **Pinned outputs** hardcode results by hand, deliberately redundant with the vectors, because the vectors live in a generated
 file: a change made to the port and to the Rust harness at the same time regenerates them green, and only a hand-written value
 survives that. `device-scheme.spec.ts` pins the scheme v1 outputs, the promise that a channel opened today can be recovered
-tomorrow; `fiber-scheme.spec.ts` pins the four channel keys, two commitment secrets, a commitment point and a TLC key, which is
-where "fixing" a domain separator or shortening the chain lands. Neither set is a snapshot to update when it fails.
+tomorrow; `master-seed.spec.ts` pins three master seeds, which is where a changed path level lands; `fiber-scheme.spec.ts` pins
+the four channel keys, two commitment secrets, a commitment point and a TLC key, which is where "fixing" a domain separator or
+shortening the chain lands. None of them is a snapshot to update when it fails.
 
 Coverage is 100% on statements, branches, functions and lines, which proves there is no dead code — not that the assertions are
-right. For that, four silent breakages were introduced deliberately and the reaction measured:
+right. For that, silent breakages were introduced deliberately and the reaction measured:
 
 | Mutation                                           | Tests that failed |
 | -------------------------------------------------- | ----------------- |
@@ -289,8 +325,11 @@ right. For that, four silent breakages were introduced deliberately and the reac
 | 47-bit chain instead of 48 (`bitpos = 46`)         | 13                |
 | Hashing `data ‖ salt` instead of `salt ‖ data`     | 61                |
 | `fiber channel {i}` changed to `fiber channel-{i}` | 45                |
+| Purpose 1017 changed to 1018                       | 4                 |
+| Coin type 309 changed to 310                       | 4                 |
+| Any path level left unhardened                     | 4                 |
 
-All four are exactly the kind of change a well-meaning refactor might make.
+Every one of them is exactly the kind of change a well-meaning refactor might make.
 
 ## Design decisions
 
@@ -299,6 +338,9 @@ All four are exactly the kind of change a well-meaning refactor might make.
 | `commitmentNumber: number` capped at 2⁴⁸−1  | `bigint`                               | The cap fits exactly in `number`, and the rest of the API already uses `number`                        |
 | Reject `n > 2⁴⁸−1`                          | Mask the low 48 bits                   | Masking silently aliases secrets and nonces; throwing turns a crypto disaster into a programming error |
 | Master seed of exactly 32 bytes             | Accept any length, the hash absorbs it | Requiring it catches a miswired host immediately                                                       |
+| BIP43 purpose 1017 for the master seed path | Reuse BIP44 with CKB's coin type       | A purpose no wallet spends from makes a collision with an on-chain key impossible, not just unlikely   |
+| `deriveMasterSeed` as a pure function       | Take the BIP39 seed in the constructor | The instance would then hold the root of the whole wallet, not just the material scoped to Fiber       |
+| BIP39 seed of exactly 64 bytes              | Accept 16 to 64 as BIP32 does          | The one wrong argument worth catching is a 32-byte master seed passed in twice, which would look valid |
 | Validate in every public function           | Validate only at the SDK boundary      | The module is called from inside; a cheap guard beats debugging wrong keys three layers up             |
 | `TypeError` / `RangeError`                  | A dedicated `DerivationError` class    | These are host programming errors, not protocol errors; protocol errors have their own codes           |
 | `DataView` in the bit chain                 | `(secret[i] ?? 0) ^ …`                 | Removes an unreachable branch that `noUncheckedIndexedAccess` would otherwise force                    |
@@ -315,8 +357,9 @@ be fixed before integration against a real node.
    already mapped.
 2. **Commitment number for the `ANNOUNCEMENT` context.** A channel announcement is signed once, not per commitment. A convention
    has to be frozen along with the wire format.
-3. **Master seed length.** 32 bytes are required today, and anything else throws. If the host turns out to deliver something else
-   (a 64-byte BIP39 seed, say), decide whether the SDK compresses it or the host does.
+3. **Account index convention.** `deriveMasterSeed` takes one and defaults to 0. Confirm whether the wallet keeps one Fiber
+   account per wallet account, and whether that index is the same one it uses for its on-chain BIP44 accounts, since recovery has
+   to know it as surely as it knows the channel index.
 4. **Nonce construction on both sides.** Only public nonces cross the wire, so the internal constructions may differ. Confirm
    during integration that fiber assumes nothing about how our secret nonce was built.
 5. **Channel index after a restore.** Re-deriving requires knowing how many channels existed. The reseeding logic belongs to the

@@ -1,5 +1,5 @@
-import * as sdk from "../../src/index.js";
-import { DERIVATION_SCHEME_VERSION, PROTOCOL_VERSION, SIGNER_ERROR_CODES } from "../../src/index.js";
+import * as sdk from "../../src";
+import { DERIVATION_SCHEME_VERSION, PROTOCOL_VERSION, SIGNER_ERROR_CODES } from "../../src";
 
 describe("public entrypoint", () => {
     it("exposes protocol version 1", () => {
@@ -16,6 +16,15 @@ describe("public entrypoint", () => {
 
     // No API may return a private key: anything added here is a published commitment.
     it("publishes nothing beyond the declared surface", () => {
-        expect(Object.keys(sdk).sort()).toEqual(["DERIVATION_SCHEME_VERSION", "PROTOCOL_VERSION", "SIGNER_ERROR_CODES"]);
+        expect(Object.keys(sdk).sort()).toEqual(
+            [
+                "BIP39_SEED_LENGTH",
+                "DERIVATION_SCHEME_VERSION",
+                "MAX_ACCOUNT_INDEX",
+                "PROTOCOL_VERSION",
+                "SIGNER_ERROR_CODES",
+                "deriveMasterSeed",
+            ].sort(),
+        );
     });
 });

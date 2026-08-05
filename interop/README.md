@@ -11,10 +11,14 @@ For the scheme those vectors pin, see [`docs/derivation.md`](../docs/derivation.
 
 ## The two halves
 
-| Half           | What it is                                                                                                                                                                                                                                |
-| -------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `fiber_scheme` | Verbatim ports of the pure derivation functions of `nervosnetwork/fiber` @ `b71a61c3` (v0.9.0-rc7), `crates/fiber-types/src/channel.rs`                                                                                                   |
-| `sdk_scheme`   | The SDK-owned derivations (wallet identity key, per-channel seed, musig2 nonce seed), written from their definition rather than ported, so the TypeScript side is checked against an independent implementation instead of against itself |
+| Half           | What it is                                                                                                                                                                                                                                                  |
+| -------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `fiber_scheme` | Verbatim ports of the pure derivation functions of `nervosnetwork/fiber` @ `b71a61c3` (v0.9.0-rc7), `crates/fiber-types/src/channel.rs`                                                                                                                     |
+| `sdk_scheme`   | The SDK-owned derivations (master seed path, wallet identity key, per-channel seed, musig2 nonce seed), written from their definition rather than ported, so the TypeScript side is checked against an independent implementation instead of against itself |
+
+The master seed half needs BIP32, and the harness implements hardened derivation from the spec (`hmac` + `sha2`) rather than
+pulling a BIP32 crate: a second implementation is the whole point, and agreeing with `@scure/bip32` only means something if the
+two were written apart.
 
 The `musig2` crate is the exact crate and version fiber depends on (`musig2 = 0.2.4`, features `["secp256k1"]`), so a partial
 signature the SDK produces is verified by the same code that will receive it.

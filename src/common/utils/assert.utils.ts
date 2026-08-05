@@ -4,7 +4,7 @@
  * @param value Value to check.
  * @param length Exact length the value must have, in bytes.
  */
-export function assertBytes(name: string, value: Uint8Array, length: number): void {
+export function assertBytes(name: string, value: unknown, length: number): asserts value is Uint8Array {
     if (!(value instanceof Uint8Array)) {
         throw new TypeError(`${name} must be a Uint8Array`);
     }

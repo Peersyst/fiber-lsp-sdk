@@ -10,8 +10,10 @@ use musig2::{
     aggregate_partial_signatures, sign_partial, verify_partial, AggNonce, CompactSignature,
     KeyAggContext, PartialSignature, PubNonce, SecNonce, SecNonceBuilder,
 };
+use hmac::{Hmac, Mac};
 use secp256k1::{PublicKey, Scalar, Secp256k1, SecretKey};
 use serde::{Deserialize, Serialize};
+use sha2::Sha512;
 
 // --- CKB hashing ---
 
@@ -122,6 +124,51 @@ impl FiberSigner {
 
 // --- SDK-owned derivations (not part of fiber's scheme) ---
 
+/// BIP32 master node from a seed: HMAC-SHA512 under the fixed "Bitcoin seed" key,
+/// left half the key and right half the chain code.
+fn bip32_master(seed: &[u8]) -> (SecretKey, [u8; 32]) {
+    let mut mac = Hmac::<Sha512>::new_from_slice(b"Bitcoin seed").expect("hmac takes any key length");
+    mac.update(seed);
+    let i = mac.finalize().into_bytes();
+    let mut chain_code = [0u8; 32];
+    chain_code.copy_from_slice(&i[32..]);
+    (
+        SecretKey::from_slice(&i[..32]).expect("master key in range"),
+        chain_code,
+    )
+}
+
+/// BIP32 hardened child. The parent's PRIVATE key goes into the hash, which is what
+/// makes the branch unwalkable from a public key alone. BIP32's "retry with the next
+/// index" rule for an invalid child is left out on both sides on purpose: a 2^-127
+/// event should fail loudly here and in `@scure/bip32`, not diverge in silence.
+fn bip32_derive_hardened(parent: &(SecretKey, [u8; 32]), index: u32) -> (SecretKey, [u8; 32]) {
+    let (parent_key, parent_chain_code) = parent;
+    let hardened = index.checked_add(0x8000_0000).expect("account index fits a hardened level");
+    let mut mac = Hmac::<Sha512>::new_from_slice(parent_chain_code).expect("hmac takes any key length");
+    mac.update(&[0u8]);
+    mac.update(&parent_key.secret_bytes());
+    mac.update(&hardened.to_be_bytes());
+    let i = mac.finalize().into_bytes();
+    let mut scalar = [0u8; 32];
+    scalar.copy_from_slice(&i[..32]);
+    let mut chain_code = [0u8; 32];
+    chain_code.copy_from_slice(&i[32..]);
+    (tweak(parent_key, scalar), chain_code)
+}
+
+/// The master seed the SDK is constructed with: the private key at the hardened
+/// path m/1017'/309'/account'.
+fn master_seed(bip39_seed: &[u8; 64], account_index: u32) -> [u8; 32] {
+    let purpose = bip32_derive_hardened(&bip32_master(bip39_seed), MASTER_SEED_PURPOSE);
+    let coin_type = bip32_derive_hardened(&purpose, MASTER_SEED_COIN_TYPE);
+    bip32_derive_hardened(&coin_type, account_index).0.secret_bytes()
+}
+
+fn master_seed_path(account_index: u32) -> String {
+    format!("m/{MASTER_SEED_PURPOSE}'/{MASTER_SEED_COIN_TYPE}'/{account_index}'")
+}
+
 /// Wallet identity key, used to answer the signer-session challenge. It identifies
 /// the master seed, not the handset.
 fn wallet_identity_key(master_seed: &[u8; 32]) -> [u8; 32] {
@@ -191,10 +238,19 @@ struct CommitmentVector {
 
 #[derive(Serialize, Deserialize)]
 struct SdkSchemeVectors {
+    bip39_seed: String,
+    master_seeds: Vec<MasterSeedVector>,
     master_seed: String,
     wallet_identity_key: String,
     channel_seeds: Vec<ChannelSeedVector>,
     channel: SdkChannelVector,
+}
+
+#[derive(Serialize, Deserialize)]
+struct MasterSeedVector {
+    account_index: u32,
+    path: String,
+    master_seed: String,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -238,7 +294,16 @@ struct TsOutput {
 const CHANNEL_SEED_PARAMS: [u8; 32] = [0x42; 32];
 /// Master seed used for the SDK-owned half.
 const MASTER_SEED: [u8; 32] = [0x24; 32];
+/// BIP39 seed used for the master seed path; unrelated to MASTER_SEED, which the
+/// rest of the SDK half starts from directly.
+const BIP39_SEED: [u8; 64] = [0x37; 64];
 const REMOTE_SEED: [u8; 32] = [0x99; 32];
+
+const MASTER_SEED_PURPOSE: u32 = 1017;
+const MASTER_SEED_COIN_TYPE: u32 = 309;
+
+/// The last index is the highest a hardened level can hold (2^31 - 1).
+const ACCOUNT_INDICES: [u32; 3] = [0, 1, 2147483647];
 
 /// Includes the boundaries of the 48-bit commitment chain: a lone top bit and
 /// all 48 bits set (the maximum a commitment number may reach).
@@ -336,6 +401,15 @@ fn gen_vectors(out_path: &str) {
             commitments,
         },
         sdk_scheme: SdkSchemeVectors {
+            bip39_seed: hex::encode(BIP39_SEED),
+            master_seeds: ACCOUNT_INDICES
+                .iter()
+                .map(|&account_index| MasterSeedVector {
+                    account_index,
+                    path: master_seed_path(account_index),
+                    master_seed: hex::encode(master_seed(&BIP39_SEED, account_index)),
+                })
+                .collect(),
             master_seed: hex::encode(MASTER_SEED),
             wallet_identity_key: hex::encode(wallet_identity_key(&MASTER_SEED)),
             channel_seeds: CHANNEL_INDICES

@@ -17,13 +17,15 @@ Upstream reference: `nervosnetwork/fiber` @ `b71a61c3` (v0.9.0-rc7). The key der
   (lint-enforced): no `node:*` imports, no globals like `process` or `window`. Every external effect is injected: `ISignerStorage`,
   a WebSocket factory, `fetch`.
 - **Dependencies**: runtime deps are exactly `@noble/curves`, `@noble/hashes`, `@scure/bip32`, `@scure/btc-signer`, declared as
-  caret ranges (`^2.2.0`) so a host app that already depends on them dedupes to a single copy instead of installing a second one.
+  caret ranges (`^2.2.0`) so a host app on the same major converges on a single copy instead of installing a second one; a host
+  still on v1 installs both lines until it upgrades, and pinning exactly would make that permanent.
   Do not add runtime dependencies, and do not pin these to exact versions; the caret floor must stay at the lowest version whose
   API the SDK actually uses. Dev dependencies stay pinned exactly.
 - **Determinism**: every derivation (channel seeds, keys, nonces) is a deterministic function of the master seed. The derivation
   scheme is versioned and additive-only: changing it breaks recoverability of existing channels.
 - **Secrets**: the master seed enters once via the constructor and stays in SDK memory. No API returns a private key, except the
-  scoped settlement-key delegation of the remote-signing protocol.
+  scoped settlement-key delegation of the remote-signing protocol and `deriveMasterSeed`, a pure function that returns to the
+  host the seed the host itself will pass back in. No SDK instance ever holds anything above the master seed.
 - **Signing safety**: deterministic nonces + persisted sign-once store; never sign two different messages for the same
   (channel, commitment number, context) slot. Policy checks run before every signature; no blind signing.
 
@@ -31,6 +33,7 @@ Upstream reference: `nervosnetwork/fiber` @ `b71a61c3` (v0.9.0-rc7). The key der
 
 ```text
 src/
+  common/         Cross-module helpers that belong to no single module (input guards)
   derivation/     Fiber key scheme port + SDK-owned derivations
   signer/         Signer-protocol dispatch, musig2 signing engine
   policy/         Policy engine + persisted per-channel records
@@ -49,7 +52,8 @@ interop/          Rust harness + generated cross-implementation vectors
 ```
 
 Inside a module: `<module>.constants.ts`, `<module>.types.ts`, `utils/`, `interfaces/`, and one file per cohesive unit of
-behavior. A module is only split further when a file stops having a single subject.
+behavior. A module is only split further when a file stops having a single subject. A helper lives in `common/` only once it is
+generic enough that naming it after a module would be wrong; anything a single module owns stays inside it.
 
 ## Commands
 
@@ -67,7 +71,9 @@ cargo run --release --manifest-path interop/rust/Cargo.toml -- gen-vectors inter
 
 ## Code style
 
-- TypeScript strict, ESM only; relative imports use explicit `.js` extensions (NodeNext).
+- TypeScript strict, ESM only; relative imports carry no file extension (`moduleResolution: bundler`), which holds only because
+  tsup bundles: a build emitting file per file would need every extension back. Dependency subpaths keep the extension their own
+  `exports` map declares (`@noble/hashes/blake2.js`).
 - Prettier: 4-space indent, double quotes, semicolons, trailing commas, 140 char width.
 - Zero tolerance for `any`: use `unknown` with type guards or proper generics; constrain type parameters.
 - Prefer `??` over `||` when `0` or `""` are valid values; optional chaining over unguarded access.
@@ -83,9 +89,10 @@ concept's name with no suffix (`fiber-scheme.ts`, `device-scheme.ts`).
 
 ### Barrels
 
-Every folder has an `index.ts`. Internal barrels (`utils/`, `interfaces/`) re-export wholesale with `export *`; module barrels
-(`src/derivation/index.ts`) and `src/index.ts` list their exports one by one, because those two lists are the SDK's surface and a
-test pins each of them. Never widen one without meaning to.
+Every folder has an `index.ts`, and it is imported as the folder (`../common`), never as `../common/index`. Barrels re-export
+wholesale with `export *`. Two exceptions list their exports one by one: `src/derivation/index.ts`, which keeps scheme internals
+out of reach of the other modules, and `src/index.ts`, which is the published surface. A test pins each of those two lists, so
+never widen one without meaning to.
 
 ### Comments
 
@@ -113,7 +120,10 @@ an upstream quirk, the reason a bound exists, an invariant a reader would otherw
 ## Testing
 
 - Specs live in `test/tests/`, mirroring `src/` one-to-one (`src/derivation/fiber-scheme.ts` →
-  `test/tests/derivation/fiber-scheme.spec.ts`). Shared helpers go in `test/utils/` and are never named `*.spec.ts`.
+  `test/tests/derivation/fiber-scheme.spec.ts`). Doubles of the injected effects go in `test/mocks/`, mirroring `src/` the same
+  way and named `*.mock.ts`; every other shared helper goes in `test/utils/`. Neither is ever named `*.spec.ts`.
+- Fixtures are written out literally in the spec that uses them, never produced by a factory that fills in defaults: a factory
+  that supplies the field a test meant to omit turns a refusal path green.
 - `test/` may use `node:*` imports and platform globals (it only ever runs under Node); `src/` may not, and lint enforces both
   bans there.
 - Derivation changes must keep the cross-implementation vectors green (`interop/`, see its README): those vectors are the

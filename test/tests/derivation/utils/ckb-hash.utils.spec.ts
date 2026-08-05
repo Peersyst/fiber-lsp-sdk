@@ -1,7 +1,7 @@
 import { blake2b } from "@noble/hashes/blake2.js";
 import { bytesToHex, concatBytes, utf8ToBytes } from "@noble/hashes/utils.js";
-import { DIGEST_LENGTH } from "../../../../src/derivation/derivation.constants.js";
-import { blake2bHashWithSalt, ckbBlake2b } from "../../../../src/derivation/utils/ckb-hash.utils.js";
+import { DIGEST_LENGTH } from "../../../../src/derivation/derivation.constants";
+import { blake2bHashWithSalt, ckbBlake2b } from "../../../../src/derivation/utils/ckb-hash.utils";
 
 const DATA = utf8ToBytes("data");
 const SALT = utf8ToBytes("salt");

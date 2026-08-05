@@ -1,14 +1,13 @@
-/**
- * Explicit list, not `export *`: scheme internals stay private so callers work with whole derivations.
- */
 export {
+    BIP39_SEED_LENGTH,
     DERIVATION_SCHEME_VERSION,
     MASTER_SEED_LENGTH,
+    MAX_ACCOUNT_INDEX,
     MAX_CHANNEL_INDEX,
     MAX_COMMITMENT_NUMBER,
     NONCE_CONTEXTS,
-} from "./derivation.constants.js";
-export type { FiberChannelKeys, NonceContext } from "./derivation.types.js";
+} from "./derivation.constants";
+export type { FiberChannelKeys, NonceContext } from "./derivation.types";
 export {
     deriveChannelKeys,
     derivePrivateKey,
@@ -17,6 +16,7 @@ export {
     getCommitmentPoint,
     getCommitmentSecret,
     pubkeyOf,
-} from "./fiber-scheme.js";
-export { deriveChannelSeed, deriveNonceSeed, deriveWalletIdentityKey } from "./device-scheme.js";
-export { ckbBlake2b } from "./utils/index.js";
+} from "./fiber-scheme";
+export { deriveChannelSeed, deriveNonceSeed, deriveWalletIdentityKey } from "./device-scheme";
+export { deriveMasterSeed } from "./master-seed";
+export { ckbBlake2b } from "./utils";

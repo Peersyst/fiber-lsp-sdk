@@ -1,4 +1,4 @@
-import type { NONCE_CONTEXTS } from "./derivation.constants.js";
+import type { NONCE_CONTEXTS } from "./derivation.constants";
 
 /**
  * The four secrets fiber's `InMemorySigner` holds for one channel.

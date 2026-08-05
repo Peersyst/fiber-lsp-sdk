@@ -1,4 +1,4 @@
-import { assertBytes, assertUnsignedInteger } from "../../../../src/derivation/utils/assert.utils.js";
+import { assertBytes, assertUnsignedInteger } from "../../../../src/common/utils/assert.utils";
 
 describe("assertBytes", () => {
     it("accepts a byte array of the exact length", () => {
