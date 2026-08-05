@@ -1,6 +1,6 @@
-import type { ChannelPolicyRecord, IAsyncSignerStorage, ISignerStorage } from "../../../src/policy/index.js";
-import { SignerStore } from "../../../src/policy/index.js";
-import { AsyncMemorySignerStorage, MemorySignerStorage } from "../../utils/memory-storage.js";
+import { AsyncInMemorySignerStorage, InMemorySignerStorage } from "../../mocks/policy";
+import type { ChannelPolicyRecord, IAsyncSignerStorage, ISignerStorage } from "../../../src/policy";
+import { SignerStore } from "../../../src/policy";
 
 const CHANNEL_ID = "0x1f".padEnd(66, "a");
 const CHANNEL_KEY = `fiber-lsp-sdk:channel:${CHANNEL_ID}`;
@@ -33,19 +33,19 @@ function bumpStateVersion(current: ChannelPolicyRecord | null): ChannelPolicyRec
 
 describe("channel records", () => {
     it("round-trips a record through a synchronous storage", async () => {
-        const store = new SignerStore(new MemorySignerStorage());
+        const store = new SignerStore(new InMemorySignerStorage());
         await store.setChannelRecord(CHANNEL_ID, record());
         await expect(store.getChannelRecord(CHANNEL_ID)).resolves.toEqual(record());
     });
 
     it("round-trips a record through an asynchronous storage", async () => {
-        const store = new SignerStore(new AsyncMemorySignerStorage());
+        const store = new SignerStore(new AsyncInMemorySignerStorage());
         await store.setChannelRecord(CHANNEL_ID, record());
         await expect(store.getChannelRecord(CHANNEL_ID)).resolves.toEqual(record());
     });
 
     it("returns null for a channel that was never written", async () => {
-        const store = new SignerStore(new MemorySignerStorage());
+        const store = new SignerStore(new InMemorySignerStorage());
         await expect(store.getChannelRecord(CHANNEL_ID)).resolves.toBeNull();
     });
 
@@ -57,13 +57,13 @@ describe("channel records", () => {
     });
 
     it("namespaces the record key", async () => {
-        const storage = new MemorySignerStorage();
+        const storage = new InMemorySignerStorage();
         await new SignerStore(storage).setChannelRecord(CHANNEL_ID, record());
         expect([...storage.map.keys()]).toEqual([CHANNEL_KEY]);
     });
 
     it("keeps two channels in separate records", async () => {
-        const store = new SignerStore(new MemorySignerStorage());
+        const store = new SignerStore(new InMemorySignerStorage());
         await store.setChannelRecord("channel-a", record({ channelIndex: 0 }));
         await store.setChannelRecord("channel-b", record({ channelIndex: 1 }));
         await expect(store.getChannelRecord("channel-a")).resolves.toMatchObject({ channelIndex: 0 });
@@ -74,12 +74,12 @@ describe("channel records", () => {
         ["get", (store: SignerStore) => store.getChannelRecord("")] as const,
         ["set", (store: SignerStore) => store.setChannelRecord("", record())] as const,
     ])("rejects an empty channelId on %s", async (_, call) => {
-        const store = new SignerStore(new MemorySignerStorage());
+        const store = new SignerStore(new InMemorySignerStorage());
         await expect(call(store)).rejects.toThrow(new TypeError("channelId must be a non-empty string"));
     });
 
     it("refuses to write a record with the wrong shape", async () => {
-        const store = new SignerStore(new MemorySignerStorage());
+        const store = new SignerStore(new InMemorySignerStorage());
         const corrupt = record({ localBalanceShannons: "-1" });
         await expect(store.setChannelRecord(CHANNEL_ID, corrupt)).rejects.toThrow(
             new TypeError("record is not a valid channel policy record"),
@@ -88,7 +88,7 @@ describe("channel records", () => {
 
     // Corruption must never read as absence: it would re-open sign-once slots.
     it("throws on a stored value that is not valid JSON", async () => {
-        const storage = new MemorySignerStorage();
+        const storage = new InMemorySignerStorage();
         storage.map.set(CHANNEL_KEY, "{not json");
         await expect(new SignerStore(storage).getChannelRecord(CHANNEL_ID)).rejects.toThrow(
             new TypeError(`stored value at ${CHANNEL_KEY} is not valid JSON`),
@@ -96,7 +96,7 @@ describe("channel records", () => {
     });
 
     it("throws on a stored record with the wrong shape", async () => {
-        const storage = new MemorySignerStorage();
+        const storage = new InMemorySignerStorage();
         storage.map.set(CHANNEL_KEY, JSON.stringify(record({ channelIndex: -1 })));
         await expect(new SignerStore(storage).getChannelRecord(CHANNEL_ID)).rejects.toThrow(
             new TypeError(`stored value at ${CHANNEL_KEY} is not a channel policy record`),
@@ -104,13 +104,13 @@ describe("channel records", () => {
     });
 
     it("throws on a stored record from a future format version", async () => {
-        const storage = new MemorySignerStorage();
+        const storage = new InMemorySignerStorage();
         storage.map.set(CHANNEL_KEY, JSON.stringify({ ...record(), version: 2 }));
         await expect(new SignerStore(storage).getChannelRecord(CHANNEL_ID)).rejects.toThrow(TypeError);
     });
 
     it("tolerates unknown extra fields in a stored record", async () => {
-        const storage = new MemorySignerStorage();
+        const storage = new InMemorySignerStorage();
         storage.map.set(CHANNEL_KEY, JSON.stringify({ ...record(), futureField: true }));
         await expect(new SignerStore(storage).getChannelRecord(CHANNEL_ID)).resolves.toMatchObject(record());
     });
@@ -124,7 +124,7 @@ describe("channel records", () => {
             '","COMMITMENT:10":"' +
             "ef".repeat(32) +
             '"},"lastSignedCommitmentNumbers":{"REVOKE":9,"COMMITMENT":10},"channelIndex":2,"version":1}';
-        const storage = new MemorySignerStorage();
+        const storage = new InMemorySignerStorage();
         storage.map.set(CHANNEL_KEY, v1Json);
         await expect(new SignerStore(storage).getChannelRecord(CHANNEL_ID)).resolves.toEqual({
             version: 1,
@@ -151,13 +151,13 @@ describe("channel records", () => {
             localBalanceShannons: "340282366920938463463374607431768211455",
             pendingDebitsShannons: ["0", "340282366920938463463374607431768211455"],
         });
-        const store = new SignerStore(new MemorySignerStorage());
+        const store = new SignerStore(new InMemorySignerStorage());
         await store.setChannelRecord(CHANNEL_ID, boundary);
         await expect(store.getChannelRecord(CHANNEL_ID)).resolves.toEqual(boundary);
     });
 
     it("writes nothing when the record is refused", async () => {
-        const storage = new MemorySignerStorage();
+        const storage = new InMemorySignerStorage();
         const store = new SignerStore(storage);
         await store.setChannelRecord(CHANNEL_ID, record());
         await expect(store.setChannelRecord(CHANNEL_ID, record({ localBalanceShannons: "-1" }))).rejects.toThrow(TypeError);
@@ -201,7 +201,7 @@ describe("channel records", () => {
     });
 
     it("treats an empty stored string as corruption, not absence", async () => {
-        const storage = new MemorySignerStorage();
+        const storage = new InMemorySignerStorage();
         storage.map.set(CHANNEL_KEY, "");
         await expect(new SignerStore(storage).getChannelRecord(CHANNEL_ID)).rejects.toThrow(
             new TypeError(`stored value at ${CHANNEL_KEY} is not valid JSON`),
@@ -211,14 +211,14 @@ describe("channel records", () => {
 
 describe("updateChannelRecord", () => {
     it("reads, updates and writes in one step", async () => {
-        const store = new SignerStore(new MemorySignerStorage());
+        const store = new SignerStore(new InMemorySignerStorage());
         await store.setChannelRecord(CHANNEL_ID, record({ lastStateVersion: 7 }));
         await expect(store.updateChannelRecord(CHANNEL_ID, bumpStateVersion)).resolves.toEqual(record({ lastStateVersion: 8 }));
         await expect(store.getChannelRecord(CHANNEL_ID)).resolves.toEqual(record({ lastStateVersion: 8 }));
     });
 
     it("passes null to the updater for a channel that was never registered", async () => {
-        const store = new SignerStore(new MemorySignerStorage());
+        const store = new SignerStore(new InMemorySignerStorage());
         const seen: (ChannelPolicyRecord | null)[] = [];
         await store.updateChannelRecord(CHANNEL_ID, (current) => {
             seen.push(current);
@@ -229,7 +229,7 @@ describe("updateChannelRecord", () => {
     });
 
     it("writes nothing when the updater refuses", async () => {
-        const storage = new MemorySignerStorage();
+        const storage = new InMemorySignerStorage();
         const store = new SignerStore(storage);
         await store.setChannelRecord(CHANNEL_ID, record());
         storage.ops.length = 0;
@@ -243,7 +243,7 @@ describe("updateChannelRecord", () => {
     });
 
     it("writes nothing when the updater returns a record with the wrong shape", async () => {
-        const storage = new MemorySignerStorage();
+        const storage = new InMemorySignerStorage();
         const store = new SignerStore(storage);
         await store.setChannelRecord(CHANNEL_ID, record());
         storage.ops.length = 0;
@@ -255,7 +255,7 @@ describe("updateChannelRecord", () => {
     });
 
     it("refuses to update over a corrupt stored record", async () => {
-        const storage = new MemorySignerStorage();
+        const storage = new InMemorySignerStorage();
         storage.map.set(CHANNEL_KEY, "{not json");
         await expect(new SignerStore(storage).updateChannelRecord(CHANNEL_ID, () => record())).rejects.toThrow(
             new TypeError(`stored value at ${CHANNEL_KEY} is not valid JSON`),
@@ -264,7 +264,7 @@ describe("updateChannelRecord", () => {
     });
 
     it("rejects an empty channelId before touching the storage", async () => {
-        const storage = new MemorySignerStorage();
+        const storage = new InMemorySignerStorage();
         await expect(new SignerStore(storage).updateChannelRecord("", () => record())).rejects.toThrow(
             new TypeError("channelId must be a non-empty string"),
         );
@@ -284,7 +284,7 @@ describe("updateChannelRecord", () => {
 
 describe("concurrency", () => {
     it("serializes concurrent updates on one channel instead of losing one", async () => {
-        const storage = new AsyncMemorySignerStorage();
+        const storage = new AsyncInMemorySignerStorage();
         const store = new SignerStore(storage);
         await store.setChannelRecord(CHANNEL_ID, record({ lastStateVersion: 0 }));
         storage.ops.length = 0;
@@ -299,7 +299,7 @@ describe("concurrency", () => {
     });
 
     it("lets only one of two concurrent claims take a sign-once slot", async () => {
-        const store = new SignerStore(new AsyncMemorySignerStorage());
+        const store = new SignerStore(new AsyncInMemorySignerStorage());
         await store.setChannelRecord(CHANNEL_ID, record({ lastSignedCommitmentNumbers: {}, signedDigests: {} }));
         const claim = (digest: string): Promise<ChannelPolicyRecord> =>
             store.updateChannelRecord(CHANNEL_ID, (current) => {
@@ -318,7 +318,7 @@ describe("concurrency", () => {
     });
 
     it("serializes an operation that arrives while an earlier one is still queued", async () => {
-        const storage = new AsyncMemorySignerStorage();
+        const storage = new AsyncInMemorySignerStorage();
         const store = new SignerStore(storage);
         await store.setChannelRecord(CHANNEL_ID, record({ lastStateVersion: 0 }));
         storage.ops.length = 0;
@@ -341,7 +341,7 @@ describe("concurrency", () => {
     });
 
     it("does not serialize two channels against each other", async () => {
-        const storage = new AsyncMemorySignerStorage();
+        const storage = new AsyncInMemorySignerStorage();
         const store = new SignerStore(storage);
 
         await Promise.all([
@@ -358,7 +358,7 @@ describe("concurrency", () => {
     });
 
     it("keeps a bare write from landing inside an update", async () => {
-        const storage = new AsyncMemorySignerStorage();
+        const storage = new AsyncInMemorySignerStorage();
         const store = new SignerStore(storage);
         await store.setChannelRecord(CHANNEL_ID, record({ lastStateVersion: 1 }));
         storage.ops.length = 0;
@@ -377,7 +377,7 @@ describe("concurrency", () => {
     });
 
     it("serves a read issued behind a pending update the updated record", async () => {
-        const store = new SignerStore(new AsyncMemorySignerStorage());
+        const store = new SignerStore(new AsyncInMemorySignerStorage());
         await store.setChannelRecord(CHANNEL_ID, record({ lastStateVersion: 1 }));
 
         const update = store.updateChannelRecord(CHANNEL_ID, bumpStateVersion);
@@ -388,7 +388,7 @@ describe("concurrency", () => {
     });
 
     it("keeps the key usable after an updater refuses", async () => {
-        const store = new SignerStore(new AsyncMemorySignerStorage());
+        const store = new SignerStore(new AsyncInMemorySignerStorage());
         await store.setChannelRecord(CHANNEL_ID, record({ lastStateVersion: 1 }));
 
         const refused = store.updateChannelRecord(CHANNEL_ID, () => {
@@ -441,7 +441,7 @@ describe("concurrency", () => {
     });
 
     it("drops a key's lane once nothing is queued behind it", async () => {
-        const store = new SignerStore(new AsyncMemorySignerStorage());
+        const store = new SignerStore(new AsyncInMemorySignerStorage());
         const lanes = (store as unknown as { lanes: Map<string, unknown> }).lanes;
 
         await Promise.all([
@@ -461,7 +461,7 @@ describe("concurrency", () => {
     });
 
     it("holds one lane per key while operations are queued on it", async () => {
-        const store = new SignerStore(new AsyncMemorySignerStorage());
+        const store = new SignerStore(new AsyncInMemorySignerStorage());
         const lanes = (store as unknown as { lanes: Map<string, unknown> }).lanes;
 
         const pending = [
@@ -478,24 +478,24 @@ describe("concurrency", () => {
 
 describe("hold-invoice preimages", () => {
     it("round-trips a preimage through a synchronous storage", async () => {
-        const store = new SignerStore(new MemorySignerStorage());
+        const store = new SignerStore(new InMemorySignerStorage());
         await store.setHoldInvoicePreimage(PAYMENT_HASH, PREIMAGE);
         await expect(store.getHoldInvoicePreimage(PAYMENT_HASH)).resolves.toBe(PREIMAGE);
     });
 
     it("round-trips a preimage through an asynchronous storage", async () => {
-        const store = new SignerStore(new AsyncMemorySignerStorage());
+        const store = new SignerStore(new AsyncInMemorySignerStorage());
         await store.setHoldInvoicePreimage(PAYMENT_HASH, PREIMAGE);
         await expect(store.getHoldInvoicePreimage(PAYMENT_HASH)).resolves.toBe(PREIMAGE);
     });
 
     it("returns null when no preimage is stored", async () => {
-        const store = new SignerStore(new MemorySignerStorage());
+        const store = new SignerStore(new InMemorySignerStorage());
         await expect(store.getHoldInvoicePreimage(PAYMENT_HASH)).resolves.toBeNull();
     });
 
     it("namespaces the preimage key by payment hash", async () => {
-        const storage = new MemorySignerStorage();
+        const storage = new InMemorySignerStorage();
         await new SignerStore(storage).setHoldInvoicePreimage(PAYMENT_HASH, PREIMAGE);
         expect([...storage.map.keys()]).toEqual([PREIMAGE_KEY]);
     });
@@ -508,7 +508,7 @@ describe("hold-invoice preimages", () => {
         ["an empty hash", ""],
         ["a non-hex hash", "zz".repeat(32)],
     ])("rejects %s", async (_, badHash) => {
-        const store = new SignerStore(new MemorySignerStorage());
+        const store = new SignerStore(new InMemorySignerStorage());
         await expect(store.getHoldInvoicePreimage(badHash)).rejects.toThrow(
             new TypeError("paymentHashHex must be 32 bytes of lowercase hex"),
         );
@@ -518,14 +518,14 @@ describe("hold-invoice preimages", () => {
     });
 
     it("rejects an invalid preimage on write", async () => {
-        const store = new SignerStore(new MemorySignerStorage());
+        const store = new SignerStore(new InMemorySignerStorage());
         await expect(store.setHoldInvoicePreimage(PAYMENT_HASH, "33".repeat(16))).rejects.toThrow(
             new TypeError("preimageHex must be 32 bytes of lowercase hex"),
         );
     });
 
     it("does not echo the rejected preimage in the error", async () => {
-        const store = new SignerStore(new MemorySignerStorage());
+        const store = new SignerStore(new InMemorySignerStorage());
         const bogus = "AB".repeat(32);
         const error = await store.setHoldInvoicePreimage(PAYMENT_HASH, bogus).catch((cause: unknown) => cause);
         expect(error).toBeInstanceOf(TypeError);
@@ -533,7 +533,7 @@ describe("hold-invoice preimages", () => {
     });
 
     it("throws on a stored value that is not a preimage", async () => {
-        const storage = new MemorySignerStorage();
+        const storage = new InMemorySignerStorage();
         storage.map.set(PREIMAGE_KEY, "not-a-preimage");
         await expect(new SignerStore(storage).getHoldInvoicePreimage(PAYMENT_HASH)).rejects.toThrow(
             new TypeError(`stored value at ${PREIMAGE_KEY} is not a preimage`),
@@ -541,14 +541,14 @@ describe("hold-invoice preimages", () => {
     });
 
     it("overwrites a previously stored preimage", async () => {
-        const store = new SignerStore(new MemorySignerStorage());
+        const store = new SignerStore(new InMemorySignerStorage());
         await store.setHoldInvoicePreimage(PAYMENT_HASH, PREIMAGE);
         await store.setHoldInvoicePreimage(PAYMENT_HASH, "33".repeat(32));
         await expect(store.getHoldInvoicePreimage(PAYMENT_HASH)).resolves.toBe("33".repeat(32));
     });
 
     it("treats an empty stored string as corruption, not absence", async () => {
-        const storage = new MemorySignerStorage();
+        const storage = new InMemorySignerStorage();
         storage.map.set(PREIMAGE_KEY, "");
         await expect(new SignerStore(storage).getHoldInvoicePreimage(PAYMENT_HASH)).rejects.toThrow(
             new TypeError(`stored value at ${PREIMAGE_KEY} is not a preimage`),
@@ -556,7 +556,7 @@ describe("hold-invoice preimages", () => {
     });
 
     it("keeps preimages and channel records in disjoint keyspaces", async () => {
-        const storage = new MemorySignerStorage();
+        const storage = new InMemorySignerStorage();
         const store = new SignerStore(storage);
         await store.setChannelRecord(PAYMENT_HASH, record());
         await store.setHoldInvoicePreimage(PAYMENT_HASH, PREIMAGE);

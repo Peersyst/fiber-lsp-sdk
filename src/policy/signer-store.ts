@@ -1,7 +1,8 @@
-import type { IAsyncSignerStorage, ISignerStorage } from "./interfaces/index.js";
-import { CHANNEL_RECORD_KEY_PREFIX, HOLD_INVOICE_PREIMAGE_KEY_PREFIX, PAYMENT_HASH_LENGTH, PREIMAGE_LENGTH } from "./policy.constants.js";
-import type { ChannelPolicyRecord } from "./policy.types.js";
-import { assertChannelPolicyRecord, assertHexBytes, assertNonEmptyString, isChannelPolicyRecord, isHexBytes } from "./utils/index.js";
+import { assertHexBytes, assertNonEmptyString, isHexBytes } from "../common";
+import type { IAsyncSignerStorage, ISignerStorage } from "./interfaces";
+import { CHANNEL_RECORD_KEY_PREFIX, HOLD_INVOICE_PREIMAGE_KEY_PREFIX, PAYMENT_HASH_LENGTH, PREIMAGE_LENGTH } from "./policy.constants";
+import type { ChannelPolicyRecord } from "./policy.types";
+import { assertChannelPolicyRecord, isChannelPolicyRecord } from "./utils";
 
 export class SignerStore {
     private readonly storage: ISignerStorage | IAsyncSignerStorage;

@@ -1,3 +1,5 @@
+import { isUnsignedInteger } from "./validate.utils";
+
 /**
  * Asserts that a value is a byte array of an exact length.
  * @param name Name of the value, used in the error message.
@@ -20,7 +22,7 @@ export function assertBytes(name: string, value: unknown, length: number): asser
  * @param max Highest accepted value, inclusive.
  */
 export function assertUnsignedInteger(name: string, value: number, max: number): void {
-    if (!Number.isSafeInteger(value) || value < 0 || value > max) {
+    if (!isUnsignedInteger(value, max)) {
         throw new RangeError(`${name} must be an integer between 0 and ${max}, got ${value}`);
     }
 }
