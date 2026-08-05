@@ -1,7 +1,7 @@
 import { bytesToHex, hexToBytes } from "@noble/hashes/utils.js";
-import { MAX_CHANNEL_INDEX, MAX_COMMITMENT_NUMBER, NONCE_CONTEXTS } from "../../../src/derivation/derivation.constants.js";
-import type { FiberChannelKeys } from "../../../src/derivation/derivation.types.js";
-import { deriveChannelSeed, deriveNonceSeed, deriveWalletIdentityKey } from "../../../src/derivation/device-scheme.js";
+import { MAX_ACCOUNT_INDEX, MAX_CHANNEL_INDEX, MAX_COMMITMENT_NUMBER, NONCE_CONTEXTS } from "../../../src/derivation/derivation.constants";
+import type { FiberChannelKeys } from "../../../src/derivation/derivation.types";
+import { deriveChannelSeed, deriveNonceSeed, deriveWalletIdentityKey } from "../../../src/derivation/device-scheme";
 import {
     deriveChannelKeys,
     derivePrivateKey,
@@ -10,9 +10,10 @@ import {
     getCommitmentPoint,
     getCommitmentSecret,
     pubkeyOf,
-} from "../../../src/derivation/fiber-scheme.js";
-import { ckbBlake2b } from "../../../src/derivation/utils/ckb-hash.utils.js";
-import { loadInteropVectors, type ChannelKeysVector } from "../../utils/interop-vectors.js";
+} from "../../../src/derivation/fiber-scheme";
+import { deriveMasterSeed } from "../../../src/derivation/master-seed";
+import { ckbBlake2b } from "../../../src/derivation/utils/ckb-hash.utils";
+import { loadInteropVectors, type ChannelKeysVector } from "../../utils/interop-vectors";
 
 function expectChannelKeys(keys: FiberChannelKeys, expected: ChannelKeysVector): void {
     expect(bytesToHex(keys.fundingKey)).toBe(expected.funding_key);
@@ -39,6 +40,7 @@ describe("cross-implementation vectors", () => {
         expect(vectors.sdk_scheme.channel_seeds.map((entry) => entry.channel_index)).toEqual(
             expect.arrayContaining([0, MAX_CHANNEL_INDEX]),
         );
+        expect(vectors.sdk_scheme.master_seeds.map((entry) => entry.account_index)).toEqual(expect.arrayContaining([0, MAX_ACCOUNT_INDEX]));
         expect(new Set(vectors.sdk_scheme.channel.nonce_seeds.map((entry) => entry.context))).toEqual(new Set(NONCE_CONTEXTS));
     });
 
@@ -81,6 +83,14 @@ describe("cross-implementation vectors", () => {
 
     describe("SDK scheme", () => {
         const masterSeed = hexToBytes(vectors.sdk_scheme.master_seed);
+
+        for (const entry of vectors.sdk_scheme.master_seeds) {
+            it(`derives the master seed at ${entry.path}`, () => {
+                expect(bytesToHex(deriveMasterSeed(hexToBytes(vectors.sdk_scheme.bip39_seed), entry.account_index))).toBe(
+                    entry.master_seed,
+                );
+            });
+        }
 
         it("derives the wallet identity key", () => {
             expect(bytesToHex(deriveWalletIdentityKey(masterSeed))).toBe(vectors.sdk_scheme.wallet_identity_key);

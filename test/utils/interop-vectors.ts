@@ -1,7 +1,7 @@
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
-import { NONCE_CONTEXTS } from "../../src/derivation/derivation.constants.js";
-import type { NonceContext } from "../../src/derivation/derivation.types.js";
+import { NONCE_CONTEXTS } from "../../src/derivation/derivation.constants";
+import type { NonceContext } from "../../src/derivation/derivation.types";
 
 export const CHANNEL_KEY_FIELDS = [
     "funding_key",
@@ -22,12 +22,16 @@ export type HashVector = { label: string; chunks: string[]; digest: string };
 
 export type NonceSeedVector = { commitment_number: number; context: NonceContext; seed: string };
 
+export type MasterSeedVector = { account_index: number; path: string; master_seed: string };
+
 export type Vectors = {
     scheme_version: number;
     fiber_ref: string;
     hashes: HashVector[];
     fiber_scheme: { channel_seed: string; channel_keys: ChannelKeysVector; commitments: CommitmentVector[] };
     sdk_scheme: {
+        bip39_seed: string;
+        master_seeds: MasterSeedVector[];
         master_seed: string;
         wallet_identity_key: string;
         channel_seeds: { channel_index: number; seed: string }[];
@@ -101,6 +105,16 @@ export function parseVectors(value: unknown): Vectors {
             }),
         },
         sdk_scheme: {
+            bip39_seed: asString(sdkScheme.bip39_seed, "sdk_scheme.bip39_seed"),
+            master_seeds: asArray(sdkScheme.master_seeds, "sdk_scheme.master_seeds").map((entry, index) => {
+                const path = `sdk_scheme.master_seeds[${index}]`;
+                const record = asRecord(entry, path);
+                return {
+                    account_index: asNumber(record.account_index, `${path}.account_index`),
+                    path: asString(record.path, `${path}.path`),
+                    master_seed: asString(record.master_seed, `${path}.master_seed`),
+                };
+            }),
             master_seed: asString(sdkScheme.master_seed, "sdk_scheme.master_seed"),
             wallet_identity_key: asString(sdkScheme.wallet_identity_key, "sdk_scheme.wallet_identity_key"),
             channel_seeds: asArray(sdkScheme.channel_seeds, "sdk_scheme.channel_seeds").map((entry, index) => {

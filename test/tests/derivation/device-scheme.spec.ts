@@ -1,8 +1,8 @@
 import { bytesToHex } from "@noble/hashes/utils.js";
-import { MAX_CHANNEL_INDEX, MAX_COMMITMENT_NUMBER, NONCE_CONTEXTS } from "../../../src/derivation/derivation.constants.js";
-import type { NonceContext } from "../../../src/derivation/derivation.types.js";
-import { deriveChannelSeed, deriveNonceSeed, deriveWalletIdentityKey } from "../../../src/derivation/device-scheme.js";
-import { deriveChannelKeys } from "../../../src/derivation/fiber-scheme.js";
+import { MAX_CHANNEL_INDEX, MAX_COMMITMENT_NUMBER, NONCE_CONTEXTS } from "../../../src/derivation/derivation.constants";
+import type { NonceContext } from "../../../src/derivation/derivation.types";
+import { deriveChannelSeed, deriveNonceSeed, deriveWalletIdentityKey } from "../../../src/derivation/device-scheme";
+import { deriveChannelKeys } from "../../../src/derivation/fiber-scheme";
 
 const MASTER_SEED = new Uint8Array(32).fill(0x24);
 const OTHER_MASTER_SEED = new Uint8Array(32).fill(0x25);

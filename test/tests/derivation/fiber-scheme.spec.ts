@@ -1,7 +1,7 @@
 import { secp256k1 } from "@noble/curves/secp256k1.js";
 import { bytesToNumberBE, numberToBytesBE } from "@noble/curves/utils.js";
 import { bytesToHex } from "@noble/hashes/utils.js";
-import { MAX_COMMITMENT_NUMBER } from "../../../src/derivation/derivation.constants.js";
+import { MAX_COMMITMENT_NUMBER } from "../../../src/derivation/derivation.constants";
 import {
     deriveChannelKeys,
     derivePrivateKey,
@@ -12,8 +12,8 @@ import {
     getTweakByCommitmentPoint,
     pubkeyOf,
     tweakPrivkey,
-} from "../../../src/derivation/fiber-scheme.js";
-import { ckbBlake2b } from "../../../src/derivation/utils/ckb-hash.utils.js";
+} from "../../../src/derivation/fiber-scheme";
+import { ckbBlake2b } from "../../../src/derivation/utils/ckb-hash.utils";
 
 const CURVE_ORDER = secp256k1.Point.Fn.ORDER;
 const CHANNEL_SEED = new Uint8Array(32).fill(0x42);

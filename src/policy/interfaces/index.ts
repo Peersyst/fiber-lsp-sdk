@@ -1,1 +1,1 @@
-export * from "./i-signer-storage.js";
+export * from "./i-signer-storage";

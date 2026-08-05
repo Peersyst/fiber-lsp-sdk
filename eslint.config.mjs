@@ -25,6 +25,17 @@ const PLATFORM_GLOBALS = [
     "crypto",
 ];
 
+const RELATIVE_IMPORT_PATTERNS = [
+    {
+        group: ["./*.js", "./**/*.js", "../*.js", "../**/*.js"],
+        message: "Relative imports carry no file extension (`moduleResolution: bundler`)",
+    },
+    {
+        group: ["./index", "./**/index", "../index", "../**/index"],
+        message: "A barrel is imported as its folder, never as its index file",
+    },
+];
+
 const NODE_BUILTINS = [
     "fs",
     "path",
@@ -96,11 +107,17 @@ export default tseslint.config(
             "no-restricted-imports": [
                 "error",
                 {
-                    patterns: [{ group: ["node:*"], message: RUNTIME_MESSAGE }],
+                    patterns: [{ group: ["node:*"], message: RUNTIME_MESSAGE }, ...RELATIVE_IMPORT_PATTERNS],
                     paths: NODE_BUILTINS,
                 },
             ],
             "no-restricted-globals": ["error", ...PLATFORM_GLOBALS.map((name) => ({ name, message: RUNTIME_MESSAGE }))],
+        },
+    },
+    {
+        files: ["test/**/*.ts"],
+        rules: {
+            "no-restricted-imports": ["error", { patterns: RELATIVE_IMPORT_PATTERNS }],
         },
     },
 );
