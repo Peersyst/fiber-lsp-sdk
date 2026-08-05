@@ -38,6 +38,7 @@ Only `derivation` is implemented today; the rest are placeholders.
 ```text
 src/            SDK source, one folder per module (see above), plus common/ for helpers no single module owns
 test/tests/     Specs, mirroring the src tree one-to-one
+test/mocks/     Doubles of the injected effects, one folder per module
 test/utils/     Shared test helpers
 docs/           Long-form documentation, indexed by docs/README.md
 interop/        Rust harness and the generated cross-implementation vectors

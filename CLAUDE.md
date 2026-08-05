@@ -45,6 +45,7 @@ src/
 
 test/
   tests/          Specs mirroring the src tree one-to-one
+  mocks/          Doubles of the injected effects, one folder per module
   utils/          Shared test helpers (vector loading, fixtures)
 
 docs/             Long-form docs, indexed by docs/README.md
@@ -121,8 +122,10 @@ an upstream quirk, the reason a bound exists, an invariant a reader would otherw
 ## Testing
 
 - Specs live in `test/tests/`, mirroring `src/` one-to-one (`src/derivation/fiber-scheme.ts` →
-  `test/tests/derivation/fiber-scheme.spec.ts`). Doubles of the injected effects go in `test/mocks/`, mirroring `src/` the same
-  way and named `*.mock.ts`; every other shared helper goes in `test/utils/`. Neither is ever named `*.spec.ts`.
+  `test/tests/derivation/fiber-scheme.spec.ts`). Doubles of the injected effects go in `test/mocks/<module>/`, in a file named
+  after what they double (`ISignerStorage` → `signer-storage.mock.ts`). `.mock.ts` is the umbrella suffix for any double, so one
+  that grows behavior is never renamed; the export carries the precision (`InMemorySignerStorage` is a fake, a stub over `fetch`
+  would be `FetchMock`). Every other shared helper goes in `test/utils/`. Neither is ever named `*.spec.ts`.
 - Fixtures are written out literally in the spec that uses them, never produced by a factory that fills in defaults: a factory
   that supplies the field a test meant to omit turns a refusal path green.
 - `test/` may use `node:*` imports and platform globals (it only ever runs under Node); `src/` may not, and lint enforces both

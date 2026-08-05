@@ -1,6 +1,6 @@
-import type { IAsyncSignerStorage, ISignerStorage } from "../../src/policy/index.js";
+import type { IAsyncSignerStorage, ISignerStorage } from "../../../src/policy";
 
-export class MemorySignerStorage implements ISignerStorage {
+export class InMemorySignerStorage implements ISignerStorage {
     readonly map = new Map<string, string>();
     readonly ops: string[] = [];
 
@@ -15,7 +15,7 @@ export class MemorySignerStorage implements ISignerStorage {
     }
 }
 
-export class AsyncMemorySignerStorage implements IAsyncSignerStorage {
+export class AsyncInMemorySignerStorage implements IAsyncSignerStorage {
     readonly map = new Map<string, string>();
     readonly ops: string[] = [];
 
