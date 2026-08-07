@@ -2,11 +2,10 @@
     "compilerOptions": {
         "target": "ES2022",
         "lib": ["ES2022"],
-        "module": "preserve",
-        "moduleResolution": "bundler",
+        "module": "NodeNext",
+        "moduleResolution": "NodeNext",
         "strict": true,
         "noUncheckedIndexedAccess": true,
-        "verbatimModuleSyntax": true,
         "isolatedModules": true,
         "esModuleInterop": true,
         "forceConsistentCasingInFileNames": true,

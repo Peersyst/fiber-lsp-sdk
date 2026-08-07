@@ -28,7 +28,7 @@ const PLATFORM_GLOBALS = [
 const RELATIVE_IMPORT_PATTERNS = [
     {
         group: ["./*.js", "./**/*.js", "../*.js", "../**/*.js"],
-        message: "Relative imports carry no file extension (`moduleResolution: bundler`)",
+        message: "Relative imports carry no file extension: the package is CommonJS, so NodeNext resolves them without one",
     },
     {
         group: ["./index", "./**/index", "../index", "../**/index"],

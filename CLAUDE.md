@@ -61,8 +61,8 @@ generic enough that naming it after a module would be wrong; anything a single m
 pnpm install
 pnpm lint          # eslint (no-platform-API guard + JSDoc conventions)
 pnpm check-types   # tsc --noEmit
-pnpm test          # jest (ESM mode)
-pnpm build         # tsup -> dist/ (dual ESM + CJS, one shared index.d.ts)
+pnpm test          # jest
+pnpm build         # tsup -> dist/ (index.js for require, index.mjs for import, one shared index.d.ts)
 pnpm format        # prettier
 
 # Regenerate the cross-implementation vectors (needs a Rust toolchain; `pnpm test` does not)
@@ -71,9 +71,10 @@ cargo run --release --manifest-path interop/rust/Cargo.toml -- gen-vectors inter
 
 ## Code style
 
-- TypeScript strict, ESM only; relative imports carry no file extension (`moduleResolution: bundler`), which holds only because
-  tsup bundles: a build emitting file per file would need every extension back. Dependency subpaths keep the extension their own
-  `exports` map declares (`@noble/hashes/blake2.js`).
+- TypeScript strict, ESM syntax throughout, `module`/`moduleResolution: NodeNext`. The package itself is CommonJS (no `type`
+  field), which is what lets relative imports stay extensionless and barrels be imported as their folder; under `type: module`
+  NodeNext would demand `./fiber-scheme.js` on every one of them. Dependency subpaths keep the extension their own `exports` map
+  declares (`@noble/hashes/blake2.js`).
 - Prettier: 4-space indent, double quotes, semicolons, trailing commas, 140 char width.
 - Zero tolerance for `any`: use `unknown` with type guards or proper generics; constrain type parameters.
 - Prefer `??` over `||` when `0` or `""` are valid values; optional chaining over unguarded access.
@@ -91,8 +92,8 @@ concept's name with no suffix (`fiber-scheme.ts`, `device-scheme.ts`).
 
 Every folder has an `index.ts`, and it is imported as the folder (`../common`), never as `../common/index`. Barrels re-export
 wholesale with `export *`. Two exceptions list their exports one by one: `src/derivation/index.ts`, which keeps scheme internals
-out of reach of the other modules, and `src/index.ts`, which is the published surface. A test pins each of those two lists, so
-never widen one without meaning to.
+out of reach of the other modules, and `src/index.ts`, which is the published surface. Both lists are read as code, not pinned by
+a test: a test that restates a list of names only asks to be updated alongside it.
 
 ### Comments
 
