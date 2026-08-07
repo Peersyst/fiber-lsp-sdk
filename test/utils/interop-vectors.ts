@@ -1,5 +1,5 @@
 import { readFileSync } from "node:fs";
-import { fileURLToPath } from "node:url";
+import { join } from "node:path";
 import { NONCE_CONTEXTS } from "../../src/derivation/derivation.constants";
 import type { NonceContext } from "../../src/derivation/derivation.types";
 
@@ -148,7 +148,7 @@ export function parseVectors(value: unknown): Vectors {
  * @returns The typed vectors.
  */
 export function loadInteropVectors(): Vectors {
-    const path = fileURLToPath(new URL("../../interop/vectors/vectors.json", import.meta.url));
+    const path = join(__dirname, "../../interop/vectors/vectors.json");
     const raw: unknown = JSON.parse(readFileSync(path, "utf8"));
     return parseVectors(raw);
 }

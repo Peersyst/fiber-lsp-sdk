@@ -285,7 +285,7 @@ reading the two side by side.
 
 ## What the tests guarantee
 
-187 tests across the 6 suites of `test/tests/derivation/`, in four layers with different jobs. The input guards the module leans
+186 tests across the 5 suites of `test/tests/derivation/`, in four layers with different jobs. The input guards the module leans
 on are generic and live in `common/`, tested alongside them.
 
 **Cross-implementation vectors** (`test/tests/derivation/interop-vectors.spec.ts`) compare every derivation against
@@ -316,8 +316,8 @@ tomorrow; `master-seed.spec.ts` pins three master seeds, which is where a change
 the four channel keys, two commitment secrets, a commitment point and a TLC key, which is where "fixing" a domain separator or
 shortening the chain lands. None of them is a snapshot to update when it fails.
 
-Coverage is 100% on statements, branches, functions and lines, which proves there is no dead code — not that the assertions are
-right. For that, silent breakages were introduced deliberately and the reaction measured:
+Coverage of the module is 100% on statements, branches, functions and lines, which proves there is no dead code, not that the
+assertions are right. For that, silent breakages were introduced deliberately and the reaction measured:
 
 | Mutation                                           | Tests that failed |
 | -------------------------------------------------- | ----------------- |

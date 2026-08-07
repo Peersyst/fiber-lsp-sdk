@@ -2,15 +2,14 @@
     "name": "@peersyst/fiber-lsp-sdk",
     "version": "0.0.0",
     "description": "Device signer SDK for Fiber (Nervos Lightning) hosted-LSP integrations: key derivation, musig2 partial signatures, signing policy, signer session, and typed fiber RPC client.",
-    "type": "module",
-    "main": "./dist/index.cjs",
-    "module": "./dist/index.js",
+    "main": "./dist/index.js",
+    "module": "./dist/index.mjs",
     "types": "./dist/index.d.ts",
     "exports": {
         ".": {
             "types": "./dist/index.d.ts",
-            "import": "./dist/index.js",
-            "require": "./dist/index.cjs"
+            "import": "./dist/index.mjs",
+            "require": "./dist/index.js"
         }
     },
     "files": [
@@ -23,7 +22,7 @@
     "packageManager": "pnpm@10.29.3",
     "scripts": {
         "build": "tsup",
-        "test": "NODE_OPTIONS=--experimental-vm-modules jest",
+        "test": "jest",
         "lint": "eslint src test *.ts *.mjs",
         "lint:fix": "eslint src test *.ts *.mjs --fix",
         "check-types": "tsc --noEmit",

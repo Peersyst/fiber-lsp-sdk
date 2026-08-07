@@ -72,7 +72,7 @@ a Rust toolchain; regenerating the vectors is what needs one. See [`interop/READ
 
 ### Build output
 
-`pnpm build` emits a dual bundle in `dist/`: `index.js` for `import`, `index.cjs` for `require`, both with source maps. Both
+`pnpm build` emits a dual bundle in `dist/`: `index.js` for `require`, `index.mjs` for `import`, both with source maps. Both
 conditions resolve types through a single `index.d.ts`. The runtime dependencies stay external and are ESM-only packages, so the
 CommonJS entry loads them through `require(esm)` — this is why the package requires Node >= 20.19.
 
