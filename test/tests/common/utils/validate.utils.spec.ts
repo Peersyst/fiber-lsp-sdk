@@ -1,4 +1,20 @@
-import { assertHexBytes, assertNonEmptyString, isHexBytes, isUnsignedInteger } from "../../../../src/common/utils/validate.utils";
+import { isDecimalShannons, isHexBytes, isPlainObject, isUnsignedInteger } from "../../../../src/common/utils/validate.utils";
+
+describe("isPlainObject", () => {
+    it.each([{}, { a: 1 }, Object.create(null) as object, new Date()])("accepts %p", (value) => {
+        expect(isPlainObject(value)).toBe(true);
+    });
+
+    // The three shapes that pass a naive `typeof value === "object"` check and would
+    // then be read field by field as if they were a record.
+    it.each([null, [], [{ a: 1 }]])("rejects %p", (value) => {
+        expect(isPlainObject(value)).toBe(false);
+    });
+
+    it.each(["", "text", 0, 42, true, undefined, 5n, Symbol("s"), () => undefined])("rejects the non-object %p", (value) => {
+        expect(isPlainObject(value)).toBe(false);
+    });
+});
 
 describe("isUnsignedInteger", () => {
     it.each([0, 1, 10])("accepts %i within the bound", (value) => {
@@ -32,22 +48,23 @@ describe("isHexBytes", () => {
     });
 });
 
-describe("assertHexBytes", () => {
-    it("accepts a valid value", () => {
-        expect(() => assertHexBytes("digest", "ab".repeat(32), 32)).not.toThrow();
+describe("isDecimalShannons", () => {
+    it.each(["0", "1", "10", "5000000000", "340282366920938463463374607431768211455"])("accepts %s", (value) => {
+        expect(isDecimalShannons(value)).toBe(true);
     });
 
-    it("names the argument and size in the refusal", () => {
-        expect(() => assertHexBytes("preimageHex", "nope", 32)).toThrow(new TypeError("preimageHex must be 32 bytes of lowercase hex"));
-    });
-});
-
-describe("assertNonEmptyString", () => {
-    it("accepts a non-empty string", () => {
-        expect(() => assertNonEmptyString("channelId", "abc")).not.toThrow();
+    it.each(["", "01", "-1", "+1", "1.5", "1e3", " 1", "1 ", "0x10", "١٢٣"])("rejects %p", (value) => {
+        expect(isDecimalShannons(value)).toBe(false);
     });
 
-    it.each(["", 42 as unknown as string, null as unknown as string, undefined as unknown as string])("rejects %p", (value) => {
-        expect(() => assertNonEmptyString("channelId", value)).toThrow(new TypeError("channelId must be a non-empty string"));
+    it("rejects amounts beyond u128", () => {
+        expect(isDecimalShannons("340282366920938463463374607431768211455")).toBe(true);
+        expect(isDecimalShannons("340282366920938463463374607431768211456")).toBe(false);
+        expect(isDecimalShannons("1" + "0".repeat(39))).toBe(false);
+        expect(isDecimalShannons("9".repeat(1000))).toBe(false);
+    });
+
+    it.each([5, 5n, null, undefined])("rejects the non-string %p", (value) => {
+        expect(isDecimalShannons(value)).toBe(false);
     });
 });

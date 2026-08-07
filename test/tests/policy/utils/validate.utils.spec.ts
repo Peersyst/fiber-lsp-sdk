@@ -1,28 +1,7 @@
 import type { ChannelPolicyRecord } from "../../../../src/policy";
-import { assertChannelPolicyRecord, isChannelPolicyRecord, isDecimalShannons } from "../../../../src/policy/utils";
+import { isChannelPolicyRecord } from "../../../../src/policy/utils/validate.utils";
 
 const MAX_COMMITMENT_NUMBER = 2 ** 48 - 1;
-
-describe("isDecimalShannons", () => {
-    it.each(["0", "1", "10", "5000000000", "340282366920938463463374607431768211455"])("accepts %s", (value) => {
-        expect(isDecimalShannons(value)).toBe(true);
-    });
-
-    it.each(["", "01", "-1", "+1", "1.5", "1e3", " 1", "1 ", "0x10", "١٢٣"])("rejects %p", (value) => {
-        expect(isDecimalShannons(value)).toBe(false);
-    });
-
-    it("rejects amounts beyond u128", () => {
-        expect(isDecimalShannons("340282366920938463463374607431768211455")).toBe(true);
-        expect(isDecimalShannons("340282366920938463463374607431768211456")).toBe(false);
-        expect(isDecimalShannons("1" + "0".repeat(39))).toBe(false);
-        expect(isDecimalShannons("9".repeat(1000))).toBe(false);
-    });
-
-    it.each([5, 5n, null, undefined])("rejects the non-string %p", (value) => {
-        expect(isDecimalShannons(value)).toBe(false);
-    });
-});
 
 describe("isChannelPolicyRecord", () => {
     function record(): ChannelPolicyRecord {
@@ -113,21 +92,5 @@ describe("isChannelPolicyRecord", () => {
         ["a debit that is not decimal", { pendingDebitsShannons: ["100", "1.5"] }],
     ])("rejects a record with %s", (_, override) => {
         expect(isChannelPolicyRecord({ ...record(), ...override })).toBe(false);
-    });
-
-    describe("assertChannelPolicyRecord", () => {
-        it("accepts a valid record", () => {
-            expect(() => assertChannelPolicyRecord("record", record())).not.toThrow();
-        });
-
-        it.each(["record", "updated record"])("names the value %p in the refusal", (name) => {
-            expect(() => assertChannelPolicyRecord(name, { ...record(), version: 2 })).toThrow(
-                new TypeError(`${name} is not a valid channel policy record`),
-            );
-        });
-
-        it.each([null, undefined, "record", 42])("rejects the non-object %p", (value) => {
-            expect(() => assertChannelPolicyRecord("record", value)).toThrow(TypeError);
-        });
     });
 });

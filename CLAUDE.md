@@ -112,9 +112,9 @@ Block comments always span multiple lines, never `/** text */` on one line:
  */
 ```
 
-Exported functions carry JSDoc in that shape: a description that fits on one line, then `@param` per parameter and `@returns`.
-The description is the whole story: no extra paragraphs — when something more needs saying, it belongs in `docs/`, cross-linked,
-not in the JSDoc. `//` is only for a note inside a function body.
+Every function in `src/` carries JSDoc in that shape, exported or not, methods included: a description that fits on one line,
+then `@param` per parameter and `@returns`. The description is the whole story: no extra paragraphs — when something more needs
+saying, it belongs in `docs/`, cross-linked, not in the JSDoc. `//` is only for a note inside a function body.
 
 Everything else — types, constants, interfaces, modules — takes a comment only when it earns one by saying what the code cannot:
 an upstream quirk, the reason a bound exists, an invariant a reader would otherwise break.
