@@ -1,26 +1,10 @@
-import { isHexBytes, isUnsignedInteger } from "../../common";
+import { MESSAGE_DIGEST_LENGTH, isDecimalShannons, isHexBytes, isPlainObject, isUnsignedInteger } from "../../common";
 import { MAX_CHANNEL_INDEX, MAX_COMMITMENT_NUMBER, NONCE_CONTEXTS } from "../../derivation";
-import { CHANNEL_POLICY_RECORD_VERSION, MAX_AMOUNT_SHANNONS, MESSAGE_DIGEST_LENGTH } from "../policy.constants";
+import { CHANNEL_POLICY_RECORD_VERSION } from "../policy.constants";
 import type { ChannelPolicyRecord } from "../policy.types";
 
 const CONTEXTS: readonly string[] = NONCE_CONTEXTS;
-const DECIMAL_SHANNONS_PATTERN = /^(0|[1-9][0-9]*)$/;
-// Digits of u128 max; length-checked before converting to BigInt.
-const MAX_AMOUNT_DIGITS = 39;
-
-/**
- * Checks that a value is an amount in decimal shannons: canonical digits within fiber's u128 range, no sign, no leading zeros.
- * @param value Value to check.
- * @returns Whether the value is a decimal shannons string.
- */
-export function isDecimalShannons(value: unknown): value is string {
-    return (
-        typeof value === "string" &&
-        value.length <= MAX_AMOUNT_DIGITS &&
-        DECIMAL_SHANNONS_PATTERN.test(value) &&
-        BigInt(value) <= MAX_AMOUNT_SHANNONS
-    );
-}
+const CANONICAL_DECIMAL_PATTERN = /^(0|[1-9][0-9]*)$/;
 
 /**
  * Checks that a value has the exact shape of a stored {@link ChannelPolicyRecord}. Unknown extra fields are tolerated.
@@ -42,20 +26,10 @@ export function isChannelPolicyRecord(value: unknown): value is ChannelPolicyRec
 }
 
 /**
- * Asserts that a value has the exact shape of a stored {@link ChannelPolicyRecord}.
- * @param name Name of the value, used in the error message.
+ * Checks that a value maps known nonce contexts to commitment numbers within the chain.
  * @param value Value to check.
+ * @returns Whether the value is a per-context counter map.
  */
-export function assertChannelPolicyRecord(name: string, value: unknown): void {
-    if (!isChannelPolicyRecord(value)) {
-        throw new TypeError(`${name} is not a valid channel policy record`);
-    }
-}
-
-function isPlainObject(value: unknown): value is Record<string, unknown> {
-    return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
 function isContextCounterMap(value: unknown): boolean {
     if (!isPlainObject(value)) return false;
     return Object.entries(value).every(
@@ -63,11 +37,21 @@ function isContextCounterMap(value: unknown): boolean {
     );
 }
 
+/**
+ * Checks that a value maps sign-once slot keys to the digest each slot signed.
+ * @param value Value to check.
+ * @returns Whether the value is a signed digest map.
+ */
 function isSignedDigestMap(value: unknown): boolean {
     if (!isPlainObject(value)) return false;
     return Object.entries(value).every(([slot, digest]) => isSignSlot(slot) && isHexBytes(digest, MESSAGE_DIGEST_LENGTH));
 }
 
+/**
+ * Checks that a key is a sign-once slot: a known context and a commitment number, separated by a colon.
+ * @param value Key to check.
+ * @returns Whether the key names a slot.
+ */
 function isSignSlot(value: string): boolean {
     const separator = value.indexOf(":");
     if (separator === -1) return false;
@@ -75,6 +59,6 @@ function isSignSlot(value: string): boolean {
     const commitmentNumber = value.slice(separator + 1);
     // Canonical decimal: one slot key per number.
     return (
-        CONTEXTS.includes(context) && DECIMAL_SHANNONS_PATTERN.test(commitmentNumber) && Number(commitmentNumber) <= MAX_COMMITMENT_NUMBER
+        CONTEXTS.includes(context) && CANONICAL_DECIMAL_PATTERN.test(commitmentNumber) && Number(commitmentNumber) <= MAX_COMMITMENT_NUMBER
     );
 }

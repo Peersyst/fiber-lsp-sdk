@@ -55,13 +55,11 @@ const NODE_BUILTINS = [
     "worker_threads",
 ];
 
-// Exported functions only. Internal helpers are read next to their single caller and
-// do not earn a comment.
-const DOCUMENTED_EXPORTS = [
-    "ExportNamedDeclaration > FunctionDeclaration",
-    "ExportNamedDeclaration > VariableDeclaration > VariableDeclarator > ArrowFunctionExpression",
-    "ExportDefaultDeclaration > FunctionDeclaration",
-    "ExportDefaultDeclaration > ArrowFunctionExpression",
+// Every function in src/ carries the same JSDoc.
+const DOCUMENTED_FUNCTIONS = [
+    "VariableDeclarator > ArrowFunctionExpression",
+    "MethodDefinition[kind=method]",
+    "MethodDefinition[kind=constructor]",
 ];
 
 // One-line summary, capitalised, ending in a full stop, no extra paragraphs: anything
@@ -97,7 +95,7 @@ export default tseslint.config(
     {
         files: ["src/**/*.ts"],
         rules: {
-            "jsdoc/require-jsdoc": ["error", { require: { FunctionDeclaration: false }, contexts: DOCUMENTED_EXPORTS }],
+            "jsdoc/require-jsdoc": ["error", { require: { FunctionDeclaration: true }, contexts: DOCUMENTED_FUNCTIONS }],
         },
     },
     {

@@ -1,6 +1,6 @@
-import { assertHexBytes, assertNonEmptyString, isHexBytes } from "../common";
+import { PAYMENT_HASH_LENGTH, PREIMAGE_LENGTH, assertHexBytes, assertNonEmptyString, isHexBytes } from "../common";
 import type { IAsyncSignerStorage, ISignerStorage } from "./interfaces";
-import { CHANNEL_RECORD_KEY_PREFIX, HOLD_INVOICE_PREIMAGE_KEY_PREFIX, PAYMENT_HASH_LENGTH, PREIMAGE_LENGTH } from "./policy.constants";
+import { CHANNEL_RECORD_KEY_PREFIX, HOLD_INVOICE_PREIMAGE_KEY_PREFIX } from "./policy.constants";
 import type { ChannelPolicyRecord } from "./policy.types";
 import { assertChannelPolicyRecord, isChannelPolicyRecord } from "./utils";
 
@@ -93,6 +93,11 @@ export class SignerStore {
         });
     }
 
+    /**
+     * Reads and parses the record at a storage key.
+     * @param key Storage key to read.
+     * @returns The record, or `null` if the key was never written.
+     */
     private async readChannelRecord(key: string): Promise<ChannelPolicyRecord | null> {
         const raw = (await this.storage.get(key)) ?? null;
         if (raw === null) return null;
@@ -100,10 +105,21 @@ export class SignerStore {
         return parseChannelRecord(key, raw);
     }
 
+    /**
+     * Serializes a record into the storage key that holds it.
+     * @param key Storage key to write.
+     * @param record Record to persist.
+     */
     private async writeChannelRecord(key: string, record: ChannelPolicyRecord): Promise<void> {
         await this.storage.set(key, JSON.stringify(record));
     }
 
+    /**
+     * Runs an operation after every earlier one queued on the same key, so a read-modify-write never interleaves.
+     * @param key Storage key whose lane the operation joins.
+     * @param operation Operation to run once the lane is free.
+     * @returns Whatever the operation returned.
+     */
     private async serialize<T>(key: string, operation: () => Promise<T>): Promise<T> {
         const previous = this.lanes.get(key) ?? Promise.resolve();
         const result = previous.then(operation);
@@ -118,6 +134,12 @@ export class SignerStore {
     }
 }
 
+/**
+ * Parses a stored channel record, refusing anything the storage returns that is not one.
+ * @param key Storage key the value came from, used in the error message.
+ * @param raw Raw string read from storage.
+ * @returns The parsed record.
+ */
 function parseChannelRecord(key: string, raw: string): ChannelPolicyRecord {
     let parsed: unknown;
     try {

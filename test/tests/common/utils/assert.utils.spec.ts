@@ -1,4 +1,4 @@
-import { assertBytes, assertUnsignedInteger } from "../../../../src/common/utils/assert.utils";
+import { assertBytes, assertHexBytes, assertNonEmptyString, assertUnsignedInteger } from "../../../../src/common/utils/assert.utils";
 
 describe("assertBytes", () => {
     it("accepts a byte array of the exact length", () => {
@@ -40,5 +40,25 @@ describe("assertUnsignedInteger", () => {
         expect(() => assertUnsignedInteger("commitmentNumber", -1, 10)).toThrow(
             new RangeError("commitmentNumber must be an integer between 0 and 10, got -1"),
         );
+    });
+});
+
+describe("assertHexBytes", () => {
+    it("accepts a valid value", () => {
+        expect(() => assertHexBytes("digest", "ab".repeat(32), 32)).not.toThrow();
+    });
+
+    it("names the argument and size in the refusal", () => {
+        expect(() => assertHexBytes("preimageHex", "nope", 32)).toThrow(new TypeError("preimageHex must be 32 bytes of lowercase hex"));
+    });
+});
+
+describe("assertNonEmptyString", () => {
+    it("accepts a non-empty string", () => {
+        expect(() => assertNonEmptyString("channelId", "abc")).not.toThrow();
+    });
+
+    it.each(["", 42 as unknown as string, null as unknown as string, undefined as unknown as string])("rejects %p", (value) => {
+        expect(() => assertNonEmptyString("channelId", value)).toThrow(new TypeError("channelId must be a non-empty string"));
     });
 });
