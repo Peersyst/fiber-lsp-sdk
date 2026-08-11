@@ -4,8 +4,8 @@
 import { secp256k1 } from "@noble/curves/secp256k1.js";
 import { bytesToNumberBE, numberToBytesBE } from "@noble/curves/utils.js";
 import { utf8ToBytes } from "@noble/hashes/utils.js";
-import { assertBytes, assertUnsignedInteger } from "../common";
-import { CHANNEL_SEED_LENGTH, COMPRESSED_POINT_LENGTH, MAX_COMMITMENT_NUMBER, SECRET_KEY_LENGTH } from "./derivation.constants";
+import { COMPRESSED_POINT_LENGTH, assertBytes, assertUnsignedInteger } from "../common";
+import { CHANNEL_SEED_LENGTH, MAX_COMMITMENT_NUMBER, SECRET_KEY_LENGTH } from "./derivation.constants";
 import type { FiberChannelKeys } from "./derivation.types";
 import { blake2bHashWithSalt, ckbBlake2b } from "./utils";
 

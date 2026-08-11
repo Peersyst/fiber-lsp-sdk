@@ -14,9 +14,13 @@ export const CHANNEL_KEY_FIELDS = [
 
 export const COMMITMENT_FIELDS = ["secret", "point", "tlc_privkey", "tlc_pubkey", "musig2_nonce_seckey"] as const;
 
+export const MUSIG_FIELDS = ["remote_seckey", "remote_pubkey", "remote_pubnonce", "message"] as const;
+
 export type ChannelKeysVector = Record<(typeof CHANNEL_KEY_FIELDS)[number], string>;
 
 export type CommitmentVector = Record<(typeof COMMITMENT_FIELDS)[number], string> & { n: number };
+
+export type MusigVector = Record<(typeof MUSIG_FIELDS)[number], string>;
 
 export type HashVector = { label: string; chunks: string[]; digest: string };
 
@@ -37,6 +41,7 @@ export type Vectors = {
         channel_seeds: { channel_index: number; seed: string }[];
         channel: { channel_index: number; seed: string; channel_keys: ChannelKeysVector; nonce_seeds: NonceSeedVector[] };
     };
+    musig: MusigVector;
 };
 
 function asRecord(value: unknown, path: string): Record<string, unknown> {
@@ -140,6 +145,7 @@ export function parseVectors(value: unknown): Vectors {
                 }),
             },
         },
+        musig: asStringFields(root.musig, "musig", MUSIG_FIELDS),
     };
 }
 

@@ -145,13 +145,15 @@ From which follows the decision that shapes the SDK:
 
 That reads like a violation of the golden rule, and it is not, provided the other half holds:
 
-> The **sign-once** policy guarantees a slot ever signs **one** message. A repeated request with the same message returns the
-> cached signature; a different message for an already-signed slot is refused.
+> The **sign-once** policy guarantees a slot ever serves **one** signing session: one ordered key list, one aggregated nonce,
+> one message. A byte-identical repeat returns the same signature; anything else on an already-served slot is refused.
 
-Deterministic nonce + sign-once = single-use nonce _per message_. The payoff on mobile is large: if the connection drops
-mid-signature and the bridge redelivers, the device produces the same response byte for byte, so retries are idempotent without
-persisting the signature itself. The four contexts (`COMMITMENT`, `REVOKE`, `CLOSE`, `ANNOUNCEMENT`) exist so two different
-operations on the same commitment number cannot share a nonce.
+Deterministic nonce + sign-once = single-use nonce _per session_. Counting messages instead would not do: the challenge a
+partial signature answers is a function of the aggregated nonce too, so a node that re-asks for one slot and one message under
+three aggregates of its choosing recovers the funding key ([signing.md](./signing.md)). The payoff on mobile is large: if the
+connection drops mid-signature and the bridge redelivers, the device produces the same response byte for byte, so retries are
+idempotent without persisting the signature itself. The four contexts (`COMMITMENT`, `REVOKE`, `CLOSE`, `ANNOUNCEMENT`) exist so
+two different operations on the same commitment number cannot share a nonce.
 
 This module derives the nonce **seed**. The nonce itself (BIP-327 `nonceGen`) belongs to the signing engine.
 

@@ -7,7 +7,7 @@ export default {
     transform: {
         "^.+\\.[tj]s$": ["ts-jest", { tsconfig: { allowJs: true } }],
     },
-    transformIgnorePatterns: ["node_modules/(?!.*(@noble|@scure))"],
+    transformIgnorePatterns: ["node_modules/(?!.*(@noble|@scure|micro-packed))"],
     // Barrels are re-export lists: counting their re-exports as uncovered functions
     // measures nothing, since every spec imports the file that declares the behavior.
     collectCoverageFrom: ["src/**/*.ts", "!src/**/index.ts"],
