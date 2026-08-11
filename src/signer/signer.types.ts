@@ -13,7 +13,7 @@ export type BasePublicKeys = {
  */
 export type PartialSignRequest = {
     /**
-     * The 2-of-2 key list in fiber's role order, [local, remote] as the node sent it; the SDK never sorts it.
+     * The 2-of-2 key list exactly as the node sent it; the SDK never sorts or reorders it.
      */
     orderedPublicKeys: Uint8Array[];
     /**

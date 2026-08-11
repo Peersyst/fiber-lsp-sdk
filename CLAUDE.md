@@ -35,6 +35,7 @@ Upstream reference: `nervosnetwork/fiber` @ `b71a61c3` (v0.9.0-rc7). The key der
 src/
   common/         Cross-module helpers that belong to no single module (input guards)
   derivation/     Fiber key scheme port + SDK-owned derivations
+  digest/         Rebuilds the four messages fiber signs (no-blind-signing); minimal molecule serializer
   signer/         Signer-protocol dispatch, musig2 signing engine
   policy/         Policy engine + persisted per-channel records
   session/        Signer session client: challenge auth, correlation, resume
@@ -92,9 +93,10 @@ concept's name with no suffix (`fiber-scheme.ts`, `device-scheme.ts`).
 ### Barrels
 
 Every folder has an `index.ts`, and it is imported as the folder (`../common`), never as `../common/index`. Barrels re-export
-wholesale with `export *`. Two exceptions list their exports one by one: `src/derivation/index.ts`, which keeps scheme internals
-out of reach of the other modules, and `src/index.ts`, which is the published surface. Both lists are read as code, not pinned by
-a test: a test that restates a list of names only asks to be updated alongside it.
+wholesale with `export *`. Three exceptions list their exports one by one: `src/derivation/index.ts` and `src/digest/index.ts`,
+which keep the internals of their fiber ports out of reach of the other modules, and `src/index.ts`, which is the published
+surface. Those lists are read as code, not pinned by a test: a test that restates a list of names only asks to be updated
+alongside it.
 
 ### Comments
 

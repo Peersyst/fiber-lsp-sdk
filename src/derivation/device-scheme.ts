@@ -2,11 +2,10 @@
  * Derivations the SDK owns. The domain separators are inside the hash: changing one strands every channel opened under it.
  */
 import { utf8ToBytes } from "@noble/hashes/utils.js";
-import { assertBytes, assertUnsignedInteger } from "../common";
+import { assertBytes, assertUnsignedInteger, ckbBlake2b } from "../common";
 import { MASTER_SEED_LENGTH, MAX_CHANNEL_INDEX, MAX_COMMITMENT_NUMBER, NONCE_CONTEXTS } from "./derivation.constants";
 import type { FiberChannelKeys, NonceContext } from "./derivation.types";
 import { derivePrivateKey, getCommitmentPoint } from "./fiber-scheme";
-import { ckbBlake2b } from "./utils";
 
 /**
  * Derives the wallet identity key, which answers the signer-session challenge.

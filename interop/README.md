@@ -9,12 +9,13 @@ checked without a Rust toolchain. Rust is only needed to regenerate the vectors.
 
 For the scheme those vectors pin, see [`docs/derivation.md`](../docs/derivation.md).
 
-## The two halves
+## The three halves
 
-| Half           | What it is                                                                                                                                                                                                                                                  |
-| -------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `fiber_scheme` | Verbatim ports of the pure derivation functions of `nervosnetwork/fiber` @ `b71a61c3` (v0.9.0-rc7), `crates/fiber-types/src/channel.rs`                                                                                                                     |
-| `sdk_scheme`   | The SDK-owned derivations (master seed path, wallet identity key, per-channel seed, musig2 nonce seed), written from their definition rather than ported, so the TypeScript side is checked against an independent implementation instead of against itself |
+| Half           | What it is                                                                                                                                                                                                                                                                                                        |
+| -------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `fiber_scheme` | Verbatim ports of the pure derivation functions of `nervosnetwork/fiber` @ `b71a61c3` (v0.9.0-rc7), `crates/fiber-types/src/channel.rs`                                                                                                                                                                           |
+| `sdk_scheme`   | The SDK-owned derivations (master seed path, wallet identity key, per-channel seed, musig2 nonce seed), written from their definition rather than ported, so the TypeScript side is checked against an independent implementation instead of against itself                                                       |
+| `digest`       | Verbatim ports of fiber's signed-message reconstruction (`crates/fiber-lib/src/fiber/channel.rs` and `fee.rs`): fixture channels through settlement witness, lock args, fee mocks, and the four digests, with per-case intermediates so a divergence localizes itself (see [`docs/digest.md`](../docs/digest.md)) |
 
 The master seed half needs BIP32, and the harness implements hardened derivation from the spec (`hmac` + `sha2`) rather than
 pulling a BIP32 crate: a second implementation is the whole point, and agreeing with `@scure/bip32` only means something if the
@@ -22,6 +23,11 @@ two were written apart.
 
 The `musig2` crate is the exact crate and version fiber depends on (`musig2 = 0.2.4`, features `["secp256k1"]`), so a partial
 signature the SDK produces is verified by the same code that will receive it.
+
+The digest half leans the other way on purpose: where the TS side implements molecule serialization from scratch, the harness
+serializes with CKB's own `ckb-types`, and the unsigned channel announcement is built and hashed by `fiber-types` itself,
+pinned by git rev to the reference commit. The TS fragment is thereby checked against the canonical implementations, not
+against a second hand-rolled one.
 
 All seeds are fixed public constants: the keys in `vectors/vectors.json` are test keys and nothing else.
 

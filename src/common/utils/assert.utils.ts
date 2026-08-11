@@ -28,6 +28,18 @@ export function assertUnsignedInteger(name: string, value: number, max: number):
 }
 
 /**
+ * Asserts that a value is a bigint within `[0, max]`.
+ * @param name Name of the value, used in the error message.
+ * @param value Value to check.
+ * @param max Highest accepted value, inclusive.
+ */
+export function assertUnsignedBigInt(name: string, value: bigint, max: bigint): void {
+    if (typeof value !== "bigint" || value < 0n || value > max) {
+        throw new RangeError(`${name} must be a bigint between 0 and ${max}, got ${value}`);
+    }
+}
+
+/**
  * Asserts that a value is lowercase hex encoding exactly `byteLength` bytes.
  * @param name Name of the value, used in the error message.
  * @param value Value to check.
