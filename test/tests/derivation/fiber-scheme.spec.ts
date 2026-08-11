@@ -13,7 +13,7 @@ import {
     pubkeyOf,
     tweakPrivkey,
 } from "../../../src/derivation/fiber-scheme";
-import { ckbBlake2b } from "../../../src/derivation/utils/ckb-hash.utils";
+import { ckbBlake2b } from "../../../src/common/utils/ckb-hash.utils";
 
 const CURVE_ORDER = secp256k1.Point.Fn.ORDER;
 const CHANNEL_SEED = new Uint8Array(32).fill(0x42);

@@ -1,4 +1,10 @@
-import { assertBytes, assertHexBytes, assertNonEmptyString, assertUnsignedInteger } from "../../../../src/common/utils/assert.utils";
+import {
+    assertBytes,
+    assertHexBytes,
+    assertNonEmptyString,
+    assertUnsignedBigInt,
+    assertUnsignedInteger,
+} from "../../../../src/common/utils/assert.utils";
 
 describe("assertBytes", () => {
     it("accepts a byte array of the exact length", () => {
@@ -40,6 +46,25 @@ describe("assertUnsignedInteger", () => {
         expect(() => assertUnsignedInteger("commitmentNumber", -1, 10)).toThrow(
             new RangeError("commitmentNumber must be an integer between 0 and 10, got -1"),
         );
+    });
+});
+
+describe("assertUnsignedBigInt", () => {
+    it.each([0n, 1n, 10n])("accepts %p within the range", (value) => {
+        expect(() => assertUnsignedBigInt("amount", value, 10n)).not.toThrow();
+    });
+
+    it.each([-1n, 11n])("rejects %p", (value) => {
+        expect(() => assertUnsignedBigInt("amount", value, 10n)).toThrow(RangeError);
+    });
+
+    it("rejects a value that is not a bigint", () => {
+        expect(() => assertUnsignedBigInt("amount", 5 as unknown as bigint, 10n)).toThrow(RangeError);
+        expect(() => assertUnsignedBigInt("amount", "5" as unknown as bigint, 10n)).toThrow(RangeError);
+    });
+
+    it("names the offending value in the message", () => {
+        expect(() => assertUnsignedBigInt("amount", -1n, 10n)).toThrow(new RangeError("amount must be a bigint between 0 and 10, got -1"));
     });
 });
 

@@ -19,4 +19,3 @@ export {
 } from "./fiber-scheme";
 export { deriveChannelSeed, deriveNonceSeed, deriveWalletIdentityKey } from "./device-scheme";
 export { deriveMasterSeed } from "./master-seed";
-export { ckbBlake2b } from "./utils";

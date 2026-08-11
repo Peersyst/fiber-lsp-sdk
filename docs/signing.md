@@ -7,9 +7,11 @@ sign-once registry the safety argument depends on see [persistence.md](./persist
 ## Role order
 
 Fiber locks a channel's funds in a 2-of-2 musig2 aggregate of the two funding pubkeys. Key aggregation is
-order-sensitive (`KeyAgg([A, B]) ≠ KeyAgg([B, A])`), and fiber orders by role, `[local, remote]`, not lexicographically.
-The engine therefore signs for exactly the list the node sent, in the order it sent it, and never sorts. It validates
-only that the list has exactly two distinct 33-byte keys and that its own funding pubkey is one of them.
+order-sensitive (`KeyAgg([A, B]) ≠ KeyAgg([B, A])`), and fiber uses two orderings: funding-cell spends and the channel
+announcement sort the keys lexicographically, while the revocation signature keeps role order (see
+[digest.md](./digest.md)). The engine takes no side in that: it signs for exactly the list the node sent, in the order it
+sent it, and never sorts, which is correct under both. It validates only that the list has exactly two distinct 33-byte
+keys and that its own funding pubkey is one of them.
 
 ## Deterministic nonces
 

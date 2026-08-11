@@ -8,6 +8,10 @@ publish = false
 musig2 = { version = "0.2.4", features = ["secp256k1", "serde"] }
 secp256k1 = { version = "0.29", features = ["global-context"] }
 ckb-hash = "0.115"
+ckb-types = "1"
+fiber-types = { git = "https://github.com/nervosnetwork/fiber.git", rev = "b71a61c3", default-features = false }
+# fiber-types' secp256k1 line, aliased because the harness's own is pinned older by musig2 0.2.4.
+secp030 = { package = "secp256k1", version = "0.30" }
 hmac = "0.12"
 sha2 = "0.10"
 serde = { version = "1", features = ["derive"] }

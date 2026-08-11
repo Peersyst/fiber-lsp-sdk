@@ -1,5 +1,4 @@
 export const SECRET_KEY_LENGTH = 32;
-export const DIGEST_LENGTH = 32;
 export const CHANNEL_SEED_LENGTH = 32;
 export const MASTER_SEED_LENGTH = 32;
 
