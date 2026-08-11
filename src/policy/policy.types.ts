@@ -2,7 +2,7 @@ import type { NonceContext } from "../derivation";
 import type { CHANNEL_POLICY_RECORD_VERSION } from "./policy.constants";
 
 /**
- * One sign-once slot: at most one distinct message is ever signed per (channel, commitment number, context).
+ * One sign-once slot: at most one signing session is ever served per (channel, commitment number, context).
  */
 export type SignSlot = `${NonceContext}:${number}`;
 

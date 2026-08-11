@@ -48,9 +48,12 @@ under the old one stay on it (`DERIVATION_SCHEME_VERSION` is additive only).
 ## Verifying a partial signature
 
 ```bash
-cargo run --release -- verify-ts ../vectors/vectors.json <ts-out.json>
+INTEROP_TS_OUT=/tmp/ts-out.json pnpm test -- test/tests/signer/interop-vectors.spec.ts
+cd interop/rust
+cargo run --release -- verify-ts ../vectors/vectors.json /tmp/ts-out.json
 ```
 
 Checks that a BIP-327 partial signature produced by the SDK verifies under fiber's musig2 crate and aggregates into a valid Schnorr
-signature. It reads a `{ "local_pubnonce": "...", "partial_signature": "..." }` file, which the musig2 signing engine emits; that
-engine is not implemented yet, so this subcommand has no producer in the repo today.
+signature. `INTEROP_TS_OUT` makes `test/tests/signer/interop-vectors.spec.ts` write the `{ "local_pubnonce": "...",
+"partial_signature": "..." }` the subcommand reads, for the loop's canonical slot, (0, `COMMITMENT`); unset, the spec writes
+nothing, so a plain `pnpm test` has no side effects. For the engine under test, see [`docs/signing.md`](../docs/signing.md).
