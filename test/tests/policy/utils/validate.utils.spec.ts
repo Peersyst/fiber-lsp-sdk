@@ -7,11 +7,11 @@ describe("isChannelPolicyRecord", () => {
     function record(): ChannelPolicyRecord {
         return {
             version: 1,
-            channelIndex: 3,
+            channelId: "0x1f".padEnd(66, "a"),
             lastSignedCommitmentNumbers: { COMMITMENT: 5, REVOKE: 4 },
-            signedDigests: { "COMMITMENT:5": "ab".repeat(32) },
+            signedSessions: { "COMMITMENT:5": "ab".repeat(32) },
             lastStateVersion: 7,
-            localBalanceShannons: "5000000000",
+            localExposureShannons: "5000000000",
             pendingDebitsShannons: ["100", "0"],
         };
     }
@@ -25,7 +25,7 @@ describe("isChannelPolicyRecord", () => {
             isChannelPolicyRecord({
                 ...record(),
                 lastSignedCommitmentNumbers: {},
-                signedDigests: {},
+                signedSessions: {},
                 pendingDebitsShannons: [],
             }),
         ).toBe(true);
@@ -36,7 +36,7 @@ describe("isChannelPolicyRecord", () => {
             isChannelPolicyRecord({
                 ...record(),
                 lastSignedCommitmentNumbers: { COMMITMENT: MAX_COMMITMENT_NUMBER },
-                signedDigests: { [`COMMITMENT:${MAX_COMMITMENT_NUMBER}`]: "ab".repeat(32) },
+                signedSessions: { [`COMMITMENT:${MAX_COMMITMENT_NUMBER}`]: "ab".repeat(32) },
             }),
         ).toBe(true);
     });
@@ -57,7 +57,7 @@ describe("isChannelPolicyRecord", () => {
         expect(isChannelPolicyRecord(withExtra)).toBe(true);
         expect(({} as Record<string, unknown>).polluted).toBeUndefined();
 
-        const inDigests = { ...record(), signedDigests: JSON.parse('{"__proto__":"' + "ab".repeat(32) + '"}') as unknown };
+        const inDigests = { ...record(), signedSessions: JSON.parse('{"__proto__":"' + "ab".repeat(32) + '"}') as unknown };
         expect(isChannelPolicyRecord(inDigests)).toBe(false);
     });
 
@@ -69,25 +69,24 @@ describe("isChannelPolicyRecord", () => {
         ["a missing version", { version: undefined }],
         ["a future version", { version: 2 }],
         ["a string version", { version: "1" }],
-        ["a negative channel index", { channelIndex: -1 }],
-        ["a fractional channel index", { channelIndex: 1.5 }],
-        ["a string channel index", { channelIndex: "3" }],
+        ["an empty channel id", { channelId: "" }],
+        ["a numeric channel id", { channelId: 3 }],
         ["counters that are not an object", { lastSignedCommitmentNumbers: [] }],
         ["a counter for an unknown context", { lastSignedCommitmentNumbers: { SETTLEMENT: 1 } }],
         ["a counter above the commitment cap", { lastSignedCommitmentNumbers: { COMMITMENT: MAX_COMMITMENT_NUMBER + 1 } }],
         ["a negative counter", { lastSignedCommitmentNumbers: { COMMITMENT: -1 } }],
-        ["digests that are not an object", { signedDigests: [] }],
-        ["a slot without a number", { signedDigests: { COMMITMENT: "ab".repeat(32) } }],
-        ["a slot with an unknown context", { signedDigests: { "SETTLEMENT:1": "ab".repeat(32) } }],
-        ["a slot with a non-canonical number", { signedDigests: { "COMMITMENT:01": "ab".repeat(32) } }],
-        ["a slot above the commitment cap", { signedDigests: { [`COMMITMENT:${MAX_COMMITMENT_NUMBER + 1}`]: "ab".repeat(32) } }],
-        ["a digest that is not 32 bytes", { signedDigests: { "COMMITMENT:5": "ab".repeat(31) } }],
-        ["an uppercase digest", { signedDigests: { "COMMITMENT:5": "AB".repeat(32) } }],
+        ["digests that are not an object", { signedSessions: [] }],
+        ["a slot without a number", { signedSessions: { COMMITMENT: "ab".repeat(32) } }],
+        ["a slot with an unknown context", { signedSessions: { "SETTLEMENT:1": "ab".repeat(32) } }],
+        ["a slot with a non-canonical number", { signedSessions: { "COMMITMENT:01": "ab".repeat(32) } }],
+        ["a slot above the commitment cap", { signedSessions: { [`COMMITMENT:${MAX_COMMITMENT_NUMBER + 1}`]: "ab".repeat(32) } }],
+        ["a digest that is not 32 bytes", { signedSessions: { "COMMITMENT:5": "ab".repeat(31) } }],
+        ["an uppercase digest", { signedSessions: { "COMMITMENT:5": "AB".repeat(32) } }],
         ["a negative state version", { lastStateVersion: -1 }],
         ["a fractional state version", { lastStateVersion: 0.5 }],
-        ["a balance with a leading zero", { localBalanceShannons: "01" }],
-        ["a negative balance", { localBalanceShannons: "-1" }],
-        ["a numeric balance", { localBalanceShannons: 100 }],
+        ["a balance with a leading zero", { localExposureShannons: "01" }],
+        ["a negative balance", { localExposureShannons: "-1" }],
+        ["a numeric balance", { localExposureShannons: 100 }],
         ["debits that are not an array", { pendingDebitsShannons: "100" }],
         ["a debit that is not decimal", { pendingDebitsShannons: ["100", "1.5"] }],
     ])("rejects a record with %s", (_, override) => {

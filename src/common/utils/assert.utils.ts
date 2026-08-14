@@ -1,4 +1,4 @@
-import { isHexBytes, isUnsignedInteger } from "./validate.utils";
+import { isHexBytes, isNonEmptyString, isUnsignedInteger } from "./validate.utils";
 
 /**
  * Asserts that a value is a byte array of an exact length.
@@ -58,7 +58,7 @@ export function assertHexBytes(name: string, value: string, byteLength: number):
  * @param value Value to check.
  */
 export function assertNonEmptyString(name: string, value: string): void {
-    if (typeof value !== "string" || value.length === 0) {
+    if (!isNonEmptyString(value)) {
         throw new TypeError(`${name} must be a non-empty string`);
     }
 }

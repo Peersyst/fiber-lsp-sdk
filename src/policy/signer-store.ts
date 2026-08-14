@@ -1,6 +1,16 @@
-import { PAYMENT_HASH_LENGTH, PREIMAGE_LENGTH, assertHexBytes, assertNonEmptyString, isHexBytes } from "../common";
+import {
+    PAYMENT_HASH_LENGTH,
+    PREIMAGE_LENGTH,
+    assertHexBytes,
+    assertNonEmptyString,
+    assertUnsignedInteger,
+    isCanonicalDecimal,
+    isHexBytes,
+    isUnsignedInteger,
+} from "../common";
+import { MAX_CHANNEL_INDEX } from "../derivation";
 import type { IAsyncSignerStorage, ISignerStorage } from "./interfaces";
-import { CHANNEL_RECORD_KEY_PREFIX, HOLD_INVOICE_PREIMAGE_KEY_PREFIX } from "./policy.constants";
+import { CHANNEL_ALIAS_KEY_PREFIX, CHANNEL_RECORD_KEY_PREFIX, HOLD_INVOICE_PREIMAGE_KEY_PREFIX } from "./policy.constants";
 import type { ChannelPolicyRecord } from "./policy.types";
 import { assertChannelPolicyRecord, isChannelPolicyRecord } from "./utils";
 
@@ -18,43 +28,74 @@ export class SignerStore {
     }
 
     /**
-     * Reads a channel's policy record.
-     * @param channelId Channel identifier the record is keyed by.
-     * @returns The record, or `null` for a channel this device never registered.
+     * Reads the channel index a channel name resolves to.
+     * @param channelId Channel identifier as the node names it, which the open handshake may still change.
+     * @returns The channel index, or `null` for a name this device never registered.
      */
-    async getChannelRecord(channelId: string): Promise<ChannelPolicyRecord | null> {
+    async resolveChannelIndex(channelId: string): Promise<number | null> {
         assertNonEmptyString("channelId", channelId);
-        const key = CHANNEL_RECORD_KEY_PREFIX + channelId;
+        const key = CHANNEL_ALIAS_KEY_PREFIX + channelId;
+        return this.serialize(key, () => this.readChannelIndex(key));
+    }
+
+    /**
+     * Points a channel name at a channel index, keeping the names it already had and refusing to move one.
+     * @param channelId Channel identifier as the node names it.
+     * @param channelIndex Index the channel seed derives from.
+     */
+    async claimChannelAlias(channelId: string, channelIndex: number): Promise<void> {
+        assertNonEmptyString("channelId", channelId);
+        assertUnsignedInteger("channelIndex", channelIndex, MAX_CHANNEL_INDEX);
+        const key = CHANNEL_ALIAS_KEY_PREFIX + channelId;
+        await this.serialize(key, async () => {
+            const current = await this.readChannelIndex(key);
+            if (current === channelIndex) return;
+            if (current !== null) {
+                throw new TypeError(`the name at ${key} already resolves to channel index ${current}`);
+            }
+            await this.storage.set(key, String(channelIndex));
+        });
+    }
+
+    /**
+     * Reads a channel's policy record.
+     * @param channelIndex Index the record is keyed by.
+     * @returns The record, or `null` for an index this device never registered.
+     */
+    async getChannelRecord(channelIndex: number): Promise<ChannelPolicyRecord | null> {
+        assertUnsignedInteger("channelIndex", channelIndex, MAX_CHANNEL_INDEX);
+        const key = CHANNEL_RECORD_KEY_PREFIX + channelIndex;
         return this.serialize(key, () => this.readChannelRecord(key));
     }
 
     /**
      * Writes a channel's policy record, overwriting any previous one.
-     * @param channelId Channel identifier the record is keyed by.
+     * @param channelIndex Index the record is keyed by.
      * @param record Record to persist.
      */
-    async setChannelRecord(channelId: string, record: ChannelPolicyRecord): Promise<void> {
-        assertNonEmptyString("channelId", channelId);
+    async setChannelRecord(channelIndex: number, record: ChannelPolicyRecord): Promise<void> {
+        assertUnsignedInteger("channelIndex", channelIndex, MAX_CHANNEL_INDEX);
         assertChannelPolicyRecord("record", record);
-        const key = CHANNEL_RECORD_KEY_PREFIX + channelId;
+        const key = CHANNEL_RECORD_KEY_PREFIX + channelIndex;
         await this.serialize(key, () => this.writeChannelRecord(key, record));
     }
 
     /**
      * Reads, updates and writes a channel's record as one step no concurrent call on the same channel can interleave with.
-     * @param channelId Channel identifier the record is keyed by.
-     * @param update Synchronous updater over the stored record, or over `null` for an unregistered channel.
-     * @returns The record that was written.
+     * @param channelIndex Index the record is keyed by, so two names of one channel share the lane.
+     * @param update Synchronous updater; handing back the record it was given means nothing changed, and skips the write.
+     * @returns The record the key now holds.
      */
     async updateChannelRecord(
-        channelId: string,
+        channelIndex: number,
         update: (current: ChannelPolicyRecord | null) => ChannelPolicyRecord,
     ): Promise<ChannelPolicyRecord> {
-        assertNonEmptyString("channelId", channelId);
-        const key = CHANNEL_RECORD_KEY_PREFIX + channelId;
+        assertUnsignedInteger("channelIndex", channelIndex, MAX_CHANNEL_INDEX);
+        const key = CHANNEL_RECORD_KEY_PREFIX + channelIndex;
         return this.serialize(key, async () => {
             const current = await this.readChannelRecord(key);
             const next = update(current);
+            if (next === current) return current;
             assertChannelPolicyRecord("updated record", next);
             await this.writeChannelRecord(key, next);
             return next;
@@ -91,6 +132,21 @@ export class SignerStore {
         await this.serialize(key, async () => {
             await this.storage.set(key, preimageHex);
         });
+    }
+
+    /**
+     * Reads and parses the channel index at an alias key.
+     * @param key Storage key to read.
+     * @returns The channel index, or `null` if the key was never written.
+     */
+    private async readChannelIndex(key: string): Promise<number | null> {
+        const raw = (await this.storage.get(key)) ?? null;
+        if (raw === null) return null;
+        // Corruption must throw: an alias read as absent would re-open the channel's slots under a second record.
+        if (!isCanonicalDecimal(raw) || !isUnsignedInteger(Number(raw), MAX_CHANNEL_INDEX)) {
+            throw new TypeError(`stored value at ${key} is not a channel index`);
+        }
+        return Number(raw);
     }
 
     /**

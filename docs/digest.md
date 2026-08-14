@@ -2,8 +2,8 @@
 
 The no-blind-signing half of the policy design: before the device signs a 32-byte message, the `digest` module rebuilds that
 message from the channel state the node attached, so a signature can only ever bind what the device was actually shown. The
-policy layer compares and refuses on mismatch; this module only reconstructs. For what the signature then does with the
-digest see [signing.md](./signing.md).
+policy layer compares and refuses on mismatch ([policy.md](./policy.md)); this module only reconstructs. For what the
+signature then does with the digest see [signing.md](./signing.md).
 
 ## Four constructions, not one
 
