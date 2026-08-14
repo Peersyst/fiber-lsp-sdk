@@ -9,39 +9,70 @@ keys carry the `fiber-lsp-sdk:` namespace, because the host may back that storag
 
 | Key                             | Value                                                    |
 | ------------------------------- | -------------------------------------------------------- |
-| `fiber-lsp-sdk:channel:<id>`    | The channel's policy record, JSON                        |
+| `fiber-lsp-sdk:channel:<index>` | The channel's policy record, JSON                        |
+| `fiber-lsp-sdk:alias:<id>`      | The channel index that channel id resolves to, decimal   |
 | `fiber-lsp-sdk:preimage:<hash>` | The device-held preimage of a hold invoice, 32 bytes hex |
 
-The two prefixes are fixed and disjoint, so a channel id and a payment hash can be the same string without colliding.
+The three prefixes are fixed and disjoint, so a channel id and a payment hash can be the same string without colliding.
+
+## Identity: the index, not the name
+
+A record is keyed by the **channel index**, and the channel id is an alias pointing at it. The two are not interchangeable:
+the index is what every channel secret derives from ([derivation.md](./derivation.md)), while the id is a name fiber assigns
+twice, a temporary one at open and the final one once the handshake knows both sides' TLC base keys.
+
+Keying by the name would split the record the moment the name changed: two records, two sign-once registries, one nonce
+space, which is the exact condition that leaks the funding key ([policy.md](./policy.md)). Aliases are therefore many to
+one and never removed, so every name a channel ever had keeps resolving to the one record, and the critical section runs on
+the index, so two names cannot interleave on it.
+
+`registerChannel` writes the record first and the alias second: the reverse order could leave a name resolving to an index
+that holds nothing. A record may take a new name only while it has served nothing at all, since renaming one that has
+served would hand a live channel's slots to another name.
+
+The alias is **claimed**, not written: `claimChannelAlias` reads and sets the key inside one critical section, and a name
+already resolving to another index throws instead of moving. Many names may point at one index, which is the whole point of
+the map, but a name never moves between indexes, so the two registrations of a channel cannot end up with the record at one
+index and its name at another.
 
 ## The channel record
 
 One record per channel, holding what the policy checks and recovery need. Everything else about a channel lives on the node,
 which stays the durable store for channel state.
 
-| Field                         | What it holds                                                             |
-| ----------------------------- | ------------------------------------------------------------------------- |
-| `version`                     | Format version of the record itself                                       |
-| `channelIndex`                | The index the channel seed derives from                                   |
-| `lastSignedCommitmentNumbers` | Last commitment number signed per context, strictly increasing            |
-| `signedDigests`               | Sign-once registry: the digest signed in each `<context>:<number>` slot   |
-| `lastStateVersion`            | Last state version seen from the node, non-decreasing                     |
-| `localBalanceShannons`        | Local balance after the last signed commitment, decimal shannons          |
-| `pendingDebitsShannons`       | User-initiated debits not yet consumed by a balance-decreasing commitment |
+| Field                         | What it holds                                                            |
+| ----------------------------- | ------------------------------------------------------------------------ |
+| `version`                     | Format version of the record itself                                      |
+| `channelId`                   | The channel's current name, which the open handshake may still change    |
+| `lastSignedCommitmentNumbers` | Last commitment number signed per context, strictly increasing           |
+| `signedSessions`              | Sign-once registry: the session served in each `<context>:<number>` slot |
+| `lastStateVersion`            | Last state version seen from the node, non-decreasing                    |
+| `localExposureShannons`       | The device's TLC-adjusted share after the last signed message, decimal   |
+| `pendingDebitsShannons`       | User-initiated debits not yet consumed by an exposure-lowering message   |
+
+Two fields carry more than their name suggests, and [policy.md](./policy.md) is where the reasoning lives:
+
+- `signedSessions` stores a commitment to the whole triple a signature answers (the ordered key list, the aggregated nonce
+  and the message), not to the message alone. Storing only the message would let a node re-ask one slot under three
+  aggregated nonces of its choosing and recover the funding key.
+- `localExposureShannons` is fiber's settlement amount, not the raw balance: it drops the moment an offered TLC is
+  committed, which is while the device can still refuse, rather than later when the TLC settles.
 
 Two rules keep the sign-once registry trustworthy:
 
-- **Corruption throws; it never reads as absence.** A record that fails to parse or fails the shape guard raises a `TypeError`
-  naming the key. Reading it as "no record" would re-register the channel with empty sign-once slots, and a slot that reopens
-  turns a legitimate refusal into a second signature over the same nonce.
+- **Corruption throws; it never reads as absence.** A record or an alias that fails to parse or fails its shape guard raises a
+  `TypeError` naming the key. Reading it as "no record" would re-register the channel with empty sign-once slots, and a slot
+  that reopens turns a legitimate refusal into a second signature over the same nonce. An alias resolving to an index that
+  holds no record throws for the same reason, rather than reading as a channel the device never knew.
 - **The record carries a format version.** A future format change migrates old records rather than rejecting them, for the same
   reason: a rejected record is a lost registry. Unknown extra fields are tolerated on read; a version from the future is not.
 
 ## Concurrency
 
 `SignerStore` serializes every operation per storage key. Operations on one key run in call order, one at a time, and each
-`updateChannelRecord` holds its key for the whole read-modify-write. Different keys never wait on each other, so a slow channel
-does not stall the rest.
+`updateChannelRecord` holds its key for the whole read-modify-write, which is the record's key and therefore the channel
+index: two names of one channel share the lane. Different keys never wait on each other, so a slow channel does not stall
+the rest.
 
 This is what makes the sign-once registry hold under concurrent sign requests. Without it, two requests for the same slot both
 read the record before either writes, and the second write drops the first one's claim on the slot: exactly the double signature
@@ -50,7 +81,9 @@ a separate `getChannelRecord` plus `setChannelRecord`. The updater is synchronou
 it decides and returns, and anything slower belongs outside the critical section.
 
 Refusals throw out of the updater before the write, which leaves the stored record untouched and the key immediately usable by
-the next operation.
+the next operation. So does a decision that changes nothing: an updater that hands back the record it was given skips the
+write, so the idempotent replay of an already-served request and the re-registration of a known channel cost the device's
+storage nothing.
 
 **The guarantee is per `SignerStore` instance.** Two stores over the same underlying storage (a second tab, a second process, a
 second SDK instance) can still lose an update to each other, because `ISignerStorage` has no compare-and-swap to build on. A
@@ -62,3 +95,7 @@ From the mnemonic alone the host re-derives the master seed, and the SDK re-deri
 [derivation.md](./derivation.md)). Counters and balances re-seed from the node's state on the next session, under the
 monotonicity check. Losing the storage is therefore not losing funds, with one exception: hold-invoice preimages exist only on
 the device, so unclaimed held payments need the storage intact. They are refundable to the payer otherwise.
+
+What a restore has to rebuild before anything else is the alias map: which channel index each of the node's channels belongs
+to. `ISignerStorage` is `get` and `set` with no enumeration, so that mapping cannot be recovered from the storage itself, and
+until it is rebuilt every existing channel reads as unregistered.

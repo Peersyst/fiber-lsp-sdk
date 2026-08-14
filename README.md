@@ -24,14 +24,16 @@ These properties reflect the current specification and may evolve with it while 
 | Module                           | Responsibility                                                                                |
 | -------------------------------- | --------------------------------------------------------------------------------------------- |
 | [`derivation`](./src/derivation) | Fiber key scheme port + SDK-owned derivations (channel seed, wallet identity key, nonce seed) |
-| `signer`                         | Dispatches signer-protocol methods, musig2 signing engine                                     |
+| [`digest`](./src/digest)         | Rebuilds the four messages fiber signs, so the device never blind-signs                       |
+| [`signer`](./src/signer)         | Dispatches signer-protocol methods, musig2 signing engine                                     |
 | [`policy`](./src/policy)         | Policy engine + persisted per-channel records                                                 |
 | `session`                        | Signer session client: challenge auth, correlation, resume                                    |
 | [`protocol`](./src/protocol)     | Wire types of the remote signing protocol                                                     |
 | `rpc`                            | Typed fiber JSON-RPC client (Biscuit-authed)                                                  |
 | `sdk`                            | Public facade wiring the above                                                                |
 
-Only `derivation` is implemented today; the rest are placeholders.
+`derivation`, `digest`, `policy` and the signing engine of `signer` are implemented; the signer-protocol dispatch,
+`session`, `rpc` and `sdk` are still placeholders, so the public entrypoint stays small while the API settles.
 
 ## Repository layout
 
@@ -46,9 +48,17 @@ interop/        Rust harness and the generated cross-implementation vectors
 
 ## Documentation
 
-- [How keys are derived](./docs/derivation.md) — what each channel key protects, the primitives behind the scheme, the full
+Full index in [docs/README.md](./docs/README.md). The load-bearing ones:
+
+- [How keys are derived](./docs/derivation.md): what each channel key protects, the primitives behind the scheme, the full
   derivation tree, and why nonces are deterministic.
-- [Cross-implementation harness](./interop/README.md) — how the vectors are generated and re-validated against a new fiber
+- [What the device signs](./docs/digest.md): the four message constructions rebuilt on the device, and the trust model of
+  the inputs they take.
+- [How signatures are produced](./docs/signing.md): the musig2 engine, its deterministic nonces, and the conditions that
+  make them safe.
+- [What the device refuses](./docs/policy.md): the five checks every request passes, and the sign-once rule those
+  conditions rest on.
+- [Cross-implementation harness](./interop/README.md): how the vectors are generated and re-validated against a new fiber
   release.
 
 ## Development

@@ -4,11 +4,11 @@ import { assertChannelPolicyRecord } from "../../../../src/policy/utils/assert.u
 function record(): ChannelPolicyRecord {
     return {
         version: 1,
-        channelIndex: 3,
+        channelId: "0x1f".padEnd(66, "a"),
         lastSignedCommitmentNumbers: { COMMITMENT: 5, REVOKE: 4 },
-        signedDigests: { "COMMITMENT:5": "ab".repeat(32) },
+        signedSessions: { "COMMITMENT:5": "ab".repeat(32) },
         lastStateVersion: 7,
-        localBalanceShannons: "5000000000",
+        localExposureShannons: "5000000000",
         pendingDebitsShannons: ["100", "0"],
     };
 }

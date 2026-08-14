@@ -25,6 +25,24 @@ export function isUnsignedInteger(value: unknown, max: number): value is number 
 }
 
 /**
+ * Checks that a string is canonical decimal digits: no sign, no leading zeros, so one value has one representation.
+ * @param value Value to check.
+ * @returns Whether the string is a canonical decimal integer.
+ */
+export function isCanonicalDecimal(value: string): boolean {
+    return CANONICAL_DECIMAL_PATTERN.test(value);
+}
+
+/**
+ * Checks that a value is a string with at least one character.
+ * @param value Value to check.
+ * @returns Whether the value is a non-empty string.
+ */
+export function isNonEmptyString(value: unknown): value is string {
+    return typeof value === "string" && value.length > 0;
+}
+
+/**
  * Checks that a value is lowercase hex encoding exactly `byteLength` bytes.
  * @param value Value to check.
  * @param byteLength Exact number of bytes the hex must encode.
@@ -41,9 +59,6 @@ export function isHexBytes(value: unknown, byteLength: number): value is string 
  */
 export function isDecimalShannons(value: unknown): value is string {
     return (
-        typeof value === "string" &&
-        value.length <= MAX_AMOUNT_DIGITS &&
-        CANONICAL_DECIMAL_PATTERN.test(value) &&
-        BigInt(value) <= MAX_AMOUNT_SHANNONS
+        typeof value === "string" && value.length <= MAX_AMOUNT_DIGITS && isCanonicalDecimal(value) && BigInt(value) <= MAX_AMOUNT_SHANNONS
     );
 }

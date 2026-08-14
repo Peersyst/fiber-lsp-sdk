@@ -29,7 +29,7 @@ That parameterization buys two properties:
 
 Determinism is only safe under the sign-once rule, and that rule counts **sessions**, not messages: a slot ever serves
 one (ordered key list, aggregated nonce, message) triple, and a repeat is answered only when all three match byte for
-byte. The guard lives in the policy layer over the persisted registry ([persistence.md](./persistence.md)); the engine
+byte. The guard lives in the policy layer over the persisted registry ([policy.md](./policy.md)); the engine
 itself checks no policy and stores nothing, so on its own it would resign a slot for whatever it is handed. This is why
 the engine is internal and every signature must pass through the policy gate: the pair is the design, neither half
 stands alone. The four contexts exist so that two different operations on the same commitment number never share a

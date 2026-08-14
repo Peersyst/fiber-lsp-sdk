@@ -1,9 +1,9 @@
 import { equalBytes } from "@noble/curves/utils.js";
 import { Session, nonceGen } from "@scure/btc-signer/musig2.js";
-import { COMPRESSED_POINT_LENGTH, MESSAGE_DIGEST_LENGTH, assertBytes } from "../common";
+import { COMPRESSED_POINT_LENGTH, MESSAGE_DIGEST_LENGTH, MUSIG_PARTICIPANTS, PUBLIC_NONCE_LENGTH, assertBytes } from "../common";
 import type { FiberChannelKeys, NonceContext } from "../derivation";
 import { deriveNonceSeed, getCommitmentPoint, pubkeyOf } from "../derivation";
-import { MUSIG_PARTICIPANTS, PARTIAL_SIGNATURE_LENGTH, PUBLIC_NONCE_LENGTH } from "./signer.constants";
+import { PARTIAL_SIGNATURE_LENGTH } from "./signer.constants";
 import type { BasePublicKeys, PartialSignRequest } from "./signer.types";
 
 /**

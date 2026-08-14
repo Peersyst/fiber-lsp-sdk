@@ -3,13 +3,13 @@ import { deriveChannelKeys } from "../../../src/derivation/fiber-scheme";
 import { computeChannelAnnouncementDigest } from "../../../src/digest/channel-announcement";
 import { buildCommitmentLockArgs, computeCommitmentTxDigest } from "../../../src/digest/commitment-tx";
 import { COMMITMENT_LOCK_TESTNET } from "../../../src/digest/digest.constants";
-import type { Script, ScriptHashType, SettlementTlc, TlcDirection, TlcHashAlgorithm } from "../../../src/digest/digest.types";
 import { calculateFee, commitmentTxSize, shutdownTxSize } from "../../../src/digest/fee";
 import { computeRevocationDigest } from "../../../src/digest/revocation";
 import { buildSettlementWitness } from "../../../src/digest/settlement-witness";
 import { computeShutdownTxDigest } from "../../../src/digest/shutdown-tx";
 import { aggregateXOnlyPubkey } from "../../../src/digest/utils/digest.utils";
-import { loadInteropVectors, type ScriptVector, type TlcVector } from "../../utils/interop-vectors";
+import { toOutPoint, toScript, toScriptOrNull, toTlc } from "../../utils/digest-inputs";
+import { loadInteropVectors } from "../../utils/interop-vectors";
 
 const vectors = loadInteropVectors();
 const digest = vectors.digest;
@@ -21,27 +21,6 @@ const remoteTlcBasePubkey = hexToBytes(digest.remote.tlc_base_pubkey);
 
 // The peer's side of each fixture channel, re-derived from its seed: what the counterparty device would compute.
 const remoteKeys = deriveChannelKeys(hexToBytes(digest.remote.seed));
-
-function toScript(vector: ScriptVector): Script {
-    return { codeHash: hexToBytes(vector.code_hash), hashType: vector.hash_type as ScriptHashType, args: hexToBytes(vector.args) };
-}
-
-function toScriptOrNull(vector: ScriptVector | null): Script | null {
-    return vector === null ? null : toScript(vector);
-}
-
-function toTlc(vector: TlcVector): SettlementTlc {
-    return {
-        id: vector.id,
-        direction: vector.direction as TlcDirection,
-        hashAlgorithm: vector.hash_algorithm as TlcHashAlgorithm,
-        amountShannons: BigInt(vector.amount),
-        paymentHash: hexToBytes(vector.payment_hash),
-        expiryMs: BigInt(vector.expiry_ms),
-        createdAtRemoteCommitmentNumber: vector.created_at_remote_commitment_number,
-        remoteCommitmentPoint: hexToBytes(vector.remote_commitment_point),
-    };
-}
 
 describe("digest cross-implementation vectors", () => {
     it("uses the SDK's testnet commitment lock preset", () => {
@@ -55,7 +34,7 @@ describe("digest cross-implementation vectors", () => {
                 const isUdt = kase.udt_type_script !== null;
                 const input = {
                     forRemote: kase.for_remote,
-                    fundingOutPoint: { txHash: hexToBytes(kase.funding_out_point.tx_hash), index: kase.funding_out_point.index },
+                    fundingOutPoint: toOutPoint(kase.funding_out_point),
                     remoteFundingPubkey,
                     remoteTlcBasePubkey,
                     commitmentNumber: kase.commitment_number,
@@ -125,7 +104,7 @@ describe("digest cross-implementation vectors", () => {
 
                 it("recomputes the digest", () => {
                     const recomputed = computeShutdownTxDigest(keys, {
-                        fundingOutPoint: { txHash: hexToBytes(kase.funding_out_point.tx_hash), index: kase.funding_out_point.index },
+                        fundingOutPoint: toOutPoint(kase.funding_out_point),
                         remoteFundingPubkey,
                         localCloseScript: toScript(kase.local_close_script),
                         remoteCloseScript: toScript(kase.remote_close_script),
@@ -145,7 +124,7 @@ describe("digest cross-implementation vectors", () => {
                 // opposite branch of the funding-pubkey output sort gets exercised against the same Rust digest.
                 it("recomputes the same digest from the other side of the channel", () => {
                     const recomputed = computeShutdownTxDigest(remoteKeys, {
-                        fundingOutPoint: { txHash: hexToBytes(kase.funding_out_point.tx_hash), index: kase.funding_out_point.index },
+                        fundingOutPoint: toOutPoint(kase.funding_out_point),
                         remoteFundingPubkey: localFundingPubkey,
                         localCloseScript: toScript(kase.remote_close_script),
                         remoteCloseScript: toScript(kase.local_close_script),
@@ -192,7 +171,7 @@ describe("digest cross-implementation vectors", () => {
             it(`recomputes the "${kase.name}" digest`, () => {
                 const recomputed = computeChannelAnnouncementDigest(keys, {
                     chainHash: hexToBytes(kase.chain_hash),
-                    fundingOutPoint: { txHash: hexToBytes(kase.funding_out_point.tx_hash), index: kase.funding_out_point.index },
+                    fundingOutPoint: toOutPoint(kase.funding_out_point),
                     nodeIds: [hexToBytes(kase.node_ids[0]), hexToBytes(kase.node_ids[1])],
                     remoteFundingPubkey,
                     capacityShannons: BigInt(kase.capacity),
@@ -204,7 +183,7 @@ describe("digest cross-implementation vectors", () => {
             it(`recomputes the "${kase.name}" digest from the other side of the channel`, () => {
                 const recomputed = computeChannelAnnouncementDigest(remoteKeys, {
                     chainHash: hexToBytes(kase.chain_hash),
-                    fundingOutPoint: { txHash: hexToBytes(kase.funding_out_point.tx_hash), index: kase.funding_out_point.index },
+                    fundingOutPoint: toOutPoint(kase.funding_out_point),
                     nodeIds: [hexToBytes(kase.node_ids[0]), hexToBytes(kase.node_ids[1])],
                     remoteFundingPubkey: localFundingPubkey,
                     capacityShannons: BigInt(kase.capacity),

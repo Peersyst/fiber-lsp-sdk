@@ -1,4 +1,11 @@
-import { isDecimalShannons, isHexBytes, isPlainObject, isUnsignedInteger } from "../../../../src/common/utils/validate.utils";
+import {
+    isCanonicalDecimal,
+    isDecimalShannons,
+    isHexBytes,
+    isNonEmptyString,
+    isPlainObject,
+    isUnsignedInteger,
+} from "../../../../src/common/utils/validate.utils";
 
 describe("isPlainObject", () => {
     it.each([{}, { a: 1 }, Object.create(null) as object, new Date()])("accepts %p", (value) => {
@@ -45,6 +52,27 @@ describe("isHexBytes", () => {
 
     it("rejects a non-string", () => {
         expect(isHexBytes(42, 32)).toBe(false);
+    });
+});
+
+describe("isCanonicalDecimal", () => {
+    // Unbounded on purpose: the callers that have a cap apply their own.
+    it.each(["0", "1", "10", "9007199254740993", "9".repeat(1000)])("accepts %s", (value) => {
+        expect(isCanonicalDecimal(value)).toBe(true);
+    });
+
+    it.each(["", "00", "01", "-1", "+1", "1.5", "1e3", " 1", "1 ", "0x10", "١٢٣"])("rejects %p", (value) => {
+        expect(isCanonicalDecimal(value)).toBe(false);
+    });
+});
+
+describe("isNonEmptyString", () => {
+    it.each(["a", "0", " ", "0x1f"])("accepts %p", (value) => {
+        expect(isNonEmptyString(value)).toBe(true);
+    });
+
+    it.each(["", 42, null, undefined, [], {}, 5n])("rejects %p", (value) => {
+        expect(isNonEmptyString(value)).toBe(false);
     });
 });
 
