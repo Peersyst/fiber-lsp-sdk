@@ -7,11 +7,11 @@ What the device persists, and the guarantees `SignerStore` gives the policy engi
 The host injects an `ISignerStorage` (or its async form): a string-keyed, string-valued store the SDK never introspects. All
 keys carry the `fiber-lsp-sdk:` namespace, because the host may back that storage with a store it also uses for its own keys.
 
-| Key                             | Value                                                    |
-| ------------------------------- | -------------------------------------------------------- |
-| `fiber-lsp-sdk:channel:<index>` | The channel's policy record, JSON                        |
-| `fiber-lsp-sdk:alias:<id>`      | The channel index that channel id resolves to, decimal   |
-| `fiber-lsp-sdk:preimage:<hash>` | The device-held preimage of a hold invoice, 32 bytes hex |
+| Key                             | Value                                                                |
+| ------------------------------- | -------------------------------------------------------------------- |
+| `fiber-lsp-sdk:channel:<index>` | The channel's policy record, JSON                                    |
+| `fiber-lsp-sdk:alias:<id>`      | The channel index that channel id resolves to, an integer in base 10 |
+| `fiber-lsp-sdk:preimage:<hash>` | The device-held preimage of a hold invoice, 32 bytes hex             |
 
 The three prefixes are fixed and disjoint, so a channel id and a payment hash can be the same string without colliding.
 
@@ -40,15 +40,15 @@ index and its name at another.
 One record per channel, holding what the policy checks and recovery need. Everything else about a channel lives on the node,
 which stays the durable store for channel state.
 
-| Field                         | What it holds                                                            |
-| ----------------------------- | ------------------------------------------------------------------------ |
-| `version`                     | Format version of the record itself                                      |
-| `channelId`                   | The channel's current name, which the open handshake may still change    |
-| `lastSignedCommitmentNumbers` | Last commitment number signed per context, strictly increasing           |
-| `signedSessions`              | Sign-once registry: the session served in each `<context>:<number>` slot |
-| `lastStateVersion`            | Last state version seen from the node, non-decreasing                    |
-| `localExposureShannons`       | The device's TLC-adjusted share after the last signed message, decimal   |
-| `pendingDebitsShannons`       | User-initiated debits not yet consumed by an exposure-lowering message   |
+| Field                         | What it holds                                                                              |
+| ----------------------------- | ------------------------------------------------------------------------------------------ |
+| `version`                     | Format version of the record itself                                                        |
+| `channelId`                   | The channel's current name, which the open handshake may still change                      |
+| `lastSignedCommitmentNumbers` | Last commitment number signed per context, strictly increasing                             |
+| `signedSessions`              | Sign-once registry: the session served in each `<context>:<number>` slot                   |
+| `lastStateVersion`            | Last state version seen from the node, non-decreasing                                      |
+| `localExposureShannons`       | The device's TLC-adjusted share after the last signed message, integer shannons in base 10 |
+| `pendingDebitsShannons`       | User-initiated debits not yet consumed by an exposure-lowering message                     |
 
 Two fields carry more than their name suggests, and [policy.md](./policy.md) is where the reasoning lives:
 
@@ -66,6 +66,21 @@ Two rules keep the sign-once registry trustworthy:
   holds no record throws for the same reason, rather than reading as a channel the device never knew.
 - **The record carries a format version.** A future format change migrates old records rather than rejecting them, for the same
   reason: a rejected record is a lost registry. Unknown extra fields are tolerated on read; a version from the future is not.
+
+## What growth this costs
+
+Nothing here is ever deleted, so it is worth stating what that costs. An alias is about 90 bytes (a 20-character prefix, a
+64-character channel id, and an index), and a channel has at most the two names fiber gives it, so every channel the device
+ever opened costs under 200 bytes of names for good: a thousand channels is under 200 KB.
+
+The registry inside the record is the half that grows without a bound, at about 85 bytes per slot ever served, in a value
+re-serialized on every claim. A channel a thousand commitments deep therefore rewrites an 85 KB record on each signature, and
+that write amplification, not the alias map, is the cost to watch on a device.
+
+Neither is pruned, and the reason is the same for both: the device never learns from a source it trusts that a channel is
+finished, since closure is node-supplied state, and deleting on it would hand the node a way to clear the names and slots that
+refuse it. Pruning the registry is additionally bounded by what would still be safe without it, the monotonic counter, and it
+would cost the idempotent replay of an old request ([policy.md](./policy.md)).
 
 ## Concurrency
 
@@ -98,4 +113,11 @@ the device, so unclaimed held payments need the storage intact. They are refunda
 
 What a restore has to rebuild before anything else is the alias map: which channel index each of the node's channels belongs
 to. `ISignerStorage` is `get` and `set` with no enumeration, so that mapping cannot be recovered from the storage itself, and
-until it is rebuilt every existing channel reads as unregistered.
+until it is rebuilt every existing channel reads as unregistered. That is where a reinstalled device stands today, and it is
+the safe side to fail on: it refuses everything rather than signing under an empty registry.
+
+Rebuilding the map is what the recovery work adds, and the hazard it has to answer is that the sign-once registry cannot come
+back with it. Counters re-seed from the number the node reports, and a node reporting one below the truth gets a slot served
+twice under a session of its choosing, which is the condition that recovers the funding key ([policy.md](./policy.md)). Once
+the storage is gone the device holds nothing to check that number against, so the only thing behind it is a watermark the host
+keeps somewhere an uninstall does not reach.
