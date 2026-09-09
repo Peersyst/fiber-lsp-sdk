@@ -4,11 +4,10 @@ import type { FiberChannelKeys } from "../derivation";
 import { MAX_CHANNEL_INDEX } from "../derivation";
 import { computeChannelAnnouncementDigest, computeCommitmentTxDigest, computeRevocationDigest, computeShutdownTxDigest } from "../digest";
 import type { SignerErrorCode } from "../protocol";
-import { CHANNEL_POLICY_RECORD_VERSION } from "./policy.constants";
 import { refuse } from "./policy.error";
 import type { ChannelPolicyRecord, PolicySignRequest, PolicyVerdict, SignOperation } from "./policy.types";
 import type { SignerStore } from "./signer-store";
-import { assertSignSession, buildSessionCommitment, resolveSignSlot, signSlotKey } from "./utils";
+import { assertSignSession, buildChannelRecord, buildSessionCommitment, resolveSignSlot, signSlotKey } from "./utils";
 
 export class PolicyEngine {
     private readonly store: SignerStore;
@@ -38,17 +37,11 @@ export class PolicyEngine {
         if (aliased !== null && aliased !== channelIndex) {
             throw new TypeError(`channel ${channelId} is already registered under a different channel index`);
         }
+        // An index with a watermark has signed before, so the record starts from it and not from zero.
+        const watermark = await this.store.getChannelWatermark(channelIndex);
         const record = await this.store.updateChannelRecord(channelIndex, (current) => {
             if (current === null) {
-                return {
-                    version: CHANNEL_POLICY_RECORD_VERSION,
-                    channelId,
-                    lastSignedCommitmentNumbers: {},
-                    signedSessions: {},
-                    lastStateVersion: 0,
-                    localExposureShannons,
-                    pendingDebitsShannons: [],
-                };
+                return buildChannelRecord(channelId, watermark, localExposureShannons);
             }
             if (current.channelId !== channelId) {
                 assertUnservedRecord(channelIndex, current);

@@ -1,3 +1,4 @@
+export * from "./channel-recovery";
 export * from "./interfaces";
 export * from "./policy-engine";
 export * from "./policy.constants";

@@ -8,8 +8,8 @@ import {
     isUnsignedInteger,
 } from "../../common";
 import { MAX_COMMITMENT_NUMBER, NONCE_CONTEXTS } from "../../derivation";
-import { CHANNEL_POLICY_RECORD_VERSION } from "../policy.constants";
-import type { ChannelPolicyRecord } from "../policy.types";
+import { CHANNEL_POLICY_RECORD_VERSION, CHANNEL_WATERMARK_VERSION } from "../policy.constants";
+import type { ChannelPolicyRecord, ChannelWatermark } from "../policy.types";
 
 const CONTEXTS: readonly string[] = NONCE_CONTEXTS;
 
@@ -29,6 +29,22 @@ export function isChannelPolicyRecord(value: unknown): value is ChannelPolicyRec
         isDecimalShannons(value.localExposureShannons) &&
         Array.isArray(value.pendingDebitsShannons) &&
         value.pendingDebitsShannons.every(isDecimalShannons)
+    );
+}
+
+/**
+ * Checks that a value has the exact shape of a stored {@link ChannelWatermark}. Unknown extra fields are tolerated.
+ * @param value Value to check, typically freshly parsed JSON.
+ * @returns Whether the value is a valid channel watermark.
+ */
+export function isChannelWatermark(value: unknown): value is ChannelWatermark {
+    if (!isPlainObject(value)) return false;
+    return (
+        value.version === CHANNEL_WATERMARK_VERSION &&
+        isContextCounterMap(value.lastSignedCommitmentNumbers) &&
+        isSignedSessionMap(value.signedSessions) &&
+        isUnsignedInteger(value.lastStateVersion, Number.MAX_SAFE_INTEGER) &&
+        isDecimalShannons(value.localExposureShannons)
     );
 }
 

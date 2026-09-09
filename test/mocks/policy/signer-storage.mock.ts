@@ -2,7 +2,12 @@ import type { IAsyncSignerStorage, ISignerStorage } from "../../../src/policy";
 
 export class InMemorySignerStorage implements ISignerStorage {
     readonly map = new Map<string, string>();
-    readonly ops: string[] = [];
+    readonly ops: string[];
+
+    // Shareable so a test over two storages sees the order the writes landed in.
+    constructor(ops: string[] = []) {
+        this.ops = ops;
+    }
 
     get(key: string): string | null {
         this.ops.push(`get ${key}`);
@@ -17,13 +22,14 @@ export class InMemorySignerStorage implements ISignerStorage {
 
 export class AsyncInMemorySignerStorage implements IAsyncSignerStorage {
     readonly map = new Map<string, string>();
-    readonly ops: string[] = [];
+    readonly ops: string[];
 
     // On by default: without latency an unserialized read-modify-write may not interleave.
     private readonly latencyTicks: number;
 
-    constructor(latencyTicks = 2) {
+    constructor(latencyTicks = 2, ops: string[] = []) {
         this.latencyTicks = latencyTicks;
+        this.ops = ops;
     }
 
     async get(key: string): Promise<string | null> {
