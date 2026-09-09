@@ -15,6 +15,16 @@ keys carry the `fiber-lsp-sdk:` namespace, because the host may back that storag
 
 The three prefixes are fixed and disjoint, so a channel id and a payment hash can be the same string without colliding.
 
+The SDK takes a **second storage** for the little that a reinstall must not erase, and its keys never appear in the first one:
+
+| Key                                | Value                                                         |
+| ---------------------------------- | ------------------------------------------------------------- |
+| `fiber-lsp-sdk:watermark:<index>`  | The channel's anti-rollback watermark, JSON                   |
+| `fiber-lsp-sdk:next-channel-index` | The next index the allocator hands out, an integer in base 10 |
+
+The counter is written to **both** storages and read as the higher of the two, because either one alone can be lost. The
+second storage is optional, and [what a reinstall keeps](#what-a-reinstall-keeps) is what a device without one gives up.
+
 ## Identity: the index, not the name
 
 A record is keyed by the **channel index**, and the channel id is an alias pointing at it. The two are not interchangeable:
@@ -77,10 +87,60 @@ The registry inside the record is the half that grows without a bound, at about 
 re-serialized on every claim. A channel a thousand commitments deep therefore rewrites an 85 KB record on each signature, and
 that write amplification, not the alias map, is the cost to watch on a device.
 
-Neither is pruned, and the reason is the same for both: the device never learns from a source it trusts that a channel is
+A watermark is about 400 bytes and does not grow with the channel: it holds one slot per context, whatever the depth.
+
+Neither of the first two is pruned, and the reason is the same for both: the device never learns from a source it trusts that a channel is
 finished, since closure is node-supplied state, and deleting on it would hand the node a way to clear the names and slots that
 refuse it. Pruning the registry is additionally bounded by what would still be safe without it, the monotonic counter, and it
 would cost the idempotent replay of an old request ([policy.md](./policy.md)).
+
+## What a reinstall keeps
+
+The sign-once registry is what makes deterministic nonces safe, and it is the one thing the node cannot hand back: counters
+re-seeded from a number the node states are counters an under-reporting node moves backwards, and a slot served twice under
+two sessions of its choosing recovers the funding key ([policy.md](./policy.md)). So the device keeps its own floor in a
+storage the host places where an uninstall does not reach: an iOS keychain item survives one, Android needs an explicit
+backup. The SDK does not choose the place, it takes the storage.
+
+The watermark is the record minus everything a restore can rebuild from elsewhere:
+
+| Dropped                                         | Where it comes back from                                                        |
+| ----------------------------------------------- | ------------------------------------------------------------------------------- |
+| The channel name                                | The node's channel list, matched to the index by public key                     |
+| The debit intents                               | Nowhere: they are user authorisations, and they die with the app that took them |
+| The registry below the top slot of each context | Nowhere: the counter refuses every number at or below it anyway                 |
+
+The top slot of each context is kept because it is the one a reconnect re-delivers, and answering that re-delivery
+`already-signed` is what keeps a restored device from stalling the channel at its first request.
+
+The watermark is written **before** the record it projects from, so a crash between the two writes can only leave the floor
+ahead of the claim, never behind it. A write whose projection matches the one this run of the app already wrote is skipped, so
+recording a debit intent costs the slow store one write per run at most, while a claim that moves a counter always costs one.
+
+A recovery storage that throws takes the record write down with it, and with it the signature: the device refuses rather than
+claim a slot whose floor it could not persist. That is a real case on a phone, where a keychain item readable only while the
+device is unlocked is unreadable to a signer answering in the background, so the host has to place the watermark where the
+signer can reach it whenever it can be asked to sign.
+
+Without the second storage a restore still works, and every channel it rebuilds is reported `unguarded`: the device is then
+trusting the node's commitment numbers, and its first request may reopen a slot it already served.
+
+## The channel index allocator
+
+The index is the one piece of a channel that recovery cannot take from the node, since every secret derives from it, so the
+SDK owns the counter that hands indexes out. It reads the higher of the two storages, spends an index before returning it,
+and steps over any index that still holds a record or a watermark.
+
+None of that is enough on its own: after a wipe the counter reads `0`, and an index handed out twice signs two channels
+under one nonce space. So the allocator refuses to hand out anything until the session has reconciled with the node's
+channels, and it refuses again in the next run of the app, since the flag is in memory and the counter alone cannot prove
+what it survived.
+
+The gate is only as strong as the list it reconciles against. With the second storage the mirrored counter survives the wipe,
+so the allocator resumes past every index it ever handed out even when the node's list is short. Without it, a wiped device
+has nothing to check the node's answer against: reconciliation restores exactly the channels the node reports, and a channel
+the node omits, pruned or withheld, leaves its index looking free. Handing that index out again is the nonce reuse above, so
+a host that skips the second storage is trusting the node's completeness, not just its commitment numbers.
 
 ## Concurrency
 
@@ -107,17 +167,42 @@ host must give the SDK a single instance, or keep its storage private to one.
 ## Recovery
 
 From the mnemonic alone the host re-derives the master seed, and the SDK re-derives every channel key (see
-[derivation.md](./derivation.md)). Counters and balances re-seed from the node's state on the next session, under the
-monotonicity check. Losing the storage is therefore not losing funds, with one exception: hold-invoice preimages exist only on
-the device, so unclaimed held payments need the storage intact. They are refundable to the payer otherwise.
+[derivation.md](./derivation.md)). Losing the storage is therefore not losing funds, with one exception: hold-invoice
+preimages exist only on the device, so unclaimed held payments need the storage intact. They are refundable to the payer
+otherwise.
 
-What a restore has to rebuild before anything else is the alias map: which channel index each of the node's channels belongs
-to. `ISignerStorage` is `get` and `set` with no enumeration, so that mapping cannot be recovered from the storage itself, and
-until it is rebuilt every existing channel reads as unregistered. That is where a reinstalled device stands today, and it is
-the safe side to fail on: it refuses everything rather than signing under an empty registry.
+What no re-derivation gives back is **which index each of the node's channels belongs to**. `ISignerStorage` is `get` and
+`set` with no enumeration, so that mapping cannot come from the storage, and until it exists every channel reads as
+unregistered, which is the safe side to fail on: the device refuses everything rather than signing under an empty registry.
 
-Rebuilding the map is what the recovery work adds, and the hazard it has to answer is that the sign-once registry cannot come
-back with it. Counters re-seed from the number the node reports, and a node reporting one below the truth gets a slot served
-twice under a session of its choosing, which is the condition that recovers the funding key ([policy.md](./policy.md)). Once
-the storage is gone the device holds nothing to check that number against, so the only thing behind it is a watermark the host
-keeps somewhere an uninstall does not reach.
+`ChannelRecovery.reconcile` is what rebuilds it, and it is what a session runs before anything else. It takes the node's
+channels, closed ones included, and a function from channel index to funding public key, and it matches a channel to an
+index by **that key**: the device compares the node's answer against its own derivation, so no name and no index the node
+states is ever taken on trust, and recovery only ever sees public keys. Then, per matched channel:
+
+| What it finds          | What it does                                                  | Reported    |
+| ---------------------- | ------------------------------------------------------------- | ----------- |
+| A record               | Leaves it exactly as it is, and adds the name as an alias     | `known`     |
+| No record, a watermark | Rebuilds the record from the watermark                        | `restored`  |
+| Neither                | Rebuilds it from the exposure the node reports, with no floor | `unguarded` |
+
+A channel no index owns is reported apart and stays unregistered. The scan runs a gap of twenty indexes past the counter and
+past every match, which is enough because indexes are handed out in sequence: a gap is an index whose channel the node never
+came to know. Finally the counter is raised above the highest index matched, and the allocator is allowed to run.
+
+Reconciliation is idempotent, so a device that never lost anything runs it on every connect and changes nothing.
+
+### What a restored device still refuses
+
+The record that comes back from a watermark is thinner than the one that was lost, and the difference is what the counter
+has to cover:
+
+- A repeat of the top slot's exact session is answered `already-signed`, and the deterministic nonce re-signs it to the same
+  bytes it signed before the reinstall.
+- Any other session on that slot refuses with `policy_refusal`, as it would have before.
+- A slot at or below the counter refuses with `stale_state`, even though the pruned registry no longer names it. That is the
+  counter standing in for the slots the watermark dropped.
+- Above the counter everything is fresh, which is correct: those slots were never served.
+
+Without a watermark none of that holds. The channel comes back `unguarded` with no counters at all, and the first request the
+node sends is served whatever it asks for.

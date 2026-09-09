@@ -278,6 +278,20 @@ describe("registerChannel", () => {
         await expect(engine.registerChannel(CHANNEL_ID, CHANNEL_INDEX, OPENING_EXPOSURE)).rejects.toThrow(TypeError);
     });
 
+    it("starts a record from the watermark left by an install that already signed", async () => {
+        const storage = new InMemorySignerStorage();
+        const recoveryStorage = new InMemorySignerStorage();
+        const engine = new PolicyEngine(new SignerStore(storage, recoveryStorage));
+        await engine.registerChannel(CHANNEL_ID, CHANNEL_INDEX, OPENING_EXPOSURE);
+        await engine.checkAndClaim(KEYS, commitmentRequest("ckb, no tlcs, for remote"));
+        storage.map.clear();
+
+        const restored = new PolicyEngine(new SignerStore(storage, recoveryStorage));
+        const record = await restored.registerChannel(CHANNEL_ID, CHANNEL_INDEX, OPENING_EXPOSURE);
+        expect(record.lastSignedCommitmentNumbers).toEqual({ COMMITMENT: 0 });
+        expect(Object.keys(record.signedSessions)).toEqual(["COMMITMENT:0"]);
+    });
+
     it.each([
         ["an empty channelId", "", CHANNEL_INDEX, OPENING_EXPOSURE],
         ["a negative channel index", CHANNEL_ID, -1, OPENING_EXPOSURE],

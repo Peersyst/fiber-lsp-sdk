@@ -58,6 +58,8 @@ Full index in [docs/README.md](./docs/README.md). The load-bearing ones:
   make them safe.
 - [What the device refuses](./docs/policy.md): the five checks every request passes, and the sign-once rule those
   conditions rest on.
+- [What the device persists](./docs/persistence.md): the keyspace, what a reinstall keeps, and how a restored device
+  gets its channels back before it signs again.
 - [Cross-implementation harness](./interop/README.md): how the vectors are generated and re-validated against a new fiber
   release.
 

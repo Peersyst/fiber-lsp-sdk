@@ -1,6 +1,6 @@
 import type { NonceContext } from "../derivation";
 import type { ChannelAnnouncementInput, CommitmentTxInput, RevocationInput, ShutdownTxInput } from "../digest";
-import type { CHANNEL_POLICY_RECORD_VERSION } from "./policy.constants";
+import type { CHANNEL_POLICY_RECORD_VERSION, CHANNEL_WATERMARK_VERSION } from "./policy.constants";
 
 export type SignSlot = `${NonceContext}:${number}`;
 
@@ -55,4 +55,48 @@ export type SignSlotRef = {
 
 export type PolicyVerdict = SignSlotRef & {
     status: "fresh" | "already-signed";
+};
+
+/**
+ * The half of a record that has to outlive the storage: what the node cannot be trusted to restate after a reinstall.
+ */
+export type ChannelWatermark = {
+    version: typeof CHANNEL_WATERMARK_VERSION;
+    lastSignedCommitmentNumbers: Partial<Record<NonceContext, number>>;
+    /**
+     * Pruned to the top slot of each context, the one a reconnect re-delivers; the counters cover the rest.
+     */
+    signedSessions: Partial<Record<SignSlot, string>>;
+    lastStateVersion: number;
+    localExposureShannons: string;
+};
+
+export type NodeChannelState = {
+    channelId: string;
+    /**
+     * What identifies the index that derives this channel's keys.
+     */
+    localFundingPubkey: Uint8Array;
+    /**
+     * The settlement amount the node reports, used only for a channel whose watermark is gone too.
+     */
+    localExposureShannons: string;
+};
+
+export type ReconciledChannel = {
+    channelId: string;
+    channelIndex: number;
+    /**
+     * `known` kept the record it found, `restored` rebuilt it from the watermark, `unguarded` from node state alone.
+     */
+    status: "known" | "restored" | "unguarded";
+};
+
+export type ChannelReconciliation = {
+    channels: ReconciledChannel[];
+    /**
+     * Channels no index within the scan owns: they stay unregistered, so every request for them is refused.
+     */
+    unmatchedChannelIds: string[];
+    nextChannelIndex: number;
 };

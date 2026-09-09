@@ -80,6 +80,11 @@ A repeat that matches the stored commitment byte for byte is the idempotent resu
 and the caller re-signs, which is deterministic and therefore identical. That path leaves the pipeline at check 3, so a
 re-delivery consumes no debit intent and moves no counter, and the stale numbers it would otherwise carry never matter.
 
+A device that lost its storage keeps that path for the one slot that matters. The watermark it left behind carries the
+top slot of each context, so the request a reconnect re-delivers is still answered `already-signed` and re-signed to the
+same bytes, while everything at or below the counter refuses with `stale_state`
+([persistence.md](./persistence.md#what-a-restored-device-still-refuses)).
+
 ## The claim is written before anything is signed
 
 The gate persists the claim and only then does the caller sign. The reverse order loses: a crash between producing a
@@ -131,20 +136,25 @@ then issues `send_payment`.
   removed: its fee shrinks the cell below the settlement amounts it must pay out, and the settlement amount the rule reads
   is untouched. Closing it is a decision about what exposure is measured in, since the fee is CKB while a UDT channel's
   amounts are not, and it lands with the same work that binds intents to payment hashes.
+- **It does not decide where the anti-rollback floor is kept.** The host injects the storage that survives an uninstall,
+  and a device without one is told, per channel, that its restored record has no floor
+  ([persistence.md](./persistence.md#what-a-reinstall-keeps)).
 - **It never prunes the registry.** A slot per signed commitment stays forever. Pruning is only safe behind the monotonic
   counter, which refuses a number already served even when its slot is gone, and it would cost the idempotent replay of an
   old request.
 
 ## Where it lives
 
-| File                                | Contents                                                                       |
-| ----------------------------------- | ------------------------------------------------------------------------------ |
-| `src/policy/policy-engine.ts`       | The five checks, the claim, channel registration and debit intents             |
-| `src/policy/policy.constants.ts`    | The keyspace prefixes, and the three formats a change to would reopen slots    |
-| `src/policy/policy.error.ts`        | `PolicyRefusalError`, carrying the wire error code                             |
-| `src/policy/utils/slot.utils.ts`    | Operation to slot, where the shared close slot and the fixed announcement live |
-| `src/policy/utils/session.utils.ts` | The session commitment and the shape a signable session must have              |
-| `src/policy/signer-store.ts`        | The persistence underneath ([persistence.md](./persistence.md))                |
+| File                                  | Contents                                                                       |
+| ------------------------------------- | ------------------------------------------------------------------------------ |
+| `src/policy/policy-engine.ts`         | The five checks, the claim, channel registration and debit intents             |
+| `src/policy/policy.constants.ts`      | The keyspace prefixes, and the three formats a change to would reopen slots    |
+| `src/policy/policy.error.ts`          | `PolicyRefusalError`, carrying the wire error code                             |
+| `src/policy/utils/slot.utils.ts`      | Operation to slot, where the shared close slot and the fixed announcement live |
+| `src/policy/utils/session.utils.ts`   | The session commitment and the shape a signable session must have              |
+| `src/policy/channel-recovery.ts`      | Reconciling the node's channels back onto their index, and the index allocator |
+| `src/policy/utils/watermark.utils.ts` | The projection between a record and the watermark a reinstall finds            |
+| `src/policy/signer-store.ts`          | The persistence underneath ([persistence.md](./persistence.md))                |
 
 ## What the tests guarantee
 
@@ -157,6 +167,13 @@ sessions racing for one slot where exactly one wins. A malformed request for an 
 check answers first. Renaming has its own set: both names of a channel reaching one record, a repeat under the other name
 answered `already-signed`, a rename refused once the record has served, two names racing for the same slot, and two
 registrations racing for one name where the loser's index never takes it.
+
+`test/tests/policy/channel-recovery.spec.ts` runs the other half against a wiped storage: a channel matched to its index
+by the funding key alone, a record rebuilt from the watermark and one rebuilt without it, a channel of another seed
+reported unmatched and left unregistered, both names of a renamed channel reaching one index, the gap the scan stops at,
+and a second run that changes nothing. It ends where the signing engine begins: after the wipe, the re-delivered request is
+answered `already-signed` and `partialSign` returns the same bytes the device produced before the reinstall, while the slot
+below the counter refuses and the same case without a recovery storage is served fresh.
 
 Coverage of the module is 100% on all four metrics. Coverage only proves there is no dead code, so the assertions were
 checked by breaking the code on purpose:
@@ -180,3 +197,16 @@ checked by breaking the code on purpose:
 | The name is written instead of claimed            | 6                 |
 | The alias is written before the record            | 1                 |
 | A no-op update still writes the record            | 3                 |
+| The watermark is written after the record         | 1                 |
+| The watermark is never written                    | 10                |
+| The watermark keeps the whole registry            | 2                 |
+| A restore takes the node's exposure               | 2                 |
+| A restore starts the counters empty               | 4                 |
+| A restore drops the pruned registry               | 5                 |
+| Registration ignores the watermark                | 1                 |
+| The allocator does not step over used indexes     | 3                 |
+| Allocation needs no reconciliation                | 2                 |
+| The counter is not mirrored, or not read back     | 3                 |
+| Reconciliation overwrites the record it finds     | 3                 |
+| Reconciliation does not raise the counter         | 2                 |
+| The scan does not extend past a match             | 1                 |

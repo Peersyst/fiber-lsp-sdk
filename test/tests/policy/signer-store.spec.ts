@@ -1,6 +1,6 @@
 import { AsyncInMemorySignerStorage, InMemorySignerStorage } from "../../mocks/policy";
 import type { ChannelPolicyRecord, IAsyncSignerStorage, ISignerStorage } from "../../../src/policy";
-import { SignerStore } from "../../../src/policy";
+import { CHANNEL_INDEX_PROBE_LIMIT, CHANNEL_RECORD_KEY_PREFIX, CHANNEL_WATERMARK_KEY_PREFIX, SignerStore } from "../../../src/policy";
 
 const CHANNEL_ID = "0x1f".padEnd(66, "a");
 const CHANNEL_INDEX = 3;
@@ -9,6 +9,8 @@ const ALIAS_KEY = `fiber-lsp-sdk:alias:${CHANNEL_ID}`;
 const PAYMENT_HASH = "11".repeat(32);
 const PREIMAGE_KEY = `fiber-lsp-sdk:preimage:${PAYMENT_HASH}`;
 const PREIMAGE = "22".repeat(32);
+const WATERMARK_KEY = `fiber-lsp-sdk:watermark:${CHANNEL_INDEX}`;
+const NEXT_INDEX_KEY = "fiber-lsp-sdk:next-channel-index";
 
 function record(overrides: Partial<ChannelPolicyRecord> = {}): ChannelPolicyRecord {
     return {
@@ -713,5 +715,202 @@ describe("hold-invoice preimages", () => {
         await store.setHoldInvoicePreimage(PAYMENT_HASH, PREIMAGE);
         expect([...storage.map.keys()].sort()).toEqual([CHANNEL_KEY, `fiber-lsp-sdk:alias:${PAYMENT_HASH}`, PREIMAGE_KEY].sort());
         await expect(store.getHoldInvoicePreimage(PAYMENT_HASH)).resolves.toBe(PREIMAGE);
+    });
+});
+
+describe("channel watermarks", () => {
+    it("writes the watermark before the record it projects from", async () => {
+        const ops: string[] = [];
+        const storage = new InMemorySignerStorage(ops);
+        const recoveryStorage = new InMemorySignerStorage(ops);
+        await new SignerStore(storage, recoveryStorage).setChannelRecord(CHANNEL_INDEX, record());
+        expect(ops.filter((op) => op.startsWith("set"))).toEqual([`set ${WATERMARK_KEY}`, `set ${CHANNEL_KEY}`]);
+    });
+
+    it("prunes the registry to the top slot of each context", async () => {
+        const recoveryStorage = new InMemorySignerStorage();
+        const store = new SignerStore(new InMemorySignerStorage(), recoveryStorage);
+        await store.setChannelRecord(
+            CHANNEL_INDEX,
+            record({
+                lastSignedCommitmentNumbers: { COMMITMENT: 5, REVOKE: 4 },
+                signedSessions: { "COMMITMENT:2": "aa".repeat(32), "COMMITMENT:5": "bb".repeat(32), "REVOKE:4": "cc".repeat(32) },
+            }),
+        );
+        await expect(store.getChannelWatermark(CHANNEL_INDEX)).resolves.toEqual({
+            version: 1,
+            lastSignedCommitmentNumbers: { COMMITMENT: 5, REVOKE: 4 },
+            signedSessions: { "COMMITMENT:5": "bb".repeat(32), "REVOKE:4": "cc".repeat(32) },
+            lastStateVersion: 7,
+            localExposureShannons: "5000000000",
+        });
+    });
+
+    it("drops the debit intents and the channel name, which a restore takes from elsewhere", async () => {
+        const recoveryStorage = new InMemorySignerStorage();
+        const store = new SignerStore(new InMemorySignerStorage(), recoveryStorage);
+        await store.setChannelRecord(CHANNEL_INDEX, record({ pendingDebitsShannons: ["100", "200"] }));
+        const stored = JSON.parse(recoveryStorage.map.get(WATERMARK_KEY) ?? "null") as Record<string, unknown>;
+        expect(Object.keys(stored).sort()).toEqual(
+            ["version", "lastSignedCommitmentNumbers", "signedSessions", "lastStateVersion", "localExposureShannons"].sort(),
+        );
+    });
+
+    it("does not touch the recovery storage when the projection does not move", async () => {
+        const recoveryStorage = new InMemorySignerStorage();
+        const store = new SignerStore(new InMemorySignerStorage(), recoveryStorage);
+        await store.setChannelRecord(CHANNEL_INDEX, record());
+        await store.updateChannelRecord(CHANNEL_INDEX, (current) => ({ ...requireRecord(current), pendingDebitsShannons: ["7"] }));
+        expect(recoveryStorage.ops.filter((op) => op.startsWith("set"))).toEqual([`set ${WATERMARK_KEY}`]);
+    });
+
+    it("writes it again once the projection moves", async () => {
+        const recoveryStorage = new InMemorySignerStorage();
+        const store = new SignerStore(new InMemorySignerStorage(), recoveryStorage);
+        await store.setChannelRecord(CHANNEL_INDEX, record());
+        await store.updateChannelRecord(CHANNEL_INDEX, bumpStateVersion);
+        expect(recoveryStorage.ops.filter((op) => op.startsWith("set"))).toEqual([`set ${WATERMARK_KEY}`, `set ${WATERMARK_KEY}`]);
+    });
+
+    it("keeps the watermark out of the storage the host may lose", async () => {
+        const storage = new InMemorySignerStorage();
+        await new SignerStore(storage, new InMemorySignerStorage()).setChannelRecord(CHANNEL_INDEX, record());
+        expect([...storage.map.keys()]).toEqual([CHANNEL_KEY]);
+    });
+
+    it("reports no watermark when the host injected no recovery storage", async () => {
+        const store = new SignerStore(new InMemorySignerStorage());
+        await store.setChannelRecord(CHANNEL_INDEX, record());
+        await expect(store.getChannelWatermark(CHANNEL_INDEX)).resolves.toBeNull();
+    });
+
+    it("reads a watermark written by an earlier install", async () => {
+        const recoveryStorage = new InMemorySignerStorage();
+        recoveryStorage.map.set(
+            WATERMARK_KEY,
+            JSON.stringify({
+                version: 1,
+                lastSignedCommitmentNumbers: { COMMITMENT: 9 },
+                signedSessions: { "COMMITMENT:9": "dd".repeat(32) },
+                lastStateVersion: 2,
+                localExposureShannons: "62000000000",
+            }),
+        );
+        const store = new SignerStore(new InMemorySignerStorage(), recoveryStorage);
+        await expect(store.getChannelWatermark(CHANNEL_INDEX)).resolves.toEqual({
+            version: 1,
+            lastSignedCommitmentNumbers: { COMMITMENT: 9 },
+            signedSessions: { "COMMITMENT:9": "dd".repeat(32) },
+            lastStateVersion: 2,
+            localExposureShannons: "62000000000",
+        });
+    });
+
+    it.each([
+        ["not valid JSON", "{", `stored value at ${WATERMARK_KEY} is not valid JSON`],
+        ["a version from the future", '{"version":2}', `stored value at ${WATERMARK_KEY} is not a channel watermark`],
+        [
+            "a counter above the chain",
+            '{"version":1,"lastSignedCommitmentNumbers":{"COMMITMENT":281474976710656},"signedSessions":{},"lastStateVersion":0,"localExposureShannons":"1"}',
+            `stored value at ${WATERMARK_KEY} is not a channel watermark`,
+        ],
+        ["not an object at all", '"a watermark"', `stored value at ${WATERMARK_KEY} is not a channel watermark`],
+        [
+            "a state version that is not one",
+            '{"version":1,"lastSignedCommitmentNumbers":{},"signedSessions":{},"lastStateVersion":-1,"localExposureShannons":"1"}',
+            `stored value at ${WATERMARK_KEY} is not a channel watermark`,
+        ],
+        [
+            "an exposure that is not decimal shannons",
+            '{"version":1,"lastSignedCommitmentNumbers":{},"signedSessions":{},"lastStateVersion":0,"localExposureShannons":"0x1"}',
+            `stored value at ${WATERMARK_KEY} is not a channel watermark`,
+        ],
+        [
+            "a commitment that is not a digest",
+            '{"version":1,"lastSignedCommitmentNumbers":{},"signedSessions":{"COMMITMENT:1":"ab"},"lastStateVersion":0,"localExposureShannons":"1"}',
+            `stored value at ${WATERMARK_KEY} is not a channel watermark`,
+        ],
+    ])("throws on a watermark that is %s", async (_case, stored, message) => {
+        const recoveryStorage = new InMemorySignerStorage();
+        recoveryStorage.map.set(WATERMARK_KEY, stored);
+        const store = new SignerStore(new InMemorySignerStorage(), recoveryStorage);
+        await expect(store.getChannelWatermark(CHANNEL_INDEX)).rejects.toThrow(new TypeError(message));
+    });
+});
+
+describe("the channel index allocator", () => {
+    it("starts at zero and hands out indexes in sequence", async () => {
+        const store = new SignerStore(new InMemorySignerStorage());
+        await expect(store.getNextChannelIndex()).resolves.toBe(0);
+        await expect(store.allocateChannelIndex()).resolves.toBe(0);
+        await expect(store.allocateChannelIndex()).resolves.toBe(1);
+        await expect(store.getNextChannelIndex()).resolves.toBe(2);
+    });
+
+    it("spends an index before handing it out", async () => {
+        const storage = new InMemorySignerStorage();
+        await new SignerStore(storage).allocateChannelIndex();
+        expect(storage.map.get(NEXT_INDEX_KEY)).toBe("1");
+    });
+
+    it("mirrors the counter into the recovery storage", async () => {
+        const recoveryStorage = new InMemorySignerStorage();
+        await new SignerStore(new InMemorySignerStorage(), recoveryStorage).allocateChannelIndex();
+        expect(recoveryStorage.map.get(NEXT_INDEX_KEY)).toBe("1");
+    });
+
+    it("continues from the recovery storage once the main one is lost", async () => {
+        const recoveryStorage = new InMemorySignerStorage();
+        const store = new SignerStore(new InMemorySignerStorage(), recoveryStorage);
+        await store.allocateChannelIndex();
+        await store.allocateChannelIndex();
+        const restored = new SignerStore(new InMemorySignerStorage(), recoveryStorage);
+        await expect(restored.allocateChannelIndex()).resolves.toBe(2);
+    });
+
+    it("raises the counter to an index, and never lowers it", async () => {
+        const store = new SignerStore(new InMemorySignerStorage());
+        await store.raiseNextChannelIndex(4);
+        await expect(store.getNextChannelIndex()).resolves.toBe(5);
+        await store.raiseNextChannelIndex(1);
+        await expect(store.getNextChannelIndex()).resolves.toBe(5);
+    });
+
+    it("steps over an index that still holds a record", async () => {
+        const storage = new InMemorySignerStorage();
+        storage.map.set(CHANNEL_RECORD_KEY_PREFIX + "0", JSON.stringify(record()));
+        await expect(new SignerStore(storage).allocateChannelIndex()).resolves.toBe(1);
+    });
+
+    it("steps over an index whose watermark outlived its record", async () => {
+        const recoveryStorage = new InMemorySignerStorage();
+        recoveryStorage.map.set(
+            CHANNEL_WATERMARK_KEY_PREFIX + "0",
+            JSON.stringify({
+                version: 1,
+                lastSignedCommitmentNumbers: { COMMITMENT: 1 },
+                signedSessions: {},
+                lastStateVersion: 0,
+                localExposureShannons: "1",
+            }),
+        );
+        const store = new SignerStore(new InMemorySignerStorage(), recoveryStorage);
+        await expect(store.allocateChannelIndex()).resolves.toBe(1);
+    });
+
+    it("gives two concurrent allocations different indexes", async () => {
+        const store = new SignerStore(new AsyncInMemorySignerStorage());
+        const [first, second] = await Promise.all([store.allocateChannelIndex(), store.allocateChannelIndex()]);
+        expect([first, second].sort()).toEqual([0, 1]);
+    });
+
+    it("refuses to allocate once the probes run out", async () => {
+        const storage = new InMemorySignerStorage();
+        for (let channelIndex = 0; channelIndex <= CHANNEL_INDEX_PROBE_LIMIT; channelIndex++) {
+            storage.map.set(CHANNEL_RECORD_KEY_PREFIX + channelIndex, JSON.stringify(record()));
+        }
+        await expect(new SignerStore(storage).allocateChannelIndex()).rejects.toThrow(
+            `channel indexes 0 to ${CHANNEL_INDEX_PROBE_LIMIT} are all in use`,
+        );
     });
 });
