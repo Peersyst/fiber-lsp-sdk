@@ -6,6 +6,7 @@ on:
     paths:
       - interop/**
       - src/derivation/**
+      - src/signer/**
       - test/**
 
 jobs:
@@ -31,4 +32,6 @@ jobs:
       # other way round.
       - run: git diff --exit-code interop/vectors/vectors.json
       - run: pnpm install --frozen-lockfile
+      - run: echo "INTEROP_TS_OUT=$RUNNER_TEMP/ts-out.json" >> "$GITHUB_ENV"
       - run: pnpm test
+      - run: cargo run --release --manifest-path interop/rust/Cargo.toml -- verify-ts interop/vectors/vectors.json "$INTEROP_TS_OUT"
