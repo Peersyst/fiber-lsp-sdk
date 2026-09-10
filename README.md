@@ -13,9 +13,10 @@ blind-signs.
   persistence), a WebSocket factory, and `fetch`.
 - **Minimal, audited dependency surface**: the only runtime dependencies are `@noble/curves`, `@noble/hashes`, `@scure/bip32`, and
   `@scure/btc-signer`, accepted as `^2.2.0` so a host app on the same major converges on a single copy of each.
-- **Recoverable by design**: every derivation is a deterministic function of the master seed, so channels are recoverable from the
-  wallet mnemonic alone. `deriveMasterSeed` owns the step above that, the hardened BIP32 path the master seed comes from, so the
-  chain has no link left to host convention.
+- **Recoverable by design**: every derivation is a deterministic function of the master seed, so channel keys are recoverable from
+  the wallet mnemonic alone. `deriveMasterSeed` owns the step above that, the hardened BIP32 path the master seed comes from, so
+  the chain has no link left to host convention. The keys, not the signing state: rebuilding what a lost storage took with it is
+  not implemented today ([persistence.md](./docs/persistence.md)).
 
 These properties reflect the current specification and may evolve with it while the SDK is under active design.
 
@@ -78,8 +79,9 @@ Node version: see `.nvmrc`.
 
 The key derivation is a compatibility contract with fiber's Rust implementation: the node derives the public halves of the same
 keys. `pnpm test` checks every derivation against `interop/vectors/vectors.json`, so the contract is verified on every run without
-a Rust toolchain; regenerating the vectors is what needs one. See [`interop/README.md`](./interop/README.md) and
-[`docs/derivation.md`](./docs/derivation.md).
+a Rust toolchain; regenerating the vectors is what needs one. The interop workflow closes the loop in the other direction on
+every pull request: it regenerates the vectors and verifies a partial signature the SDK produced under fiber's own musig2 crate.
+See [`interop/README.md`](./interop/README.md) and [`docs/derivation.md`](./docs/derivation.md).
 
 ### Build output
 
