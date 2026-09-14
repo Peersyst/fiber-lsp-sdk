@@ -5,7 +5,9 @@ fiber's Rust code, so a one-byte divergence makes every channel unusable. This f
 is checked against, plus the vectors it produces.
 
 `test/tests/derivation/interop-vectors.spec.ts` runs against `vectors/vectors.json` on every `pnpm test`, so the contract is
-checked without a Rust toolchain. Rust is only needed to regenerate the vectors.
+checked without a Rust toolchain. Rust is only needed to regenerate the vectors and to verify the SDK's partial signature under
+fiber's own crate, and the interop workflow does both on every pull request that touches the harness, the derivation, the signing
+engine or the tests.
 
 For the scheme those vectors pin, see [`docs/derivation.md`](../docs/derivation.md).
 
@@ -62,4 +64,6 @@ cargo run --release -- verify-ts ../vectors/vectors.json /tmp/ts-out.json
 Checks that a BIP-327 partial signature produced by the SDK verifies under fiber's musig2 crate and aggregates into a valid Schnorr
 signature. `INTEROP_TS_OUT` makes `test/tests/signer/interop-vectors.spec.ts` write the `{ "local_pubnonce": "...",
 "partial_signature": "..." }` the subcommand reads, for the loop's canonical slot, (0, `COMMITMENT`); unset, the spec writes
-nothing, so a plain `pnpm test` has no side effects. For the engine under test, see [`docs/signing.md`](../docs/signing.md).
+nothing, so a plain `pnpm test` has no side effects. The interop workflow sets it for its own `pnpm test` and runs `verify-ts`
+right after, so a signature fiber's crate rejects fails the build the same way a changed vector does. For the engine under test,
+see [`docs/signing.md`](../docs/signing.md).

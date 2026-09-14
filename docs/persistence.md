@@ -37,8 +37,8 @@ index and its name at another.
 
 ## The channel record
 
-One record per channel, holding what the policy checks and recovery need. Everything else about a channel lives on the node,
-which stays the durable store for channel state.
+One record per channel, holding what the policy checks need. Everything else about a channel lives on the node, which stays
+the durable store for channel state.
 
 | Field                         | What it holds                                                                              |
 | ----------------------------- | ------------------------------------------------------------------------------------------ |
@@ -107,17 +107,19 @@ host must give the SDK a single instance, or keep its storage private to one.
 ## Recovery
 
 From the mnemonic alone the host re-derives the master seed, and the SDK re-derives every channel key (see
-[derivation.md](./derivation.md)). Counters and balances re-seed from the node's state on the next session, under the
-monotonicity check. Losing the storage is therefore not losing funds, with one exception: hold-invoice preimages exist only on
-the device, so unclaimed held payments need the storage intact. They are refundable to the payer otherwise.
+[derivation.md](./derivation.md)). What does not come back is the record: counters, the sign-once registry and the exposure
+snapshot all start empty. Losing the storage is therefore not losing funds, with one exception: hold-invoice preimages exist
+only on the device, so unclaimed held payments need the storage intact. They are refundable to the payer otherwise.
 
-What a restore has to rebuild before anything else is the alias map: which channel index each of the node's channels belongs
-to. `ISignerStorage` is `get` and `set` with no enumeration, so that mapping cannot be recovered from the storage itself, and
-until it is rebuilt every existing channel reads as unregistered. That is where a reinstalled device stands today, and it is
-the safe side to fail on: it refuses everything rather than signing under an empty registry.
+**Rebuilding that state is not something the SDK does today.** What a restore would have to rebuild before anything else is
+the alias map: which channel index each of the node's channels belongs to. `ISignerStorage` is `get` and `set` with no
+enumeration, so that mapping cannot be read back from the storage itself, and while it is missing every channel the node
+holds reads as unregistered. That is where a reinstalled device stands, and it is the safe side to fail on: it refuses
+everything rather than signing under an empty registry.
 
-Rebuilding the map is what the recovery work adds, and the hazard it has to answer is that the sign-once registry cannot come
-back with it. Counters re-seed from the number the node reports, and a node reporting one below the truth gets a slot served
-twice under a session of its choosing, which is the condition that recovers the funding key ([policy.md](./policy.md)). Once
-the storage is gone the device holds nothing to check that number against, so the only thing behind it is a watermark the host
-keeps somewhere an uninstall does not reach.
+The reason it stays open is that whatever rebuilds the map still owes an answer for the sign-once registry, which cannot come
+back with it. A record rebuilt from what the node reports takes its counters from a number the node chooses, and a node
+reporting one below the truth gets a slot served twice under a session of its choosing, which is the condition that recovers
+the funding key ([policy.md](./policy.md)). Once the storage is gone the device holds nothing of its own to check that number
+against. Until that is settled, re-registering a channel this device has already signed for is a decision the host takes on
+its own: `registerChannel` will build a record with an empty registry, and every check downstream trusts it.

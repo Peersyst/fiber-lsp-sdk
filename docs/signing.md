@@ -66,8 +66,9 @@ Two halves verify the engine against fiber's exact stack:
   signature in-session. Full aggregation against the vector remote is impossible in TS: fiber's Rust `SecNonceBuilder`
   omits the public key scure's `nonceGen` requires, so only the public half of the remote's nonce exists here.
 - **Rust**: the harness's `verify-ts` subcommand verifies and aggregates that same signature under fiber's own
-  `musig2 0.2.4` crate. It runs on demand, fed by the same spec under `INTEROP_TS_OUT`
-  ([`interop/`](../interop/README.md)), because it needs a Rust toolchain that `pnpm test` does not.
+  `musig2 0.2.4` crate, fed by the same spec under `INTEROP_TS_OUT` ([`interop/`](../interop/README.md)). It needs a
+  Rust toolchain that `pnpm test` does not, so it runs in the interop workflow on every pull request that touches the
+  engine, the derivation, the tests or the harness, and on demand locally.
 
 `test/tests/signer/musig2-engine.spec.ts` additionally pins the slot's public nonce and partial signature as literal
 hex. Those pins are the idempotent re-delivery contract, not snapshots: the SDK's dependencies float on caret ranges,
