@@ -1,9 +1,9 @@
 import { equalBytes } from "@noble/curves/utils.js";
+import type { SignerErrorCode } from "../common";
 import { assertNonEmptyString, assertUnsignedInteger, isDecimalShannons } from "../common";
 import type { FiberChannelKeys } from "../derivation";
 import { MAX_CHANNEL_INDEX } from "../derivation";
 import { computeChannelAnnouncementDigest, computeCommitmentTxDigest, computeRevocationDigest, computeShutdownTxDigest } from "../digest";
-import type { SignerErrorCode } from "../protocol";
 import { CHANNEL_POLICY_RECORD_VERSION } from "./policy.constants";
 import { refuse } from "./policy.error";
 import type { ChannelPolicyRecord, PolicySignRequest, PolicyVerdict, SignOperation } from "./policy.types";

@@ -29,17 +29,18 @@ These properties reflect the current specification and may evolve with it while 
 | [`signer`](./src/signer)         | Dispatches signer-protocol methods, musig2 signing engine                                     |
 | [`policy`](./src/policy)         | Policy engine + persisted per-channel records                                                 |
 | `session`                        | Signer session client: challenge auth, correlation, resume                                    |
-| [`protocol`](./src/protocol)     | Wire types of the remote signing protocol                                                     |
+| [`wire`](./src/wire)             | How fiber writes values in JSON, and the field readers that refuse anything else              |
+| [`protocol`](./src/protocol)     | Frames, methods and results of the remote signing protocol                                    |
 | `rpc`                            | Typed fiber JSON-RPC client (Biscuit-authed)                                                  |
 | `sdk`                            | Public facade wiring the above                                                                |
 
-`derivation`, `digest`, `policy` and the signing engine of `signer` are implemented; the signer-protocol dispatch,
-`session`, `rpc` and `sdk` are still placeholders, so the public entrypoint stays small while the API settles.
+`derivation`, `digest`, `policy`, `wire`, `protocol` and the signing engine of `signer` are implemented; the signer-protocol
+dispatch, `session`, `rpc` and `sdk` are still placeholders, so the public entrypoint stays small while the API settles.
 
 ## Repository layout
 
 ```text
-src/            SDK source, one folder per module (see above), plus common/ for helpers no single module owns
+src/            SDK source, one folder per module (see above), plus common/ for what no single module owns
 test/tests/     Specs, mirroring the src tree one-to-one
 test/mocks/     Doubles of the injected effects, one folder per module
 test/utils/     Shared test helpers
@@ -59,6 +60,8 @@ Full index in [docs/README.md](./docs/README.md). The load-bearing ones:
   make them safe.
 - [What the device refuses](./docs/policy.md): the five checks every request passes, and the sign-once rule those
   conditions rest on.
+- [What crosses the wire](./docs/protocol.md): the remote signing protocol as proposed for review, its encodings, and
+  what a frame that does not decode is answered with.
 - [Cross-implementation harness](./interop/README.md): how the vectors are generated and re-validated against a new fiber
   release.
 

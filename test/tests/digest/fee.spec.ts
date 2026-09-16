@@ -1,6 +1,6 @@
 import { hexToBytes } from "@noble/hashes/utils.js";
 import { COMMITMENT_LOCK_TESTNET } from "../../../src/digest/digest.constants";
-import type { Script } from "../../../src/digest/digest.types";
+import type { Script } from "../../../src/common";
 import { calculateFee, commitmentTxSize, shutdownTxSize } from "../../../src/digest/fee";
 
 const UDT_SCRIPT: Script = {

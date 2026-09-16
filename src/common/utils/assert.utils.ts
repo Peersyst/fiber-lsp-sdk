@@ -18,10 +18,10 @@ export function assertBytes(name: string, value: unknown, length: number): asser
 /**
  * Asserts that a value is an integer within `[0, max]`.
  * @param name Name of the value, used in the error message.
- * @param value Value to check.
+ * @param value Value to check, which an optional field may leave absent.
  * @param max Highest accepted value, inclusive.
  */
-export function assertUnsignedInteger(name: string, value: number, max: number): void {
+export function assertUnsignedInteger(name: string, value: unknown, max: number): asserts value is number {
     if (!isUnsignedInteger(value, max)) {
         throw new RangeError(`${name} must be an integer between 0 and ${max}, got ${value}`);
     }

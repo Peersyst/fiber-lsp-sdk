@@ -1,7 +1,8 @@
 import { bytesToHex, hexToBytes } from "@noble/hashes/utils.js";
 import { deriveChannelSeed } from "../../../src/derivation/device-scheme";
 import { deriveChannelKeys, pubkeyOf } from "../../../src/derivation/fiber-scheme";
-import type { Script, ShutdownTxInput } from "../../../src/digest/digest.types";
+import type { Script } from "../../../src/common";
+import type { ShutdownTxInput } from "../../../src/digest/digest.types";
 import { computeShutdownTxDigest } from "../../../src/digest/shutdown-tx";
 import { ckbBlake2b } from "../../../src/common/utils/ckb-hash.utils";
 import { compareBytes } from "../../../src/common/utils/bytes.utils";

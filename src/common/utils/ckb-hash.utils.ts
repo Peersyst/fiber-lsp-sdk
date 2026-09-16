@@ -1,9 +1,8 @@
 import { blake2b } from "@noble/hashes/blake2.js";
 import { concatBytes, utf8ToBytes } from "@noble/hashes/utils.js";
+import { HASH256_LENGTH } from "../common.constants";
 
 const CKB_PERSONALIZATION = utf8ToBytes("ckb-default-hash");
-
-const DIGEST_LENGTH = 32;
 
 const BLAKE160_LENGTH = 20;
 
@@ -13,7 +12,7 @@ const BLAKE160_LENGTH = 20;
  * @returns The 32-byte digest.
  */
 export function ckbBlake2b(...chunks: Uint8Array[]): Uint8Array {
-    return blake2b(concatBytes(...chunks), { dkLen: DIGEST_LENGTH, personalization: CKB_PERSONALIZATION });
+    return blake2b(concatBytes(...chunks), { dkLen: HASH256_LENGTH, personalization: CKB_PERSONALIZATION });
 }
 
 /**

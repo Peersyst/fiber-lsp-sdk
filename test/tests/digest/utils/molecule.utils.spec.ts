@@ -1,5 +1,5 @@
 import { bytesToHex, hexToBytes } from "@noble/hashes/utils.js";
-import type { Script } from "../../../../src/digest/digest.types";
+import type { Script } from "../../../../src/common";
 import {
     encodeCellInput,
     encodeCellOutput,

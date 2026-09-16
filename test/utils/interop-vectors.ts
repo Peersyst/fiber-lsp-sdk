@@ -384,3 +384,15 @@ export function loadInteropVectors(): Vectors {
     const raw: unknown = JSON.parse(readFileSync(path, "utf8"));
     return parseVectors(raw);
 }
+
+/**
+ * Finds a vector case by name, failing loudly when the vectors no longer carry it.
+ * @param cases Cases of one construction.
+ * @param name Name of the case.
+ * @returns The case.
+ */
+export function caseOf<Vector extends { name: string }>(cases: Vector[], name: string): Vector {
+    const found = cases.find((entry) => entry.name === name);
+    if (found === undefined) throw new Error(`the vectors carry no case named "${name}"`);
+    return found;
+}

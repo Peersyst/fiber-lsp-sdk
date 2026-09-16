@@ -1,1 +1,0 @@
-export const PARTIAL_SIGNATURE_LENGTH = 32;

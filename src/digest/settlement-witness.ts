@@ -1,4 +1,5 @@
 import { concatBytes } from "@noble/hashes/utils.js";
+import type { TlcDirection, TlcHashAlgorithm } from "../common";
 import {
     COMPRESSED_POINT_LENGTH,
     MAX_AMOUNT_SHANNONS,
@@ -11,7 +12,7 @@ import {
 import type { FiberChannelKeys } from "../derivation";
 import { MAX_COMMITMENT_NUMBER, derivePublicKey, deriveTlcKey, pubkeyOf } from "../derivation";
 import { MAX_SETTLEMENT_TLCS, MAX_SINCE_PAYLOAD, SINCE_ABSOLUTE_TIMESTAMP_FLAG } from "./digest.constants";
-import type { SettlementTlc, TlcDirection, TlcHashAlgorithm } from "./digest.types";
+import type { SettlementTlc } from "./digest.types";
 import { uint128Le, uint64Le } from "./utils";
 
 const HASH_ALGORITHM_BITS: Record<TlcHashAlgorithm, number> = { "ckb-hash": 0, sha256: 1 };

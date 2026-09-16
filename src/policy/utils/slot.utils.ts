@@ -17,10 +17,10 @@ const CONTEXT_BY_OPERATION: Record<SignOperationKind, NonceContext> = {
 /**
  * Resolves the slot an operation claims, which is the slot its nonce comes from.
  * @param operation Operation the request asks for.
- * @param nonceCommitmentNumber Commitment number the nonce is derived at; ignored for the fixed announcement slot.
+ * @param nonceCommitmentNumber Commitment number the nonce is derived at; the fixed announcement slot takes none.
  * @returns The claimed slot.
  */
-export function resolveSignSlot(operation: SignOperation, nonceCommitmentNumber: number): SignSlotRef {
+export function resolveSignSlot(operation: SignOperation, nonceCommitmentNumber?: number): SignSlotRef {
     const context = CONTEXT_BY_OPERATION[operation.kind] as NonceContext | undefined;
     if (context === undefined) {
         throw new TypeError(`operation.kind must be one of ${Object.keys(CONTEXT_BY_OPERATION).join(", ")}`);
