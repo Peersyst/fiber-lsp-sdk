@@ -1,4 +1,4 @@
-import { isHexBytes, isNonEmptyString, isUnsignedInteger } from "./validate.utils";
+import { isDecimalShannons, isHexBytes, isNonEmptyString, isUnsignedInteger } from "./validate.utils";
 
 /**
  * Asserts that a value is a byte array of an exact length.
@@ -60,5 +60,16 @@ export function assertHexBytes(name: string, value: string, byteLength: number):
 export function assertNonEmptyString(name: string, value: string): void {
     if (!isNonEmptyString(value)) {
         throw new TypeError(`${name} must be a non-empty string`);
+    }
+}
+
+/**
+ * Asserts that a value is an amount in decimal shannons.
+ * @param name Name of the value, used in the error message.
+ * @param value Value to check.
+ */
+export function assertDecimalShannons(name: string, value: string): void {
+    if (!isDecimalShannons(value)) {
+        throw new TypeError(`${name} must be an amount in decimal shannons`);
     }
 }

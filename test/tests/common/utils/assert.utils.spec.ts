@@ -1,5 +1,6 @@
 import {
     assertBytes,
+    assertDecimalShannons,
     assertHexBytes,
     assertNonEmptyString,
     assertUnsignedBigInt,
@@ -85,5 +86,17 @@ describe("assertNonEmptyString", () => {
 
     it.each(["", 42 as unknown as string, null as unknown as string, undefined as unknown as string])("rejects %p", (value) => {
         expect(() => assertNonEmptyString("channelId", value)).toThrow(new TypeError("channelId must be a non-empty string"));
+    });
+});
+
+describe("assertDecimalShannons", () => {
+    it.each(["0", "62000000000"])("accepts %p", (value) => {
+        expect(() => assertDecimalShannons("amountShannons", value)).not.toThrow();
+    });
+
+    it.each(["", "01", "0x10", "-1", 42 as unknown as string])("rejects %p", (value) => {
+        expect(() => assertDecimalShannons("amountShannons", value)).toThrow(
+            new TypeError("amountShannons must be an amount in decimal shannons"),
+        );
     });
 });

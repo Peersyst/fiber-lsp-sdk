@@ -1,6 +1,6 @@
 import { equalBytes } from "@noble/curves/utils.js";
 import type { SignerErrorCode } from "../common";
-import { assertNonEmptyString, assertUnsignedInteger, isDecimalShannons } from "../common";
+import { assertDecimalShannons, assertNonEmptyString, assertUnsignedInteger } from "../common";
 import type { FiberChannelKeys } from "../derivation";
 import { MAX_CHANNEL_INDEX } from "../derivation";
 import { computeChannelAnnouncementDigest, computeCommitmentTxDigest, computeRevocationDigest, computeShutdownTxDigest } from "../digest";
@@ -31,9 +31,7 @@ export class PolicyEngine {
     async registerChannel(channelId: string, channelIndex: number, localExposureShannons: string): Promise<ChannelPolicyRecord> {
         assertNonEmptyString("channelId", channelId);
         assertUnsignedInteger("channelIndex", channelIndex, MAX_CHANNEL_INDEX);
-        if (!isDecimalShannons(localExposureShannons)) {
-            throw new TypeError("localExposureShannons must be an amount in decimal shannons");
-        }
+        assertDecimalShannons("localExposureShannons", localExposureShannons);
         const aliased = await this.store.resolveChannelIndex(channelId);
         if (aliased !== null && aliased !== channelIndex) {
             throw new TypeError(`channel ${channelId} is already registered under a different channel index`);
@@ -79,9 +77,7 @@ export class PolicyEngine {
      * @param amountShannons Highest amount the user authorised, fee budget included, in decimal shannons.
      */
     async recordDebitIntent(channelId: string, amountShannons: string): Promise<void> {
-        if (!isDecimalShannons(amountShannons)) {
-            throw new TypeError("amountShannons must be an amount in decimal shannons");
-        }
+        assertDecimalShannons("amountShannons", amountShannons);
         const channelIndex = await this.requireChannelIndex(channelId);
         await this.store.updateChannelRecord(channelIndex, (current) => {
             if (current === null) throw missingRecord(channelId, channelIndex);

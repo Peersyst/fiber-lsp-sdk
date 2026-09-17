@@ -11,6 +11,10 @@ const REMOTE_PUBKEY = hexToBytes(vectors.digest.remote.funding_pubkey);
 const OTHER_PUBKEY = hexToBytes(vectors.fiber_scheme.channel_keys.funding_pubkey);
 const AGGREGATED_NONCE = hexToBytes("02".repeat(33) + "03".repeat(33));
 const MESSAGE = hexToBytes("5723e5072abb4f1c6a1fe86dc188129fd9a3dbc82537c3c0601effe741fe6fca");
+const G = "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798";
+const G2 = "02c6047f9441ed7d6d3045406e95c07cd85c778e4b8cef3ca7abac09b95c709ee5";
+const INFINITY = "00".repeat(33);
+const OFF_CURVE = "03".repeat(33);
 
 function session(overrides: Partial<SignSession> = {}): SignSession {
     return { orderedPublicKeys: [LOCAL_PUBKEY, REMOTE_PUBKEY], aggregatedNonce: AGGREGATED_NONCE, message: MESSAGE, ...overrides };
@@ -50,26 +54,64 @@ describe("buildSessionCommitment", () => {
 });
 
 describe("assertSignSession", () => {
+    function signable(overrides: Partial<SignSession> = {}): SignSession {
+        return session({ aggregatedNonce: hexToBytes(G + G2), ...overrides });
+    }
+
     it.each([
-        ["first", session()],
-        ["second", session({ orderedPublicKeys: [REMOTE_PUBKEY, LOCAL_PUBKEY] })],
+        ["first", signable()],
+        ["second", signable({ orderedPublicKeys: [REMOTE_PUBKEY, LOCAL_PUBKEY] })],
     ])("accepts a session with the channel funding key %s", (_, accepted) => {
         expect(() => assertSignSession(KEYS, accepted)).not.toThrow();
     });
 
+    it.each([
+        ["the first half", INFINITY + G2],
+        ["the second half", G + INFINITY],
+        ["both halves", INFINITY + INFINITY],
+    ])("accepts an aggregated nonce with %s at infinity", (_, nonce) => {
+        expect(() => assertSignSession(KEYS, signable({ aggregatedNonce: hexToBytes(nonce) }))).not.toThrow();
+    });
+
     it("rejects a session without the channel funding key", () => {
-        expect(() => assertSignSession(KEYS, session({ orderedPublicKeys: [REMOTE_PUBKEY, OTHER_PUBKEY] }))).toThrow(
+        expect(() => assertSignSession(KEYS, signable({ orderedPublicKeys: [REMOTE_PUBKEY, OTHER_PUBKEY] }))).toThrow(
             new TypeError("session.orderedPublicKeys must include the channel funding public key"),
         );
     });
 
+    it.each([
+        ["first", [hexToBytes(OFF_CURVE), LOCAL_PUBKEY]],
+        ["second", [LOCAL_PUBKEY, hexToBytes(OFF_CURVE)]],
+    ])("rejects a %s public key off the curve", (_, orderedPublicKeys) => {
+        expect(() => assertSignSession(KEYS, signable({ orderedPublicKeys }))).toThrow(
+            new TypeError("session.orderedPublicKeys must be points on the curve"),
+        );
+    });
+
+    it("rejects a public key at infinity, which only a nonce half may be", () => {
+        expect(() => assertSignSession(KEYS, signable({ orderedPublicKeys: [LOCAL_PUBKEY, hexToBytes(INFINITY)] }))).toThrow(
+            new TypeError("session.orderedPublicKeys must be points on the curve"),
+        );
+    });
+
+    it.each([
+        ["a first half off the curve", OFF_CURVE + G2],
+        ["a second half off the curve", G + OFF_CURVE],
+        ["an uncompressed prefix", `04${G.slice(2)}` + G2],
+        ["a zero-prefixed half that is not infinity", `${"00".repeat(32)}01` + G2],
+    ])("rejects an aggregated nonce with %s", (_, nonce) => {
+        expect(() => assertSignSession(KEYS, signable({ aggregatedNonce: hexToBytes(nonce) }))).toThrow(
+            new TypeError("session.aggregatedNonce must be two points on the curve or at infinity"),
+        );
+    });
+
     it("rejects a malformed session before looking at the keys", () => {
-        expect(() => assertSignSession(KEYS, session({ message: MESSAGE.slice(1) }))).toThrow(TypeError);
+        expect(() => assertSignSession(KEYS, signable({ message: MESSAGE.slice(1) }))).toThrow(TypeError);
     });
 
     it("never names a secret in its refusals", () => {
         try {
-            assertSignSession(KEYS, session({ orderedPublicKeys: [REMOTE_PUBKEY, OTHER_PUBKEY] }));
+            assertSignSession(KEYS, signable({ orderedPublicKeys: [REMOTE_PUBKEY, OTHER_PUBKEY] }));
             throw new Error("expected a refusal");
         } catch (error) {
             expect((error as Error).message).not.toContain(vectors.sdk_scheme.channel.channel_keys.funding_key);

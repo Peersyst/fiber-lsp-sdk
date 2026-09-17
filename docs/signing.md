@@ -57,6 +57,56 @@ digest matches the attached channel state is the policy layer's no-blind-signing
 Wire sizes: 33-byte compressed pubkeys, 66-byte public and aggregated nonces (two compressed points), 32-byte messages
 and partial signatures.
 
+## One call site: the dispatch
+
+`SignerDispatch.handle` is where the gate and the engine become one path, the promise [policy.md](./policy.md) makes. It
+takes a decoded envelope from the protocol layer ([protocol.md](./protocol.md)) with its params still as the node sent
+them, and runs, in this order: the params are decoded against the network's commitment lock the dispatch holds
+(`malformed`), the channel's name is resolved to its index (`unknown_channel`), the channel's four secrets are derived
+from that index, and then the method runs. For a signing method that is `PolicyEngine.checkAndClaim` over the decoded
+request and then `partialSign` at exactly the slot the verdict names, never at a number read from the operation: the
+announcement signs at its fixed slot, and the other three at the `nonce_commitment_number` the request carries, taken as
+sent (fiber's revocation carries one above the number it revokes, and nothing checks that relation). The `already-signed`
+verdict takes the same path and re-signs to the same bytes. The gate's own shape checks run after the lookup, since they
+take the channel's keys, so for an unknown channel only what the codecs refuse is `malformed`.
+
+Nothing on that path throws. Every request comes out as one of three outcomes: a result, a refusal carrying one of the
+four codes and a message, or a fault. A refusal is what the codecs or the gate said no to (`ProtocolError`,
+`PolicyRefusalError`) and is answered on the wire. A fault is anything else: the host's storage throwing, a record or an
+alias the store refuses to read, a bug. None of those is honestly one of the four codes, and answering `policy_refusal`
+would make the node treat a device fault as a security event, so a fault is left unanswered and reported to the host;
+nothing is signed and nothing is claimed, and the same request answers normally once the cause is gone.
+
+Channel keys are derived per request and never cached: a few hashes, and no channel secret stays resident between
+requests. The master seed, copied at construction so the host may discard its own buffer, is the
+only secret the dispatch holds.
+
+The public data methods resolve the channel and answer from the derivation: the base public keys, a commitment point or a
+public nonce by number, and the announcement nonce at its fixed slot. They pass the known-channel check and nothing else;
+their `state_version` is read but not judged, since nothing is claimed. `get_settlement_keys` is the one method whose
+answer is private material: the TLC base key and the TLC key of the number asked, the scoped keys a watchtower settles
+with, and never the funding key.
+
+Registration is two halves, because the name a channel is filed under comes from the node. `prepareChannelRegistration`
+derives the keys of a channel index the caller allocated and returns the payload of `register_channel`, the base public
+keys and the delegated settlement key, together with the exposure the record will open at. `channelRegistered` files the
+channel under the name the acknowledgement carried, through `PolicyEngine.registerChannel`; the session calls it while it
+processes the acknowledgement, so a request the node sends right after finds the record in place. A registration that is
+refused or interrupted leaves no record.
+
+## The wallet identity
+
+The session challenge is answered by `WalletIdentity`, over the wallet identity key of [derivation.md](./derivation.md).
+The public half is the 32-byte x-only key of BIP-340, which the bridge pins per account across sessions: two devices
+restored from one seed present one key. The signature is BIP-340 over `sessionChallengeDigest(challenge)`, the
+domain-separated hash of [protocol.md](./protocol.md), so the identity key never signs bare bytes the bridge chose.
+
+The signature is deterministic. BIP-340 takes optional auxiliary randomness to harden signing against fault attacks, and
+the library draws it from the platform's random source when none is given, which `src/` may not touch: the identity
+signs with a fixed auxiliary value instead, and BIP-340 still derives the nonce from the key and the message, so two
+challenges never share one. The tests pin a signature for a fixed challenge for that reason: a dependency that started
+drawing randomness would break the pin.
+
 ## The interop loop
 
 Two halves verify the engine against fiber's exact stack:
@@ -74,3 +124,65 @@ Two halves verify the engine against fiber's exact stack:
 hex. Those pins are the idempotent re-delivery contract, not snapshots: the SDK's dependencies float on caret ranges,
 and a bump that changes `NonceGen`'s output would break every in-flight signing round (the published nonce would no
 longer match the one regenerated at sign time). A failing pin is investigated, never repinned.
+
+## Where it lives
+
+| File                                    | Contents                                                                            |
+| --------------------------------------- | ----------------------------------------------------------------------------------- |
+| `src/signer/musig2-engine.ts`           | The public data providers and the partial signature                                 |
+| `src/signer/signer-dispatch.ts`         | The one call site: params, channel, keys, gate, signature, and the three outcomes   |
+| `src/signer/wallet-identity.ts`         | The x-only identity key and the deterministic BIP-340 signature of the challenge    |
+| `src/signer/signer.types.ts`            | The partial-sign request, the dispatch outcome, and a registration awaiting its ack |
+| `src/protocol/utils/challenge.utils.ts` | The digest the challenge is signed over, shared with the bridge                     |
+
+## What the tests guarantee
+
+`test/tests/signer/signer-dispatch.spec.ts` drives every method through the dispatch with requests built from the
+cross-implementation vectors, and verifies each of the four partial signatures with scure under an aggregate that
+contains the nonce **the dispatch itself published** for that slot, which is what the node will do, and over the key
+list in fiber's own order: sorted for the funding spends and the announcement, remote first for the send-side
+revocation, so a list the dispatch reordered would not verify; the commitment signature is also aggregated with the
+peer's half into a Schnorr signature the 2-of-2 key accepts. Around that: each of the four codes reaching the outcome as
+exactly its code and the message the codec or the gate threw, a codec refusal ahead of the channel lookup and a
+gate refusal behind it, a session off the curve refused before the claim so that the corrected request still signs, the
+re-delivered request answered with identical bytes, no write and no intent consumed, two channels on one dispatch each
+filed under and answered from its own index, so the two never share a nonce, the storage that throws (with a `code` of
+its own or without), the corrupt record and the alias without a record all coming out as faults that claim nothing and
+clear once the cause is gone, the mainnet lock refusing the testnet vectors, public data answering whatever the state
+version, the settlement keys and the registration payload never carrying the funding key, and every refusal message
+checked against the seed, the identity key, the four channel secrets, a nonce seed and a TLC key.
+
+`test/tests/signer/wallet-identity.spec.ts` pins the x-only key of the vector master seed and the signature of a fixed
+challenge, both as literals: the first is the account's name at the bridge, the second the proof that no randomness
+enters the signature. Discarding the host's seed buffer changes neither.
+`test/tests/protocol/utils/challenge.utils.spec.ts` pins the digest itself.
+
+Coverage of the module is 100% on all four metrics, and the assertions were checked by breaking the code on purpose:
+
+| Mutation                                                             | Tests that failed |
+| -------------------------------------------------------------------- | ----------------- |
+| A revocation signs at the number it revokes, not at its nonce number | 1                 |
+| Every signature uses the `COMMITMENT` nonce context                  | 2                 |
+| A refusal of the gate is ignored and the request signed anyway       | 10                |
+| The params are decoded under a fixed lock, not the dispatch's        | 18                |
+| A fault is answered as a `malformed` refusal                         | 5                 |
+| A refusal is reported as a fault                                     | 27                |
+| A refusal is told apart by carrying a `code`, not by its class       | 1                 |
+| A refusal is written with its stack, not its message                 | 2                 |
+| The key list is sorted before the engine signs                       | 1                 |
+| The channel is looked up before the params are decoded               | 1                 |
+| The keys of the first channel derived are kept for every channel     | 1                 |
+| The keys derive from a fixed index, not the resolved one             | 1                 |
+| The registration is filed at a fixed index, not the prepared one     | 2                 |
+| The prepared registration keeps a fixed index                        | 3                 |
+| The announcement nonce is published at another slot                  | 2                 |
+| The settlement keys carry the funding key                            | 1                 |
+| The registration carries the funding key                             | 3                 |
+| The seed is held by reference, not copied                            | 1                 |
+| The exposure is not validated before the registration is prepared    | 6                 |
+| The record opens at zero exposure whatever was prepared              | 5                 |
+| The gate lets a session off the curve reach the claim                | 2                 |
+| The identity signs the bare challenge                                | 5                 |
+| The identity draws fresh auxiliary randomness                        | 1                 |
+| The identity holds the seed by reference, not its derived key        | 1                 |
+| The challenge digest drops the label                                 | 4                 |

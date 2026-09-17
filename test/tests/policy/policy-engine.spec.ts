@@ -19,8 +19,14 @@ const REMOTE_FUNDING_PUBKEY = hexToBytes(digest.remote.funding_pubkey);
 const OTHER_KEYS = deriveChannelKeys(hexToBytes(vectors.fiber_scheme.channel_seed));
 const OTHER_FUNDING_PUBKEY = pubkeyOf(OTHER_KEYS.fundingKey);
 
-const AGGREGATED_NONCE = hexToBytes("02".repeat(33) + "03".repeat(33));
-const OTHER_AGGREGATED_NONCE = hexToBytes("02".repeat(33) + "04".repeat(33));
+const AGGREGATED_NONCE = hexToBytes(
+    "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798" +
+        "02c6047f9441ed7d6d3045406e95c07cd85c778e4b8cef3ca7abac09b95c709ee5",
+);
+const OTHER_AGGREGATED_NONCE = hexToBytes(
+    "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798" +
+        "02f9308a019258c31049344f85f89d5229b531c845836f99b08601f113bce036f9",
+);
 
 const OPENING_EXPOSURE = "62000000000";
 const THREE_TLC_EXPOSURE = "59750000000";
@@ -421,6 +427,22 @@ describe("checkAndClaim", () => {
                 commitmentRequest("ckb, no tlcs, for remote", {
                     session: session(hexToBytes(caseOf(digest.commitment_cases, "ckb, no tlcs, for remote").digest), {
                         aggregatedNonce: AGGREGATED_NONCE.slice(1),
+                    }),
+                }),
+            ],
+            [
+                "a public key off the curve",
+                commitmentRequest("ckb, no tlcs, for remote", {
+                    session: session(hexToBytes(caseOf(digest.commitment_cases, "ckb, no tlcs, for remote").digest), {
+                        orderedPublicKeys: [LOCAL_FUNDING_PUBKEY, hexToBytes("03".repeat(33))],
+                    }),
+                }),
+            ],
+            [
+                "an aggregated nonce off the curve",
+                commitmentRequest("ckb, no tlcs, for remote", {
+                    session: session(hexToBytes(caseOf(digest.commitment_cases, "ckb, no tlcs, for remote").digest), {
+                        aggregatedNonce: hexToBytes("03".repeat(66)),
                     }),
                 }),
             ],

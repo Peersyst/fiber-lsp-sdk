@@ -28,7 +28,9 @@ const CHANNEL_INDEX = vectors.sdk_scheme.channel.channel_index;
 const KEYS = deriveChannelKeys(hexToBytes(vectors.sdk_scheme.channel.seed));
 const LOCAL_FUNDING_PUBKEY = pubkeyOf(KEYS.fundingKey);
 const REMOTE_FUNDING_PUBKEY = hexToBytes(REMOTE.funding_pubkey);
-const AGGREGATED_NONCE_HEX = "02".repeat(33) + "03".repeat(33);
+const AGGREGATED_NONCE_HEX =
+    "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798" +
+    "02c6047f9441ed7d6d3045406e95c07cd85c778e4b8cef3ca7abac09b95c709ee5";
 
 const CHANNEL_ID = `0x${"1f".repeat(32)}`;
 const REQUEST_ID = "0x2a";

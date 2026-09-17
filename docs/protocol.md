@@ -79,8 +79,9 @@ record is aliased by ([persistence.md](./persistence.md)).
 
 The signed challenge is domain-separated so the identity key never signs a bare 32-byte digest the bridge chose; the bridge
 computes the same hash to verify. `ckbBlake2b` is CKB's blake2b-256, personalized with `ckb-default-hash`, over the label's
-UTF-8 bytes followed by the 32 challenge bytes. Whether `protocol_version` in `session_established` matches the device's own is the
-session's decision, not a decode refusal: the codec reads any version.
+UTF-8 bytes followed by the 32 challenge bytes; `sessionChallengeDigest` is that hash, and the device side that signs it is
+the wallet identity of [signing.md](./signing.md). Whether `protocol_version` in `session_established` matches the device's
+own is the session's decision, not a decode refusal: the codec reads any version.
 
 **Position taken**: the handshake carries no public data at all, only the base public keys and the delegated settlement
 key. The node fetches commitment points and public nonces by number through the public-data methods, which it needs for
@@ -218,7 +219,8 @@ Every field is validated before anything is derived: type, hex prefix and length
 membership, array shape, and that the `method` is one of the ten. A failure anywhere is answered `malformed`, with the
 echoed `request_id` and a message naming the **field**, as a path such as `sign_request.params.commitment_tx.tlcs[0].amount`,
 and what it had to be. A decode refusal never names the value: it reaches the node's logs, and a value can be a preimage or
-a key. `malformed` precedes the channel lookup, so a malformed request for an unknown channel is answered `malformed`.
+a key. A decode refusal precedes the channel lookup, so a request the codec refuses is answered `malformed` even for an
+unknown channel.
 
 A `sign_request` whose `request_id` cannot be read is unanswerable: answering without an id would correlate with nothing,
 so the frame is dropped and the host is told. The same goes for any other frame that does not decode, a challenge of the
@@ -226,9 +228,12 @@ wrong length or an acknowledgement with a bad channel id, since none of those is
 told apart by the refusal itself: the answerable one carries the request id, the unanswerable one is the bare wire refusal.
 
 The codec is the first of two shape checks and the only one that knows the wire. The policy engine repeats the part it
-depends on over the typed input, because it is callable without the wire ([policy.md](./policy.md)), and it is the engine
-that issues the other three codes. Its refusals explain the state they judged, so they may cite what the request carried or
-what the channel's record holds (a commitment number, a state version, an amount), though never key material:
+depends on over the typed input, because it is callable without the wire, and adds that the session's keys are points on
+the curve and the nonce's halves too, or at infinity ([policy.md](./policy.md)); it is also the engine that issues the
+other three codes. It takes the channel's keys, so it runs after the lookup: for an unknown channel, what only the engine
+refuses, a point off the curve or a message that does not match, is answered `unknown_channel`. Its refusals explain the
+state they judged, so they may cite what the request carried or what the channel's record holds (a commitment number, a
+state version, an amount), though never key material:
 
 | Code              | Meaning                                                                                         |
 | ----------------- | ----------------------------------------------------------------------------------------------- |
@@ -238,22 +243,23 @@ what the channel's record holds (a commitment number, a state version, an amount
 | `policy_refusal`  | The sign-once rule or the balance rule                                                          |
 
 A failure that is the device's own, its storage throwing or a record it refuses to read, is none of the four: such a request
-is left unanswered and reported to the host, so the node never reads a device fault as a security event.
+is left unanswered and reported to the host, so the node never reads a device fault as a security event. The dispatch
+returns it as a fault, apart from the refusals ([signing.md](./signing.md)).
 
 ## Where it lives
 
-| File                                   | Contents                                                                                                      |
-| -------------------------------------- | ------------------------------------------------------------------------------------------------------------- |
-| `src/protocol/protocol.constants.ts`   | The method and frame names, the challenge label, and the challenge and request id bounds                      |
-| `src/protocol/protocol.types.ts`       | Every frame and operation object in its wire form (`*Wire`), and the decoded forms the SDK uses               |
-| `src/protocol/protocol.error.ts`       | `ProtocolError`: a wire refusal restated with the code and the request id it is answered with                 |
-| `src/protocol/frame.ts`                | Text in, typed inbound frame out; typed outbound frame in, text out                                           |
-| `src/protocol/sign-request.ts`         | The sign request's envelope, its params per method, and the response                                          |
-| `src/protocol/operation-params.ts`     | The four operation objects and the musig2 session                                                             |
-| `src/protocol/channel-registration.ts` | The registration and its acknowledgement                                                                      |
-| `src/protocol/utils/`                  | The protocol's own identifiers: the request id it echoes and the channel id it names a record by              |
-| `src/wire/`                            | The forms of the Encodings table, and the field reader whose paths the refusals are written in                |
-| `src/common/`                          | The four error codes, and the chain and channel vocabulary the codecs, the digest module and the engine share |
+| File                                   | Contents                                                                                                           |
+| -------------------------------------- | ------------------------------------------------------------------------------------------------------------------ |
+| `src/protocol/protocol.constants.ts`   | The method and frame names, the challenge label, and the challenge and request id bounds                           |
+| `src/protocol/protocol.types.ts`       | Every frame and operation object in its wire form (`*Wire`), and the decoded forms the SDK uses                    |
+| `src/protocol/protocol.error.ts`       | `ProtocolError`: a wire refusal restated with the code and the request id it is answered with                      |
+| `src/protocol/frame.ts`                | Text in, typed inbound frame out; typed outbound frame in, text out                                                |
+| `src/protocol/sign-request.ts`         | The sign request's envelope, its params per method, and the response                                               |
+| `src/protocol/operation-params.ts`     | The four operation objects and the musig2 session                                                                  |
+| `src/protocol/channel-registration.ts` | The registration and its acknowledgement                                                                           |
+| `src/protocol/utils/`                  | The request id it echoes, the channel id it names a record by, and the digest the session challenge is signed over |
+| `src/wire/`                            | The forms of the Encodings table, and the field reader whose paths the refusals are written in                     |
+| `src/common/`                          | The four error codes, and the chain and channel vocabulary the codecs, the digest module and the engine share      |
 
 The encodings are fiber's, not this protocol's, so the readers that enforce them are a module of their own, shared with the
 JSON-RPC client that reads the same values from the same node. They refuse with a `WireError` naming the field; the two entry
