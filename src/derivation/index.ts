@@ -6,8 +6,9 @@ export {
     MAX_CHANNEL_INDEX,
     MAX_COMMITMENT_NUMBER,
     NONCE_CONTEXTS,
+    SECRET_KEY_LENGTH,
 } from "./derivation.constants";
-export type { FiberChannelKeys, NonceContext } from "./derivation.types";
+export type { BasePublicKeys, FiberChannelKeys, NonceContext } from "./derivation.types";
 export {
     deriveChannelKeys,
     derivePrivateKey,

@@ -1,10 +1,16 @@
 import { equalBytes } from "@noble/curves/utils.js";
 import { Session, nonceGen } from "@scure/btc-signer/musig2.js";
-import { COMPRESSED_POINT_LENGTH, MESSAGE_DIGEST_LENGTH, MUSIG_PARTICIPANTS, PUBLIC_NONCE_LENGTH, assertBytes } from "../common";
-import type { FiberChannelKeys, NonceContext } from "../derivation";
+import {
+    COMPRESSED_POINT_LENGTH,
+    MESSAGE_DIGEST_LENGTH,
+    MUSIG_PARTICIPANTS,
+    PARTIAL_SIGNATURE_LENGTH,
+    PUBLIC_NONCE_LENGTH,
+    assertBytes,
+} from "../common";
+import type { BasePublicKeys, FiberChannelKeys, NonceContext } from "../derivation";
 import { deriveNonceSeed, getCommitmentPoint, pubkeyOf } from "../derivation";
-import { PARTIAL_SIGNATURE_LENGTH } from "./signer.constants";
-import type { BasePublicKeys, PartialSignRequest } from "./signer.types";
+import type { PartialSignRequest } from "./signer.types";
 
 /**
  * Derives the public halves of the channel's base keys the device shares with the node.

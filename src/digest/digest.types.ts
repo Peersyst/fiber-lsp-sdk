@@ -1,33 +1,4 @@
-/**
- * The four values of the molecule `hash_type` byte, encoded as `data 0, type 1, data1 2, data2 4`.
- */
-export type ScriptHashType = "data" | "type" | "data1" | "data2";
-
-export type Script = {
-    codeHash: Uint8Array;
-    hashType: ScriptHashType;
-    args: Uint8Array;
-};
-
-/**
- * A script minus its args: what the device pins per network for locks whose args it computes itself.
- */
-export type ScriptTemplate = {
-    codeHash: Uint8Array;
-    hashType: ScriptHashType;
-};
-
-export type OutPoint = {
-    txHash: Uint8Array;
-    index: number;
-};
-
-export type TlcDirection = "offered" | "received";
-
-/**
- * The two hash locks fiber's TLCs support, encoded in the witness flag byte as `ckb-hash 0, sha256 1`.
- */
-export type TlcHashAlgorithm = "ckb-hash" | "sha256";
+import type { OutPoint, Script, ScriptTemplate, TlcDirection, TlcHashAlgorithm } from "../common";
 
 /**
  * One TLC of the settlement witness, as the node attaches it: selection and status filtering happen node-side, the

@@ -1,4 +1,5 @@
 import { concatBytes } from "@noble/hashes/utils.js";
+import type { Script } from "../common";
 import {
     COMPRESSED_POINT_LENGTH,
     MAX_AMOUNT_SHANNONS,
@@ -11,7 +12,7 @@ import {
 import type { FiberChannelKeys } from "../derivation";
 import { MAX_COMMITMENT_NUMBER, pubkeyOf } from "../derivation";
 import { MAX_CAPACITY_SHANNONS, MAX_SINCE_PAYLOAD, SINCE_RELATIVE_EPOCH_FLAGS } from "./digest.constants";
-import type { CommitmentTxInput, Script } from "./digest.types";
+import type { CommitmentTxInput } from "./digest.types";
 import { calculateFee, commitmentTxSize } from "./fee";
 import { buildSettlementWitness } from "./settlement-witness";
 import {

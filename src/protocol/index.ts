@@ -1,2 +1,50 @@
-export * from "./protocol.constants";
-export * from "./protocol.types";
+export {
+    CHALLENGE_LENGTH,
+    INBOUND_FRAME_TYPES,
+    MAX_REQUEST_ID_LENGTH,
+    PROTOCOL_VERSION,
+    SESSION_CHALLENGE_LABEL,
+    SIGNER_METHODS,
+} from "./protocol.constants";
+export type {
+    ChallengeWire,
+    ChannelAnnouncementWire,
+    ChannelRegisteredWire,
+    ChannelRegistration,
+    CommitmentNumberParamsWire,
+    CommitmentTxWire,
+    EmptyParamsWire,
+    ErrorWire,
+    InboundFrame,
+    InboundFrameWire,
+    OutboundFrame,
+    OutboundFrameWire,
+    PartialSignChannelAnnouncementParamsWire,
+    PartialSignClosingTxParamsWire,
+    PartialSignCommitmentTxParamsWire,
+    PartialSignParamsWire,
+    PartialSignRevocationParamsWire,
+    PingWire,
+    PongWire,
+    RegisterChannelWire,
+    RevocationWire,
+    SessionEstablishedWire,
+    SettlementTlcWire,
+    ShutdownTxWire,
+    SignError,
+    SignMethodParamsWire,
+    SignParams,
+    SignParamsWireByMethod,
+    SignRequest,
+    SignRequestWire,
+    SignResponseWire,
+    SignResult,
+    SignResultWire,
+    SignSessionWire,
+    SignatureMethod,
+    SignedChallengeWire,
+    SignerMethod,
+} from "./protocol.types";
+export { ProtocolError } from "./protocol.error";
+export { decodeInboundFrame, encodeOutboundFrame } from "./frame";
+export { decodeSignParams } from "./sign-request";

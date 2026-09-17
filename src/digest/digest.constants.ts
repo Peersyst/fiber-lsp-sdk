@@ -1,10 +1,11 @@
 import { hexToBytes } from "@noble/hashes/utils.js";
-import type { ScriptTemplate } from "./digest.types";
+import type { ScriptTemplate } from "../common";
+import { UINT64_MAX } from "../common";
 
 /**
  * CKB cell capacities and fees are u64 shannons, unlike the u128 channel amounts.
  */
-export const MAX_CAPACITY_SHANNONS = (1n << 64n) - 1n;
+export const MAX_CAPACITY_SHANNONS = UINT64_MAX;
 
 /**
  * Fee rates are shannons per 1000 bytes of transaction; this is fiber's `FEE_RATE_WEIGHT_SCALE`.

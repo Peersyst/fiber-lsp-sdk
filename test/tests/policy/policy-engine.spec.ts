@@ -1,12 +1,11 @@
 import { hexToBytes } from "@noble/hashes/utils.js";
 import { deriveChannelKeys, pubkeyOf } from "../../../src/derivation";
-import { COMMITMENT_LOCK_TESTNET } from "../../../src/digest";
 import type { ChannelPolicyRecord, PolicySignRequest, SignSession } from "../../../src/policy";
 import { PolicyEngine, PolicyRefusalError, SignerStore } from "../../../src/policy";
 import { buildSessionCommitment } from "../../../src/policy/utils";
 import { AsyncInMemorySignerStorage, InMemorySignerStorage } from "../../mocks/policy";
-import { toOutPoint, toScript, toScriptOrNull, toTlc } from "../../utils/digest-inputs";
-import { loadInteropVectors } from "../../utils/interop-vectors";
+import { toChannelAnnouncementInput, toCommitmentTxInput, toRevocationInput, toShutdownTxInput } from "../../utils/digest-inputs";
+import { caseOf, loadInteropVectors } from "../../utils/interop-vectors";
 
 const vectors = loadInteropVectors();
 const digest = vectors.digest;
@@ -16,7 +15,6 @@ const CHANNEL_INDEX = vectors.sdk_scheme.channel.channel_index;
 const KEYS = deriveChannelKeys(hexToBytes(vectors.sdk_scheme.channel.seed));
 const LOCAL_FUNDING_PUBKEY = pubkeyOf(KEYS.fundingKey);
 const REMOTE_FUNDING_PUBKEY = hexToBytes(digest.remote.funding_pubkey);
-const REMOTE_TLC_BASE_PUBKEY = hexToBytes(digest.remote.tlc_base_pubkey);
 
 const OTHER_KEYS = deriveChannelKeys(hexToBytes(vectors.fiber_scheme.channel_seed));
 const OTHER_FUNDING_PUBKEY = pubkeyOf(OTHER_KEYS.fundingKey);
@@ -27,12 +25,6 @@ const OTHER_AGGREGATED_NONCE = hexToBytes("02".repeat(33) + "04".repeat(33));
 const OPENING_EXPOSURE = "62000000000";
 const THREE_TLC_EXPOSURE = "59750000000";
 const TLC_DECREASE = "2250000000";
-
-function caseOf<Vector extends { name: string }>(cases: Vector[], name: string): Vector {
-    const found = cases.find((entry) => entry.name === name);
-    if (found === undefined) throw new Error(`the vectors carry no case named "${name}"`);
-    return found;
-}
 
 function session(message: Uint8Array, overrides: Partial<SignSession> = {}): SignSession {
     return {
@@ -50,28 +42,7 @@ function commitmentRequest(name: string, overrides: Partial<PolicySignRequest> =
         stateVersion: 1,
         nonceCommitmentNumber: kase.commitment_number,
         session: session(hexToBytes(kase.digest)),
-        operation: {
-            kind: "commitment_tx",
-            input: {
-                forRemote: kase.for_remote,
-                fundingOutPoint: toOutPoint(kase.funding_out_point),
-                remoteFundingPubkey: REMOTE_FUNDING_PUBKEY,
-                remoteTlcBasePubkey: REMOTE_TLC_BASE_PUBKEY,
-                commitmentNumber: kase.commitment_number,
-                commitmentDelayEpoch: BigInt(kase.delay_epoch),
-                commitmentFeeRate: BigInt(kase.fee_rate),
-                cellDepsCount: kase.cell_deps_count,
-                udtTypeScript: toScriptOrNull(kase.udt_type_script),
-                toLocalShannons: BigInt(kase.to_local),
-                toRemoteShannons: BigInt(kase.to_remote),
-                settlementLocalShannons: BigInt(kase.settlement_local),
-                settlementRemoteShannons: BigInt(kase.settlement_remote),
-                localReservedCkbShannons: BigInt(kase.local_reserved),
-                remoteReservedCkbShannons: BigInt(kase.remote_reserved),
-                tlcs: kase.tlcs.map(toTlc),
-                commitmentLock: COMMITMENT_LOCK_TESTNET,
-            },
-        },
+        operation: { kind: "commitment_tx", input: toCommitmentTxInput(kase, digest.remote) },
         ...overrides,
     };
 }
@@ -84,23 +55,7 @@ function shutdownRequest(name: string, overrides: Partial<PolicySignRequest> = {
         // Fiber signs a close with the commitment nonce of the current local number.
         nonceCommitmentNumber: 20,
         session: session(hexToBytes(kase.digest)),
-        operation: {
-            kind: "shutdown_tx",
-            input: {
-                fundingOutPoint: toOutPoint(kase.funding_out_point),
-                remoteFundingPubkey: REMOTE_FUNDING_PUBKEY,
-                localCloseScript: toScript(kase.local_close_script),
-                remoteCloseScript: toScript(kase.remote_close_script),
-                localFeeRate: BigInt(kase.local_fee_rate),
-                remoteFeeRate: BigInt(kase.remote_fee_rate),
-                cellDepsCount: kase.cell_deps_count,
-                udtTypeScript: toScriptOrNull(kase.udt_type_script),
-                toLocalShannons: BigInt(kase.to_local),
-                toRemoteShannons: BigInt(kase.to_remote),
-                localReservedCkbShannons: BigInt(kase.local_reserved),
-                remoteReservedCkbShannons: BigInt(kase.remote_reserved),
-            },
-        },
+        operation: { kind: "shutdown_tx", input: toShutdownTxInput(kase, digest.remote) },
         ...overrides,
     };
 }
@@ -113,24 +68,7 @@ function revocationRequest(name: string, overrides: Partial<PolicySignRequest> =
         // Fiber's off-by-one: the nonce is one above the number the message revokes.
         nonceCommitmentNumber: kase.revoked_commitment_number + 1,
         session: session(hexToBytes(kase.digest)),
-        operation: {
-            kind: "revocation",
-            input: {
-                forRemote: kase.for_remote,
-                revokedCommitmentNumber: kase.revoked_commitment_number,
-                payoutScript: toScript(kase.payout_script),
-                remoteFundingPubkey: REMOTE_FUNDING_PUBKEY,
-                commitmentDelayEpoch: BigInt(kase.delay_epoch),
-                commitmentFeeRate: BigInt(kase.fee_rate),
-                cellDepsCount: kase.cell_deps_count,
-                udtTypeScript: toScriptOrNull(kase.udt_type_script),
-                toLocalShannons: BigInt(kase.to_local),
-                toRemoteShannons: BigInt(kase.to_remote),
-                localReservedCkbShannons: BigInt(kase.local_reserved),
-                remoteReservedCkbShannons: BigInt(kase.remote_reserved),
-                commitmentLock: COMMITMENT_LOCK_TESTNET,
-            },
-        },
+        operation: { kind: "revocation", input: toRevocationInput(kase, digest.remote) },
         ...overrides,
     };
 }
@@ -143,17 +81,7 @@ function announcementRequest(name: string, overrides: Partial<PolicySignRequest>
         // Deliberately not zero: the announcement slot must not follow the request.
         nonceCommitmentNumber: 7,
         session: session(hexToBytes(kase.digest)),
-        operation: {
-            kind: "channel_announcement",
-            input: {
-                chainHash: hexToBytes(kase.chain_hash),
-                fundingOutPoint: toOutPoint(kase.funding_out_point),
-                nodeIds: [hexToBytes(kase.node_ids[0]), hexToBytes(kase.node_ids[1])],
-                remoteFundingPubkey: REMOTE_FUNDING_PUBKEY,
-                capacityShannons: BigInt(kase.capacity),
-                udtTypeScript: toScriptOrNull(kase.udt_type_script),
-            },
-        },
+        operation: { kind: "channel_announcement", input: toChannelAnnouncementInput(kase, digest.remote) },
         ...overrides,
     };
 }
@@ -453,6 +381,9 @@ describe("checkAndClaim", () => {
             ["a negative state version", commitmentRequest("ckb, no tlcs, for remote", { stateVersion: -1 })],
             ["a fractional state version", commitmentRequest("ckb, no tlcs, for remote", { stateVersion: 1.5 })],
             ["a commitment number above the chain", commitmentRequest("ckb, no tlcs, for remote", { nonceCommitmentNumber: 2 ** 48 })],
+            ["no nonce number on a commitment tx", commitmentRequest("ckb, no tlcs, for remote", { nonceCommitmentNumber: undefined })],
+            ["no nonce number on a close", shutdownRequest("ckb", { nonceCommitmentNumber: undefined })],
+            ["no nonce number on a revocation", revocationRequest("ckb, send side", { nonceCommitmentNumber: undefined })],
             [
                 "one public key",
                 commitmentRequest("ckb, no tlcs, for remote", {

@@ -1,10 +1,17 @@
-import { COMPRESSED_POINT_LENGTH, MAX_AMOUNT_SHANNONS, assertBytes, assertUnsignedBigInt, ckbBlake2b, compareBytes } from "../common";
+import {
+    COMPRESSED_POINT_LENGTH,
+    HASH256_LENGTH,
+    MAX_AMOUNT_SHANNONS,
+    assertBytes,
+    assertUnsignedBigInt,
+    ckbBlake2b,
+    compareBytes,
+} from "../common";
 import type { FiberChannelKeys } from "../derivation";
 import { pubkeyOf } from "../derivation";
 import type { ChannelAnnouncementInput } from "./digest.types";
 import { aggregateXOnlyPubkey, encodeOutPoint, encodeScriptOpt, moleculeTable, uint128Le, uint64Le } from "./utils";
 
-const CHAIN_HASH_LENGTH = 32;
 const SIGNATURE_PLACEHOLDER_LENGTH = 64;
 
 /**
@@ -14,7 +21,7 @@ const SIGNATURE_PLACEHOLDER_LENGTH = 64;
  * @returns The 32-byte digest a compliant signing request must carry.
  */
 export function computeChannelAnnouncementDigest(keys: FiberChannelKeys, input: ChannelAnnouncementInput): Uint8Array {
-    assertBytes("chainHash", input.chainHash, CHAIN_HASH_LENGTH);
+    assertBytes("chainHash", input.chainHash, HASH256_LENGTH);
     assertBytes("nodeIds[0]", input.nodeIds[0], COMPRESSED_POINT_LENGTH);
     assertBytes("nodeIds[1]", input.nodeIds[1], COMPRESSED_POINT_LENGTH);
     assertBytes("remoteFundingPubkey", input.remoteFundingPubkey, COMPRESSED_POINT_LENGTH);

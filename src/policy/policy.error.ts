@@ -1,4 +1,4 @@
-import type { SignerErrorCode } from "../protocol";
+import type { SignerErrorCode } from "../common";
 
 export class PolicyRefusalError extends Error {
     readonly code: SignerErrorCode;

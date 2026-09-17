@@ -1,11 +1,9 @@
 import { concatBytes } from "@noble/hashes/utils.js";
-import { MAX_AMOUNT_SHANNONS, assertBytes, assertUnsignedBigInt, assertUnsignedInteger } from "../../common";
+import type { OutPoint, Script, ScriptHashType } from "../../common";
+import { HASH256_LENGTH, MAX_AMOUNT_SHANNONS, UINT32_MAX, assertBytes, assertUnsignedBigInt, assertUnsignedInteger } from "../../common";
 import { CELL_DEP_LENGTH, CELL_INPUT_LENGTH, MAX_CAPACITY_SHANNONS } from "../digest.constants";
-import type { OutPoint, Script, ScriptHashType } from "../digest.types";
 
-const U32_MAX = 2 ** 32 - 1;
 const U32_LENGTH = 4;
-const BYTE32_LENGTH = 32;
 
 /**
  * The molecule `hash_type` byte: `DataN` encodes as `N << 1`, `type` as 1.
@@ -18,7 +16,7 @@ const HASH_TYPE_BYTES: Record<ScriptHashType, number> = { data: 0, type: 1, data
  * @returns The 4 bytes.
  */
 export function uint32Le(value: number): Uint8Array {
-    assertUnsignedInteger("uint32 value", value, U32_MAX);
+    assertUnsignedInteger("uint32 value", value, UINT32_MAX);
     const bytes = new Uint8Array(U32_LENGTH);
     new DataView(bytes.buffer).setUint32(0, value, true);
     return bytes;
@@ -121,7 +119,7 @@ export function moleculeBytes(data: Uint8Array): Uint8Array {
  * @returns The Script bytes.
  */
 export function encodeScript(script: Script): Uint8Array {
-    assertBytes("script.codeHash", script.codeHash, BYTE32_LENGTH);
+    assertBytes("script.codeHash", script.codeHash, HASH256_LENGTH);
     if (!(script.hashType in HASH_TYPE_BYTES)) {
         throw new TypeError(`script.hashType must be one of ${Object.keys(HASH_TYPE_BYTES).join(", ")}`);
     }
@@ -146,8 +144,8 @@ export function encodeScriptOpt(script: Script | null): Uint8Array {
  * @returns The 36 bytes.
  */
 export function encodeOutPoint(outPoint: OutPoint): Uint8Array {
-    assertBytes("outPoint.txHash", outPoint.txHash, BYTE32_LENGTH);
-    assertUnsignedInteger("outPoint.index", outPoint.index, U32_MAX);
+    assertBytes("outPoint.txHash", outPoint.txHash, HASH256_LENGTH);
+    assertUnsignedInteger("outPoint.index", outPoint.index, UINT32_MAX);
     return concatBytes(outPoint.txHash, uint32Le(outPoint.index));
 }
 
@@ -200,7 +198,7 @@ export type RawTransactionFields = {
  */
 export function encodeRawTransaction(fields: RawTransactionFields): Uint8Array {
     for (const [index, cellDep] of fields.cellDeps.entries()) assertBytes(`cellDeps[${index}]`, cellDep, CELL_DEP_LENGTH);
-    for (const [index, headerDep] of fields.headerDeps.entries()) assertBytes(`headerDeps[${index}]`, headerDep, BYTE32_LENGTH);
+    for (const [index, headerDep] of fields.headerDeps.entries()) assertBytes(`headerDeps[${index}]`, headerDep, HASH256_LENGTH);
     for (const [index, input] of fields.inputs.entries()) assertBytes(`inputs[${index}]`, input, CELL_INPUT_LENGTH);
     return moleculeTable([
         uint32Le(fields.version),

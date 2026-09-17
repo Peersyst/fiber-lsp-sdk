@@ -1,3 +1,4 @@
+import type { Script, ScriptTemplate } from "../common";
 import { assertUnsignedBigInt, assertUnsignedInteger } from "../common";
 import {
     CELL_DEP_LENGTH,
@@ -8,7 +9,6 @@ import {
     MAX_CAPACITY_SHANNONS,
     MAX_CELL_DEPS_COUNT,
 } from "./digest.constants";
-import type { Script, ScriptTemplate } from "./digest.types";
 import { encodeCellOutput, encodeRawTransaction, encodeTransaction } from "./utils";
 
 const UDT_AMOUNT_DATA_LENGTH = 16;

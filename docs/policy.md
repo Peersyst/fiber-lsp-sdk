@@ -9,11 +9,13 @@ the per-channel record ([persistence.md](./persistence.md)).
 
 Ahead of them, `PolicyEngine.checkAndClaim` validates the request's own **shape** and refuses it as `malformed`: two
 distinct 33-byte public keys one of which is this channel's funding key, a 66-byte aggregated nonce, a 32-byte message, a
-known operation, and numbers in range. Everything in a request is node-supplied, so a bad field has to be a wire refusal
-rather than an exception escaping into the session, and the same mapping covers the digest builders, whose rejections of
-structurally impossible state (a fee no capacity covers, more than 255 TLCs, a public key off the curve) become
-`malformed` rather than a crash. It precedes the channel lookup, so a malformed request for an unknown channel answers
-`malformed`.
+known operation, and numbers in range. On the wire that shape is checked once more, and earlier, by the protocol codecs
+([protocol.md](./protocol.md)), which is where a field's spelling and encoding are judged; the engine repeats the part it
+depends on because it is callable without the wire. Everything in a request is node-supplied, so a bad field has to be a
+wire refusal rather than an exception escaping into the session, and the same mapping covers the digest builders, whose
+rejections of structurally impossible state (a fee no capacity covers, more than 255 TLCs, a public key off the curve)
+become `malformed` rather than a crash. It precedes the channel lookup, so a malformed request for an unknown channel
+answers `malformed`.
 
 The five then resolve the channel's name to its index and run as one step inside `SignerStore.updateChannelRecord`, so the
 record they read is the record they write and no concurrent request can interleave with the decision.

@@ -17,8 +17,9 @@ describe("resolveSignSlot", () => {
         expect(resolveSignSlot(operation(kind), 9)).toEqual({ context, commitmentNumber: 9 });
     });
 
-    it("claims the fixed announcement slot whatever number the request carries", () => {
+    it("claims the fixed announcement slot whatever number the request carries, or none at all", () => {
         expect(resolveSignSlot(operation("channel_announcement"), 9)).toEqual({ context: "ANNOUNCEMENT", commitmentNumber: 0 });
+        expect(resolveSignSlot(operation("channel_announcement"))).toEqual({ context: "ANNOUNCEMENT", commitmentNumber: 0 });
     });
 
     it("accepts the highest commitment number of the chain", () => {
@@ -37,6 +38,7 @@ describe("resolveSignSlot", () => {
         ["negative", -1],
         ["fractional", 1.5],
         ["not a number", "3" as unknown as number],
+        ["absent, which only the announcement slot may be", undefined],
     ])("rejects a commitment number %s", (_, commitmentNumber) => {
         expect(() => resolveSignSlot(operation("commitment_tx"), commitmentNumber)).toThrow(RangeError);
     });

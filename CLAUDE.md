@@ -33,13 +33,14 @@ Upstream reference: `nervosnetwork/fiber` @ `b71a61c3` (v0.9.0-rc7). The key der
 
 ```text
 src/
-  common/         Cross-module helpers that belong to no single module (input guards)
+  common/         Input guards, and the chain and protocol vocabulary that belongs to no single module
   derivation/     Fiber key scheme port + SDK-owned derivations
   digest/         Rebuilds the four messages fiber signs (no-blind-signing); minimal molecule serializer
   signer/         Signer-protocol dispatch, musig2 signing engine
   policy/         Policy engine + persisted per-channel records
   session/        Signer session client: challenge auth, correlation, resume
-  protocol/       Wire types of the remote signing protocol
+  wire/           How fiber writes values in JSON, and the field readers that refuse anything else
+  protocol/       Frames, methods and results of the remote signing protocol
   rpc/            Typed fiber JSON-RPC client
   sdk/            Public facade wiring the above
   index.ts        Public entrypoint; every export here is a published commitment
@@ -93,10 +94,10 @@ concept's name with no suffix (`fiber-scheme.ts`, `device-scheme.ts`).
 ### Barrels
 
 Every folder has an `index.ts`, and it is imported as the folder (`../common`), never as `../common/index`. Barrels re-export
-wholesale with `export *`. Three exceptions list their exports one by one: `src/derivation/index.ts` and `src/digest/index.ts`,
-which keep the internals of their fiber ports out of reach of the other modules, and `src/index.ts`, which is the published
-surface. Those lists are read as code, not pinned by a test: a test that restates a list of names only asks to be updated
-alongside it.
+wholesale with `export *`. Four exceptions list their exports one by one: `src/derivation/index.ts` and `src/digest/index.ts`,
+which keep the internals of their fiber ports out of reach of the other modules, `src/protocol/index.ts`, which keeps the decoders
+behind its two entry points out of reach of them too, and `src/index.ts`, which is the published surface. Those lists are read as
+code, not pinned by a test: a test that restates a list of names only asks to be updated alongside it.
 
 ### Comments
 
@@ -116,7 +117,8 @@ Block comments always span multiple lines, never `/** text */` on one line:
 
 Every function in `src/` carries JSDoc in that shape, exported or not, methods included: a description that fits on one line,
 then `@param` per parameter and `@returns`. The description is the whole story: no extra paragraphs — when something more needs
-saying, it belongs in `docs/`, cross-linked, not in the JSDoc. `//` is only for a note inside a function body.
+saying, it belongs in `docs/`, cross-linked, not in the JSDoc. `//` is for a note inside a function body or above a
+module-private constant; a comment on anything exported is a block comment.
 
 Everything else — types, constants, interfaces, modules — takes a comment only when it earns one by saying what the code cannot:
 an upstream quirk, the reason a bound exists, an invariant a reader would otherwise break.
@@ -129,7 +131,10 @@ an upstream quirk, the reason a bound exists, an invariant a reader would otherw
   that grows behavior is never renamed; the export carries the precision (`InMemorySignerStorage` is a fake, a stub over `fetch`
   would be `FetchMock`). Every other shared helper goes in `test/utils/`. Neither is ever named `*.spec.ts`.
 - Fixtures are written out literally in the spec that uses them, never produced by a factory that fills in defaults: a factory
-  that supplies the field a test meant to omit turns a refusal path green.
+  that supplies the field a test meant to omit turns a refusal path green. The one exception is a helper that projects a
+  cross-implementation vector into a typed input or a wire object (`test/utils/digest-inputs.ts`, `test/utils/wire-requests.ts`):
+  every field comes from the vector, so nothing is defaulted, and a refusal path mutates what it returns rather than omitting
+  at construction.
 - `test/` may use `node:*` imports and platform globals (it only ever runs under Node); `src/` may not, and lint enforces both
   bans there.
 - Derivation changes must keep the cross-implementation vectors green (`interop/`, see its README): those vectors are the

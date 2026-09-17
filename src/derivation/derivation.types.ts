@@ -14,3 +14,11 @@ export type FiberChannelKeys = {
 };
 
 export type NonceContext = (typeof NONCE_CONTEXTS)[number];
+
+/**
+ * The public halves of the channel's base keys, registered with the node at channel open.
+ */
+export type BasePublicKeys = {
+    fundingPubkey: Uint8Array;
+    tlcBasePubkey: Uint8Array;
+};

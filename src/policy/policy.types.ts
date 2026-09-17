@@ -24,8 +24,14 @@ export type ChannelPolicyRecord = {
 };
 
 export type SignSession = {
+    /**
+     * The 2-of-2 key list exactly as the node sent it; the SDK never sorts or reorders it.
+     */
     orderedPublicKeys: Uint8Array[];
     aggregatedNonce: Uint8Array;
+    /**
+     * Opaque to the engine until the policy layer recomputes it.
+     */
     message: Uint8Array;
 };
 
@@ -41,9 +47,10 @@ export type PolicySignRequest = {
     channelId: string;
     stateVersion: number;
     /**
-     * The number the nonce slot is keyed by, which is not always the number inside the message.
+     * The number the nonce slot is keyed by, which is not always the number inside the message; absent for the
+     * announcement, whose slot `resolveSignSlot` fixes.
      */
-    nonceCommitmentNumber: number;
+    nonceCommitmentNumber?: number;
     session: SignSession;
     operation: SignOperation;
 };

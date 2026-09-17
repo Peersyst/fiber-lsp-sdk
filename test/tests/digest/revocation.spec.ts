@@ -2,7 +2,8 @@ import { bytesToHex, hexToBytes } from "@noble/hashes/utils.js";
 import { deriveChannelSeed } from "../../../src/derivation/device-scheme";
 import { deriveChannelKeys, pubkeyOf } from "../../../src/derivation/fiber-scheme";
 import { COMMITMENT_LOCK_TESTNET } from "../../../src/digest/digest.constants";
-import type { RevocationInput, Script } from "../../../src/digest/digest.types";
+import type { Script } from "../../../src/common";
+import type { RevocationInput } from "../../../src/digest/digest.types";
 import { computeRevocationDigest } from "../../../src/digest/revocation";
 
 const MASTER_SEED = new Uint8Array(32).fill(0x24);

@@ -8,7 +8,16 @@ import { computeRevocationDigest } from "../../../src/digest/revocation";
 import { buildSettlementWitness } from "../../../src/digest/settlement-witness";
 import { computeShutdownTxDigest } from "../../../src/digest/shutdown-tx";
 import { aggregateXOnlyPubkey } from "../../../src/digest/utils/digest.utils";
-import { toOutPoint, toScript, toScriptOrNull, toTlc } from "../../utils/digest-inputs";
+import {
+    toChannelAnnouncementInput,
+    toCommitmentTxInput,
+    toOutPoint,
+    toRevocationInput,
+    toScript,
+    toScriptOrNull,
+    toShutdownTxInput,
+    toTlc,
+} from "../../utils/digest-inputs";
 import { loadInteropVectors } from "../../utils/interop-vectors";
 
 const vectors = loadInteropVectors();
@@ -32,25 +41,7 @@ describe("digest cross-implementation vectors", () => {
         for (const kase of digest.commitment_cases) {
             describe(kase.name, () => {
                 const isUdt = kase.udt_type_script !== null;
-                const input = {
-                    forRemote: kase.for_remote,
-                    fundingOutPoint: toOutPoint(kase.funding_out_point),
-                    remoteFundingPubkey,
-                    remoteTlcBasePubkey,
-                    commitmentNumber: kase.commitment_number,
-                    commitmentDelayEpoch: BigInt(kase.delay_epoch),
-                    commitmentFeeRate: BigInt(kase.fee_rate),
-                    cellDepsCount: kase.cell_deps_count,
-                    udtTypeScript: toScriptOrNull(kase.udt_type_script),
-                    toLocalShannons: BigInt(kase.to_local),
-                    toRemoteShannons: BigInt(kase.to_remote),
-                    settlementLocalShannons: BigInt(kase.settlement_local),
-                    settlementRemoteShannons: BigInt(kase.settlement_remote),
-                    localReservedCkbShannons: BigInt(kase.local_reserved),
-                    remoteReservedCkbShannons: BigInt(kase.remote_reserved),
-                    tlcs: kase.tlcs.map(toTlc),
-                    commitmentLock: COMMITMENT_LOCK_TESTNET,
-                };
+                const input = toCommitmentTxInput(kase, digest.remote);
 
                 it("rebuilds the settlement witness", () => {
                     const witness = buildSettlementWitness(keys, {
@@ -103,20 +94,7 @@ describe("digest cross-implementation vectors", () => {
                 });
 
                 it("recomputes the digest", () => {
-                    const recomputed = computeShutdownTxDigest(keys, {
-                        fundingOutPoint: toOutPoint(kase.funding_out_point),
-                        remoteFundingPubkey,
-                        localCloseScript: toScript(kase.local_close_script),
-                        remoteCloseScript: toScript(kase.remote_close_script),
-                        localFeeRate: BigInt(kase.local_fee_rate),
-                        remoteFeeRate: BigInt(kase.remote_fee_rate),
-                        cellDepsCount: kase.cell_deps_count,
-                        udtTypeScript: toScriptOrNull(kase.udt_type_script),
-                        toLocalShannons: BigInt(kase.to_local),
-                        toRemoteShannons: BigInt(kase.to_remote),
-                        localReservedCkbShannons: BigInt(kase.local_reserved),
-                        remoteReservedCkbShannons: BigInt(kase.remote_reserved),
-                    });
+                    const recomputed = computeShutdownTxDigest(keys, toShutdownTxInput(kase, digest.remote));
                     expect(bytesToHex(recomputed)).toBe(kase.digest);
                 });
 
@@ -146,21 +124,7 @@ describe("digest cross-implementation vectors", () => {
     describe("revocation", () => {
         for (const kase of digest.revocation_cases) {
             it(`recomputes the "${kase.name}" digest`, () => {
-                const recomputed = computeRevocationDigest(keys, {
-                    forRemote: kase.for_remote,
-                    revokedCommitmentNumber: kase.revoked_commitment_number,
-                    payoutScript: toScript(kase.payout_script),
-                    remoteFundingPubkey,
-                    commitmentDelayEpoch: BigInt(kase.delay_epoch),
-                    commitmentFeeRate: BigInt(kase.fee_rate),
-                    cellDepsCount: kase.cell_deps_count,
-                    udtTypeScript: toScriptOrNull(kase.udt_type_script),
-                    toLocalShannons: BigInt(kase.to_local),
-                    toRemoteShannons: BigInt(kase.to_remote),
-                    localReservedCkbShannons: BigInt(kase.local_reserved),
-                    remoteReservedCkbShannons: BigInt(kase.remote_reserved),
-                    commitmentLock: COMMITMENT_LOCK_TESTNET,
-                });
+                const recomputed = computeRevocationDigest(keys, toRevocationInput(kase, digest.remote));
                 expect(bytesToHex(recomputed)).toBe(kase.digest);
             });
         }
@@ -169,14 +133,7 @@ describe("digest cross-implementation vectors", () => {
     describe("channel announcement", () => {
         for (const kase of digest.announcement_cases) {
             it(`recomputes the "${kase.name}" digest`, () => {
-                const recomputed = computeChannelAnnouncementDigest(keys, {
-                    chainHash: hexToBytes(kase.chain_hash),
-                    fundingOutPoint: toOutPoint(kase.funding_out_point),
-                    nodeIds: [hexToBytes(kase.node_ids[0]), hexToBytes(kase.node_ids[1])],
-                    remoteFundingPubkey,
-                    capacityShannons: BigInt(kase.capacity),
-                    udtTypeScript: toScriptOrNull(kase.udt_type_script),
-                });
+                const recomputed = computeChannelAnnouncementDigest(keys, toChannelAnnouncementInput(kase, digest.remote));
                 expect(bytesToHex(recomputed)).toBe(kase.digest);
             });
 
