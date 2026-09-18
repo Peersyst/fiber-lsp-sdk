@@ -34,8 +34,8 @@ These properties reflect the current specification and may evolve with it while 
 | `rpc`                            | Typed fiber JSON-RPC client (Biscuit-authed)                                                  |
 | `sdk`                            | Public facade wiring the above                                                                |
 
-`derivation`, `digest`, `policy`, `wire`, `protocol` and the signing engine of `signer` are implemented; the signer-protocol
-dispatch, `session`, `rpc` and `sdk` are still placeholders, so the public entrypoint stays small while the API settles.
+`derivation`, `digest`, `signer`, `policy`, `wire` and `protocol` are implemented; `session`, `rpc` and `sdk` are still
+placeholders, so the public entrypoint stays small while the API settles.
 
 ## Repository layout
 
@@ -56,8 +56,8 @@ Full index in [docs/README.md](./docs/README.md). The load-bearing ones:
   derivation tree, and why nonces are deterministic.
 - [What the device signs](./docs/digest.md): the four message constructions rebuilt on the device, and the trust model of
   the inputs they take.
-- [How signatures are produced](./docs/signing.md): the musig2 engine, its deterministic nonces, and the conditions that
-  make them safe.
+- [How signatures are produced](./docs/signing.md): the musig2 engine, its deterministic nonces, the conditions that
+  make them safe, and the dispatch that gates every signature at one call site.
 - [What the device refuses](./docs/policy.md): the five checks every request passes, and the sign-once rule those
   conditions rest on.
 - [What crosses the wire](./docs/protocol.md): the remote signing protocol as proposed for review, its encodings, and

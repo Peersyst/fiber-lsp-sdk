@@ -8,14 +8,17 @@ the per-channel record ([persistence.md](./persistence.md)).
 ## The five checks, in order
 
 Ahead of them, `PolicyEngine.checkAndClaim` validates the request's own **shape** and refuses it as `malformed`: two
-distinct 33-byte public keys one of which is this channel's funding key, a 66-byte aggregated nonce, a 32-byte message, a
-known operation, and numbers in range. On the wire that shape is checked once more, and earlier, by the protocol codecs
-([protocol.md](./protocol.md)), which is where a field's spelling and encoding are judged; the engine repeats the part it
-depends on because it is callable without the wire. Everything in a request is node-supplied, so a bad field has to be a
-wire refusal rather than an exception escaping into the session, and the same mapping covers the digest builders, whose
+distinct 33-byte public keys on the curve, one of which is this channel's funding key, a 66-byte aggregated nonce whose two
+halves are points on the curve or at infinity, a 32-byte message, a known operation, and numbers in range. On the wire the
+lengths are checked once more, and earlier, by the protocol codecs ([protocol.md](./protocol.md)), which is where a field's
+spelling and encoding are judged; the engine repeats the part it depends on because it is callable without the wire. The
+points are not the codecs' to check but the gate's, before the claim: the musig2 engine would refuse them too, but with
+the slot already served and nothing ever signed in it. Everything in a request is node-supplied, so a bad field has to be
+a wire refusal rather than an exception escaping into the session, and the same mapping covers the digest builders, whose
 rejections of structurally impossible state (a fee no capacity covers, more than 255 TLCs, a public key off the curve)
-become `malformed` rather than a crash. It precedes the channel lookup, so a malformed request for an unknown channel
-answers `malformed`.
+become `malformed` rather than a crash. Inside the engine it precedes the channel lookup. Through the signer dispatch the
+channel is resolved first, since the keys the gate takes derive from it, so a request for an unknown channel answers
+`unknown_channel` unless the codecs have already refused it ([signing.md](./signing.md)).
 
 The five then resolve the channel's name to its index and run as one step inside `SignerStore.updateChannelRecord`, so the
 record they read is the record they write and no concurrent request can interleave with the decision.
@@ -111,8 +114,9 @@ then issues `send_payment`.
 - **It does not re-derive the state it is shown.** TLC selection, settlement amounts, fee rates and close scripts arrive as
   inputs. The digest binds the signature to them and the record judges them; re-running fiber's TLC state machine would be
   a second source of truth with its own bugs.
-- **It does not sign.** Nothing in the pipeline forces the caller to sign what it claimed. The gate and the engine become
-  one path when the signer session dispatch wires them together, at one call site.
+- **It does not sign.** Nothing in the pipeline forces the caller to sign what it claimed. The gate and the engine are
+  one path in the signer dispatch, at one call site that signs exactly the slot the verdict names
+  ([signing.md](./signing.md)).
 - **It does not tie an intent to a payment.** Intents are amounts, so any decrease consumes any intent that covers it: the
   rule bounds how much can be drained, the sum of what was recorded, but not where it goes. Consuming the smallest
   sufficient intent is optimal for that model, since every alternative leaves a residual set this one dominates element by
@@ -169,6 +173,11 @@ checked by breaking the code on purpose:
 | The announcement slot follows the request         | 3                 |
 | The session commitment drops the aggregated nonce | 4                 |
 | The session commitment sorts the key list         | 2                 |
+| The keys are not checked to be on the curve       | 3                 |
+| The nonce is not checked to be on the curve       | 4                 |
+| A nonce half at infinity is refused               | 3                 |
+| A zero-prefixed nonce half is read as infinity    | 1                 |
+| A key at infinity is accepted                     | 1                 |
 | Monotonicity accepts an equal number              | 1                 |
 | The state version may roll back                   | 1                 |
 | The balance rule reads the raw balance            | 5                 |

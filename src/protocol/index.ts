@@ -48,3 +48,4 @@ export type {
 export { ProtocolError } from "./protocol.error";
 export { decodeInboundFrame, encodeOutboundFrame } from "./frame";
 export { decodeSignParams } from "./sign-request";
+export { sessionChallengeDigest } from "./utils";
