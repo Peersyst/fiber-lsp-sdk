@@ -15,3 +15,13 @@ export class WireError extends Error {
         this.reason = reason;
     }
 }
+
+/**
+ * Narrows what a codec threw to a `WireError`, rethrowing anything else.
+ * @param error What the codec threw.
+ * @returns The refusal.
+ */
+export function asWireError(error: unknown): WireError {
+    if (error instanceof WireError) return error;
+    throw error;
+}

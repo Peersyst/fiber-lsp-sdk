@@ -28,13 +28,13 @@ These properties reflect the current specification and may evolve with it while 
 | [`digest`](./src/digest)         | Rebuilds the four messages fiber signs, so the device never blind-signs                       |
 | [`signer`](./src/signer)         | Dispatches signer-protocol methods, musig2 signing engine                                     |
 | [`policy`](./src/policy)         | Policy engine + persisted per-channel records                                                 |
-| `session`                        | Signer session client: challenge auth, correlation, resume                                    |
+| [`session`](./src/session)       | Signer session client: challenge auth, sequential processing, heartbeat, reconnect            |
 | [`wire`](./src/wire)             | How fiber writes values in JSON, and the field readers that refuse anything else              |
 | [`protocol`](./src/protocol)     | Frames, methods and results of the remote signing protocol                                    |
 | `rpc`                            | Typed fiber JSON-RPC client (Biscuit-authed)                                                  |
 | `sdk`                            | Public facade wiring the above                                                                |
 
-`derivation`, `digest`, `signer`, `policy`, `wire` and `protocol` are implemented; `session`, `rpc` and `sdk` are still
+`derivation`, `digest`, `signer`, `policy`, `wire`, `protocol` and `session` are implemented; `rpc` and `sdk` are still
 placeholders, so the public entrypoint stays small while the API settles.
 
 ## Repository layout
@@ -62,6 +62,8 @@ Full index in [docs/README.md](./docs/README.md). The load-bearing ones:
   conditions rest on.
 - [What crosses the wire](./docs/protocol.md): the remote signing protocol as proposed for review, its encodings, and
   what a frame that does not decode is answered with.
+- [How the session stays up](./docs/session.md): the outbound socket, its states, one request at a time, and the
+  reconnect that runs only while the host wants it.
 - [Cross-implementation harness](./interop/README.md): how the vectors are generated and re-validated against a new fiber
   release.
 

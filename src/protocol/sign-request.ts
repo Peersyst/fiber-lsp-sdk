@@ -3,7 +3,7 @@ import { COMPRESSED_POINT_LENGTH, PARTIAL_SIGNATURE_LENGTH, PUBLIC_NONCE_LENGTH,
 import { MAX_COMMITMENT_NUMBER, SECRET_KEY_LENGTH } from "../derivation";
 import type { PolicySignRequest, SignOperation, SignSession } from "../policy";
 import type { Field, FieldReader } from "../wire";
-import { WireError, decodeEnum, decodeUintHexNumber, encodeHexBytes, readObject, requireObject } from "../wire";
+import { asWireError, decodeEnum, decodeUintHexNumber, encodeHexBytes, readObject, requireObject } from "../wire";
 import { decodeChannelAnnouncement, decodeCommitmentTx, decodeRevocation, decodeShutdownTx, decodeSignSession } from "./operation-params";
 import { SIGNER_METHODS } from "./protocol.constants";
 import { ProtocolError } from "./protocol.error";
@@ -182,7 +182,7 @@ function correlating<T>(requestId: string, step: () => T): T {
     try {
         return step();
     } catch (error) {
-        if (error instanceof WireError) throw new ProtocolError(error.path, error.reason, requestId);
-        throw error;
+        const { path, reason } = asWireError(error);
+        throw new ProtocolError(path, reason, requestId);
     }
 }

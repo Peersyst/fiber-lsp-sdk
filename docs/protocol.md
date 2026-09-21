@@ -83,6 +83,15 @@ UTF-8 bytes followed by the 32 challenge bytes; `sessionChallengeDigest` is that
 the wallet identity of [signing.md](./signing.md). Whether `protocol_version` in `session_established` matches the device's
 own is the session's decision, not a decode refusal: the codec reads any version.
 
+The bridge has no frame to refuse a handshake with, so the device reads it from the socket: a close after the signature
+went out and before `session_established` is a refused handshake, on which the device does not reconnect, while a close
+before the challenge is answered, or after a signature the socket would not take, is a lost socket, on which it does
+([session.md](./session.md)). When the device closes a socket itself it does so with code `1000`, the one code a browser
+lets a client send outside the private range, and a reason string that says why: `disconnect`, `connect timeout`,
+`heartbeat timeout`, `protocol violation`, `protocol version mismatch`, `authentication failed` or `send failed`. During
+establishment a frame that does not decode or arrives out of the sequence ends the session; once established it is
+dropped and reported, and the session goes on.
+
 **Position taken**: the handshake carries no public data at all, only the base public keys and the delegated settlement
 key. The node fetches commitment points and public nonces by number through the public-data methods, which it needs for
 every later round anyway. The alternative, points and nonces inline in the registration, would make the device encode
