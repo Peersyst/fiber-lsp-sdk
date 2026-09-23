@@ -1,5 +1,6 @@
 import { ProtocolError } from "../../src/protocol";
-import { WireError } from "../../src/wire";
+import type { WireError } from "../../src/wire";
+import { asWireError } from "../../src/wire";
 
 /**
  * Runs a decode step that must refuse, and returns the refusal.
@@ -10,8 +11,7 @@ export function refusal(step: () => unknown): WireError {
     try {
         step();
     } catch (error) {
-        if (error instanceof WireError) return error;
-        throw error;
+        return asWireError(error);
     }
     throw new Error("the step did not refuse");
 }
