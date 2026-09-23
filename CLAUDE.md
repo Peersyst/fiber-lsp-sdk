@@ -130,6 +130,9 @@ an upstream quirk, the reason a bound exists, an invariant a reader would otherw
   after what they double (`ISignerStorage` → `signer-storage.mock.ts`). `.mock.ts` is the umbrella suffix for any double, so one
   that grows behavior is never renamed; the export carries the precision (`InMemorySignerStorage` is a fake, a stub over `fetch`
   would be `FetchMock`). Every other shared helper goes in `test/utils/`. Neither is ever named `*.spec.ts`.
+- Flow specs are the one exception to the mirror: a `<name>.flow.spec.ts` sits next to the `<name>.spec.ts` of the surface it
+  drives and runs several modules together against the LSP double in `test/utils/signer-bridge.ts`, which is the peer end of
+  the injected socket rather than a double of it, so it lives with the helpers.
 - Fixtures are written out literally in the spec that uses them, never produced by a factory that fills in defaults: a factory
   that supplies the field a test meant to omit turns a refusal path green. The one exception is a helper that projects a
   cross-implementation vector into a typed input or a wire object (`test/utils/digest-inputs.ts`, `test/utils/wire-requests.ts`):

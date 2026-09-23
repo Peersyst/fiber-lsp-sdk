@@ -27,13 +27,15 @@ import { SignerDispatch, getBasePublicKeys, getChannelCommitmentPoint, getPublic
 import { InMemorySignerStorage } from "../../mocks/policy";
 import type { CommitmentCaseVector } from "../../utils/interop-vectors";
 import { caseOf, loadInteropVectors } from "../../utils/interop-vectors";
+import { SHUTDOWN_NONCE_NUMBER, revocationNonceNumber } from "../../utils/nonce-numbers";
+import { standInAggregatedNonce } from "../../utils/stand-in-nonce";
 import {
-    toChannelAnnouncementWire,
-    toCommitmentTxWire,
-    toRevocationWire,
-    toShutdownTxWire,
+    toCommitmentNumberParamsWire,
+    toPartialSignChannelAnnouncementParamsWire,
+    toPartialSignClosingTxParamsWire,
+    toPartialSignCommitmentTxParamsWire,
+    toPartialSignRevocationParamsWire,
     toSignSessionWire,
-    wireUint,
 } from "../../utils/wire-requests";
 import { withField } from "../../utils/with-field";
 
@@ -62,9 +64,7 @@ const CKB_SHUTDOWN = caseOf(digest.shutdown_cases, "ckb");
 const SEND_SIDE_REVOCATION = caseOf(digest.revocation_cases, "ckb, send side");
 const CKB_ANNOUNCEMENT = caseOf(digest.announcement_cases, "ckb");
 
-// Fiber signs a close with the commitment nonce of the current local number, and a revocation one above the revoked number.
-const SHUTDOWN_NONCE_NUMBER = 20;
-const REVOCATION_NONCE_NUMBER = SEND_SIDE_REVOCATION.revoked_commitment_number + 1;
+const REVOCATION_NONCE_NUMBER = revocationNonceNumber(SEND_SIDE_REVOCATION);
 
 const OPENING_EXPOSURE = "62000000000";
 const TLC_DECREASE = "2250000000";
@@ -77,23 +77,8 @@ const ORDERED_PUBLIC_KEYS: Record<SignatureMethod, [Uint8Array, Uint8Array]> = {
     partial_sign_channel_announcement: [LOCAL_FUNDING_PUBKEY, REMOTE_FUNDING_PUBKEY],
 };
 
-// Valid point pairs the device never published: enough for every path that answers before the node would verify.
-const AGGREGATED_NONCE = nonceGen(
-    REMOTE_FUNDING_PUBKEY,
-    REMOTE_KEYS.fundingKey,
-    undefined,
-    undefined,
-    undefined,
-    new Uint8Array(32).fill(0x01),
-).public;
-const OTHER_AGGREGATED_NONCE = nonceGen(
-    REMOTE_FUNDING_PUBKEY,
-    REMOTE_KEYS.fundingKey,
-    undefined,
-    undefined,
-    undefined,
-    new Uint8Array(32).fill(0x02),
-).public;
+const AGGREGATED_NONCE = standInAggregatedNonce(0x01);
+const OTHER_AGGREGATED_NONCE = standInAggregatedNonce(0x02);
 
 type SigningCase = {
     method: SignatureMethod;
@@ -145,34 +130,26 @@ function sessionWire(method: SignatureMethod, aggregatedNonce: Uint8Array, messa
 }
 
 function commitmentParams(kase: CommitmentCaseVector, aggregatedNonce: Uint8Array): Record<string, unknown> {
-    return {
-        session: sessionWire("partial_sign_commitment_tx", aggregatedNonce, kase.digest),
-        nonce_commitment_number: wireUint(kase.commitment_number),
-        commitment_tx: toCommitmentTxWire(kase, REMOTE),
-    };
+    const session = sessionWire("partial_sign_commitment_tx", aggregatedNonce, kase.digest);
+    return toPartialSignCommitmentTxParamsWire(kase, REMOTE, session, kase.commitment_number);
 }
 
 function signingParams(method: SignatureMethod, aggregatedNonce: Uint8Array): Record<string, unknown> {
     switch (method) {
         case "partial_sign_commitment_tx":
             return commitmentParams(THREE_TLCS, aggregatedNonce);
-        case "partial_sign_closing_tx":
-            return {
-                session: sessionWire(method, aggregatedNonce, CKB_SHUTDOWN.digest),
-                nonce_commitment_number: wireUint(SHUTDOWN_NONCE_NUMBER),
-                shutdown_tx: toShutdownTxWire(CKB_SHUTDOWN, REMOTE),
-            };
-        case "partial_sign_revocation":
-            return {
-                session: sessionWire(method, aggregatedNonce, SEND_SIDE_REVOCATION.digest),
-                nonce_commitment_number: wireUint(REVOCATION_NONCE_NUMBER),
-                revocation: toRevocationWire(SEND_SIDE_REVOCATION, REMOTE),
-            };
-        case "partial_sign_channel_announcement":
-            return {
-                session: sessionWire(method, aggregatedNonce, CKB_ANNOUNCEMENT.digest),
-                channel_announcement: toChannelAnnouncementWire(CKB_ANNOUNCEMENT, REMOTE),
-            };
+        case "partial_sign_closing_tx": {
+            const session = sessionWire(method, aggregatedNonce, CKB_SHUTDOWN.digest);
+            return toPartialSignClosingTxParamsWire(CKB_SHUTDOWN, REMOTE, session, SHUTDOWN_NONCE_NUMBER);
+        }
+        case "partial_sign_revocation": {
+            const session = sessionWire(method, aggregatedNonce, SEND_SIDE_REVOCATION.digest);
+            return toPartialSignRevocationParamsWire(SEND_SIDE_REVOCATION, REMOTE, session, REVOCATION_NONCE_NUMBER);
+        }
+        case "partial_sign_channel_announcement": {
+            const session = sessionWire(method, aggregatedNonce, CKB_ANNOUNCEMENT.digest);
+            return toPartialSignChannelAnnouncementParamsWire(CKB_ANNOUNCEMENT, REMOTE, session);
+        }
     }
 }
 
@@ -440,7 +417,7 @@ describe("the public data methods", () => {
 describe("the signing methods", () => {
     it.each(SIGNING_CASES)("signs $method under the nonce $published published, verifiable by the node", async (kase) => {
         const { dispatch } = await registered();
-        const publishedParams = kase.nonceNumber === undefined ? {} : { commitment_number: wireUint(kase.nonceNumber) };
+        const publishedParams = kase.nonceNumber === undefined ? {} : toCommitmentNumberParamsWire(kase.nonceNumber);
         const pubNonce = pubNonceOf(await dispatch.handle(request(kase.published, publishedParams)));
         const orderedPublicKeys = ORDERED_PUBLIC_KEYS[kase.method];
         const localIndex = orderedPublicKeys.indexOf(LOCAL_FUNDING_PUBKEY);
@@ -465,7 +442,7 @@ describe("the signing methods", () => {
     it("aggregates with the peer's half into a valid schnorr signature under the 2-of-2 key", async () => {
         const { dispatch } = await registered();
         const pubNonce = pubNonceOf(
-            await dispatch.handle(request("get_commitment_pub_nonce", { commitment_number: wireUint(THREE_TLCS.commitment_number) })),
+            await dispatch.handle(request("get_commitment_pub_nonce", toCommitmentNumberParamsWire(THREE_TLCS.commitment_number))),
         );
         const peer = peerNonces();
         const aggregatedNonce = nonceAggregate([pubNonce, peer.public]);

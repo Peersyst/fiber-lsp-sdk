@@ -18,6 +18,8 @@ import { DEFAULT_PUB_NONCE, SessionHandlerMock, TimerMock, WebSocketFactoryMock,
 import { flush } from "../../utils/flush";
 import { loadInteropVectors } from "../../utils/interop-vectors";
 import { answerableRefusal, refusal } from "../../utils/refusal";
+import { rejection } from "../../utils/rejection";
+import { sessionError } from "../../utils/session-error";
 
 const vectors = loadInteropVectors();
 const MASTER_SEED = hexToBytes(vectors.sdk_scheme.master_seed);
@@ -103,21 +105,6 @@ async function establish(h: Harness): Promise<WebSocketMock> {
     await socket.receive(ESTABLISHED_FRAME);
     await connected;
     return socket;
-}
-
-async function rejection(promise: Promise<unknown>): Promise<unknown> {
-    try {
-        await promise;
-    } catch (error) {
-        return error;
-    }
-    throw new Error("did not reject");
-}
-
-function sessionError(error: unknown, kind: SessionError["kind"]): SessionError {
-    expect(error).toBeInstanceOf(SessionError);
-    expect((error as SessionError).kind).toBe(kind);
-    return error as SessionError;
 }
 
 function holdAnswers(handler: SessionHandlerMock): ((outcome?: DispatchOutcome) => void)[] {

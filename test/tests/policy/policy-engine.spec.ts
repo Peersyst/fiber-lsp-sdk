@@ -6,6 +6,7 @@ import { buildSessionCommitment } from "../../../src/policy/utils";
 import { AsyncInMemorySignerStorage, InMemorySignerStorage } from "../../mocks/policy";
 import { toChannelAnnouncementInput, toCommitmentTxInput, toRevocationInput, toShutdownTxInput } from "../../utils/digest-inputs";
 import { caseOf, loadInteropVectors } from "../../utils/interop-vectors";
+import { SHUTDOWN_NONCE_NUMBER, revocationNonceNumber } from "../../utils/nonce-numbers";
 
 const vectors = loadInteropVectors();
 const digest = vectors.digest;
@@ -58,8 +59,7 @@ function shutdownRequest(name: string, overrides: Partial<PolicySignRequest> = {
     return {
         channelId: CHANNEL_ID,
         stateVersion: 1,
-        // Fiber signs a close with the commitment nonce of the current local number.
-        nonceCommitmentNumber: 20,
+        nonceCommitmentNumber: SHUTDOWN_NONCE_NUMBER,
         session: session(hexToBytes(kase.digest)),
         operation: { kind: "shutdown_tx", input: toShutdownTxInput(kase, digest.remote) },
         ...overrides,
@@ -71,8 +71,7 @@ function revocationRequest(name: string, overrides: Partial<PolicySignRequest> =
     return {
         channelId: CHANNEL_ID,
         stateVersion: 1,
-        // Fiber's off-by-one: the nonce is one above the number the message revokes.
-        nonceCommitmentNumber: kase.revoked_commitment_number + 1,
+        nonceCommitmentNumber: revocationNonceNumber(kase),
         session: session(hexToBytes(kase.digest)),
         operation: { kind: "revocation", input: toRevocationInput(kase, digest.remote) },
         ...overrides,
@@ -302,7 +301,7 @@ describe("checkAndClaim", () => {
             await expect(engine.checkAndClaim(KEYS, shutdownRequest("ckb"))).resolves.toEqual({
                 status: "fresh",
                 context: "COMMITMENT",
-                commitmentNumber: 20,
+                commitmentNumber: SHUTDOWN_NONCE_NUMBER,
             });
         });
 

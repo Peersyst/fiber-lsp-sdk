@@ -180,16 +180,18 @@ a richer error taxonomy are decided with the facade, which is what consumes them
 
 ## Where it lives
 
-| File                                 | Contents                                                                                    |
-| ------------------------------------ | ------------------------------------------------------------------------------------------- |
-| `src/session/signer-session.ts`      | `SignerSession`: the state machine, the FIFO, the heartbeat, the reconnect, the correlation |
-| `src/session/session.types.ts`       | The states, the events, the options and the reconnect policy                                |
-| `src/session/session.error.ts`       | `SessionError`, with its seven kinds, and `BridgeError`                                     |
-| `src/session/session.constants.ts`   | The defaults, the timer ceiling, the close code and reasons                                 |
-| `src/session/interfaces/`            | `IWebSocketLike`, `WebSocketFactory`, `ITimer`, `ISessionAuthenticator`, `ISessionHandler`  |
-| `src/session/utils/backoff.utils.ts` | The delay before a reconnect attempt                                                        |
-| `src/session/utils/timer-slot.ts`    | One armed timer at a time, immune to a cancel that does nothing                             |
-| `test/mocks/session/`                | The socket, timer and handler doubles the specs drive                                       |
+| File                                             | Contents                                                                                        |
+| ------------------------------------------------ | ----------------------------------------------------------------------------------------------- |
+| `src/session/signer-session.ts`                  | `SignerSession`: the state machine, the FIFO, the heartbeat, the reconnect, the correlation     |
+| `src/session/session.types.ts`                   | The states, the events, the options and the reconnect policy                                    |
+| `src/session/session.error.ts`                   | `SessionError`, with its seven kinds, and `BridgeError`                                         |
+| `src/session/session.constants.ts`               | The defaults, the timer ceiling, the close code and reasons                                     |
+| `src/session/interfaces/`                        | `IWebSocketLike`, `WebSocketFactory`, `ITimer`, `ISessionAuthenticator`, `ISessionHandler`      |
+| `src/session/utils/backoff.utils.ts`             | The delay before a reconnect attempt                                                            |
+| `src/session/utils/timer-slot.ts`                | One armed timer at a time, immune to a cancel that does nothing                                 |
+| `test/mocks/session/`                            | The socket, timer and handler doubles the specs drive                                           |
+| `test/utils/signer-bridge.ts`                    | `InMemorySignerBridge`: the LSP end of the protocol over the socket double, verifying node-side |
+| `test/tests/session/signer-session.flow.spec.ts` | The flows: session, dispatch, policy and engine together against the bridge                     |
 
 ## What the tests guarantee
 
@@ -278,3 +280,64 @@ Coverage of the module is 100% on all four metrics, and the assertions were chec
 | The heartbeat is armed whatever the state                                    | 1                 |
 | An event reaches a listener subscribed while it is raised                    | 1                 |
 | A re-armed `TimerSlot` lets the arming it replaced run                       | 5                 |
+
+## What the flows guarantee
+
+`test/tests/session/signer-session.flow.spec.ts` runs the real session, dispatch, policy engine and musig2 engine over an
+in-memory storage against `InMemorySignerBridge` (`test/utils/signer-bridge.ts`), the LSP end of the protocol over the server
+side of the socket double. The bridge challenges every socket, verifies the signature over the domain-separated digest and
+pins the identity, announces the pending count and re-delivers every unanswered request on each new session, names a
+registered channel the way fiber names a temporary one, and runs signing rounds the way the node will: it fetches the
+device's nonce by number, aggregates it with a peer nonce derived from the vectors' remote seed, sends the operation object
+the wire twin builds from a vector case, verifies the partial signature with scure under that aggregate, and aggregates it
+with the peer's half into a Schnorr signature the 2-of-2 key must accept. A frame the node would not take (an answer to a
+request it is not waiting on, a frame out of place or unreadable, a delegated settlement key that is not the TLC base key)
+is a violation: the bridge records it, hangs up and rejects whatever it is waiting on, and every flow ends by checking that
+it recorded none. A result the node cannot use (a partial signature that does not verify, a result without the bytes asked
+for) rejects only the round or the fetch that asked for it, with the bridge's diagnosis, and leaves the session up. The
+flows:
+
+- **Session**: establishment with the identity verified and pinned, a device restored from the same seed accepted, another
+  identity refused by the bridge hanging up and read as `handshake_refused`, another protocol version ending the session,
+  requests queued while offline drained in order with the pending count announced, and the heartbeat answered in both
+  directions.
+- **Channel open**: registration under the name the bridge gives it, the TLC base key delegated and the funding key never,
+  the public data `OpenChannel` needs fetched by number, the first commitment aggregated into a signature the 2-of-2 key
+  accepts, and a registration the bridge refuses rejecting with the bridge's code and filing nothing.
+- **The life of a channel**: the four signing methods over the wire, the send covered by a debit intent, each verified and
+  aggregated by the node, with the whole record pinned at the end.
+- **Re-delivery**: a socket lost right after a sign request is delivered, whose re-delivered request, same id and same
+  envelope, answers the same bytes and writes nothing; and a device fault left unanswered, the next request answered, the
+  faulted one answered on re-delivery once the cause is gone.
+- **Refusals**: a refusal stalling neither the other channel nor the next request on the same one, both queued behind it,
+  and a field the device cannot read answered `malformed`, naming the field and not the value.
+- **A wiped device**: the same seed over an empty storage, accepted under the pinned identity and refusing all ten methods
+  for the channel as `unknown_channel`, writing nothing.
+- **The bridge's own checks**: a signature over the bare challenge refused, a partial signature that does not verify
+  rejecting only its round with the session left up, an answer to a request the bridge never sent recorded as a
+  violation, hung up on and rejecting what it waits on, and a delegated settlement key that is not the TLC base key
+  recorded as a violation, the registration failing with the hang-up. They keep the checks above from passing vacuously:
+  a bridge that stopped verifying or recording would still see every other flow green.
+
+The digests bind the vectors' channel keys, so only the channel at the vectors' index can sign; a second channel on the
+device is exercised through public data. The flows were checked the same way, by breaking the code of the modules they
+cross; what only the session's own ordering decides (which socket an answer goes to, whether a queue survives a loss, one
+request at a time) is invisible to them under a synchronous storage and stays pinned by the spec above:
+
+| Mutation                                                          | Tests that failed |
+| ----------------------------------------------------------------- | ----------------- |
+| The identity signs the bare challenge                             | 19                |
+| The registration delegates the funding key                        | 12                |
+| The gate is skipped and the request signed anyway                 | 4                 |
+| The balance rule reads the raw balance, not the settlement amount | 3                 |
+| A refusal is reported as a fault                                  | 3                 |
+| The record opens at zero exposure whatever was prepared           | 2                 |
+| The already-signed path applies the balance rule again            | 1                 |
+| The key list is sorted before the engine signs                    | 1                 |
+| The registration is filed at a fixed index, not the prepared one  | 1                 |
+| A fault is answered as a malformed refusal                        | 1                 |
+| The announcement signs at a slot other than the one it published  | 1                 |
+
+The bridge was broken the same way: disabling its challenge check, its partial signature check or its settlement key check
+fails exactly one of its own checks each, and disabling its record of a violation or its hang-up on one fails the two that
+record one.

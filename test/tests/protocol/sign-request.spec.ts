@@ -10,13 +10,14 @@ import { decodeSignRequest, encodeSignResponse } from "../../../src/protocol/sig
 import { InMemorySignerStorage } from "../../mocks/policy";
 import { toChannelAnnouncementInput, toCommitmentTxInput, toRevocationInput, toShutdownTxInput } from "../../utils/digest-inputs";
 import { caseOf, loadInteropVectors } from "../../utils/interop-vectors";
+import { SHUTDOWN_NONCE_NUMBER, revocationNonceNumber } from "../../utils/nonce-numbers";
 import { answerableRefusal, refusal } from "../../utils/refusal";
 import { withField } from "../../utils/with-field";
 import {
-    toChannelAnnouncementWire,
-    toCommitmentTxWire,
-    toRevocationWire,
-    toShutdownTxWire,
+    toPartialSignChannelAnnouncementParamsWire,
+    toPartialSignClosingTxParamsWire,
+    toPartialSignCommitmentTxParamsWire,
+    toPartialSignRevocationParamsWire,
     toSignSessionWire,
     wireUint,
 } from "../../utils/wire-requests";
@@ -41,9 +42,7 @@ const CKB_SHUTDOWN = caseOf(digest.shutdown_cases, "ckb");
 const SEND_SIDE_REVOCATION = caseOf(digest.revocation_cases, "ckb, send side");
 const CKB_ANNOUNCEMENT = caseOf(digest.announcement_cases, "ckb");
 
-// Fiber signs a close with the commitment nonce of the current local number, and a revocation one above the revoked number.
-const SHUTDOWN_NONCE_NUMBER = 20;
-const REVOCATION_NONCE_NUMBER = SEND_SIDE_REVOCATION.revoked_commitment_number + 1;
+const REVOCATION_NONCE_NUMBER = revocationNonceNumber(SEND_SIDE_REVOCATION);
 
 function envelope(overrides: Record<string, unknown> = {}): Record<string, unknown> {
     return {
@@ -86,11 +85,7 @@ type SigningCase = [SignatureMethod, Record<string, unknown>, PolicySignRequest]
 const SIGNING_CASES: SigningCase[] = [
     [
         "partial_sign_commitment_tx",
-        {
-            session: sessionWire(THREE_TLCS.digest),
-            nonce_commitment_number: wireUint(THREE_TLCS.commitment_number),
-            commitment_tx: toCommitmentTxWire(THREE_TLCS, REMOTE),
-        },
+        toPartialSignCommitmentTxParamsWire(THREE_TLCS, REMOTE, sessionWire(THREE_TLCS.digest), THREE_TLCS.commitment_number),
         policyRequest(THREE_TLCS.commitment_number, THREE_TLCS.digest, {
             kind: "commitment_tx",
             input: toCommitmentTxInput(THREE_TLCS, REMOTE),
@@ -98,20 +93,12 @@ const SIGNING_CASES: SigningCase[] = [
     ],
     [
         "partial_sign_closing_tx",
-        {
-            session: sessionWire(CKB_SHUTDOWN.digest),
-            nonce_commitment_number: wireUint(SHUTDOWN_NONCE_NUMBER),
-            shutdown_tx: toShutdownTxWire(CKB_SHUTDOWN, REMOTE),
-        },
+        toPartialSignClosingTxParamsWire(CKB_SHUTDOWN, REMOTE, sessionWire(CKB_SHUTDOWN.digest), SHUTDOWN_NONCE_NUMBER),
         policyRequest(SHUTDOWN_NONCE_NUMBER, CKB_SHUTDOWN.digest, { kind: "shutdown_tx", input: toShutdownTxInput(CKB_SHUTDOWN, REMOTE) }),
     ],
     [
         "partial_sign_revocation",
-        {
-            session: sessionWire(SEND_SIDE_REVOCATION.digest),
-            nonce_commitment_number: wireUint(REVOCATION_NONCE_NUMBER),
-            revocation: toRevocationWire(SEND_SIDE_REVOCATION, REMOTE),
-        },
+        toPartialSignRevocationParamsWire(SEND_SIDE_REVOCATION, REMOTE, sessionWire(SEND_SIDE_REVOCATION.digest), REVOCATION_NONCE_NUMBER),
         policyRequest(REVOCATION_NONCE_NUMBER, SEND_SIDE_REVOCATION.digest, {
             kind: "revocation",
             input: toRevocationInput(SEND_SIDE_REVOCATION, REMOTE),
@@ -119,7 +106,7 @@ const SIGNING_CASES: SigningCase[] = [
     ],
     [
         "partial_sign_channel_announcement",
-        { session: sessionWire(CKB_ANNOUNCEMENT.digest), channel_announcement: toChannelAnnouncementWire(CKB_ANNOUNCEMENT, REMOTE) },
+        toPartialSignChannelAnnouncementParamsWire(CKB_ANNOUNCEMENT, REMOTE, sessionWire(CKB_ANNOUNCEMENT.digest)),
         policyRequest(undefined, CKB_ANNOUNCEMENT.digest, {
             kind: "channel_announcement",
             input: toChannelAnnouncementInput(CKB_ANNOUNCEMENT, REMOTE),

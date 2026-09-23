@@ -1,4 +1,4 @@
-import type { IWebSocketLike, WebSocketCloseEvent, WebSocketFactory } from "../../../src/session";
+import type { IWebSocketLike, WebSocketCloseEvent } from "../../../src/session";
 
 export class WebSocketMock implements IWebSocketLike {
     readonly url: string;
@@ -10,6 +10,11 @@ export class WebSocketMock implements IWebSocketLike {
     onerror: IWebSocketLike["onerror"] = null;
 
     readonly sent: unknown[] = [];
+
+    // Hooks for the server end.
+    onSent: ((frame: unknown) => void) | null = null;
+
+    onClosed: ((event: WebSocketCloseEvent) => void) | null = null;
 
     closedWith: WebSocketCloseEvent | undefined;
 
@@ -24,13 +29,16 @@ export class WebSocketMock implements IWebSocketLike {
     send(data: string): void {
         if (this.sendError) throw this.sendError;
         if (this.closedWith) throw new Error("send on a closed socket");
-        this.sent.push(JSON.parse(data));
+        const frame: unknown = JSON.parse(data);
+        this.sent.push(frame);
+        this.onSent?.(frame);
     }
 
     close(code?: number, reason?: string): void {
         if (this.closeError) throw this.closeError;
         if (this.closedWith) return;
         this.closedWith = { code, reason };
+        this.onClosed?.({ code, reason });
         // Runtimes fire the close event asynchronously.
         queueMicrotask(() => this.onclose?.({ code, reason }));
     }
@@ -54,7 +62,7 @@ export class WebSocketFactoryMock {
 
     failure: Error | undefined;
 
-    readonly create: WebSocketFactory = (url) => {
+    readonly create = (url: string): WebSocketMock => {
         if (this.failure) throw this.failure;
         const socket = new WebSocketMock(url);
         this.sockets.push(socket);
