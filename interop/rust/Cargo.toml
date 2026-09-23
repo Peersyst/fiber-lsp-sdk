@@ -10,12 +10,16 @@ secp256k1 = { version = "0.29", features = ["global-context"] }
 ckb-hash = "0.115"
 ckb-types = "1"
 fiber-types = { git = "https://github.com/nervosnetwork/fiber.git", rev = "b71a61c3", default-features = false }
+# jsonrpsee-types pinned to the version fiber serves.
+fiber-json-types = { git = "https://github.com/nervosnetwork/fiber.git", rev = "b71a61c3", default-features = false }
+jsonrpsee-types = "=0.25.1"
+ckb-jsonrpc-types = "1"
 # fiber-types' secp256k1 line, aliased because the harness's own is pinned older by musig2 0.2.4.
 secp030 = { package = "secp256k1", version = "0.30" }
 hmac = "0.12"
 sha2 = "0.10"
 serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+serde_json = { version = "1", features = ["preserve_order"] }
 hex = "0.4"
 
 [workspace]
