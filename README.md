@@ -86,7 +86,9 @@ The key derivation is a compatibility contract with fiber's Rust implementation:
 keys. `pnpm test` checks every derivation against `interop/vectors/vectors.json`, so the contract is verified on every run without
 a Rust toolchain; regenerating the vectors is what needs one. The interop workflow closes the loop in the other direction on
 every pull request: it regenerates the vectors and verifies a partial signature the SDK produced under fiber's own musig2 crate.
-See [`interop/README.md`](./interop/README.md) and [`docs/derivation.md`](./docs/derivation.md).
+The same harness pins fiber's RPC forms in `interop/vectors/rpc.json`, params and results serialized by fiber's own JSON types,
+which the `rpc` module is tested against. See [`interop/README.md`](./interop/README.md) and
+[`docs/derivation.md`](./docs/derivation.md).
 
 ### Build output
 

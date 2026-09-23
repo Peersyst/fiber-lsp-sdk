@@ -4,9 +4,15 @@ on:
   workflow_dispatch:
   pull_request:
     paths:
+      - .github/workflows/interop.yml
       - interop/**
+      - pnpm-lock.yaml
+      - src/common/**
       - src/derivation/**
+      - src/digest/**
       - src/signer/**
+      - src/wire/**
+      - src/rpc/**
       - test/**
 
 jobs:
@@ -26,11 +32,13 @@ jobs:
             ~/.cargo/git
             interop/rust/target
           key: cargo-${{ hashFiles('interop/rust/Cargo.lock') }}
+      - run: cargo test --release --manifest-path interop/rust/Cargo.toml
       - run: cargo run --release --manifest-path interop/rust/Cargo.toml -- gen-vectors interop/vectors/vectors.json
+      - run: cargo run --release --manifest-path interop/rust/Cargo.toml -- gen-rpc-vectors interop/vectors/rpc.json
       # The committed vectors must be exactly what the harness produces: a diff here
-      # means a derivation changed without the vectors being regenerated, or the
-      # other way round.
-      - run: git diff --exit-code interop/vectors/vectors.json
+      # means a derivation or a fixture changed without the vectors being regenerated,
+      # or the other way round.
+      - run: git diff --exit-code interop/vectors/
       - run: pnpm install --frozen-lockfile
       - run: echo "INTEROP_TS_OUT=$RUNNER_TEMP/ts-out.json" >> "$GITHUB_ENV"
       - run: pnpm test
