@@ -1,10 +1,18 @@
 import type { ScriptHashType, TlcDirection } from "../../src/common";
 import type {
     ChannelAnnouncementWire,
+    CommitmentNumberParamsWire,
     CommitmentTxWire,
+    PartialSignChannelAnnouncementParamsWire,
+    PartialSignClosingTxParamsWire,
+    PartialSignCommitmentTxParamsWire,
+    PartialSignRevocationParamsWire,
     RevocationWire,
     SettlementTlcWire,
     ShutdownTxWire,
+    SignMethodParamsWire,
+    SignRequest,
+    SignRequestWire,
     SignSessionWire,
 } from "../../src/protocol";
 import type { OutPointWire, ScriptWire, TlcHashAlgorithmWire } from "../../src/wire";
@@ -19,7 +27,7 @@ import type {
     TlcVector,
 } from "./interop-vectors";
 
-function wireHex(hex: string): string {
+export function wireHex(hex: string): string {
     return `0x${hex}`;
 }
 
@@ -127,5 +135,57 @@ export function toSignSessionWire(orderedPubkeys: [string, string], aggregatedNo
         ordered_pubkeys: [wireHex(orderedPubkeys[0]), wireHex(orderedPubkeys[1])],
         aggregated_nonce: wireHex(aggregatedNonce),
         message: wireHex(message),
+    };
+}
+
+export function toCommitmentNumberParamsWire(commitmentNumber: number): CommitmentNumberParamsWire {
+    return { commitment_number: wireUint(commitmentNumber) };
+}
+
+export function toPartialSignCommitmentTxParamsWire(
+    kase: CommitmentCaseVector,
+    remote: RemotePubkeys,
+    session: SignSessionWire,
+    nonceCommitmentNumber: number,
+): PartialSignCommitmentTxParamsWire {
+    return { session, nonce_commitment_number: wireUint(nonceCommitmentNumber), commitment_tx: toCommitmentTxWire(kase, remote) };
+}
+
+export function toPartialSignClosingTxParamsWire(
+    kase: ShutdownCaseVector,
+    remote: RemotePubkeys,
+    session: SignSessionWire,
+    nonceCommitmentNumber: number,
+): PartialSignClosingTxParamsWire {
+    return { session, nonce_commitment_number: wireUint(nonceCommitmentNumber), shutdown_tx: toShutdownTxWire(kase, remote) };
+}
+
+export function toPartialSignRevocationParamsWire(
+    kase: RevocationCaseVector,
+    remote: RemotePubkeys,
+    session: SignSessionWire,
+    nonceCommitmentNumber: number,
+): PartialSignRevocationParamsWire {
+    return { session, nonce_commitment_number: wireUint(nonceCommitmentNumber), revocation: toRevocationWire(kase, remote) };
+}
+
+export function toPartialSignChannelAnnouncementParamsWire(
+    kase: AnnouncementCaseVector,
+    remote: RemotePubkeys,
+    session: SignSessionWire,
+): PartialSignChannelAnnouncementParamsWire {
+    return { session, channel_announcement: toChannelAnnouncementWire(kase, remote) };
+}
+
+export function toSignRequestWire(
+    envelope: Pick<SignRequest, "requestId" | "channelId" | "stateVersion">,
+    request: SignMethodParamsWire,
+): SignRequestWire {
+    return {
+        type: "sign_request",
+        request_id: envelope.requestId,
+        channel_id: envelope.channelId,
+        state_version: wireUint(envelope.stateVersion),
+        ...request,
     };
 }
