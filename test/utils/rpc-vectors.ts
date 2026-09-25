@@ -1,22 +1,8 @@
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
+import { RPC_METHODS, type RpcMethod } from "../../src/rpc";
 import { asOutPoint, asScript, type OutPointVector, type ScriptVector } from "./interop-vectors";
 import { asBoolean, asList, asNullable, asNumber, asPresent, asRecord, asString, asStringFields } from "./json-shape";
-
-export const RPC_VECTOR_METHODS = [
-    "open_channel_with_external_funding",
-    "submit_signed_funding_tx",
-    "abandon_channel",
-    "list_channels",
-    "new_invoice",
-    "get_invoice",
-    "settle_invoice",
-    "cancel_invoice",
-    "send_payment",
-    "get_payment",
-] as const;
-
-export type RpcVectorMethod = (typeof RPC_VECTOR_METHODS)[number];
 
 export type CellDepVector = { out_point: OutPointVector; dep_type: string };
 
@@ -142,7 +128,7 @@ export type RpcVectorShapes = {
 
 export type RpcCaseVector<Values> = { name: string; values: Values; json: unknown };
 
-export type RpcMethodVectors<Method extends RpcVectorMethod> = {
+export type RpcMethodVectors<Method extends RpcMethod> = {
     params: RpcCaseVector<RpcVectorShapes[Method]["params"]>[];
     results: RpcCaseVector<RpcVectorShapes[Method]["result"]>[];
 };
@@ -157,7 +143,7 @@ export type RpcVectors = {
     fiber_ref: string;
     jsonrpsee_version: string;
     envelopes: { request: RequestEnvelopeVector; results: ResultEnvelopeVector[]; errors: ErrorEnvelopeVector[] };
-    methods: { [Method in RpcVectorMethod]: RpcMethodVectors<Method> };
+    methods: { [Method in RpcMethod]: RpcMethodVectors<Method> };
 };
 
 type Parser<Value> = (value: unknown, path: string) => Value;
@@ -292,7 +278,7 @@ function asEmptyRecord(value: unknown, path: string): Record<string, never> {
 }
 
 const METHOD_PARSERS: {
-    [Method in RpcVectorMethod]: { params: Parser<RpcVectorShapes[Method]["params"]>; result: Parser<RpcVectorShapes[Method]["result"]> };
+    [Method in RpcMethod]: { params: Parser<RpcVectorShapes[Method]["params"]>; result: Parser<RpcVectorShapes[Method]["result"]> };
 } = {
     open_channel_with_external_funding: {
         params: (value, path) => {
@@ -376,7 +362,7 @@ function asCases<Values>(value: unknown, path: string, parse: Parser<Values>): R
     });
 }
 
-function asMethodVectors<Method extends RpcVectorMethod>(value: unknown, method: Method): RpcMethodVectors<Method> {
+function asMethodVectors<Method extends RpcMethod>(value: unknown, method: Method): RpcMethodVectors<Method> {
     const record = asRecord(value, `methods.${method}`);
     const parsers = METHOD_PARSERS[method];
     return {
@@ -390,9 +376,11 @@ export function parseRpcVectors(value: unknown): RpcVectors {
     const envelopes = asRecord(root.envelopes, "envelopes");
     const request = asRecord(envelopes.request, "envelopes.request");
     const methods = asRecord(root.methods, "methods");
+    const unknownMethod = Object.keys(methods).find((method) => !(RPC_METHODS as readonly string[]).includes(method));
+    if (unknownMethod !== undefined) throw new Error(`methods.${unknownMethod} is not a method of the client`);
     const parsedMethods = {} as RpcVectors["methods"];
-    for (const method of RPC_VECTOR_METHODS) {
-        (parsedMethods as Record<RpcVectorMethod, RpcMethodVectors<RpcVectorMethod>>)[method] = asMethodVectors(methods[method], method);
+    for (const method of RPC_METHODS) {
+        (parsedMethods as Record<RpcMethod, RpcMethodVectors<RpcMethod>>)[method] = asMethodVectors(methods[method], method);
     }
     return {
         fiber_ref: asString(root.fiber_ref, "fiber_ref"),
