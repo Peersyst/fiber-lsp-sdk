@@ -1,7 +1,7 @@
-import { UINT128_MAX, assertUnsignedInteger } from "../common";
+import { UINT128_MAX, assertUnsignedBigInt, assertUnsignedInteger } from "../common";
 import { malformed } from "./field";
 import { WIRE_HEX_PREFIX } from "./wire.constants";
-import type { Field } from "./wire.types";
+import type { Field, UintHexWire } from "./wire.types";
 
 const UINT_HEX_PATTERN = /^0x(?:0|[1-9a-f][0-9a-f]*)$/;
 
@@ -33,4 +33,15 @@ export function decodeUintHex(field: Field, max: bigint): bigint {
 export function decodeUintHexNumber(field: Field, max: number): number {
     assertUnsignedInteger("max", max, Number.MAX_SAFE_INTEGER);
     return Number(decodeUintHex(field, BigInt(max)));
+}
+
+/**
+ * Writes an unsigned integer in fiber's hex form, refusing one outside `[0, max]`.
+ * @param value Integer to write.
+ * @param max Highest accepted value, inclusive: the wire width, or the domain bound when it is narrower.
+ * @returns The `0x` hex, lowercase, without leading zeros.
+ */
+export function encodeUintHex(value: bigint, max: bigint): UintHexWire {
+    assertUnsignedBigInt("value", value, max);
+    return WIRE_HEX_PREFIX + value.toString(16);
 }
