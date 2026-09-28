@@ -2,6 +2,7 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { NONCE_CONTEXTS } from "../../src/derivation/derivation.constants";
 import type { NonceContext } from "../../src/derivation/derivation.types";
+import { asArray, asBoolean, asNullable, asNumber, asRecord, asString, asStringFields } from "./json-shape";
 
 export const CHANNEL_KEY_FIELDS = [
     "funding_key",
@@ -138,47 +139,11 @@ export type Vectors = {
     digest: DigestVectors;
 };
 
-function asRecord(value: unknown, path: string): Record<string, unknown> {
-    if (typeof value !== "object" || value === null || Array.isArray(value)) throw new Error(`${path} must be an object`);
-    return value as Record<string, unknown>;
-}
-
-function asString(value: unknown, path: string): string {
-    if (typeof value !== "string") throw new Error(`${path} must be a string`);
-    return value;
-}
-
-function asNumber(value: unknown, path: string): number {
-    if (typeof value !== "number") throw new Error(`${path} must be a number`);
-    return value;
-}
-
-function asArray(value: unknown, path: string): unknown[] {
-    if (!Array.isArray(value)) throw new Error(`${path} must be an array`);
-    return value;
-}
-
-function asStringFields<Field extends string>(value: unknown, path: string, fields: readonly Field[]): Record<Field, string> {
-    const record = asRecord(value, path);
-    const parsed = {} as Record<Field, string>;
-    for (const field of fields) parsed[field] = asString(record[field], `${path}.${field}`);
-    return parsed;
-}
-
-function asBoolean(value: unknown, path: string): boolean {
-    if (typeof value !== "boolean") throw new Error(`${path} must be a boolean`);
-    return value;
-}
-
-function asScript(value: unknown, path: string): ScriptVector {
+export function asScript(value: unknown, path: string): ScriptVector {
     return asStringFields(value, path, ["code_hash", "hash_type", "args"] as const);
 }
 
-function asScriptOrNull(value: unknown, path: string): ScriptVector | null {
-    return value === null || value === undefined ? null : asScript(value, path);
-}
-
-function asOutPoint(value: unknown, path: string): OutPointVector {
+export function asOutPoint(value: unknown, path: string): OutPointVector {
     const record = asRecord(value, path);
     return { tx_hash: asString(record.tx_hash, `${path}.tx_hash`), index: asNumber(record.index, `${path}.index`) };
 }
@@ -215,7 +180,7 @@ function asDigestVectors(value: unknown): DigestVectors {
                 funding_out_point: asOutPoint(record.funding_out_point, `${path}.funding_out_point`),
                 commitment_number: asNumber(record.commitment_number, `${path}.commitment_number`),
                 cell_deps_count: asNumber(record.cell_deps_count, `${path}.cell_deps_count`),
-                udt_type_script: asScriptOrNull(record.udt_type_script, `${path}.udt_type_script`),
+                udt_type_script: asNullable(record.udt_type_script, `${path}.udt_type_script`, asScript),
                 tlcs: asArray(record.tlcs, `${path}.tlcs`).map((tlc, at) => asTlc(tlc, `${path}.tlcs[${at}]`)),
                 tx_size: asNumber(record.tx_size, `${path}.tx_size`),
                 ...asStringFields(record, path, [
@@ -243,7 +208,7 @@ function asDigestVectors(value: unknown): DigestVectors {
                 local_close_script: asScript(record.local_close_script, `${path}.local_close_script`),
                 remote_close_script: asScript(record.remote_close_script, `${path}.remote_close_script`),
                 cell_deps_count: asNumber(record.cell_deps_count, `${path}.cell_deps_count`),
-                udt_type_script: asScriptOrNull(record.udt_type_script, `${path}.udt_type_script`),
+                udt_type_script: asNullable(record.udt_type_script, `${path}.udt_type_script`, asScript),
                 tx_size: asNumber(record.tx_size, `${path}.tx_size`),
                 ...asStringFields(record, path, [
                     "name",
@@ -267,7 +232,7 @@ function asDigestVectors(value: unknown): DigestVectors {
                 revoked_commitment_number: asNumber(record.revoked_commitment_number, `${path}.revoked_commitment_number`),
                 payout_script: asScript(record.payout_script, `${path}.payout_script`),
                 cell_deps_count: asNumber(record.cell_deps_count, `${path}.cell_deps_count`),
-                udt_type_script: asScriptOrNull(record.udt_type_script, `${path}.udt_type_script`),
+                udt_type_script: asNullable(record.udt_type_script, `${path}.udt_type_script`, asScript),
                 ...asStringFields(record, path, [
                     "name",
                     "delay_epoch",
@@ -289,7 +254,7 @@ function asDigestVectors(value: unknown): DigestVectors {
             return {
                 funding_out_point: asOutPoint(record.funding_out_point, `${path}.funding_out_point`),
                 node_ids: [nodeIds[0] as string, nodeIds[1] as string],
-                udt_type_script: asScriptOrNull(record.udt_type_script, `${path}.udt_type_script`),
+                udt_type_script: asNullable(record.udt_type_script, `${path}.udt_type_script`, asScript),
                 ...asStringFields(record, path, ["name", "chain_hash", "capacity", "digest"] as const),
             };
         }),

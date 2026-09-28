@@ -14,7 +14,7 @@ Long-form documentation that does not belong in code comments. For commands and 
 | [protocol.md](./protocol.md)                 | The remote signing protocol v1 as proposed for the review: the encodings, the session frames, the sign request and its ten methods, the four operation objects field by field, and what a frame that does not decode is answered with.          |
 | [session.md](./session.md)                   | The signer session client: the effects it is given, its states, the establishment and each way it fails, one request at a time, the heartbeat, the reconnect backoff, device-initiated requests, what a listener may do, and the flow tests.    |
 | [signing.md](./signing.md)                   | The musig2 engine: fiber's role order, the deterministic nonces and the rule that makes them safe, what the engine leaves to policy, the dispatch that joins the two at one call site, the wallet identity, and the interop loop.               |
-| [../interop/README.md](../interop/README.md) | The cross-implementation harness: how the vectors are generated, regenerated, and re-validated against a new fiber release.                                                                                                                     |
+| [../interop/README.md](../interop/README.md) | The cross-implementation harness: how the vectors are generated, regenerated, and re-validated against a new fiber release, and the RPC forms it pins from fiber's own serde.                                                                   |
 
 ## Conventions
 

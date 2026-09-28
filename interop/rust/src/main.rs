@@ -1,10 +1,14 @@
 //! Cross-implementation vector generator and verifier for the SDK's derivation
-//! scheme and musig2 signing; see `interop/README.md` for what the two halves of
-//! the vectors are and how to regenerate them.
+//! scheme, musig2 signing, signed-message digests and fiber's RPC forms; see
+//! `interop/README.md` for what each part of the vectors is and how to regenerate them.
 //!
 //! Subcommands:
 //!   gen-vectors <out.json>
 //!   verify-ts <vectors.json> <ts-out.json>
+//!   gen-rpc-vectors <out.json>
+//!   verify-rpc-params <rpc.json> <ts-rpc-out.json>
+
+mod rpc;
 
 use musig2::{
     aggregate_partial_signatures, sign_partial, verify_partial, AggNonce, CompactSignature,
@@ -1287,8 +1291,12 @@ fn main() {
     match args.get(1).map(String::as_str) {
         Some("gen-vectors") => gen_vectors(&args[2]),
         Some("verify-ts") => verify_ts(&args[2], &args[3]),
+        Some("gen-rpc-vectors") => rpc::gen_rpc_vectors(&args[2]),
+        Some("verify-rpc-params") => rpc::verify_rpc_params(&args[2], &args[3]),
         _ => {
-            eprintln!("usage: gen-vectors <out.json> | verify-ts <vectors.json> <ts-out.json>");
+            eprintln!(
+                "usage: gen-vectors <out.json> | verify-ts <vectors.json> <ts-out.json> | gen-rpc-vectors <out.json> | verify-rpc-params <rpc.json> <ts-rpc-out.json>"
+            );
             std::process::exit(1);
         }
     }

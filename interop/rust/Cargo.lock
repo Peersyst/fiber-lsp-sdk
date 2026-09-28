@@ -251,7 +251,7 @@ dependencies = [
  "anyhow",
  "ckb-occupied-capacity",
  "derive_more",
- "thiserror",
+ "thiserror 1.0.69",
 ]
 
 [[package]]
@@ -273,7 +273,7 @@ dependencies = [
  "faster-hex",
  "schemars 1.2.2",
  "serde",
- "thiserror",
+ "thiserror 1.0.69",
 ]
 
 [[package]]
@@ -555,14 +555,32 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5ad8c7269456fd609f700340399dca5fa160c4785c9623f87b6079e5a479f28b"
 
 [[package]]
+name = "fiber-json-types"
+version = "0.9.0-rc7"
+source = "git+https://github.com/nervosnetwork/fiber.git?rev=b71a61c3#b71a61c3a1b3b9ffe12bcfcd0be7395f164fa63d"
+dependencies = [
+ "ckb-jsonrpc-types",
+ "ckb-types",
+ "hex",
+ "molecule",
+ "schemars 1.2.2",
+ "serde",
+ "serde_json",
+ "serde_with",
+]
+
+[[package]]
 name = "fiber-lsp-sdk-interop"
 version = "0.1.0"
 dependencies = [
  "ckb-hash 0.115.0",
+ "ckb-jsonrpc-types",
  "ckb-types",
+ "fiber-json-types",
  "fiber-types",
  "hex",
  "hmac",
+ "jsonrpsee-types",
  "musig2",
  "secp256k1 0.29.1",
  "secp256k1 0.30.0",
@@ -581,7 +599,7 @@ dependencies = [
  "hmac",
  "secp256k1 0.30.0",
  "sha2",
- "thiserror",
+ "thiserror 1.0.69",
 ]
 
 [[package]]
@@ -614,7 +632,7 @@ dependencies = [
  "sha2",
  "strum 0.26.3",
  "tentacle-multiaddr",
- "thiserror",
+ "thiserror 1.0.69",
  "tracing",
  "web-time",
 ]
@@ -753,6 +771,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "http"
+version = "1.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "918d3568bebf352712bc2ef3d46a8bcf1a75b373be6539de198e9105cbbf9ce0"
+dependencies = [
+ "bytes",
+ "itoa",
+]
+
+[[package]]
 name = "iana-time-zone"
 version = "0.1.65"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -829,6 +857,18 @@ dependencies = [
  "cfg-if",
  "futures-util",
  "wasm-bindgen",
+]
+
+[[package]]
+name = "jsonrpsee-types"
+version = "0.25.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "66df7256371c45621b3b7d2fb23aea923d577616b9c0e9c0b950a6ea5c2be0ca"
+dependencies = [
+ "http",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.20",
 ]
 
 [[package]]
@@ -970,7 +1010,7 @@ dependencies = [
  "numext-constructor",
  "rand 0.7.3",
  "serde",
- "thiserror",
+ "thiserror 1.0.69",
 ]
 
 [[package]]
@@ -1319,6 +1359,7 @@ version = "1.0.151"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c841b55ecdae098c80dcae9cf767f6f8a0c2cdb3416bbef72181df4d0fe73f14"
 dependencies = [
+ "indexmap 2.14.0",
  "itoa",
  "memchr",
  "serde",
@@ -1513,7 +1554,16 @@ version = "1.0.69"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b6aaf5339b578ea85b50e080feb250a3e8ae8cfcdff9a461c9ec2904bc923f52"
 dependencies = [
- "thiserror-impl",
+ "thiserror-impl 1.0.69",
+]
+
+[[package]]
+name = "thiserror"
+version = "2.0.20"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ec86235f5fcc2a73650310756d2ac5b138a5780bbbdfae3eeccec992c435ba4f"
+dependencies = [
+ "thiserror-impl 2.0.20",
 ]
 
 [[package]]
@@ -1525,6 +1575,17 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.119",
+]
+
+[[package]]
+name = "thiserror-impl"
+version = "2.0.20"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bc04cd3e1236dd4a98afca4569f2deb3f120e5422a4023be2cb683f8486292af"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 3.0.3",
 ]
 
 [[package]]

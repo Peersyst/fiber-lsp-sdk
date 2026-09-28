@@ -1,0 +1,2673 @@
+{
+  "fiber_ref": "b71a61c3",
+  "jsonrpsee_version": "0.25.1",
+  "envelopes": {
+    "request": {
+      "id": 7,
+      "method": "get_payment",
+      "params": [
+        {
+          "payment_hash": "0x0925435785680234bf8c01f1d0a8f876ca2a013665dedc5867a2a5a58ae974c0"
+        }
+      ],
+      "text": "{\"jsonrpc\":\"2.0\",\"id\":7,\"method\":\"get_payment\",\"params\":[{\"payment_hash\":\"0x0925435785680234bf8c01f1d0a8f876ca2a013665dedc5867a2a5a58ae974c0\"}]}"
+    },
+    "results": [
+      {
+        "name": "object result",
+        "id": 7,
+        "result": {
+          "channel_id": "0x0e109be6e5559f77c575df49bb643498d74a2586e0ac51bebbe660919623f169",
+          "funding_tx_hash": "0xc1d596643b6957ca4b6ef6034542104d50cf6c4ee4522ecccc554f268fac03eb"
+        },
+        "text": "{\"jsonrpc\":\"2.0\",\"id\":7,\"result\":{\"channel_id\":\"0x0e109be6e5559f77c575df49bb643498d74a2586e0ac51bebbe660919623f169\",\"funding_tx_hash\":\"0xc1d596643b6957ca4b6ef6034542104d50cf6c4ee4522ecccc554f268fac03eb\"}}"
+      },
+      {
+        "name": "empty object result",
+        "id": 8,
+        "result": {},
+        "text": "{\"jsonrpc\":\"2.0\",\"id\":8,\"result\":{}}"
+      },
+      {
+        "name": "null result",
+        "id": 9,
+        "result": null,
+        "text": "{\"jsonrpc\":\"2.0\",\"id\":9,\"result\":null}"
+      }
+    ],
+    "errors": [
+      {
+        "name": "call failed",
+        "id": 10,
+        "code": -32000,
+        "message": "invoice not found",
+        "data": null,
+        "text": "{\"jsonrpc\":\"2.0\",\"id\":10,\"error\":{\"code\":-32000,\"message\":\"invoice not found\"}}"
+      },
+      {
+        "name": "unauthorized",
+        "id": 11,
+        "code": -32999,
+        "message": "Unauthorized",
+        "data": null,
+        "text": "{\"jsonrpc\":\"2.0\",\"id\":11,\"error\":{\"code\":-32999,\"message\":\"Unauthorized\"}}"
+      },
+      {
+        "name": "unauthorized, run limit",
+        "id": 12,
+        "code": -32999,
+        "message": "Unauthorized: Biscuit authorization timed out",
+        "data": null,
+        "text": "{\"jsonrpc\":\"2.0\",\"id\":12,\"error\":{\"code\":-32999,\"message\":\"Unauthorized: Biscuit authorization timed out\"}}"
+      },
+      {
+        "name": "invalid params",
+        "id": 13,
+        "code": -32602,
+        "message": "Invalid params",
+        "data": "failed to convert vector into type: [0] at line 1 column 23",
+        "text": "{\"jsonrpc\":\"2.0\",\"id\":13,\"error\":{\"code\":-32602,\"message\":\"Invalid params\",\"data\":\"failed to convert vector into type: [0] at line 1 column 23\"}}"
+      },
+      {
+        "name": "method not found",
+        "id": 14,
+        "code": -32601,
+        "message": "Method not found",
+        "data": null,
+        "text": "{\"jsonrpc\":\"2.0\",\"id\":14,\"error\":{\"code\":-32601,\"message\":\"Method not found\"}}"
+      },
+      {
+        "name": "invalid request",
+        "id": null,
+        "code": -32600,
+        "message": "Invalid request",
+        "data": null,
+        "text": "{\"jsonrpc\":\"2.0\",\"id\":null,\"error\":{\"code\":-32600,\"message\":\"Invalid request\"}}"
+      }
+    ]
+  },
+  "methods": {
+    "open_channel_with_external_funding": {
+      "params": [
+        {
+          "name": "public channel",
+          "values": {
+            "pubkey": "02106fa580a1c56411d6ee7deabcc98aae6f6479858f924487cf58c4c2ca302304",
+            "funding_amount": "16000000000",
+            "public": true,
+            "shutdown_script": {
+              "code_hash": "9bd7e06f3ecf4be0f2fcd2188b23f1b9fcc88e5d4b65a8637b17723bbda3cce8",
+              "hash_type": "type",
+              "args": "42149f078609fb2978e11ffd4d847bce9c854c44"
+            },
+            "funding_lock_script": {
+              "code_hash": "9bd7e06f3ecf4be0f2fcd2188b23f1b9fcc88e5d4b65a8637b17723bbda3cce8",
+              "hash_type": "type",
+              "args": "7599ae0cac87618d753a381fcbbd97b11d711e60"
+            }
+          },
+          "json": {
+            "pubkey": "02106fa580a1c56411d6ee7deabcc98aae6f6479858f924487cf58c4c2ca302304",
+            "funding_amount": "0x3b9aca000",
+            "public": true,
+            "funding_udt_type_script": null,
+            "shutdown_script": {
+              "code_hash": "0x9bd7e06f3ecf4be0f2fcd2188b23f1b9fcc88e5d4b65a8637b17723bbda3cce8",
+              "hash_type": "type",
+              "args": "0x42149f078609fb2978e11ffd4d847bce9c854c44"
+            },
+            "funding_lock_script": {
+              "code_hash": "0x9bd7e06f3ecf4be0f2fcd2188b23f1b9fcc88e5d4b65a8637b17723bbda3cce8",
+              "hash_type": "type",
+              "args": "0x7599ae0cac87618d753a381fcbbd97b11d711e60"
+            },
+            "funding_lock_script_cell_deps": null,
+            "commitment_delay_epoch": null,
+            "commitment_fee_rate": null,
+            "funding_fee_rate": null,
+            "tlc_expiry_delta": null,
+            "tlc_min_value": null,
+            "tlc_fee_proportional_millionths": null,
+            "max_tlc_value_in_flight": null,
+            "max_tlc_number_in_flight": null
+          }
+        },
+        {
+          "name": "private channel, largest amount",
+          "values": {
+            "pubkey": "02106fa580a1c56411d6ee7deabcc98aae6f6479858f924487cf58c4c2ca302304",
+            "funding_amount": "340282366920938463463374607431768211455",
+            "public": false,
+            "shutdown_script": {
+              "code_hash": "c694d7e229684a66814deb0a7763d0de1f0d66c121f254566d2e67a32d49ca63",
+              "hash_type": "data2",
+              "args": ""
+            },
+            "funding_lock_script": {
+              "code_hash": "d95cd4c4c4015fb0bf5f2c566179922dce7d8aa9638ea1184c6f894855eabfe2",
+              "hash_type": "data",
+              "args": "f6be49e1381c9dd75be3e35953589f6adf5027a9619040593e353b19151ef089"
+            }
+          },
+          "json": {
+            "pubkey": "02106fa580a1c56411d6ee7deabcc98aae6f6479858f924487cf58c4c2ca302304",
+            "funding_amount": "0xffffffffffffffffffffffffffffffff",
+            "public": false,
+            "funding_udt_type_script": null,
+            "shutdown_script": {
+              "code_hash": "0xc694d7e229684a66814deb0a7763d0de1f0d66c121f254566d2e67a32d49ca63",
+              "hash_type": "data2",
+              "args": "0x"
+            },
+            "funding_lock_script": {
+              "code_hash": "0xd95cd4c4c4015fb0bf5f2c566179922dce7d8aa9638ea1184c6f894855eabfe2",
+              "hash_type": "data",
+              "args": "0xf6be49e1381c9dd75be3e35953589f6adf5027a9619040593e353b19151ef089"
+            },
+            "funding_lock_script_cell_deps": null,
+            "commitment_delay_epoch": null,
+            "commitment_fee_rate": null,
+            "funding_fee_rate": null,
+            "tlc_expiry_delta": null,
+            "tlc_min_value": null,
+            "tlc_fee_proportional_millionths": null,
+            "max_tlc_value_in_flight": null,
+            "max_tlc_number_in_flight": null
+          }
+        }
+      ],
+      "results": [
+        {
+          "name": "ckb channel",
+          "values": {
+            "channel_id": "0e109be6e5559f77c575df49bb643498d74a2586e0ac51bebbe660919623f169",
+            "unsigned_funding_tx": {
+              "version": 0,
+              "cell_deps": [
+                {
+                  "out_point": {
+                    "tx_hash": "d8ef9125d4bc98b9c3716fcf61110e302098a55222a2e79344a8264352fe7b9d",
+                    "index": 0
+                  },
+                  "dep_type": "dep_group"
+                }
+              ],
+              "header_deps": [],
+              "inputs": [
+                {
+                  "since": "0",
+                  "previous_output": {
+                    "tx_hash": "89dc569f9eec0e82ca13a353be098d150e9164d79f9c5201079e422a283c8ee4",
+                    "index": 1
+                  }
+                }
+              ],
+              "outputs": [
+                {
+                  "capacity": "6100000000",
+                  "lock": {
+                    "code_hash": "2adb9f25cf2c2ad54648f14d9899b5baf9229df3a1ed98748a2b2313adee8deb",
+                    "hash_type": "data1",
+                    "args": "b3a1f0f6c1f0c7d0d5a4ad24508384c3440a4baa"
+                  },
+                  "type": null
+                },
+                {
+                  "capacity": "9900000000",
+                  "lock": {
+                    "code_hash": "9bd7e06f3ecf4be0f2fcd2188b23f1b9fcc88e5d4b65a8637b17723bbda3cce8",
+                    "hash_type": "type",
+                    "args": "7599ae0cac87618d753a381fcbbd97b11d711e60"
+                  },
+                  "type": null
+                }
+              ],
+              "outputs_data": [
+                "",
+                ""
+              ],
+              "witnesses": [
+                "55000000100000005500000055000000410000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
+              ]
+            }
+          },
+          "json": {
+            "channel_id": "0x0e109be6e5559f77c575df49bb643498d74a2586e0ac51bebbe660919623f169",
+            "unsigned_funding_tx": {
+              "version": "0x0",
+              "cell_deps": [
+                {
+                  "out_point": {
+                    "tx_hash": "0xd8ef9125d4bc98b9c3716fcf61110e302098a55222a2e79344a8264352fe7b9d",
+                    "index": "0x0"
+                  },
+                  "dep_type": "dep_group"
+                }
+              ],
+              "header_deps": [],
+              "inputs": [
+                {
+                  "since": "0x0",
+                  "previous_output": {
+                    "tx_hash": "0x89dc569f9eec0e82ca13a353be098d150e9164d79f9c5201079e422a283c8ee4",
+                    "index": "0x1"
+                  }
+                }
+              ],
+              "outputs": [
+                {
+                  "capacity": "0x16b969d00",
+                  "lock": {
+                    "code_hash": "0x2adb9f25cf2c2ad54648f14d9899b5baf9229df3a1ed98748a2b2313adee8deb",
+                    "hash_type": "data1",
+                    "args": "0xb3a1f0f6c1f0c7d0d5a4ad24508384c3440a4baa"
+                  },
+                  "type": null
+                },
+                {
+                  "capacity": "0x24e160300",
+                  "lock": {
+                    "code_hash": "0x9bd7e06f3ecf4be0f2fcd2188b23f1b9fcc88e5d4b65a8637b17723bbda3cce8",
+                    "hash_type": "type",
+                    "args": "0x7599ae0cac87618d753a381fcbbd97b11d711e60"
+                  },
+                  "type": null
+                }
+              ],
+              "outputs_data": [
+                "0x",
+                "0x"
+              ],
+              "witnesses": [
+                "0x55000000100000005500000055000000410000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
+              ]
+            }
+          }
+        },
+        {
+          "name": "udt channel with deps",
+          "values": {
+            "channel_id": "26472d26266431a5f13a2e08e1e1e2d7409166f87652bb6dcb6add640ee55bf2",
+            "unsigned_funding_tx": {
+              "version": 0,
+              "cell_deps": [
+                {
+                  "out_point": {
+                    "tx_hash": "d8ef9125d4bc98b9c3716fcf61110e302098a55222a2e79344a8264352fe7b9d",
+                    "index": 0
+                  },
+                  "dep_type": "dep_group"
+                },
+                {
+                  "out_point": {
+                    "tx_hash": "25420fa6561f27d788553529c5a2d7758ce5ed85823df5f12b21f7a0f105acd9",
+                    "index": 2
+                  },
+                  "dep_type": "code"
+                }
+              ],
+              "header_deps": [
+                "c1dd0db769c996b1a1a3bcf8363a52591525470d2e8b74d8af8e76c33235143d"
+              ],
+              "inputs": [
+                {
+                  "since": "0",
+                  "previous_output": {
+                    "tx_hash": "89dc569f9eec0e82ca13a353be098d150e9164d79f9c5201079e422a283c8ee4",
+                    "index": 1
+                  }
+                },
+                {
+                  "since": "18446744073709551615",
+                  "previous_output": {
+                    "tx_hash": "ba99565f43b9baad46715753a94028906c73fdc052418acd24e473aebd15d47d",
+                    "index": 0
+                  }
+                }
+              ],
+              "outputs": [
+                {
+                  "capacity": "14200000000",
+                  "lock": {
+                    "code_hash": "2adb9f25cf2c2ad54648f14d9899b5baf9229df3a1ed98748a2b2313adee8deb",
+                    "hash_type": "data1",
+                    "args": "b3a1f0f6c1f0c7d0d5a4ad24508384c3440a4baa"
+                  },
+                  "type": {
+                    "code_hash": "912f64f976947ed5467ff5e7ba4c87bd37f240cdbdba0b38da619372056ef827",
+                    "hash_type": "type",
+                    "args": "8612706980baca14e3d03ea4d77d185e6f7338cd6e98a0ea0cd17a69918f2578"
+                  }
+                },
+                {
+                  "capacity": "14200000000",
+                  "lock": {
+                    "code_hash": "9bd7e06f3ecf4be0f2fcd2188b23f1b9fcc88e5d4b65a8637b17723bbda3cce8",
+                    "hash_type": "type",
+                    "args": "7599ae0cac87618d753a381fcbbd97b11d711e60"
+                  },
+                  "type": {
+                    "code_hash": "912f64f976947ed5467ff5e7ba4c87bd37f240cdbdba0b38da619372056ef827",
+                    "hash_type": "type",
+                    "args": "8612706980baca14e3d03ea4d77d185e6f7338cd6e98a0ea0cd17a69918f2578"
+                  }
+                },
+                {
+                  "capacity": "9900000000",
+                  "lock": {
+                    "code_hash": "9bd7e06f3ecf4be0f2fcd2188b23f1b9fcc88e5d4b65a8637b17723bbda3cce8",
+                    "hash_type": "type",
+                    "args": "7599ae0cac87618d753a381fcbbd97b11d711e60"
+                  },
+                  "type": null
+                }
+              ],
+              "outputs_data": [
+                "40420f00000000000000000000000000",
+                "ffffffffffffffffffffffffffffffff",
+                ""
+              ],
+              "witnesses": [
+                "55000000100000005500000055000000410000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
+                ""
+              ]
+            }
+          },
+          "json": {
+            "channel_id": "0x26472d26266431a5f13a2e08e1e1e2d7409166f87652bb6dcb6add640ee55bf2",
+            "unsigned_funding_tx": {
+              "version": "0x0",
+              "cell_deps": [
+                {
+                  "out_point": {
+                    "tx_hash": "0xd8ef9125d4bc98b9c3716fcf61110e302098a55222a2e79344a8264352fe7b9d",
+                    "index": "0x0"
+                  },
+                  "dep_type": "dep_group"
+                },
+                {
+                  "out_point": {
+                    "tx_hash": "0x25420fa6561f27d788553529c5a2d7758ce5ed85823df5f12b21f7a0f105acd9",
+                    "index": "0x2"
+                  },
+                  "dep_type": "code"
+                }
+              ],
+              "header_deps": [
+                "0xc1dd0db769c996b1a1a3bcf8363a52591525470d2e8b74d8af8e76c33235143d"
+              ],
+              "inputs": [
+                {
+                  "since": "0x0",
+                  "previous_output": {
+                    "tx_hash": "0x89dc569f9eec0e82ca13a353be098d150e9164d79f9c5201079e422a283c8ee4",
+                    "index": "0x1"
+                  }
+                },
+                {
+                  "since": "0xffffffffffffffff",
+                  "previous_output": {
+                    "tx_hash": "0xba99565f43b9baad46715753a94028906c73fdc052418acd24e473aebd15d47d",
+                    "index": "0x0"
+                  }
+                }
+              ],
+              "outputs": [
+                {
+                  "capacity": "0x34e62ce00",
+                  "lock": {
+                    "code_hash": "0x2adb9f25cf2c2ad54648f14d9899b5baf9229df3a1ed98748a2b2313adee8deb",
+                    "hash_type": "data1",
+                    "args": "0xb3a1f0f6c1f0c7d0d5a4ad24508384c3440a4baa"
+                  },
+                  "type": {
+                    "code_hash": "0x912f64f976947ed5467ff5e7ba4c87bd37f240cdbdba0b38da619372056ef827",
+                    "hash_type": "type",
+                    "args": "0x8612706980baca14e3d03ea4d77d185e6f7338cd6e98a0ea0cd17a69918f2578"
+                  }
+                },
+                {
+                  "capacity": "0x34e62ce00",
+                  "lock": {
+                    "code_hash": "0x9bd7e06f3ecf4be0f2fcd2188b23f1b9fcc88e5d4b65a8637b17723bbda3cce8",
+                    "hash_type": "type",
+                    "args": "0x7599ae0cac87618d753a381fcbbd97b11d711e60"
+                  },
+                  "type": {
+                    "code_hash": "0x912f64f976947ed5467ff5e7ba4c87bd37f240cdbdba0b38da619372056ef827",
+                    "hash_type": "type",
+                    "args": "0x8612706980baca14e3d03ea4d77d185e6f7338cd6e98a0ea0cd17a69918f2578"
+                  }
+                },
+                {
+                  "capacity": "0x24e160300",
+                  "lock": {
+                    "code_hash": "0x9bd7e06f3ecf4be0f2fcd2188b23f1b9fcc88e5d4b65a8637b17723bbda3cce8",
+                    "hash_type": "type",
+                    "args": "0x7599ae0cac87618d753a381fcbbd97b11d711e60"
+                  },
+                  "type": null
+                }
+              ],
+              "outputs_data": [
+                "0x40420f00000000000000000000000000",
+                "0xffffffffffffffffffffffffffffffff",
+                "0x"
+              ],
+              "witnesses": [
+                "0x55000000100000005500000055000000410000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
+                "0x"
+              ]
+            }
+          }
+        }
+      ]
+    },
+    "submit_signed_funding_tx": {
+      "params": [
+        {
+          "name": "ckb channel",
+          "values": {
+            "channel_id": "0e109be6e5559f77c575df49bb643498d74a2586e0ac51bebbe660919623f169",
+            "signed_funding_tx": {
+              "version": 0,
+              "cell_deps": [
+                {
+                  "out_point": {
+                    "tx_hash": "d8ef9125d4bc98b9c3716fcf61110e302098a55222a2e79344a8264352fe7b9d",
+                    "index": 0
+                  },
+                  "dep_type": "dep_group"
+                }
+              ],
+              "header_deps": [],
+              "inputs": [
+                {
+                  "since": "0",
+                  "previous_output": {
+                    "tx_hash": "89dc569f9eec0e82ca13a353be098d150e9164d79f9c5201079e422a283c8ee4",
+                    "index": 1
+                  }
+                }
+              ],
+              "outputs": [
+                {
+                  "capacity": "6100000000",
+                  "lock": {
+                    "code_hash": "2adb9f25cf2c2ad54648f14d9899b5baf9229df3a1ed98748a2b2313adee8deb",
+                    "hash_type": "data1",
+                    "args": "b3a1f0f6c1f0c7d0d5a4ad24508384c3440a4baa"
+                  },
+                  "type": null
+                },
+                {
+                  "capacity": "9900000000",
+                  "lock": {
+                    "code_hash": "9bd7e06f3ecf4be0f2fcd2188b23f1b9fcc88e5d4b65a8637b17723bbda3cce8",
+                    "hash_type": "type",
+                    "args": "7599ae0cac87618d753a381fcbbd97b11d711e60"
+                  },
+                  "type": null
+                }
+              ],
+              "outputs_data": [
+                "",
+                ""
+              ],
+              "witnesses": [
+                "55000000100000005500000055000000410000005a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a"
+              ]
+            }
+          },
+          "json": {
+            "channel_id": "0x0e109be6e5559f77c575df49bb643498d74a2586e0ac51bebbe660919623f169",
+            "signed_funding_tx": {
+              "version": "0x0",
+              "cell_deps": [
+                {
+                  "out_point": {
+                    "tx_hash": "0xd8ef9125d4bc98b9c3716fcf61110e302098a55222a2e79344a8264352fe7b9d",
+                    "index": "0x0"
+                  },
+                  "dep_type": "dep_group"
+                }
+              ],
+              "header_deps": [],
+              "inputs": [
+                {
+                  "since": "0x0",
+                  "previous_output": {
+                    "tx_hash": "0x89dc569f9eec0e82ca13a353be098d150e9164d79f9c5201079e422a283c8ee4",
+                    "index": "0x1"
+                  }
+                }
+              ],
+              "outputs": [
+                {
+                  "capacity": "0x16b969d00",
+                  "lock": {
+                    "code_hash": "0x2adb9f25cf2c2ad54648f14d9899b5baf9229df3a1ed98748a2b2313adee8deb",
+                    "hash_type": "data1",
+                    "args": "0xb3a1f0f6c1f0c7d0d5a4ad24508384c3440a4baa"
+                  },
+                  "type": null
+                },
+                {
+                  "capacity": "0x24e160300",
+                  "lock": {
+                    "code_hash": "0x9bd7e06f3ecf4be0f2fcd2188b23f1b9fcc88e5d4b65a8637b17723bbda3cce8",
+                    "hash_type": "type",
+                    "args": "0x7599ae0cac87618d753a381fcbbd97b11d711e60"
+                  },
+                  "type": null
+                }
+              ],
+              "outputs_data": [
+                "0x",
+                "0x"
+              ],
+              "witnesses": [
+                "0x55000000100000005500000055000000410000005a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a"
+              ]
+            }
+          }
+        },
+        {
+          "name": "udt channel with deps",
+          "values": {
+            "channel_id": "26472d26266431a5f13a2e08e1e1e2d7409166f87652bb6dcb6add640ee55bf2",
+            "signed_funding_tx": {
+              "version": 0,
+              "cell_deps": [
+                {
+                  "out_point": {
+                    "tx_hash": "d8ef9125d4bc98b9c3716fcf61110e302098a55222a2e79344a8264352fe7b9d",
+                    "index": 0
+                  },
+                  "dep_type": "dep_group"
+                },
+                {
+                  "out_point": {
+                    "tx_hash": "25420fa6561f27d788553529c5a2d7758ce5ed85823df5f12b21f7a0f105acd9",
+                    "index": 2
+                  },
+                  "dep_type": "code"
+                }
+              ],
+              "header_deps": [
+                "c1dd0db769c996b1a1a3bcf8363a52591525470d2e8b74d8af8e76c33235143d"
+              ],
+              "inputs": [
+                {
+                  "since": "0",
+                  "previous_output": {
+                    "tx_hash": "89dc569f9eec0e82ca13a353be098d150e9164d79f9c5201079e422a283c8ee4",
+                    "index": 1
+                  }
+                },
+                {
+                  "since": "18446744073709551615",
+                  "previous_output": {
+                    "tx_hash": "ba99565f43b9baad46715753a94028906c73fdc052418acd24e473aebd15d47d",
+                    "index": 0
+                  }
+                }
+              ],
+              "outputs": [
+                {
+                  "capacity": "14200000000",
+                  "lock": {
+                    "code_hash": "2adb9f25cf2c2ad54648f14d9899b5baf9229df3a1ed98748a2b2313adee8deb",
+                    "hash_type": "data1",
+                    "args": "b3a1f0f6c1f0c7d0d5a4ad24508384c3440a4baa"
+                  },
+                  "type": {
+                    "code_hash": "912f64f976947ed5467ff5e7ba4c87bd37f240cdbdba0b38da619372056ef827",
+                    "hash_type": "type",
+                    "args": "8612706980baca14e3d03ea4d77d185e6f7338cd6e98a0ea0cd17a69918f2578"
+                  }
+                },
+                {
+                  "capacity": "14200000000",
+                  "lock": {
+                    "code_hash": "9bd7e06f3ecf4be0f2fcd2188b23f1b9fcc88e5d4b65a8637b17723bbda3cce8",
+                    "hash_type": "type",
+                    "args": "7599ae0cac87618d753a381fcbbd97b11d711e60"
+                  },
+                  "type": {
+                    "code_hash": "912f64f976947ed5467ff5e7ba4c87bd37f240cdbdba0b38da619372056ef827",
+                    "hash_type": "type",
+                    "args": "8612706980baca14e3d03ea4d77d185e6f7338cd6e98a0ea0cd17a69918f2578"
+                  }
+                },
+                {
+                  "capacity": "9900000000",
+                  "lock": {
+                    "code_hash": "9bd7e06f3ecf4be0f2fcd2188b23f1b9fcc88e5d4b65a8637b17723bbda3cce8",
+                    "hash_type": "type",
+                    "args": "7599ae0cac87618d753a381fcbbd97b11d711e60"
+                  },
+                  "type": null
+                }
+              ],
+              "outputs_data": [
+                "40420f00000000000000000000000000",
+                "ffffffffffffffffffffffffffffffff",
+                ""
+              ],
+              "witnesses": [
+                "55000000100000005500000055000000410000005a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a",
+                ""
+              ]
+            }
+          },
+          "json": {
+            "channel_id": "0x26472d26266431a5f13a2e08e1e1e2d7409166f87652bb6dcb6add640ee55bf2",
+            "signed_funding_tx": {
+              "version": "0x0",
+              "cell_deps": [
+                {
+                  "out_point": {
+                    "tx_hash": "0xd8ef9125d4bc98b9c3716fcf61110e302098a55222a2e79344a8264352fe7b9d",
+                    "index": "0x0"
+                  },
+                  "dep_type": "dep_group"
+                },
+                {
+                  "out_point": {
+                    "tx_hash": "0x25420fa6561f27d788553529c5a2d7758ce5ed85823df5f12b21f7a0f105acd9",
+                    "index": "0x2"
+                  },
+                  "dep_type": "code"
+                }
+              ],
+              "header_deps": [
+                "0xc1dd0db769c996b1a1a3bcf8363a52591525470d2e8b74d8af8e76c33235143d"
+              ],
+              "inputs": [
+                {
+                  "since": "0x0",
+                  "previous_output": {
+                    "tx_hash": "0x89dc569f9eec0e82ca13a353be098d150e9164d79f9c5201079e422a283c8ee4",
+                    "index": "0x1"
+                  }
+                },
+                {
+                  "since": "0xffffffffffffffff",
+                  "previous_output": {
+                    "tx_hash": "0xba99565f43b9baad46715753a94028906c73fdc052418acd24e473aebd15d47d",
+                    "index": "0x0"
+                  }
+                }
+              ],
+              "outputs": [
+                {
+                  "capacity": "0x34e62ce00",
+                  "lock": {
+                    "code_hash": "0x2adb9f25cf2c2ad54648f14d9899b5baf9229df3a1ed98748a2b2313adee8deb",
+                    "hash_type": "data1",
+                    "args": "0xb3a1f0f6c1f0c7d0d5a4ad24508384c3440a4baa"
+                  },
+                  "type": {
+                    "code_hash": "0x912f64f976947ed5467ff5e7ba4c87bd37f240cdbdba0b38da619372056ef827",
+                    "hash_type": "type",
+                    "args": "0x8612706980baca14e3d03ea4d77d185e6f7338cd6e98a0ea0cd17a69918f2578"
+                  }
+                },
+                {
+                  "capacity": "0x34e62ce00",
+                  "lock": {
+                    "code_hash": "0x9bd7e06f3ecf4be0f2fcd2188b23f1b9fcc88e5d4b65a8637b17723bbda3cce8",
+                    "hash_type": "type",
+                    "args": "0x7599ae0cac87618d753a381fcbbd97b11d711e60"
+                  },
+                  "type": {
+                    "code_hash": "0x912f64f976947ed5467ff5e7ba4c87bd37f240cdbdba0b38da619372056ef827",
+                    "hash_type": "type",
+                    "args": "0x8612706980baca14e3d03ea4d77d185e6f7338cd6e98a0ea0cd17a69918f2578"
+                  }
+                },
+                {
+                  "capacity": "0x24e160300",
+                  "lock": {
+                    "code_hash": "0x9bd7e06f3ecf4be0f2fcd2188b23f1b9fcc88e5d4b65a8637b17723bbda3cce8",
+                    "hash_type": "type",
+                    "args": "0x7599ae0cac87618d753a381fcbbd97b11d711e60"
+                  },
+                  "type": null
+                }
+              ],
+              "outputs_data": [
+                "0x40420f00000000000000000000000000",
+                "0xffffffffffffffffffffffffffffffff",
+                "0x"
+              ],
+              "witnesses": [
+                "0x55000000100000005500000055000000410000005a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a",
+                "0x"
+              ]
+            }
+          }
+        }
+      ],
+      "results": [
+        {
+          "name": "submitted",
+          "values": {
+            "channel_id": "0e109be6e5559f77c575df49bb643498d74a2586e0ac51bebbe660919623f169",
+            "funding_tx_hash": "c1d596643b6957ca4b6ef6034542104d50cf6c4ee4522ecccc554f268fac03eb"
+          },
+          "json": {
+            "channel_id": "0x0e109be6e5559f77c575df49bb643498d74a2586e0ac51bebbe660919623f169",
+            "funding_tx_hash": "0xc1d596643b6957ca4b6ef6034542104d50cf6c4ee4522ecccc554f268fac03eb"
+          }
+        }
+      ]
+    },
+    "abandon_channel": {
+      "params": [
+        {
+          "name": "by channel id",
+          "values": {
+            "channel_id": "0e109be6e5559f77c575df49bb643498d74a2586e0ac51bebbe660919623f169"
+          },
+          "json": {
+            "channel_id": "0x0e109be6e5559f77c575df49bb643498d74a2586e0ac51bebbe660919623f169"
+          }
+        }
+      ],
+      "results": [
+        {
+          "name": "abandoned",
+          "values": null,
+          "json": null
+        }
+      ]
+    },
+    "list_channels": {
+      "params": [
+        {
+          "name": "open channels",
+          "values": {
+            "include_closed": null,
+            "only_pending": null
+          },
+          "json": {
+            "pubkey": null,
+            "include_closed": null,
+            "only_pending": null
+          }
+        },
+        {
+          "name": "with closed channels",
+          "values": {
+            "include_closed": true,
+            "only_pending": null
+          },
+          "json": {
+            "pubkey": null,
+            "include_closed": true,
+            "only_pending": null
+          }
+        },
+        {
+          "name": "only pending openings",
+          "values": {
+            "include_closed": null,
+            "only_pending": true
+          },
+          "json": {
+            "pubkey": null,
+            "include_closed": null,
+            "only_pending": true
+          }
+        }
+      ],
+      "results": [
+        {
+          "name": "open channels",
+          "values": {
+            "channels": [
+              {
+                "channel_id": "54864f177811c07cb41e1d9c723f84fc67b496f74bad6f23404137eeed7ceb71",
+                "is_public": true,
+                "is_acceptor": false,
+                "is_one_way": false,
+                "channel_outpoint": {
+                  "tx_hash": "a36b91f95053235b306c0da6e528fc65df247af63db1d28211dcddf98acb8715",
+                  "index": 0
+                },
+                "pubkey": "02106fa580a1c56411d6ee7deabcc98aae6f6479858f924487cf58c4c2ca302304",
+                "funding_udt_type_script": null,
+                "state": {
+                  "name": "ChannelReady",
+                  "flags": []
+                },
+                "local_balance": "5000000000",
+                "offered_tlc_balance": "0",
+                "remote_balance": "1000000000",
+                "received_tlc_balance": "150000000",
+                "pending_tlcs": [
+                  {
+                    "id": "3",
+                    "amount": "250000000",
+                    "payment_hash": "2e6400bd41f4f2c0a1cd9a3192f61fa64baa5e8c05850c704b868c9d0f02f7bc",
+                    "expiry": "1726003600000",
+                    "forwarding_channel_id": "b9e7be23cdf95f6fd87152f207761bfed891d9f804376df2dd578efeb50138ad",
+                    "forwarding_tlc_id": "11",
+                    "status": {
+                      "direction": "Outbound",
+                      "status": "Committed"
+                    }
+                  },
+                  {
+                    "id": "0",
+                    "amount": "150000000",
+                    "payment_hash": "71c661a79e294e9f80c30f5b45e9a0d8eaa1308fbc113de333462efa2fe66095",
+                    "expiry": "1726007200000",
+                    "forwarding_channel_id": null,
+                    "forwarding_tlc_id": null,
+                    "status": {
+                      "direction": "Inbound",
+                      "status": "RemoteAnnounced"
+                    }
+                  }
+                ],
+                "latest_commitment_transaction_hash": "66ca91bcda3fd9bf5358a596cb21a7fc87e5b49a2ad19512293fa28502b34148",
+                "created_at": "1726000000000",
+                "enabled": true,
+                "tlc_expiry_delta": "86400000",
+                "tlc_fee_proportional_millionths": "1000",
+                "shutdown_transaction_hash": null,
+                "failure_detail": null
+              },
+              {
+                "channel_id": "26472d26266431a5f13a2e08e1e1e2d7409166f87652bb6dcb6add640ee55bf2",
+                "is_public": true,
+                "is_acceptor": true,
+                "is_one_way": true,
+                "channel_outpoint": {
+                  "tx_hash": "d2a274024a29312c15fe06a656c960fa7380de0df60a29f891dfcde168d1b640",
+                  "index": 0
+                },
+                "pubkey": "02106fa580a1c56411d6ee7deabcc98aae6f6479858f924487cf58c4c2ca302304",
+                "funding_udt_type_script": {
+                  "code_hash": "912f64f976947ed5467ff5e7ba4c87bd37f240cdbdba0b38da619372056ef827",
+                  "hash_type": "type",
+                  "args": "8612706980baca14e3d03ea4d77d185e6f7338cd6e98a0ea0cd17a69918f2578"
+                },
+                "state": {
+                  "name": "ChannelReady",
+                  "flags": []
+                },
+                "local_balance": "340282366920938463463374607431768211455",
+                "offered_tlc_balance": "340282366920938463463374607431768211455",
+                "remote_balance": "1000000000",
+                "received_tlc_balance": "0",
+                "pending_tlcs": [],
+                "latest_commitment_transaction_hash": "df49a3bfd510f1f65496fa2f9b63dd74a3ab6641e878c8eb941126987036a66a",
+                "created_at": "1726000000000",
+                "enabled": true,
+                "tlc_expiry_delta": "86400000",
+                "tlc_fee_proportional_millionths": "340282366920938463463374607431768211455",
+                "shutdown_transaction_hash": null,
+                "failure_detail": null
+              },
+              {
+                "channel_id": "65d2c1d1fd16e6f2d2395e7ad127827a4af7f0f88c9045077e213353698b54e8",
+                "is_public": true,
+                "is_acceptor": false,
+                "is_one_way": false,
+                "channel_outpoint": {
+                  "tx_hash": "5a33f6ddb5faed7131415560b1c483d82684d24ad910fa0d6d7afc552a365cb4",
+                  "index": 0
+                },
+                "pubkey": "02106fa580a1c56411d6ee7deabcc98aae6f6479858f924487cf58c4c2ca302304",
+                "funding_udt_type_script": null,
+                "state": {
+                  "name": "ShuttingDown",
+                  "flags": [
+                    "OUR_SHUTDOWN_SENT",
+                    "THEIR_SHUTDOWN_SENT",
+                    "AWAITING_PENDING_TLCS"
+                  ]
+                },
+                "local_balance": "5000000000",
+                "offered_tlc_balance": "0",
+                "remote_balance": "1000000000",
+                "received_tlc_balance": "0",
+                "pending_tlcs": [],
+                "latest_commitment_transaction_hash": "d41c13fee2ae2f75e3344dd7be8b93523b1938515cbd275046571f1f6f87c6df",
+                "created_at": "1726000000000",
+                "enabled": true,
+                "tlc_expiry_delta": "86400000",
+                "tlc_fee_proportional_millionths": "1000",
+                "shutdown_transaction_hash": null,
+                "failure_detail": null
+              }
+            ]
+          },
+          "json": {
+            "channels": [
+              {
+                "channel_id": "0x54864f177811c07cb41e1d9c723f84fc67b496f74bad6f23404137eeed7ceb71",
+                "is_public": true,
+                "is_acceptor": false,
+                "is_one_way": false,
+                "channel_outpoint": "0xa36b91f95053235b306c0da6e528fc65df247af63db1d28211dcddf98acb871500000000",
+                "pubkey": "02106fa580a1c56411d6ee7deabcc98aae6f6479858f924487cf58c4c2ca302304",
+                "funding_udt_type_script": null,
+                "state": {
+                  "state_name": "ChannelReady"
+                },
+                "local_balance": "0x12a05f200",
+                "offered_tlc_balance": "0x0",
+                "remote_balance": "0x3b9aca00",
+                "received_tlc_balance": "0x8f0d180",
+                "pending_tlcs": [
+                  {
+                    "id": "0x3",
+                    "amount": "0xee6b280",
+                    "payment_hash": "0x2e6400bd41f4f2c0a1cd9a3192f61fa64baa5e8c05850c704b868c9d0f02f7bc",
+                    "expiry": "0x191ddd4da80",
+                    "forwarding_channel_id": "0xb9e7be23cdf95f6fd87152f207761bfed891d9f804376df2dd578efeb50138ad",
+                    "forwarding_tlc_id": "0xb",
+                    "status": {
+                      "Outbound": "Committed"
+                    }
+                  },
+                  {
+                    "id": "0x0",
+                    "amount": "0x8f0d180",
+                    "payment_hash": "0x71c661a79e294e9f80c30f5b45e9a0d8eaa1308fbc113de333462efa2fe66095",
+                    "expiry": "0x191de0bc900",
+                    "forwarding_channel_id": null,
+                    "forwarding_tlc_id": null,
+                    "status": {
+                      "Inbound": "RemoteAnnounced"
+                    }
+                  }
+                ],
+                "latest_commitment_transaction_hash": "0x66ca91bcda3fd9bf5358a596cb21a7fc87e5b49a2ad19512293fa28502b34148",
+                "created_at": "0x191dd9dec00",
+                "enabled": true,
+                "tlc_expiry_delta": "0x5265c00",
+                "tlc_fee_proportional_millionths": "0x3e8",
+                "shutdown_transaction_hash": null,
+                "failure_detail": null
+              },
+              {
+                "channel_id": "0x26472d26266431a5f13a2e08e1e1e2d7409166f87652bb6dcb6add640ee55bf2",
+                "is_public": true,
+                "is_acceptor": true,
+                "is_one_way": true,
+                "channel_outpoint": "0xd2a274024a29312c15fe06a656c960fa7380de0df60a29f891dfcde168d1b64000000000",
+                "pubkey": "02106fa580a1c56411d6ee7deabcc98aae6f6479858f924487cf58c4c2ca302304",
+                "funding_udt_type_script": {
+                  "code_hash": "0x912f64f976947ed5467ff5e7ba4c87bd37f240cdbdba0b38da619372056ef827",
+                  "hash_type": "type",
+                  "args": "0x8612706980baca14e3d03ea4d77d185e6f7338cd6e98a0ea0cd17a69918f2578"
+                },
+                "state": {
+                  "state_name": "ChannelReady"
+                },
+                "local_balance": "0xffffffffffffffffffffffffffffffff",
+                "offered_tlc_balance": "0xffffffffffffffffffffffffffffffff",
+                "remote_balance": "0x3b9aca00",
+                "received_tlc_balance": "0x0",
+                "pending_tlcs": [],
+                "latest_commitment_transaction_hash": "0xdf49a3bfd510f1f65496fa2f9b63dd74a3ab6641e878c8eb941126987036a66a",
+                "created_at": "0x191dd9dec00",
+                "enabled": true,
+                "tlc_expiry_delta": "0x5265c00",
+                "tlc_fee_proportional_millionths": "0xffffffffffffffffffffffffffffffff",
+                "shutdown_transaction_hash": null,
+                "failure_detail": null
+              },
+              {
+                "channel_id": "0x65d2c1d1fd16e6f2d2395e7ad127827a4af7f0f88c9045077e213353698b54e8",
+                "is_public": true,
+                "is_acceptor": false,
+                "is_one_way": false,
+                "channel_outpoint": "0x5a33f6ddb5faed7131415560b1c483d82684d24ad910fa0d6d7afc552a365cb400000000",
+                "pubkey": "02106fa580a1c56411d6ee7deabcc98aae6f6479858f924487cf58c4c2ca302304",
+                "funding_udt_type_script": null,
+                "state": {
+                  "state_name": "ShuttingDown",
+                  "state_flags": "OUR_SHUTDOWN_SENT|THEIR_SHUTDOWN_SENT|AWAITING_PENDING_TLCS"
+                },
+                "local_balance": "0x12a05f200",
+                "offered_tlc_balance": "0x0",
+                "remote_balance": "0x3b9aca00",
+                "received_tlc_balance": "0x0",
+                "pending_tlcs": [],
+                "latest_commitment_transaction_hash": "0xd41c13fee2ae2f75e3344dd7be8b93523b1938515cbd275046571f1f6f87c6df",
+                "created_at": "0x191dd9dec00",
+                "enabled": true,
+                "tlc_expiry_delta": "0x5265c00",
+                "tlc_fee_proportional_millionths": "0x3e8",
+                "shutdown_transaction_hash": null,
+                "failure_detail": null
+              }
+            ]
+          }
+        },
+        {
+          "name": "only pending openings",
+          "values": {
+            "channels": [
+              {
+                "channel_id": "3424340275f9626890dc5926a1830cc975e2edd278eb32328a51317e1ddbe59e",
+                "is_public": false,
+                "is_acceptor": false,
+                "is_one_way": false,
+                "channel_outpoint": null,
+                "pubkey": "02106fa580a1c56411d6ee7deabcc98aae6f6479858f924487cf58c4c2ca302304",
+                "funding_udt_type_script": null,
+                "state": {
+                  "name": "NegotiatingFunding",
+                  "flags": [
+                    "OUR_INIT_SENT",
+                    "INIT_SENT"
+                  ]
+                },
+                "local_balance": "5000000000",
+                "offered_tlc_balance": "0",
+                "remote_balance": "0",
+                "received_tlc_balance": "0",
+                "pending_tlcs": [],
+                "latest_commitment_transaction_hash": null,
+                "created_at": "1726000000000",
+                "enabled": false,
+                "tlc_expiry_delta": "0",
+                "tlc_fee_proportional_millionths": "0",
+                "shutdown_transaction_hash": null,
+                "failure_detail": null
+              },
+              {
+                "channel_id": "0e109be6e5559f77c575df49bb643498d74a2586e0ac51bebbe660919623f169",
+                "is_public": true,
+                "is_acceptor": false,
+                "is_one_way": false,
+                "channel_outpoint": {
+                  "tx_hash": "888c9c90d892fe3a6b9ebeb42f5727d07e98adc11755be0c80cfdb70c3f2cf15",
+                  "index": 0
+                },
+                "pubkey": "02106fa580a1c56411d6ee7deabcc98aae6f6479858f924487cf58c4c2ca302304",
+                "funding_udt_type_script": null,
+                "state": {
+                  "name": "NegotiatingFunding",
+                  "flags": [
+                    "OUR_INIT_SENT",
+                    "THEIR_INIT_SENT",
+                    "INIT_SENT",
+                    "AWAITING_EXTERNAL_FUNDING"
+                  ]
+                },
+                "local_balance": "5000000000",
+                "offered_tlc_balance": "0",
+                "remote_balance": "1000000000",
+                "received_tlc_balance": "0",
+                "pending_tlcs": [],
+                "latest_commitment_transaction_hash": "c1c86e6f99c71c08a0cfda32969c8f33cae395f1e76eb34e41663773f8f74d26",
+                "created_at": "1726000000000",
+                "enabled": true,
+                "tlc_expiry_delta": "86400000",
+                "tlc_fee_proportional_millionths": "1000",
+                "shutdown_transaction_hash": null,
+                "failure_detail": null
+              },
+              {
+                "channel_id": "1ce1fba2bdf473d89a22aaacf4eb835aaccb219145e80138d97ff88305d394d6",
+                "is_public": true,
+                "is_acceptor": false,
+                "is_one_way": false,
+                "channel_outpoint": {
+                  "tx_hash": "f160243f9587462168ceb5ceccdc9355b81da165732ad6592789bb0c2182e5b7",
+                  "index": 0
+                },
+                "pubkey": "02106fa580a1c56411d6ee7deabcc98aae6f6479858f924487cf58c4c2ca302304",
+                "funding_udt_type_script": null,
+                "state": {
+                  "name": "NegotiatingFunding",
+                  "flags": []
+                },
+                "local_balance": "5000000000",
+                "offered_tlc_balance": "0",
+                "remote_balance": "1000000000",
+                "received_tlc_balance": "0",
+                "pending_tlcs": [],
+                "latest_commitment_transaction_hash": "449c4c78d073ec1ae7d05315e87be2825e092143d0aebc1c654030fc9a3d619d",
+                "created_at": "1726000000000",
+                "enabled": true,
+                "tlc_expiry_delta": "86400000",
+                "tlc_fee_proportional_millionths": "1000",
+                "shutdown_transaction_hash": null,
+                "failure_detail": null
+              },
+              {
+                "channel_id": "8c3e4967b139c422c03f183a58bc84456f98feffed582b25f39cd6449f6e45c6",
+                "is_public": true,
+                "is_acceptor": false,
+                "is_one_way": false,
+                "channel_outpoint": {
+                  "tx_hash": "dd5a598d3b7cca7a062b147586a4563f28ff0f0a7301be824e867100554887a1",
+                  "index": 0
+                },
+                "pubkey": "02106fa580a1c56411d6ee7deabcc98aae6f6479858f924487cf58c4c2ca302304",
+                "funding_udt_type_script": null,
+                "state": {
+                  "name": "CollaboratingFundingTx",
+                  "flags": [
+                    "OUR_TX_COMPLETE_SENT",
+                    "THEIR_TX_COMPLETE_SENT",
+                    "COLLABORATION_COMPLETED"
+                  ]
+                },
+                "local_balance": "5000000000",
+                "offered_tlc_balance": "0",
+                "remote_balance": "1000000000",
+                "received_tlc_balance": "0",
+                "pending_tlcs": [],
+                "latest_commitment_transaction_hash": "5b571221e1745c4c3cf42dcf084e2c763d8ed71b4f1d007a6cbbbb39bc687666",
+                "created_at": "1726000000000",
+                "enabled": true,
+                "tlc_expiry_delta": "86400000",
+                "tlc_fee_proportional_millionths": "1000",
+                "shutdown_transaction_hash": null,
+                "failure_detail": null
+              },
+              {
+                "channel_id": "6f3b6fa9c7c76422ce3d9a652d2066850a8c04620c2ba562aaa92a44cbba815e",
+                "is_public": true,
+                "is_acceptor": false,
+                "is_one_way": false,
+                "channel_outpoint": {
+                  "tx_hash": "a7606376cf0aab419743b669bb63e6eca3c2b8fa05500d64b98cd36f358fcf4b",
+                  "index": 0
+                },
+                "pubkey": "02106fa580a1c56411d6ee7deabcc98aae6f6479858f924487cf58c4c2ca302304",
+                "funding_udt_type_script": null,
+                "state": {
+                  "name": "SigningCommitment",
+                  "flags": [
+                    "OUR_COMMITMENT_SIGNED_SENT",
+                    "COMMITMENT_SIGNED_SENT"
+                  ]
+                },
+                "local_balance": "5000000000",
+                "offered_tlc_balance": "0",
+                "remote_balance": "1000000000",
+                "received_tlc_balance": "0",
+                "pending_tlcs": [],
+                "latest_commitment_transaction_hash": "3a82870b4f99d58ffdd4bec7d2d0bde9d9aa2465d6c76801d22c4322fcedf30d",
+                "created_at": "1726000000000",
+                "enabled": true,
+                "tlc_expiry_delta": "86400000",
+                "tlc_fee_proportional_millionths": "1000",
+                "shutdown_transaction_hash": null,
+                "failure_detail": null
+              },
+              {
+                "channel_id": "aab14a5340e777236a0b27caccd238869af58db0af44f0ad1abc35742fbd065f",
+                "is_public": true,
+                "is_acceptor": false,
+                "is_one_way": false,
+                "channel_outpoint": {
+                  "tx_hash": "b6ec24e06974a10aa4004acfed849c036b1ae4b4a19e5465e8012d9dd4c06f67",
+                  "index": 0
+                },
+                "pubkey": "02106fa580a1c56411d6ee7deabcc98aae6f6479858f924487cf58c4c2ca302304",
+                "funding_udt_type_script": null,
+                "state": {
+                  "name": "AwaitingTxSignatures",
+                  "flags": [
+                    "THEIR_TX_SIGNATURES_SENT",
+                    "TX_SIGNATURES_SENT"
+                  ]
+                },
+                "local_balance": "5000000000",
+                "offered_tlc_balance": "0",
+                "remote_balance": "1000000000",
+                "received_tlc_balance": "0",
+                "pending_tlcs": [],
+                "latest_commitment_transaction_hash": "2a06a9a4e46ac1b87f415ddf8c7de3c50e50bcbbe9d780ce1df19076ddf7fe47",
+                "created_at": "1726000000000",
+                "enabled": true,
+                "tlc_expiry_delta": "86400000",
+                "tlc_fee_proportional_millionths": "1000",
+                "shutdown_transaction_hash": null,
+                "failure_detail": null
+              },
+              {
+                "channel_id": "21fa4d0adfe3e91f15f2bb5de49ca09aca1cd71c4ef0ba9d22a387faceb4c5b1",
+                "is_public": true,
+                "is_acceptor": false,
+                "is_one_way": false,
+                "channel_outpoint": {
+                  "tx_hash": "f697dcc6e6489e5e9acc9872d1b7f5c3fed9892f8dd36743c79610ee55fac80e",
+                  "index": 0
+                },
+                "pubkey": "02106fa580a1c56411d6ee7deabcc98aae6f6479858f924487cf58c4c2ca302304",
+                "funding_udt_type_script": null,
+                "state": {
+                  "name": "AwaitingChannelReady",
+                  "flags": [
+                    "OUR_CHANNEL_READY",
+                    "THEIR_CHANNEL_READY",
+                    "CHANNEL_READY"
+                  ]
+                },
+                "local_balance": "5000000000",
+                "offered_tlc_balance": "0",
+                "remote_balance": "1000000000",
+                "received_tlc_balance": "0",
+                "pending_tlcs": [],
+                "latest_commitment_transaction_hash": "3c88d6dfc74f105c6ad181f516bfe527041b68f613b7a5ded85f6fb54a04131d",
+                "created_at": "1726000000000",
+                "enabled": true,
+                "tlc_expiry_delta": "86400000",
+                "tlc_fee_proportional_millionths": "1000",
+                "shutdown_transaction_hash": null,
+                "failure_detail": null
+              },
+              {
+                "channel_id": "2290ad28fc588f93ef4d03dab7b782e1e1739ada41f07ce76ae1bdbad4dae4ab",
+                "is_public": true,
+                "is_acceptor": false,
+                "is_one_way": false,
+                "channel_outpoint": {
+                  "tx_hash": "225dde892ef548170845477a01c11723a520563c4855cdc04d372c9135a4df6e",
+                  "index": 0
+                },
+                "pubkey": "02106fa580a1c56411d6ee7deabcc98aae6f6479858f924487cf58c4c2ca302304",
+                "funding_udt_type_script": null,
+                "state": {
+                  "name": "Stale",
+                  "flags": []
+                },
+                "local_balance": "5000000000",
+                "offered_tlc_balance": "0",
+                "remote_balance": "1000000000",
+                "received_tlc_balance": "0",
+                "pending_tlcs": [],
+                "latest_commitment_transaction_hash": "d0a181e3257eb902b70047b98c9854572138c38f225d3d6a48f86676494fb979",
+                "created_at": "1726000000000",
+                "enabled": true,
+                "tlc_expiry_delta": "86400000",
+                "tlc_fee_proportional_millionths": "1000",
+                "shutdown_transaction_hash": null,
+                "failure_detail": null
+              },
+              {
+                "channel_id": "dadad3ea9670548895a211df38c7c0fc7de6c2547ea21d179dfdeeee04f32229",
+                "is_public": false,
+                "is_acceptor": false,
+                "is_one_way": false,
+                "channel_outpoint": null,
+                "pubkey": "02106fa580a1c56411d6ee7deabcc98aae6f6479858f924487cf58c4c2ca302304",
+                "funding_udt_type_script": null,
+                "state": {
+                  "name": "Closed",
+                  "flags": [
+                    "FUNDING_ABORTED"
+                  ]
+                },
+                "local_balance": "5000000000",
+                "offered_tlc_balance": "0",
+                "remote_balance": "0",
+                "received_tlc_balance": "0",
+                "pending_tlcs": [],
+                "latest_commitment_transaction_hash": null,
+                "created_at": "1726000000000",
+                "enabled": false,
+                "tlc_expiry_delta": "0",
+                "tlc_fee_proportional_millionths": "0",
+                "shutdown_transaction_hash": null,
+                "failure_detail": "funding transaction not submitted within the timeout"
+              },
+              {
+                "channel_id": "6016156cfe844e99040b3c245bf9931bc29ae9ed2063637f5523ef333ae2fee2",
+                "is_public": false,
+                "is_acceptor": false,
+                "is_one_way": false,
+                "channel_outpoint": null,
+                "pubkey": "02106fa580a1c56411d6ee7deabcc98aae6f6479858f924487cf58c4c2ca302304",
+                "funding_udt_type_script": null,
+                "state": {
+                  "name": "Closed",
+                  "flags": [
+                    "FUNDING_ABORTED"
+                  ]
+                },
+                "local_balance": "5000000000",
+                "offered_tlc_balance": "0",
+                "remote_balance": "0",
+                "received_tlc_balance": "0",
+                "pending_tlcs": [],
+                "latest_commitment_transaction_hash": null,
+                "created_at": "1726000000000",
+                "enabled": false,
+                "tlc_expiry_delta": "0",
+                "tlc_fee_proportional_millionths": "0",
+                "shutdown_transaction_hash": null,
+                "failure_detail": "Channel was abandoned"
+              },
+              {
+                "channel_id": "021a5fd37a3321b92b83932ace121ecef4cc85cb645a4c9f554a5bfb43cecc8a",
+                "is_public": true,
+                "is_acceptor": false,
+                "is_one_way": false,
+                "channel_outpoint": null,
+                "pubkey": "02106fa580a1c56411d6ee7deabcc98aae6f6479858f924487cf58c4c2ca302304",
+                "funding_udt_type_script": null,
+                "state": {
+                  "name": "Closed",
+                  "flags": [
+                    "ABANDONED"
+                  ]
+                },
+                "local_balance": "5000000000",
+                "offered_tlc_balance": "0",
+                "remote_balance": "1000000000",
+                "received_tlc_balance": "0",
+                "pending_tlcs": [],
+                "latest_commitment_transaction_hash": null,
+                "created_at": "1726000000000",
+                "enabled": true,
+                "tlc_expiry_delta": "86400000",
+                "tlc_fee_proportional_millionths": "1000",
+                "shutdown_transaction_hash": null,
+                "failure_detail": null
+              }
+            ]
+          },
+          "json": {
+            "channels": [
+              {
+                "channel_id": "0x3424340275f9626890dc5926a1830cc975e2edd278eb32328a51317e1ddbe59e",
+                "is_public": false,
+                "is_acceptor": false,
+                "is_one_way": false,
+                "channel_outpoint": null,
+                "pubkey": "02106fa580a1c56411d6ee7deabcc98aae6f6479858f924487cf58c4c2ca302304",
+                "funding_udt_type_script": null,
+                "state": {
+                  "state_name": "NegotiatingFunding",
+                  "state_flags": "OUR_INIT_SENT|INIT_SENT"
+                },
+                "local_balance": "0x12a05f200",
+                "offered_tlc_balance": "0x0",
+                "remote_balance": "0x0",
+                "received_tlc_balance": "0x0",
+                "pending_tlcs": [],
+                "latest_commitment_transaction_hash": null,
+                "created_at": "0x191dd9dec00",
+                "enabled": false,
+                "tlc_expiry_delta": "0x0",
+                "tlc_fee_proportional_millionths": "0x0",
+                "shutdown_transaction_hash": null,
+                "failure_detail": null
+              },
+              {
+                "channel_id": "0x0e109be6e5559f77c575df49bb643498d74a2586e0ac51bebbe660919623f169",
+                "is_public": true,
+                "is_acceptor": false,
+                "is_one_way": false,
+                "channel_outpoint": "0x888c9c90d892fe3a6b9ebeb42f5727d07e98adc11755be0c80cfdb70c3f2cf1500000000",
+                "pubkey": "02106fa580a1c56411d6ee7deabcc98aae6f6479858f924487cf58c4c2ca302304",
+                "funding_udt_type_script": null,
+                "state": {
+                  "state_name": "NegotiatingFunding",
+                  "state_flags": "OUR_INIT_SENT|THEIR_INIT_SENT|INIT_SENT|AWAITING_EXTERNAL_FUNDING"
+                },
+                "local_balance": "0x12a05f200",
+                "offered_tlc_balance": "0x0",
+                "remote_balance": "0x3b9aca00",
+                "received_tlc_balance": "0x0",
+                "pending_tlcs": [],
+                "latest_commitment_transaction_hash": "0xc1c86e6f99c71c08a0cfda32969c8f33cae395f1e76eb34e41663773f8f74d26",
+                "created_at": "0x191dd9dec00",
+                "enabled": true,
+                "tlc_expiry_delta": "0x5265c00",
+                "tlc_fee_proportional_millionths": "0x3e8",
+                "shutdown_transaction_hash": null,
+                "failure_detail": null
+              },
+              {
+                "channel_id": "0x1ce1fba2bdf473d89a22aaacf4eb835aaccb219145e80138d97ff88305d394d6",
+                "is_public": true,
+                "is_acceptor": false,
+                "is_one_way": false,
+                "channel_outpoint": "0xf160243f9587462168ceb5ceccdc9355b81da165732ad6592789bb0c2182e5b700000000",
+                "pubkey": "02106fa580a1c56411d6ee7deabcc98aae6f6479858f924487cf58c4c2ca302304",
+                "funding_udt_type_script": null,
+                "state": {
+                  "state_name": "NegotiatingFunding",
+                  "state_flags": ""
+                },
+                "local_balance": "0x12a05f200",
+                "offered_tlc_balance": "0x0",
+                "remote_balance": "0x3b9aca00",
+                "received_tlc_balance": "0x0",
+                "pending_tlcs": [],
+                "latest_commitment_transaction_hash": "0x449c4c78d073ec1ae7d05315e87be2825e092143d0aebc1c654030fc9a3d619d",
+                "created_at": "0x191dd9dec00",
+                "enabled": true,
+                "tlc_expiry_delta": "0x5265c00",
+                "tlc_fee_proportional_millionths": "0x3e8",
+                "shutdown_transaction_hash": null,
+                "failure_detail": null
+              },
+              {
+                "channel_id": "0x8c3e4967b139c422c03f183a58bc84456f98feffed582b25f39cd6449f6e45c6",
+                "is_public": true,
+                "is_acceptor": false,
+                "is_one_way": false,
+                "channel_outpoint": "0xdd5a598d3b7cca7a062b147586a4563f28ff0f0a7301be824e867100554887a100000000",
+                "pubkey": "02106fa580a1c56411d6ee7deabcc98aae6f6479858f924487cf58c4c2ca302304",
+                "funding_udt_type_script": null,
+                "state": {
+                  "state_name": "CollaboratingFundingTx",
+                  "state_flags": "OUR_TX_COMPLETE_SENT|THEIR_TX_COMPLETE_SENT|COLLABORATION_COMPLETED"
+                },
+                "local_balance": "0x12a05f200",
+                "offered_tlc_balance": "0x0",
+                "remote_balance": "0x3b9aca00",
+                "received_tlc_balance": "0x0",
+                "pending_tlcs": [],
+                "latest_commitment_transaction_hash": "0x5b571221e1745c4c3cf42dcf084e2c763d8ed71b4f1d007a6cbbbb39bc687666",
+                "created_at": "0x191dd9dec00",
+                "enabled": true,
+                "tlc_expiry_delta": "0x5265c00",
+                "tlc_fee_proportional_millionths": "0x3e8",
+                "shutdown_transaction_hash": null,
+                "failure_detail": null
+              },
+              {
+                "channel_id": "0x6f3b6fa9c7c76422ce3d9a652d2066850a8c04620c2ba562aaa92a44cbba815e",
+                "is_public": true,
+                "is_acceptor": false,
+                "is_one_way": false,
+                "channel_outpoint": "0xa7606376cf0aab419743b669bb63e6eca3c2b8fa05500d64b98cd36f358fcf4b00000000",
+                "pubkey": "02106fa580a1c56411d6ee7deabcc98aae6f6479858f924487cf58c4c2ca302304",
+                "funding_udt_type_script": null,
+                "state": {
+                  "state_name": "SigningCommitment",
+                  "state_flags": "OUR_COMMITMENT_SIGNED_SENT|COMMITMENT_SIGNED_SENT"
+                },
+                "local_balance": "0x12a05f200",
+                "offered_tlc_balance": "0x0",
+                "remote_balance": "0x3b9aca00",
+                "received_tlc_balance": "0x0",
+                "pending_tlcs": [],
+                "latest_commitment_transaction_hash": "0x3a82870b4f99d58ffdd4bec7d2d0bde9d9aa2465d6c76801d22c4322fcedf30d",
+                "created_at": "0x191dd9dec00",
+                "enabled": true,
+                "tlc_expiry_delta": "0x5265c00",
+                "tlc_fee_proportional_millionths": "0x3e8",
+                "shutdown_transaction_hash": null,
+                "failure_detail": null
+              },
+              {
+                "channel_id": "0xaab14a5340e777236a0b27caccd238869af58db0af44f0ad1abc35742fbd065f",
+                "is_public": true,
+                "is_acceptor": false,
+                "is_one_way": false,
+                "channel_outpoint": "0xb6ec24e06974a10aa4004acfed849c036b1ae4b4a19e5465e8012d9dd4c06f6700000000",
+                "pubkey": "02106fa580a1c56411d6ee7deabcc98aae6f6479858f924487cf58c4c2ca302304",
+                "funding_udt_type_script": null,
+                "state": {
+                  "state_name": "AwaitingTxSignatures",
+                  "state_flags": "THEIR_TX_SIGNATURES_SENT|TX_SIGNATURES_SENT"
+                },
+                "local_balance": "0x12a05f200",
+                "offered_tlc_balance": "0x0",
+                "remote_balance": "0x3b9aca00",
+                "received_tlc_balance": "0x0",
+                "pending_tlcs": [],
+                "latest_commitment_transaction_hash": "0x2a06a9a4e46ac1b87f415ddf8c7de3c50e50bcbbe9d780ce1df19076ddf7fe47",
+                "created_at": "0x191dd9dec00",
+                "enabled": true,
+                "tlc_expiry_delta": "0x5265c00",
+                "tlc_fee_proportional_millionths": "0x3e8",
+                "shutdown_transaction_hash": null,
+                "failure_detail": null
+              },
+              {
+                "channel_id": "0x21fa4d0adfe3e91f15f2bb5de49ca09aca1cd71c4ef0ba9d22a387faceb4c5b1",
+                "is_public": true,
+                "is_acceptor": false,
+                "is_one_way": false,
+                "channel_outpoint": "0xf697dcc6e6489e5e9acc9872d1b7f5c3fed9892f8dd36743c79610ee55fac80e00000000",
+                "pubkey": "02106fa580a1c56411d6ee7deabcc98aae6f6479858f924487cf58c4c2ca302304",
+                "funding_udt_type_script": null,
+                "state": {
+                  "state_name": "AwaitingChannelReady",
+                  "state_flags": "OUR_CHANNEL_READY|THEIR_CHANNEL_READY|CHANNEL_READY"
+                },
+                "local_balance": "0x12a05f200",
+                "offered_tlc_balance": "0x0",
+                "remote_balance": "0x3b9aca00",
+                "received_tlc_balance": "0x0",
+                "pending_tlcs": [],
+                "latest_commitment_transaction_hash": "0x3c88d6dfc74f105c6ad181f516bfe527041b68f613b7a5ded85f6fb54a04131d",
+                "created_at": "0x191dd9dec00",
+                "enabled": true,
+                "tlc_expiry_delta": "0x5265c00",
+                "tlc_fee_proportional_millionths": "0x3e8",
+                "shutdown_transaction_hash": null,
+                "failure_detail": null
+              },
+              {
+                "channel_id": "0x2290ad28fc588f93ef4d03dab7b782e1e1739ada41f07ce76ae1bdbad4dae4ab",
+                "is_public": true,
+                "is_acceptor": false,
+                "is_one_way": false,
+                "channel_outpoint": "0x225dde892ef548170845477a01c11723a520563c4855cdc04d372c9135a4df6e00000000",
+                "pubkey": "02106fa580a1c56411d6ee7deabcc98aae6f6479858f924487cf58c4c2ca302304",
+                "funding_udt_type_script": null,
+                "state": {
+                  "state_name": "Stale"
+                },
+                "local_balance": "0x12a05f200",
+                "offered_tlc_balance": "0x0",
+                "remote_balance": "0x3b9aca00",
+                "received_tlc_balance": "0x0",
+                "pending_tlcs": [],
+                "latest_commitment_transaction_hash": "0xd0a181e3257eb902b70047b98c9854572138c38f225d3d6a48f86676494fb979",
+                "created_at": "0x191dd9dec00",
+                "enabled": true,
+                "tlc_expiry_delta": "0x5265c00",
+                "tlc_fee_proportional_millionths": "0x3e8",
+                "shutdown_transaction_hash": null,
+                "failure_detail": null
+              },
+              {
+                "channel_id": "0xdadad3ea9670548895a211df38c7c0fc7de6c2547ea21d179dfdeeee04f32229",
+                "is_public": false,
+                "is_acceptor": false,
+                "is_one_way": false,
+                "channel_outpoint": null,
+                "pubkey": "02106fa580a1c56411d6ee7deabcc98aae6f6479858f924487cf58c4c2ca302304",
+                "funding_udt_type_script": null,
+                "state": {
+                  "state_name": "Closed",
+                  "state_flags": "FUNDING_ABORTED"
+                },
+                "local_balance": "0x12a05f200",
+                "offered_tlc_balance": "0x0",
+                "remote_balance": "0x0",
+                "received_tlc_balance": "0x0",
+                "pending_tlcs": [],
+                "latest_commitment_transaction_hash": null,
+                "created_at": "0x191dd9dec00",
+                "enabled": false,
+                "tlc_expiry_delta": "0x0",
+                "tlc_fee_proportional_millionths": "0x0",
+                "shutdown_transaction_hash": null,
+                "failure_detail": "funding transaction not submitted within the timeout"
+              },
+              {
+                "channel_id": "0x6016156cfe844e99040b3c245bf9931bc29ae9ed2063637f5523ef333ae2fee2",
+                "is_public": false,
+                "is_acceptor": false,
+                "is_one_way": false,
+                "channel_outpoint": null,
+                "pubkey": "02106fa580a1c56411d6ee7deabcc98aae6f6479858f924487cf58c4c2ca302304",
+                "funding_udt_type_script": null,
+                "state": {
+                  "state_name": "Closed",
+                  "state_flags": "FUNDING_ABORTED"
+                },
+                "local_balance": "0x12a05f200",
+                "offered_tlc_balance": "0x0",
+                "remote_balance": "0x0",
+                "received_tlc_balance": "0x0",
+                "pending_tlcs": [],
+                "latest_commitment_transaction_hash": null,
+                "created_at": "0x191dd9dec00",
+                "enabled": false,
+                "tlc_expiry_delta": "0x0",
+                "tlc_fee_proportional_millionths": "0x0",
+                "shutdown_transaction_hash": null,
+                "failure_detail": "Channel was abandoned"
+              },
+              {
+                "channel_id": "0x021a5fd37a3321b92b83932ace121ecef4cc85cb645a4c9f554a5bfb43cecc8a",
+                "is_public": true,
+                "is_acceptor": false,
+                "is_one_way": false,
+                "channel_outpoint": null,
+                "pubkey": "02106fa580a1c56411d6ee7deabcc98aae6f6479858f924487cf58c4c2ca302304",
+                "funding_udt_type_script": null,
+                "state": {
+                  "state_name": "Closed",
+                  "state_flags": "ABANDONED"
+                },
+                "local_balance": "0x12a05f200",
+                "offered_tlc_balance": "0x0",
+                "remote_balance": "0x3b9aca00",
+                "received_tlc_balance": "0x0",
+                "pending_tlcs": [],
+                "latest_commitment_transaction_hash": null,
+                "created_at": "0x191dd9dec00",
+                "enabled": true,
+                "tlc_expiry_delta": "0x5265c00",
+                "tlc_fee_proportional_millionths": "0x3e8",
+                "shutdown_transaction_hash": null,
+                "failure_detail": null
+              }
+            ]
+          }
+        },
+        {
+          "name": "with closed channels",
+          "values": {
+            "channels": [
+              {
+                "channel_id": "a6186ef0686b29402dd0977d5a9f081076af8b2b5622b930be94cc27b285dbf7",
+                "is_public": true,
+                "is_acceptor": false,
+                "is_one_way": false,
+                "channel_outpoint": {
+                  "tx_hash": "900492e72492a131a4af7d6e8e6d4b5e4a8f65c36d78d1342ca5f06a740454d1",
+                  "index": 0
+                },
+                "pubkey": "02106fa580a1c56411d6ee7deabcc98aae6f6479858f924487cf58c4c2ca302304",
+                "funding_udt_type_script": null,
+                "state": {
+                  "name": "Closed",
+                  "flags": [
+                    "COOPERATIVE"
+                  ]
+                },
+                "local_balance": "0",
+                "offered_tlc_balance": "0",
+                "remote_balance": "0",
+                "received_tlc_balance": "0",
+                "pending_tlcs": [],
+                "latest_commitment_transaction_hash": "0ec284ae8917189cd696d66414ac51f5a04981f7d3a5d7b311564efb356a95e8",
+                "created_at": "1726000000000",
+                "enabled": true,
+                "tlc_expiry_delta": "86400000",
+                "tlc_fee_proportional_millionths": "1000",
+                "shutdown_transaction_hash": "c0203d1fbe95e084d189e0020d650b1ea27405d1e74f11a6f913ce619b86a7a0",
+                "failure_detail": null
+              },
+              {
+                "channel_id": "0dc5c5ce4495f22285c5d1cdde28c6c4727147275ac33556bd9532cdf610c20d",
+                "is_public": true,
+                "is_acceptor": false,
+                "is_one_way": false,
+                "channel_outpoint": {
+                  "tx_hash": "ec14982c5b352864d002ff2cbb8dafd5788cb91ad9dd24831ed537021e901011",
+                  "index": 0
+                },
+                "pubkey": "02106fa580a1c56411d6ee7deabcc98aae6f6479858f924487cf58c4c2ca302304",
+                "funding_udt_type_script": null,
+                "state": {
+                  "name": "Closed",
+                  "flags": [
+                    "UNCOOPERATIVE_LOCAL",
+                    "WAITING_ONCHAIN_SETTLEMENT"
+                  ]
+                },
+                "local_balance": "5000000000",
+                "offered_tlc_balance": "0",
+                "remote_balance": "1000000000",
+                "received_tlc_balance": "0",
+                "pending_tlcs": [],
+                "latest_commitment_transaction_hash": "7f52b0543ca52da0cfe0db890104a8a0d10352eb5c59ecda6ea7c6ab59a1c130",
+                "created_at": "1726000000000",
+                "enabled": true,
+                "tlc_expiry_delta": "86400000",
+                "tlc_fee_proportional_millionths": "1000",
+                "shutdown_transaction_hash": null,
+                "failure_detail": null
+              },
+              {
+                "channel_id": "e017fed2d63b6dd68083095ece0b87877882533104b161dea3242067f480789d",
+                "is_public": true,
+                "is_acceptor": false,
+                "is_one_way": false,
+                "channel_outpoint": {
+                  "tx_hash": "8c620e7e3e69adbe0ee4f9d396fba182b93a203c2b7140e91e0debe492db02f2",
+                  "index": 0
+                },
+                "pubkey": "02106fa580a1c56411d6ee7deabcc98aae6f6479858f924487cf58c4c2ca302304",
+                "funding_udt_type_script": null,
+                "state": {
+                  "name": "Closed",
+                  "flags": [
+                    "UNCOOPERATIVE_REMOTE"
+                  ]
+                },
+                "local_balance": "5000000000",
+                "offered_tlc_balance": "0",
+                "remote_balance": "1000000000",
+                "received_tlc_balance": "0",
+                "pending_tlcs": [],
+                "latest_commitment_transaction_hash": "6ab16e477ac8d026a9e9759a692f9be03a57dcb181f01de7493674116c72cd6b",
+                "created_at": "1726000000000",
+                "enabled": true,
+                "tlc_expiry_delta": "86400000",
+                "tlc_fee_proportional_millionths": "1000",
+                "shutdown_transaction_hash": "7a3ecfbd2cc0867404a952edec73be44556020b8e6ff02200ba8fb2b74ff7dc4",
+                "failure_detail": null
+              },
+              {
+                "channel_id": "5d8045fd834159133f65105d4f144d8849fd91c91bf6c0958f95e1fefc645518",
+                "is_public": true,
+                "is_acceptor": false,
+                "is_one_way": false,
+                "channel_outpoint": {
+                  "tx_hash": "5ede68306178cc065cd58d0ef6a8ad54b1cefd21d46a72148e138de40237e03f",
+                  "index": 0
+                },
+                "pubkey": "02106fa580a1c56411d6ee7deabcc98aae6f6479858f924487cf58c4c2ca302304",
+                "funding_udt_type_script": null,
+                "state": {
+                  "name": "ShuttingDown",
+                  "flags": [
+                    "WAITING_COMMITMENT_CONFIRMATION"
+                  ]
+                },
+                "local_balance": "5000000000",
+                "offered_tlc_balance": "0",
+                "remote_balance": "1000000000",
+                "received_tlc_balance": "0",
+                "pending_tlcs": [],
+                "latest_commitment_transaction_hash": "5d84d46985a7bbc04276b91c3e7498ac736e933f50be4d81b87ace204fbfb55d",
+                "created_at": "1726000000000",
+                "enabled": true,
+                "tlc_expiry_delta": "86400000",
+                "tlc_fee_proportional_millionths": "1000",
+                "shutdown_transaction_hash": null,
+                "failure_detail": null
+              }
+            ]
+          },
+          "json": {
+            "channels": [
+              {
+                "channel_id": "0xa6186ef0686b29402dd0977d5a9f081076af8b2b5622b930be94cc27b285dbf7",
+                "is_public": true,
+                "is_acceptor": false,
+                "is_one_way": false,
+                "channel_outpoint": "0x900492e72492a131a4af7d6e8e6d4b5e4a8f65c36d78d1342ca5f06a740454d100000000",
+                "pubkey": "02106fa580a1c56411d6ee7deabcc98aae6f6479858f924487cf58c4c2ca302304",
+                "funding_udt_type_script": null,
+                "state": {
+                  "state_name": "Closed",
+                  "state_flags": "COOPERATIVE"
+                },
+                "local_balance": "0x0",
+                "offered_tlc_balance": "0x0",
+                "remote_balance": "0x0",
+                "received_tlc_balance": "0x0",
+                "pending_tlcs": [],
+                "latest_commitment_transaction_hash": "0x0ec284ae8917189cd696d66414ac51f5a04981f7d3a5d7b311564efb356a95e8",
+                "created_at": "0x191dd9dec00",
+                "enabled": true,
+                "tlc_expiry_delta": "0x5265c00",
+                "tlc_fee_proportional_millionths": "0x3e8",
+                "shutdown_transaction_hash": "0xc0203d1fbe95e084d189e0020d650b1ea27405d1e74f11a6f913ce619b86a7a0",
+                "failure_detail": null
+              },
+              {
+                "channel_id": "0x0dc5c5ce4495f22285c5d1cdde28c6c4727147275ac33556bd9532cdf610c20d",
+                "is_public": true,
+                "is_acceptor": false,
+                "is_one_way": false,
+                "channel_outpoint": "0xec14982c5b352864d002ff2cbb8dafd5788cb91ad9dd24831ed537021e90101100000000",
+                "pubkey": "02106fa580a1c56411d6ee7deabcc98aae6f6479858f924487cf58c4c2ca302304",
+                "funding_udt_type_script": null,
+                "state": {
+                  "state_name": "Closed",
+                  "state_flags": "UNCOOPERATIVE_LOCAL|WAITING_ONCHAIN_SETTLEMENT"
+                },
+                "local_balance": "0x12a05f200",
+                "offered_tlc_balance": "0x0",
+                "remote_balance": "0x3b9aca00",
+                "received_tlc_balance": "0x0",
+                "pending_tlcs": [],
+                "latest_commitment_transaction_hash": "0x7f52b0543ca52da0cfe0db890104a8a0d10352eb5c59ecda6ea7c6ab59a1c130",
+                "created_at": "0x191dd9dec00",
+                "enabled": true,
+                "tlc_expiry_delta": "0x5265c00",
+                "tlc_fee_proportional_millionths": "0x3e8",
+                "shutdown_transaction_hash": null,
+                "failure_detail": null
+              },
+              {
+                "channel_id": "0xe017fed2d63b6dd68083095ece0b87877882533104b161dea3242067f480789d",
+                "is_public": true,
+                "is_acceptor": false,
+                "is_one_way": false,
+                "channel_outpoint": "0x8c620e7e3e69adbe0ee4f9d396fba182b93a203c2b7140e91e0debe492db02f200000000",
+                "pubkey": "02106fa580a1c56411d6ee7deabcc98aae6f6479858f924487cf58c4c2ca302304",
+                "funding_udt_type_script": null,
+                "state": {
+                  "state_name": "Closed",
+                  "state_flags": "UNCOOPERATIVE_REMOTE"
+                },
+                "local_balance": "0x12a05f200",
+                "offered_tlc_balance": "0x0",
+                "remote_balance": "0x3b9aca00",
+                "received_tlc_balance": "0x0",
+                "pending_tlcs": [],
+                "latest_commitment_transaction_hash": "0x6ab16e477ac8d026a9e9759a692f9be03a57dcb181f01de7493674116c72cd6b",
+                "created_at": "0x191dd9dec00",
+                "enabled": true,
+                "tlc_expiry_delta": "0x5265c00",
+                "tlc_fee_proportional_millionths": "0x3e8",
+                "shutdown_transaction_hash": "0x7a3ecfbd2cc0867404a952edec73be44556020b8e6ff02200ba8fb2b74ff7dc4",
+                "failure_detail": null
+              },
+              {
+                "channel_id": "0x5d8045fd834159133f65105d4f144d8849fd91c91bf6c0958f95e1fefc645518",
+                "is_public": true,
+                "is_acceptor": false,
+                "is_one_way": false,
+                "channel_outpoint": "0x5ede68306178cc065cd58d0ef6a8ad54b1cefd21d46a72148e138de40237e03f00000000",
+                "pubkey": "02106fa580a1c56411d6ee7deabcc98aae6f6479858f924487cf58c4c2ca302304",
+                "funding_udt_type_script": null,
+                "state": {
+                  "state_name": "ShuttingDown",
+                  "state_flags": "WAITING_COMMITMENT_CONFIRMATION"
+                },
+                "local_balance": "0x12a05f200",
+                "offered_tlc_balance": "0x0",
+                "remote_balance": "0x3b9aca00",
+                "received_tlc_balance": "0x0",
+                "pending_tlcs": [],
+                "latest_commitment_transaction_hash": "0x5d84d46985a7bbc04276b91c3e7498ac736e933f50be4d81b87ace204fbfb55d",
+                "created_at": "0x191dd9dec00",
+                "enabled": true,
+                "tlc_expiry_delta": "0x5265c00",
+                "tlc_fee_proportional_millionths": "0x3e8",
+                "shutdown_transaction_hash": null,
+                "failure_detail": null
+              }
+            ]
+          }
+        },
+        {
+          "name": "no channels",
+          "values": {
+            "channels": []
+          },
+          "json": {
+            "channels": []
+          }
+        }
+      ]
+    },
+    "new_invoice": {
+      "params": [
+        {
+          "name": "testnet, ckb hash",
+          "values": {
+            "amount": "250000000",
+            "currency": "Fibt",
+            "payment_hash": "0925435785680234bf8c01f1d0a8f876ca2a013665dedc5867a2a5a58ae974c0",
+            "hash_algorithm": "ckb_hash",
+            "expiry": "3600",
+            "description": "device invoice"
+          },
+          "json": {
+            "amount": "0xee6b280",
+            "description": "device invoice",
+            "currency": "Fibt",
+            "payment_preimage": null,
+            "payment_hash": "0x0925435785680234bf8c01f1d0a8f876ca2a013665dedc5867a2a5a58ae974c0",
+            "expiry": "0xe10",
+            "fallback_address": null,
+            "final_expiry_delta": null,
+            "udt_type_script": null,
+            "hash_algorithm": "ckb_hash",
+            "allow_mpp": null,
+            "allow_trampoline_routing": null
+          }
+        },
+        {
+          "name": "mainnet, sha256, no description",
+          "values": {
+            "amount": "1",
+            "currency": "Fibb",
+            "payment_hash": "c54333bb9073f668208a4665c7f4c21021fdb049cd62e5609afa6da1d678db34",
+            "hash_algorithm": "sha256",
+            "expiry": "86400",
+            "description": null
+          },
+          "json": {
+            "amount": "0x1",
+            "description": null,
+            "currency": "Fibb",
+            "payment_preimage": null,
+            "payment_hash": "0xc54333bb9073f668208a4665c7f4c21021fdb049cd62e5609afa6da1d678db34",
+            "expiry": "0x15180",
+            "fallback_address": null,
+            "final_expiry_delta": null,
+            "udt_type_script": null,
+            "hash_algorithm": "sha256",
+            "allow_mpp": null,
+            "allow_trampoline_routing": null
+          }
+        },
+        {
+          "name": "devnet, largest amount and expiry",
+          "values": {
+            "amount": "340282366920938463463374607431768211455",
+            "currency": "Fibd",
+            "payment_hash": "0afdebd4f2b0e145d0c2f4eba084f9898f2b58165f04543acc909a90b75d57a4",
+            "hash_algorithm": "ckb_hash",
+            "expiry": "18446744073709551615",
+            "description": ""
+          },
+          "json": {
+            "amount": "0xffffffffffffffffffffffffffffffff",
+            "description": "",
+            "currency": "Fibd",
+            "payment_preimage": null,
+            "payment_hash": "0x0afdebd4f2b0e145d0c2f4eba084f9898f2b58165f04543acc909a90b75d57a4",
+            "expiry": "0xffffffffffffffff",
+            "fallback_address": null,
+            "final_expiry_delta": null,
+            "udt_type_script": null,
+            "hash_algorithm": "ckb_hash",
+            "allow_mpp": null,
+            "allow_trampoline_routing": null
+          }
+        }
+      ],
+      "results": [
+        {
+          "name": "hold invoice",
+          "values": {
+            "invoice_address": "fibt1-fixture-held",
+            "invoice": {
+              "currency": "Fibt",
+              "amount": "250000000",
+              "signature": "555a4945a7c40e57c20d2cf13effaf711e7ee48ed90140b4c7cffaa55e79348b5100836f73fa14d9ef76b54542ab916389f9e0d52b52889899a9ea4b6941b02201",
+              "data": {
+                "timestamp": "1726000000000",
+                "payment_hash": "0925435785680234bf8c01f1d0a8f876ca2a013665dedc5867a2a5a58ae974c0",
+                "attrs": [
+                  {
+                    "name": "expiry_time",
+                    "value": "3600"
+                  },
+                  {
+                    "name": "description",
+                    "value": "device invoice"
+                  },
+                  {
+                    "name": "hash_algorithm",
+                    "value": "ckb_hash"
+                  },
+                  {
+                    "name": "payee_public_key",
+                    "value": "0388b3f6725f602c2264516a7cb3e769ee809ef696eef87fa3f7f33b34e1f922c2"
+                  },
+                  {
+                    "name": "final_htlc_minimum_expiry_delta",
+                    "value": "86400000"
+                  }
+                ]
+              }
+            }
+          },
+          "json": {
+            "invoice_address": "fibt1-fixture-held",
+            "invoice": {
+              "currency": "Fibt",
+              "amount": "0xee6b280",
+              "signature": "0a150d0412110d07181007050f10100d051318131d1f1d0f0e040f071d19040e1b040014010d0607191f1d0a0a17131906120515020004030d1d191f140506191d1d1b0b0a110a02150e081607020f191c030a121614140813020c1a131a120b0d05001b00081001",
+              "data": {
+                "timestamp": "0x191dd9dec00",
+                "payment_hash": "0x0925435785680234bf8c01f1d0a8f876ca2a013665dedc5867a2a5a58ae974c0",
+                "attrs": [
+                  {
+                    "expiry_time": "0xe10"
+                  },
+                  {
+                    "description": "device invoice"
+                  },
+                  {
+                    "hash_algorithm": "ckb_hash"
+                  },
+                  {
+                    "payee_public_key": "0388b3f6725f602c2264516a7cb3e769ee809ef696eef87fa3f7f33b34e1f922c2"
+                  },
+                  {
+                    "final_htlc_minimum_expiry_delta": "0x5265c00"
+                  }
+                ]
+              }
+            }
+          }
+        }
+      ]
+    },
+    "get_invoice": {
+      "params": [
+        {
+          "name": "by payment hash",
+          "values": {
+            "payment_hash": "0925435785680234bf8c01f1d0a8f876ca2a013665dedc5867a2a5a58ae974c0"
+          },
+          "json": {
+            "payment_hash": "0x0925435785680234bf8c01f1d0a8f876ca2a013665dedc5867a2a5a58ae974c0"
+          }
+        }
+      ],
+      "results": [
+        {
+          "name": "open",
+          "values": {
+            "invoice_address": "fibt1-fixture-held",
+            "invoice": {
+              "currency": "Fibt",
+              "amount": "250000000",
+              "signature": "555a4945a7c40e57c20d2cf13effaf711e7ee48ed90140b4c7cffaa55e79348b5100836f73fa14d9ef76b54542ab916389f9e0d52b52889899a9ea4b6941b02201",
+              "data": {
+                "timestamp": "1726000000000",
+                "payment_hash": "0925435785680234bf8c01f1d0a8f876ca2a013665dedc5867a2a5a58ae974c0",
+                "attrs": [
+                  {
+                    "name": "expiry_time",
+                    "value": "3600"
+                  },
+                  {
+                    "name": "description",
+                    "value": "device invoice"
+                  },
+                  {
+                    "name": "hash_algorithm",
+                    "value": "ckb_hash"
+                  },
+                  {
+                    "name": "payee_public_key",
+                    "value": "0388b3f6725f602c2264516a7cb3e769ee809ef696eef87fa3f7f33b34e1f922c2"
+                  },
+                  {
+                    "name": "final_htlc_minimum_expiry_delta",
+                    "value": "86400000"
+                  }
+                ]
+              }
+            },
+            "status": "Open"
+          },
+          "json": {
+            "invoice_address": "fibt1-fixture-held",
+            "invoice": {
+              "currency": "Fibt",
+              "amount": "0xee6b280",
+              "signature": "0a150d0412110d07181007050f10100d051318131d1f1d0f0e040f071d19040e1b040014010d0607191f1d0a0a17131906120515020004030d1d191f140506191d1d1b0b0a110a02150e081607020f191c030a121614140813020c1a131a120b0d05001b00081001",
+              "data": {
+                "timestamp": "0x191dd9dec00",
+                "payment_hash": "0x0925435785680234bf8c01f1d0a8f876ca2a013665dedc5867a2a5a58ae974c0",
+                "attrs": [
+                  {
+                    "expiry_time": "0xe10"
+                  },
+                  {
+                    "description": "device invoice"
+                  },
+                  {
+                    "hash_algorithm": "ckb_hash"
+                  },
+                  {
+                    "payee_public_key": "0388b3f6725f602c2264516a7cb3e769ee809ef696eef87fa3f7f33b34e1f922c2"
+                  },
+                  {
+                    "final_htlc_minimum_expiry_delta": "0x5265c00"
+                  }
+                ]
+              }
+            },
+            "status": "Open"
+          }
+        },
+        {
+          "name": "received, largest amount",
+          "values": {
+            "invoice_address": "fibt1-fixture-received",
+            "invoice": {
+              "currency": "Fibt",
+              "amount": "340282366920938463463374607431768211455",
+              "signature": "cc342dded5a05c2eabfb803a581d06595ecffcb74b8baedae6fe2aed48d8a45017a4d78ab5e01dd1cc36c297aa31246ec65413c35ae9be1be2cc643d75ce59f701",
+              "data": {
+                "timestamp": "1726000000000",
+                "payment_hash": "9529aed12482eefd831b058724fd1958117c93b769160594b4737ab4778bf4ca",
+                "attrs": [
+                  {
+                    "name": "expiry_time",
+                    "value": "3600"
+                  },
+                  {
+                    "name": "description",
+                    "value": "device invoice"
+                  },
+                  {
+                    "name": "hash_algorithm",
+                    "value": "ckb_hash"
+                  },
+                  {
+                    "name": "payee_public_key",
+                    "value": "0388b3f6725f602c2264516a7cb3e769ee809ef696eef87fa3f7f33b34e1f922c2"
+                  },
+                  {
+                    "name": "final_htlc_minimum_expiry_delta",
+                    "value": "86400000"
+                  },
+                  {
+                    "name": "udt_script",
+                    "value": "55000000100000003000000031000000912f64f976947ed5467ff5e7ba4c87bd37f240cdbdba0b38da619372056ef82701200000008612706980baca14e3d03ea4d77d185e6f7338cd6e98a0ea0cd17a69918f2578"
+                  },
+                  {
+                    "name": "feature",
+                    "value": [
+                      "BASIC_MPP_OPTIONAL",
+                      "TRAMPOLINE_ROUTING_REQUIRED"
+                    ]
+                  }
+                ]
+              }
+            },
+            "status": "Received"
+          },
+          "json": {
+            "invoice_address": "fibt1-fixture-received",
+            "invoice": {
+              "currency": "Fibt",
+              "amount": "0xffffffffffffffffffffffffffffffff",
+              "signature": "19101a021b17161514010e021d0a1f1b10001d05100708060b050f0c1f1f0517090e051a1d1617061f18150e1a120618141108010f090617110a1a1e00070e1119101b0c05051d0a060412061d111214020f0115151a0d1e030f110c1819011d0e170705131d1801",
+              "data": {
+                "timestamp": "0x191dd9dec00",
+                "payment_hash": "0x9529aed12482eefd831b058724fd1958117c93b769160594b4737ab4778bf4ca",
+                "attrs": [
+                  {
+                    "expiry_time": "0xe10"
+                  },
+                  {
+                    "description": "device invoice"
+                  },
+                  {
+                    "hash_algorithm": "ckb_hash"
+                  },
+                  {
+                    "payee_public_key": "0388b3f6725f602c2264516a7cb3e769ee809ef696eef87fa3f7f33b34e1f922c2"
+                  },
+                  {
+                    "final_htlc_minimum_expiry_delta": "0x5265c00"
+                  },
+                  {
+                    "udt_script": "0x55000000100000003000000031000000912f64f976947ed5467ff5e7ba4c87bd37f240cdbdba0b38da619372056ef82701200000008612706980baca14e3d03ea4d77d185e6f7338cd6e98a0ea0cd17a69918f2578"
+                  },
+                  {
+                    "feature": [
+                      "BASIC_MPP_OPTIONAL",
+                      "TRAMPOLINE_ROUTING_REQUIRED"
+                    ]
+                  }
+                ]
+              }
+            },
+            "status": "Received"
+          }
+        },
+        {
+          "name": "paid",
+          "values": {
+            "invoice_address": "fibt1-fixture-paid",
+            "invoice": {
+              "currency": "Fibt",
+              "amount": "250000000",
+              "signature": "8c74fdac17d7405193b449c6cc79f06a3cd51f3acdf2275b4d5302db79e0c1046f5325f1fb7f1b8682b666c1c5548fe3caca868a046a17ad5448d3afa5d9b31e01",
+              "data": {
+                "timestamp": "1726000000000",
+                "payment_hash": "8340699674f20900ce588cc6933b516f4bc03c2d6e34761e27c334c4539b4a90",
+                "attrs": [
+                  {
+                    "name": "expiry_time",
+                    "value": "3600"
+                  },
+                  {
+                    "name": "description",
+                    "value": "device invoice"
+                  },
+                  {
+                    "name": "hash_algorithm",
+                    "value": "ckb_hash"
+                  },
+                  {
+                    "name": "payee_public_key",
+                    "value": "0388b3f6725f602c2264516a7cb3e769ee809ef696eef87fa3f7f33b34e1f922c2"
+                  },
+                  {
+                    "name": "final_htlc_minimum_expiry_delta",
+                    "value": "86400000"
+                  }
+                ]
+              }
+            },
+            "status": "Paid"
+          },
+          "json": {
+            "invoice_address": "fibt1-fixture-paid",
+            "invoice": {
+              "currency": "Fibt",
+              "amount": "0xee6b280",
+              "signature": "11111a0f1b0b00171a1d000503041d140907030c181e0f100d081e0d0a07191a191719020e161a0d0a0c010d161e0f00180402061e1419051e071d171e061c06100a1b060d100e050a12071e0712160a101a0500081a101715150a0411141d0f14170c1b06071001",
+              "data": {
+                "timestamp": "0x191dd9dec00",
+                "payment_hash": "0x8340699674f20900ce588cc6933b516f4bc03c2d6e34761e27c334c4539b4a90",
+                "attrs": [
+                  {
+                    "expiry_time": "0xe10"
+                  },
+                  {
+                    "description": "device invoice"
+                  },
+                  {
+                    "hash_algorithm": "ckb_hash"
+                  },
+                  {
+                    "payee_public_key": "0388b3f6725f602c2264516a7cb3e769ee809ef696eef87fa3f7f33b34e1f922c2"
+                  },
+                  {
+                    "final_htlc_minimum_expiry_delta": "0x5265c00"
+                  }
+                ]
+              }
+            },
+            "status": "Paid"
+          }
+        },
+        {
+          "name": "cancelled",
+          "values": {
+            "invoice_address": "fibt1-fixture-cancelled",
+            "invoice": {
+              "currency": "Fibt",
+              "amount": "250000000",
+              "signature": "d6e34c65baac70d1bed12ef11f3a99ef7a0039d3969e129284eff9700db8b0c71f0832e406256bd500fb4534e5c68b173f305b0f03f8d951f982d8157c4085bf01",
+              "data": {
+                "timestamp": "1726000000000",
+                "payment_hash": "b4e81eabdaf15f17dff696ab46d18f81777e0d59dcb0f1e97124524774d35f58",
+                "attrs": [
+                  {
+                    "name": "expiry_time",
+                    "value": "3600"
+                  },
+                  {
+                    "name": "description",
+                    "value": "device invoice"
+                  },
+                  {
+                    "name": "hash_algorithm",
+                    "value": "ckb_hash"
+                  },
+                  {
+                    "name": "payee_public_key",
+                    "value": "0388b3f6725f602c2264516a7cb3e769ee809ef696eef87fa3f7f33b34e1f922c2"
+                  },
+                  {
+                    "name": "final_htlc_minimum_expiry_delta",
+                    "value": "86400000"
+                  }
+                ]
+              }
+            },
+            "status": "Cancelled"
+          },
+          "json": {
+            "invoice_address": "fibt1-fixture-cancelled",
+            "invoice": {
+              "currency": "Fibt",
+              "amount": "0xee6b280",
+              "signature": "1a1b111418190d1a1511180d030f1611051b18111e0e14191d1d1d00000e0e13121a0f01050414041d1f1c1700030d18160303111e0201121c1003020a1a1e1500031d140a0d0705181a05110e0f19100b0c0710071e06190a071c18051600150f1100080b0f1801",
+              "data": {
+                "timestamp": "0x191dd9dec00",
+                "payment_hash": "0xb4e81eabdaf15f17dff696ab46d18f81777e0d59dcb0f1e97124524774d35f58",
+                "attrs": [
+                  {
+                    "expiry_time": "0xe10"
+                  },
+                  {
+                    "description": "device invoice"
+                  },
+                  {
+                    "hash_algorithm": "ckb_hash"
+                  },
+                  {
+                    "payee_public_key": "0388b3f6725f602c2264516a7cb3e769ee809ef696eef87fa3f7f33b34e1f922c2"
+                  },
+                  {
+                    "final_htlc_minimum_expiry_delta": "0x5265c00"
+                  }
+                ]
+              }
+            },
+            "status": "Cancelled"
+          }
+        },
+        {
+          "name": "expired, no amount, unsigned",
+          "values": {
+            "invoice_address": "fibt1-fixture-expired",
+            "invoice": {
+              "currency": "Fibd",
+              "amount": null,
+              "signature": null,
+              "data": {
+                "timestamp": "1726000000000",
+                "payment_hash": "5e51e128f342e1fba68ce6d7ca7a906946412f1653f210b7c0546774f72f0fe0",
+                "attrs": [
+                  {
+                    "name": "expiry_time",
+                    "value": "1"
+                  }
+                ]
+              }
+            },
+            "status": "Expired"
+          },
+          "json": {
+            "invoice_address": "fibt1-fixture-expired",
+            "invoice": {
+              "currency": "Fibd",
+              "amount": null,
+              "signature": null,
+              "data": {
+                "timestamp": "0x191dd9dec00",
+                "payment_hash": "0x5e51e128f342e1fba68ce6d7ca7a906946412f1653f210b7c0546774f72f0fe0",
+                "attrs": [
+                  {
+                    "expiry_time": "0x1"
+                  }
+                ]
+              }
+            },
+            "status": "Expired"
+          }
+        }
+      ]
+    },
+    "settle_invoice": {
+      "params": [
+        {
+          "name": "with the preimage",
+          "values": {
+            "payment_hash": "0925435785680234bf8c01f1d0a8f876ca2a013665dedc5867a2a5a58ae974c0",
+            "payment_preimage": "c75ae4eaf01ef8223bdf058c01dafee41090fdf6b85d6c65a8dcdde62f3b36cb"
+          },
+          "json": {
+            "payment_hash": "0x0925435785680234bf8c01f1d0a8f876ca2a013665dedc5867a2a5a58ae974c0",
+            "payment_preimage": "0xc75ae4eaf01ef8223bdf058c01dafee41090fdf6b85d6c65a8dcdde62f3b36cb"
+          }
+        }
+      ],
+      "results": [
+        {
+          "name": "settled",
+          "values": {},
+          "json": {}
+        }
+      ]
+    },
+    "cancel_invoice": {
+      "params": [
+        {
+          "name": "by payment hash",
+          "values": {
+            "payment_hash": "b4e81eabdaf15f17dff696ab46d18f81777e0d59dcb0f1e97124524774d35f58"
+          },
+          "json": {
+            "payment_hash": "0xb4e81eabdaf15f17dff696ab46d18f81777e0d59dcb0f1e97124524774d35f58"
+          }
+        }
+      ],
+      "results": [
+        {
+          "name": "cancelled",
+          "values": {
+            "invoice_address": "fibt1-fixture-cancelled",
+            "invoice": {
+              "currency": "Fibt",
+              "amount": "250000000",
+              "signature": "d6e34c65baac70d1bed12ef11f3a99ef7a0039d3969e129284eff9700db8b0c71f0832e406256bd500fb4534e5c68b173f305b0f03f8d951f982d8157c4085bf01",
+              "data": {
+                "timestamp": "1726000000000",
+                "payment_hash": "b4e81eabdaf15f17dff696ab46d18f81777e0d59dcb0f1e97124524774d35f58",
+                "attrs": [
+                  {
+                    "name": "expiry_time",
+                    "value": "3600"
+                  },
+                  {
+                    "name": "description",
+                    "value": "device invoice"
+                  },
+                  {
+                    "name": "hash_algorithm",
+                    "value": "ckb_hash"
+                  },
+                  {
+                    "name": "payee_public_key",
+                    "value": "0388b3f6725f602c2264516a7cb3e769ee809ef696eef87fa3f7f33b34e1f922c2"
+                  },
+                  {
+                    "name": "final_htlc_minimum_expiry_delta",
+                    "value": "86400000"
+                  }
+                ]
+              }
+            },
+            "status": "Cancelled"
+          },
+          "json": {
+            "invoice_address": "fibt1-fixture-cancelled",
+            "invoice": {
+              "currency": "Fibt",
+              "amount": "0xee6b280",
+              "signature": "1a1b111418190d1a1511180d030f1611051b18111e0e14191d1d1d00000e0e13121a0f01050414041d1f1c1700030d18160303111e0201121c1003020a1a1e1500031d140a0d0705181a05110e0f19100b0c0710071e06190a071c18051600150f1100080b0f1801",
+              "data": {
+                "timestamp": "0x191dd9dec00",
+                "payment_hash": "0xb4e81eabdaf15f17dff696ab46d18f81777e0d59dcb0f1e97124524774d35f58",
+                "attrs": [
+                  {
+                    "expiry_time": "0xe10"
+                  },
+                  {
+                    "description": "device invoice"
+                  },
+                  {
+                    "hash_algorithm": "ckb_hash"
+                  },
+                  {
+                    "payee_public_key": "0388b3f6725f602c2264516a7cb3e769ee809ef696eef87fa3f7f33b34e1f922c2"
+                  },
+                  {
+                    "final_htlc_minimum_expiry_delta": "0x5265c00"
+                  }
+                ]
+              }
+            },
+            "status": "Cancelled"
+          }
+        }
+      ]
+    },
+    "send_payment": {
+      "params": [
+        {
+          "name": "dry run",
+          "values": {
+            "invoice": "fibt1-fixture-held",
+            "max_fee_amount": "1250000",
+            "dry_run": true
+          },
+          "json": {
+            "target_pubkey": null,
+            "amount": null,
+            "payment_hash": null,
+            "final_tlc_expiry_delta": null,
+            "tlc_expiry_limit": null,
+            "invoice": "fibt1-fixture-held",
+            "timeout": null,
+            "max_fee_amount": "0x1312d0",
+            "max_fee_rate": null,
+            "max_parts": null,
+            "trampoline_hops": null,
+            "keysend": null,
+            "udt_type_script": null,
+            "allow_self_payment": null,
+            "custom_records": null,
+            "hop_hints": null,
+            "dry_run": true
+          }
+        },
+        {
+          "name": "largest fee bound",
+          "values": {
+            "invoice": "fibt1-fixture-held",
+            "max_fee_amount": "340282366920938463463374607431768211455",
+            "dry_run": false
+          },
+          "json": {
+            "target_pubkey": null,
+            "amount": null,
+            "payment_hash": null,
+            "final_tlc_expiry_delta": null,
+            "tlc_expiry_limit": null,
+            "invoice": "fibt1-fixture-held",
+            "timeout": null,
+            "max_fee_amount": "0xffffffffffffffffffffffffffffffff",
+            "max_fee_rate": null,
+            "max_parts": null,
+            "trampoline_hops": null,
+            "keysend": null,
+            "udt_type_script": null,
+            "allow_self_payment": null,
+            "custom_records": null,
+            "hop_hints": null,
+            "dry_run": false
+          }
+        }
+      ],
+      "results": [
+        {
+          "name": "created",
+          "values": {
+            "payment_hash": "0925435785680234bf8c01f1d0a8f876ca2a013665dedc5867a2a5a58ae974c0",
+            "status": "Created",
+            "created_at": "1726000000000",
+            "last_updated_at": "1726000001000",
+            "failed_error": null,
+            "fee": "0",
+            "custom_records": null
+          },
+          "json": {
+            "payment_hash": "0x0925435785680234bf8c01f1d0a8f876ca2a013665dedc5867a2a5a58ae974c0",
+            "status": "Created",
+            "created_at": "0x191dd9dec00",
+            "last_updated_at": "0x191dd9defe8",
+            "failed_error": null,
+            "fee": "0x0",
+            "custom_records": null
+          }
+        }
+      ]
+    },
+    "get_payment": {
+      "params": [
+        {
+          "name": "by payment hash",
+          "values": {
+            "payment_hash": "0925435785680234bf8c01f1d0a8f876ca2a013665dedc5867a2a5a58ae974c0"
+          },
+          "json": {
+            "payment_hash": "0x0925435785680234bf8c01f1d0a8f876ca2a013665dedc5867a2a5a58ae974c0"
+          }
+        }
+      ],
+      "results": [
+        {
+          "name": "inflight, largest fee and timestamps",
+          "values": {
+            "payment_hash": "40d8424711ccc2eec07674a3255a351ae65d69e7794828be726fd75cbf6c8026",
+            "status": "Inflight",
+            "created_at": "18446744073709551615",
+            "last_updated_at": "18446744073709551615",
+            "failed_error": null,
+            "fee": "340282366920938463463374607431768211455",
+            "custom_records": null
+          },
+          "json": {
+            "payment_hash": "0x40d8424711ccc2eec07674a3255a351ae65d69e7794828be726fd75cbf6c8026",
+            "status": "Inflight",
+            "created_at": "0xffffffffffffffff",
+            "last_updated_at": "0xffffffffffffffff",
+            "failed_error": null,
+            "fee": "0xffffffffffffffffffffffffffffffff",
+            "custom_records": null
+          }
+        },
+        {
+          "name": "success with a custom record",
+          "values": {
+            "payment_hash": "1184b6d3d0a1ee2b9a3cdc537b8f19395a878f64e08971fc604f6e00d819bf68",
+            "status": "Success",
+            "created_at": "1726000000000",
+            "last_updated_at": "1726000009000",
+            "failed_error": null,
+            "fee": "12345",
+            "custom_records": [
+              {
+                "key": 1,
+                "data": "01020304"
+              }
+            ]
+          },
+          "json": {
+            "payment_hash": "0x1184b6d3d0a1ee2b9a3cdc537b8f19395a878f64e08971fc604f6e00d819bf68",
+            "status": "Success",
+            "created_at": "0x191dd9dec00",
+            "last_updated_at": "0x191dd9e0f28",
+            "failed_error": null,
+            "fee": "0x3039",
+            "custom_records": {
+              "0x1": "0x01020304"
+            }
+          }
+        },
+        {
+          "name": "failed",
+          "values": {
+            "payment_hash": "9ed76cd1121b133c8cafa62bb2d0e711361fc97ac52681cb13d4cd43b09f7399",
+            "status": "Failed",
+            "created_at": "1726000000000",
+            "last_updated_at": "1726000001000",
+            "failed_error": "Failed to build route, PathFind error: no path found",
+            "fee": "0",
+            "custom_records": null
+          },
+          "json": {
+            "payment_hash": "0x9ed76cd1121b133c8cafa62bb2d0e711361fc97ac52681cb13d4cd43b09f7399",
+            "status": "Failed",
+            "created_at": "0x191dd9dec00",
+            "last_updated_at": "0x191dd9defe8",
+            "failed_error": "Failed to build route, PathFind error: no path found",
+            "fee": "0x0",
+            "custom_records": null
+          }
+        }
+      ]
+    }
+  }
+}
