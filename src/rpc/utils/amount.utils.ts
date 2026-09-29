@@ -8,7 +8,7 @@ import { decodeUintHex, encodeUintHex } from "../../wire";
  * @param shannons Amount in decimal shannons.
  * @returns The hex amount.
  */
-export function encodeShannons(name: string, shannons: string): UintHexWire {
+export function encodeRpcShannons(name: string, shannons: string): UintHexWire {
     assertDecimalShannons(name, shannons);
     return encodeUintHex(BigInt(shannons), MAX_AMOUNT_SHANNONS);
 }
@@ -18,6 +18,6 @@ export function encodeShannons(name: string, shannons: string): UintHexWire {
  * @param field Field to read.
  * @returns The amount in decimal shannons.
  */
-export function decodeShannons(field: Field): string {
+export function decodeRpcShannons(field: Field): string {
     return decodeUintHex(field, MAX_AMOUNT_SHANNONS).toString();
 }

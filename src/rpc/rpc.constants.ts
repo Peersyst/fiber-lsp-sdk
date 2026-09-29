@@ -13,12 +13,12 @@ export const RPC_METHODS = [
 
 export const JSON_RPC_VERSION = "2.0";
 
-export const JSON_CONTENT_TYPE = "application/json";
+export const RPC_CONTENT_TYPE = "application/json";
 
 /**
  * Fiber's middleware matches the prefix case-sensitively.
  */
-export const BEARER_PREFIX = "Bearer ";
+export const RPC_BEARER_PREFIX = "Bearer ";
 
 /**
  * Fiber's auth refusal; its message varies, so only the code identifies it.

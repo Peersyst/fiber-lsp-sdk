@@ -15,7 +15,8 @@ Upstream reference: `nervosnetwork/fiber` @ `b71a61c3` (v0.9.0-rc7). The key der
 
 - **Runtimes**: the SDK must run unmodified in Node, browsers, and React Native (Hermes). No platform APIs anywhere in `src/`
   (lint-enforced): no `node:*` imports, no globals like `process` or `window`. Every external effect is injected: `ISignerStorage`,
-  a WebSocket factory, `fetch`.
+  a WebSocket factory, `fetch`. `fetch` alone defaults to the runtime's global, read from `globalThis`, because all three
+  runtimes have one; the other two have no global every runtime shares.
 - **Dependencies**: runtime deps are exactly `@noble/curves`, `@noble/hashes`, `@scure/bip32`, `@scure/btc-signer`, declared as
   caret ranges (`^2.2.0`) so a host app on the same major converges on a single copy instead of installing a second one; a host
   still on v1 installs both lines until it upgrades, and pinning exactly would make that permanent.
