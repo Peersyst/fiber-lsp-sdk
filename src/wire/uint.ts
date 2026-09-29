@@ -37,11 +37,24 @@ export function decodeUintHexNumber(field: Field, max: number): number {
 
 /**
  * Writes an unsigned integer in fiber's hex form, refusing one outside `[0, max]`.
+ * @param name Name of the value, used in the error message.
  * @param value Integer to write.
  * @param max Highest accepted value, inclusive: the wire width, or the domain bound when it is narrower.
  * @returns The `0x` hex, lowercase, without leading zeros.
  */
-export function encodeUintHex(value: bigint, max: bigint): UintHexWire {
-    assertUnsignedBigInt("value", value, max);
+export function encodeUintHex(name: string, value: bigint, max: bigint): UintHexWire {
+    assertUnsignedBigInt(name, value, max);
+    return WIRE_HEX_PREFIX + value.toString(16);
+}
+
+/**
+ * Writes a `number` in fiber's hex form, refusing one outside `[0, max]`.
+ * @param name Name of the value, used in the error message.
+ * @param value Integer to write.
+ * @param max Highest accepted value, inclusive.
+ * @returns The `0x` hex, lowercase, without leading zeros.
+ */
+export function encodeUintHexNumber(name: string, value: number, max: number): UintHexWire {
+    assertUnsignedInteger(name, value, max);
     return WIRE_HEX_PREFIX + value.toString(16);
 }

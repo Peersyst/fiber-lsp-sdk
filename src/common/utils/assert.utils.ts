@@ -1,15 +1,24 @@
 import { isDecimalShannons, isHexBytes, isNonEmptyString, isUnsignedInteger } from "./validate.utils";
 
 /**
+ * Asserts that a value is a byte array, of any length.
+ * @param name Name of the value, used in the error message.
+ * @param value Value to check.
+ */
+export function assertAnyBytes(name: string, value: unknown): asserts value is Uint8Array {
+    if (!(value instanceof Uint8Array)) {
+        throw new TypeError(`${name} must be a Uint8Array`);
+    }
+}
+
+/**
  * Asserts that a value is a byte array of an exact length.
  * @param name Name of the value, used in the error message.
  * @param value Value to check.
  * @param length Exact length the value must have, in bytes.
  */
 export function assertBytes(name: string, value: unknown, length: number): asserts value is Uint8Array {
-    if (!(value instanceof Uint8Array)) {
-        throw new TypeError(`${name} must be a Uint8Array`);
-    }
+    assertAnyBytes(name, value);
     if (value.length !== length) {
         throw new TypeError(`${name} must be ${length} bytes, got ${value.length}`);
     }
@@ -71,5 +80,33 @@ export function assertNonEmptyString(name: string, value: string): void {
 export function assertDecimalShannons(name: string, value: string): void {
     if (!isDecimalShannons(value)) {
         throw new TypeError(`${name} must be an amount in decimal shannons`);
+    }
+}
+
+/**
+ * Asserts that a value is a boolean.
+ * @param name Name of the value, used in the error message.
+ * @param value Value to check.
+ */
+export function assertBoolean(name: string, value: unknown): asserts value is boolean {
+    if (typeof value !== "boolean") {
+        throw new TypeError(`${name} must be a boolean`);
+    }
+}
+
+/**
+ * Asserts that a value is one of a closed set of string values.
+ * @param name Name of the value, used in the error message.
+ * @param value Value to check.
+ * @param values The accepted values.
+ */
+export function assertOneOf<Values extends readonly string[]>(
+    name: string,
+    value: unknown,
+    values: Values,
+): asserts value is Values[number] {
+    const accepted: readonly string[] = values;
+    if (typeof value !== "string" || !accepted.includes(value)) {
+        throw new TypeError(`${name} must be one of ${values.join(", ")}`);
     }
 }

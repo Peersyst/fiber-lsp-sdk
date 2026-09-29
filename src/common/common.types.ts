@@ -1,4 +1,4 @@
-import type { SCRIPT_HASH_TYPES, SIGNER_ERROR_CODES, TLC_DIRECTIONS } from "./common.constants";
+import type { DEP_TYPES, SCRIPT_HASH_TYPES, SIGNER_ERROR_CODES, TLC_DIRECTIONS } from "./common.constants";
 
 export type SignerErrorCode = (typeof SIGNER_ERROR_CODES)[number];
 
@@ -21,6 +21,37 @@ export type ScriptTemplate = {
 export type OutPoint = {
     txHash: Uint8Array;
     index: number;
+};
+
+export type DepType = (typeof DEP_TYPES)[number];
+
+export type CellDep = {
+    outPoint: OutPoint;
+    depType: DepType;
+};
+
+export type CellInput = {
+    since: bigint;
+    previousOutput: OutPoint;
+};
+
+export type CellOutput = {
+    capacityShannons: bigint;
+    lock: Script;
+    type: Script | null;
+};
+
+/**
+ * A CKB transaction without its hash.
+ */
+export type Transaction = {
+    version: number;
+    cellDeps: CellDep[];
+    headerDeps: Uint8Array[];
+    inputs: CellInput[];
+    outputs: CellOutput[];
+    outputsData: Uint8Array[];
+    witnesses: Uint8Array[];
 };
 
 export type TlcDirection = (typeof TLC_DIRECTIONS)[number];

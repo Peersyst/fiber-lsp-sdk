@@ -7,9 +7,9 @@ same harness pins it in `vectors/rpc.json`: params and results serialized by fib
 jsonrpsee version fiber serves writes them.
 
 `test/tests/derivation/interop-vectors.spec.ts` runs against `vectors/vectors.json` on every `pnpm test`, so the contract is
-checked without a Rust toolchain. Rust is only needed to regenerate the vectors and to verify the SDK's partial signature under
-fiber's own crate, and the interop workflow does both on every pull request that touches the harness, the derivation, the signing
-engine or the tests.
+checked without a Rust toolchain. Rust is only needed to regenerate the vectors and to verify, under fiber's own crates, the
+SDK's partial signature and the RPC params it encodes; the interop workflow does all of it on every pull request that touches
+the harness, the modules the vectors pin (`common`, `derivation`, `digest`, `signer`, `wire`, `rpc`), the tests or the lockfile.
 
 For the scheme those vectors pin, see [`docs/derivation.md`](../docs/derivation.md).
 
@@ -58,10 +58,13 @@ fiber's serde writes for the struct built from it. The cases cover every `Channe
 that leak a composite name (`OUR_INIT_SENT` alone serializes as `OUR_INIT_SENT|INIT_SENT`) and the empty set, every invoice
 and payment status, options present and absent, `u128::MAX` amounts, and funding transactions with cell deps of both types, a
 header dep, typed and untyped outputs and witnesses, the submit's signed tx being the open's unsigned one with only its
-witnesses changed. The envelopes are one request and, as jsonrpsee writes them, an object, an empty object and a `null`
-result, and the errors a client meets: `-32000` (every handler failure), `-32999` (a refused token, twice: its message is
-`"Unauthorized"` or that word followed by the Biscuit run limit hit, so only the code identifies it), `-32602` (params fiber's
-deserializer refuses, the only one that carries `data`: serde's message), `-32601` and `-32600` with a `null` id.
+witnesses changed. Outside the methods, `channel_state_flags` holds, for each `ChannelState`, the names fiber's serializer
+writes with every bit set: the state's whole flag list in declaration order, so the client's per-state lists are pinned
+whole and not only through the names the cases carry. The envelopes are one request and, as jsonrpsee writes them, an
+object, an empty object and a `null` result, and the errors a client meets: `-32000` (every handler failure), `-32999` (a
+refused token, twice: its message is `"Unauthorized"` or that word followed by the Biscuit run limit hit, so only the code
+identifies it), `-32602` (params fiber's deserializer refuses, the only one that carries `data`: serde's message), `-32601`
+and `-32600` with a `null` id.
 `test/tests/rpc/interop-vectors.spec.ts` pins that coverage on every `pnpm test`.
 
 "Every" is checked against fiber, not against a copied list: `gen-rpc-vectors` fails unless the cases carry every channel
@@ -76,23 +79,25 @@ is a real recoverable one, written by fiber's `InvoiceSignature`: the 65 bytes r
 
 ## Verifying the RPC params
 
-Nothing writes `INTEROP_RPC_OUT` until the first encoder of the `rpc` module lands; from then on the loop runs as:
-
 ```bash
 INTEROP_RPC_OUT=/tmp/ts-rpc-out.json pnpm test -- test/tests/rpc
 cd interop/rust
 cargo run --release -- verify-rpc-params ../vectors/rpc.json /tmp/ts-rpc-out.json
 ```
 
-The TS side writes `{ "<method>": [ { "name": "<case>", "params": {...} } ] }`, the params its encoders produced for each
-`params` case of the vectors, once the client's encoders exist. `verify-rpc-params` deserializes each into fiber's params
-struct and serializes it back, and requires the round trip to return what was sent, an absent option and a `null` counting as
-one, and to equal the vector's own `json`. No fiber params struct denies unknown fields, so a misspelt optional field is
-dropped by the node in silence; the round trip is what catches it, along with a wrong form: a decimal amount, a hex with
-leading zeros and a field CKB's transaction does not know are refused, and a `0x` on a pubkey is accepted and written back
-bare. A method the TS side writes must be one of the ten and carry every case the vectors hold for it; methods it does not
-write yet are not checked, so the loop closes method by method as the encoders land, but an output with no method at all is
-refused. `cargo test --release` pins each of those outcomes against the vectors, and the interop workflow runs it.
+`INTEROP_RPC_OUT` makes `test/tests/rpc/interop-vectors.spec.ts` write `{ "<method>": [ { "name": "<case>", "params": {...} } ] }`,
+the params the client's encoders produced for each `params` case of the vectors; unset, the spec writes nothing. It is the one
+writer, so the file holds every method whose encoders have landed: today the four channel methods, the invoice and payment
+ones joining with their encoders. The interop workflow sets it and runs the verifier right after `pnpm test`.
+
+`verify-rpc-params` deserializes each case into fiber's params struct and serializes it back, and requires the round trip to
+return what was sent, an absent option and a `null` counting as one, and to equal the vector's own `json`. No fiber params
+struct denies unknown fields, so a misspelt optional field is dropped by the node in silence; the round trip is what catches it,
+along with a wrong form: a decimal amount, a hex with leading zeros and a field CKB's transaction does not know are refused, and a
+`0x` on a pubkey is accepted and written back bare. A method the TS side writes must be one of the ten and carry every case the
+vectors hold for it; methods it does not write yet are not checked, so the loop closes method by method as the encoders land, but
+an output with no method at all is refused. `cargo test --release` pins each of those outcomes against the vectors, and the
+interop workflow runs it.
 
 ## Re-validating against a new fiber release
 
@@ -106,7 +111,8 @@ refused. `cargo test --release` pins each of those outcomes against the vectors,
 
 A green suite means upstream did not move. A red derivation is the decision point: fiber changed its scheme, and existing
 channels derived under the old one stay on it (`DERIVATION_SCHEME_VERSION` is additive only). A red RPC form, or a generation
-that fails its coverage check, means the client's codecs follow the new forms.
+that fails its coverage check, means the client's codecs follow the new forms; a flag a release adds to a state shows as a
+diff in `channel_state_flags` and fails the interop spec until `CHANNEL_STATE_FLAGS` follows.
 
 ## Verifying a partial signature
 

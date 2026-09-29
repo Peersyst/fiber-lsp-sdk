@@ -2,6 +2,7 @@ import { UINT128_MAX } from "../../../../src/common";
 import { decodeShannons, encodeShannons } from "../../../../src/rpc";
 import { WireError } from "../../../../src/wire";
 import { loadRpcVectors } from "../../../utils/rpc-vectors";
+import { ABOVE_U128, U128_MAX_HEX } from "../../../utils/uint-hex";
 
 const vectors = loadRpcVectors();
 
@@ -29,7 +30,7 @@ describe("encodeShannons", () => {
 
     it("writes the bounds", () => {
         expect(encodeShannons("amount", "0")).toBe("0x0");
-        expect(encodeShannons("amount", "340282366920938463463374607431768211455")).toBe(`0x${"f".repeat(32)}`);
+        expect(encodeShannons("amount", "340282366920938463463374607431768211455")).toBe(U128_MAX_HEX);
     });
 
     it.each([
@@ -60,14 +61,14 @@ describe("decodeShannons", () => {
 
     it("reads the bounds", () => {
         expect(decodeShannons({ value: "0x0", path: "result.amount" })).toBe("0");
-        expect(decodeShannons({ value: `0x${"f".repeat(32)}`, path: "result.amount" })).toBe(UINT128_MAX.toString());
+        expect(decodeShannons({ value: U128_MAX_HEX, path: "result.amount" })).toBe(UINT128_MAX.toString());
     });
 
     it.each([
         ["a decimal string", "100"],
         ["a leading zero", "0x01"],
         ["a JSON number", 100],
-        ["more digits than a u128 has", `0x1${"0".repeat(32)}`],
+        ["more digits than a u128 has", ABOVE_U128],
     ])("refuses %s as a wire refusal of the field", (_, value) => {
         expect(() => decodeShannons({ value, path: "result.amount" })).toThrow(WireError);
         expect(() => decodeShannons({ value, path: "result.amount" })).toThrow(/^result\.amount /);

@@ -149,17 +149,15 @@ describe("FiberRpcClient", () => {
 
         it("returns what the decoder returns", async () => {
             const mock = new FetchMock().answer(ok(`{"jsonrpc":"2.0","id":1,"result":{"channel_id":"${CHANNEL_ID}"}}`));
-            await expect(clientOf(mock).call("submit_signed_funding_tx", PARAMS, decodeChannelId)).resolves.toEqual(
-                new Uint8Array(32).fill(0x11),
-            );
+            await expect(clientOf(mock).call("abandon_channel", PARAMS, decodeChannelId)).resolves.toEqual(new Uint8Array(32).fill(0x11));
         });
 
         it("turns the decoder's refusal into an RpcResponseError that names the field", async () => {
             const mock = new FetchMock().answer(ok('{"jsonrpc":"2.0","id":1,"result":{"channel_id":"0x11"}}'));
-            const error = await rejection(clientOf(mock).call("submit_signed_funding_tx", PARAMS, decodeChannelId));
+            const error = await rejection(clientOf(mock).call("abandon_channel", PARAMS, decodeChannelId));
             expect(error).toBeInstanceOf(RpcResponseError);
             expect(error).toMatchObject({
-                method: "submit_signed_funding_tx",
+                method: "abandon_channel",
                 path: "response.result.channel_id",
                 reason: "must be 32 bytes of 0x-prefixed lowercase hex",
             });

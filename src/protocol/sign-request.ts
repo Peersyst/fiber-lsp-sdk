@@ -1,5 +1,5 @@
 import type { ScriptTemplate } from "../common";
-import { COMPRESSED_POINT_LENGTH, PARTIAL_SIGNATURE_LENGTH, PUBLIC_NONCE_LENGTH, SIGNER_ERROR_CODES, assertBytes } from "../common";
+import { COMPRESSED_POINT_LENGTH, PARTIAL_SIGNATURE_LENGTH, PUBLIC_NONCE_LENGTH, SIGNER_ERROR_CODES, assertOneOf } from "../common";
 import { MAX_COMMITMENT_NUMBER, SECRET_KEY_LENGTH } from "../derivation";
 import type { PolicySignRequest, SignOperation, SignSession } from "../policy";
 import type { Field, FieldReader } from "../wire";
@@ -26,8 +26,6 @@ import type {
 import { assertRequestId, decodeChannelId, decodeRequestId } from "./utils";
 
 const PARAMS_PATH = `${"sign_request" satisfies SignRequestWire["type"]}.${"params" satisfies keyof SignRequestWire}`;
-
-const ERROR_CODES: readonly string[] = SIGNER_ERROR_CODES;
 
 /**
  * Reads a `sign_request` frame's envelope, leaving its params to `decodeSignParams`.
@@ -143,22 +141,21 @@ function policyRequest(
 function encodeSignResult(result: SignResult): SignResultWire {
     switch (result.kind) {
         case "base_public_keys":
-            assertBytes("fundingPubkey", result.fundingPubkey, COMPRESSED_POINT_LENGTH);
-            assertBytes("tlcBasePubkey", result.tlcBasePubkey, COMPRESSED_POINT_LENGTH);
-            return { funding_pubkey: encodeHexBytes(result.fundingPubkey), tlc_base_pubkey: encodeHexBytes(result.tlcBasePubkey) };
+            return {
+                funding_pubkey: encodeHexBytes("fundingPubkey", result.fundingPubkey, COMPRESSED_POINT_LENGTH),
+                tlc_base_pubkey: encodeHexBytes("tlcBasePubkey", result.tlcBasePubkey, COMPRESSED_POINT_LENGTH),
+            };
         case "commitment_point":
-            assertBytes("commitmentPoint", result.commitmentPoint, COMPRESSED_POINT_LENGTH);
-            return { commitment_point: encodeHexBytes(result.commitmentPoint) };
+            return { commitment_point: encodeHexBytes("commitmentPoint", result.commitmentPoint, COMPRESSED_POINT_LENGTH) };
         case "pub_nonce":
-            assertBytes("pubNonce", result.pubNonce, PUBLIC_NONCE_LENGTH);
-            return { pub_nonce: encodeHexBytes(result.pubNonce) };
+            return { pub_nonce: encodeHexBytes("pubNonce", result.pubNonce, PUBLIC_NONCE_LENGTH) };
         case "settlement_keys":
-            assertBytes("localSettlementKey", result.localSettlementKey, SECRET_KEY_LENGTH);
-            assertBytes("tlcKey", result.tlcKey, SECRET_KEY_LENGTH);
-            return { local_settlement_key: encodeHexBytes(result.localSettlementKey), tlc_key: encodeHexBytes(result.tlcKey) };
+            return {
+                local_settlement_key: encodeHexBytes("localSettlementKey", result.localSettlementKey, SECRET_KEY_LENGTH),
+                tlc_key: encodeHexBytes("tlcKey", result.tlcKey, SECRET_KEY_LENGTH),
+            };
         case "partial_signature":
-            assertBytes("partialSignature", result.partialSignature, PARTIAL_SIGNATURE_LENGTH);
-            return { partial_signature: encodeHexBytes(result.partialSignature) };
+            return { partial_signature: encodeHexBytes("partialSignature", result.partialSignature, PARTIAL_SIGNATURE_LENGTH) };
     }
 }
 
@@ -168,7 +165,7 @@ function encodeSignResult(result: SignResult): SignResultWire {
  * @returns The wire object.
  */
 function encodeSignError(error: SignError): SignError {
-    if (!ERROR_CODES.includes(error.code)) throw new TypeError(`error.code must be one of ${SIGNER_ERROR_CODES.join(", ")}`);
+    assertOneOf("error.code", error.code, SIGNER_ERROR_CODES);
     return { code: error.code, message: error.message };
 }
 

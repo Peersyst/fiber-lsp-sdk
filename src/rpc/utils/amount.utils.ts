@@ -10,7 +10,7 @@ import { decodeUintHex, encodeUintHex } from "../../wire";
  */
 export function encodeShannons(name: string, shannons: string): UintHexWire {
     assertDecimalShannons(name, shannons);
-    return encodeUintHex(BigInt(shannons), MAX_AMOUNT_SHANNONS);
+    return encodeUintHex(name, BigInt(shannons), MAX_AMOUNT_SHANNONS);
 }
 
 /**
