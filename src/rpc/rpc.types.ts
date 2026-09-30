@@ -23,7 +23,10 @@ export type FiberRpcClientOptions = {
      * Biscuit token, base64; omitted when the node's RPC has no auth.
      */
     token?: string;
-    fetch: IFetchLike;
+    /**
+     * Defaults to the runtime's global `fetch`, which Node, the browsers and React Native all have.
+     */
+    fetch?: IFetchLike;
 };
 
 export type OpenChannelWithExternalFundingParamsWire = {

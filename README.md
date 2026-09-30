@@ -10,7 +10,7 @@ blind-signs.
 - **Runs anywhere**: framework-agnostic TypeScript, shipped as both ESM and CommonJS. The same code runs unmodified in Node,
   browsers, and React Native (Hermes).
 - **No I/O of its own**: the SDK performs no platform calls. The host injects every external effect: an `ISignerStorage` (key-value
-  persistence), a WebSocket factory, and `fetch`.
+  persistence), a WebSocket factory, and `fetch`, which defaults to the runtime's own.
 - **Minimal, audited dependency surface**: the only runtime dependencies are `@noble/curves`, `@noble/hashes`, `@scure/bip32`, and
   `@scure/btc-signer`, accepted as `^2.2.0` so a host app on the same major converges on a single copy of each.
 - **Recoverable by design**: every derivation is a deterministic function of the master seed, so channel keys are recoverable from

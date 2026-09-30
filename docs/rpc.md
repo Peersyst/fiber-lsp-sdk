@@ -1,27 +1,32 @@
 # RPC
 
-The client of the fiber node's JSON-RPC: one HTTP POST per call, over a `fetch` the host injects. This document covers its
-transport (how a call is written, how the answer is read, and the three ways a call fails) and the methods built on it, one
-subject at a time: the four channel methods today, the invoice and payment methods next.
+The client of the fiber node's JSON-RPC: one HTTP POST per call, over the host's `fetch` or the runtime's. This document
+covers its transport (how a call is written, how the answer is read, and the three ways a call fails) and the methods built
+on it, one subject at a time: the four channel methods today, the invoice and payment methods next.
 
 Every claim about fiber refers to `nervosnetwork/fiber` @ `b71a61c3`, and the forms it rests on are pinned by
 `interop/vectors/rpc.json`, written by fiber's own serde and jsonrpsee `0.25.1` (see [interop/README.md](../interop/README.md)).
 
 ## The host's fetch
 
-The client performs no platform call. It is given, at construction:
+The client makes no platform call except reading the runtime's `fetch` when the host passes none. It is given, at
+construction:
 
 | Option  | What it is                                                                               |
 | ------- | ---------------------------------------------------------------------------------------- |
 | `url`   | The node's RPC address. jsonrpsee serves at the bare origin, so it is posted to as it is |
 | `token` | The Biscuit token, base64, when the node's RPC has auth on; absent otherwise             |
-| `fetch` | The host's `fetch`, as `IFetchLike`                                                      |
+| `fetch` | The host's `fetch`, as `IFetchLike`; optional                                            |
 
 `IFetchLike` is `(url, { method: "POST", headers, body }) => Promise<{ status, text() }>`: what Node's, the browsers' and
 React Native's `fetch` agree on, and nothing wider, since `src/` compiles against ES2022 alone and neither the DOM's nor
 Node's `fetch` type is in reach. A host passes its own `fetch` unchanged; the spec checks under `tsc` that Node's
 satisfies the interface. The client calls it without a receiver, because a browser's `fetch` called as a method of
 another object throws.
+
+Without one, the client takes the runtime's global `fetch`, which Node, the browsers and React Native all have. It reads
+it once, at construction, so a runtime without one fails there with a `TypeError` and not on the first call. A host still
+passes its own when it needs another: a timeout, a proxy, a double in tests.
 
 The token is checked once, at construction, to be printable ASCII without spaces, so a token no runtime would put in a
 header fails there and not on every call. No error the client throws carries it.
@@ -168,7 +173,7 @@ a filter fiber has no flag for throws a `TypeError` or `RangeError` naming the f
 ## Amounts
 
 Amounts on the SDK's surface are integer strings of shannons; fiber's are `U128Hex`, `0x` hex without leading zeros.
-`encodeShannons` and `decodeShannons` in `src/rpc/utils/amount.utils.ts` are the only place one becomes the other, over
+`encodeRpcShannons` and `decodeRpcShannons` in `src/rpc/utils/amount.utils.ts` are the only place one becomes the other, over
 the wire module's `encodeUintHex` and `decodeUintHex`. An amount that is not canonical decimal within a u128 is refused
 before it is written, naming the amount and not its value.
 

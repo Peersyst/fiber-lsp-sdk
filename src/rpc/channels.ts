@@ -42,7 +42,7 @@ import type {
     SubmitSignedFundingTxResult,
     SubmitSignedFundingTxResultWire,
 } from "./rpc.types";
-import { decodeShannons, encodeShannons } from "./utils";
+import { decodeRpcShannons, encodeRpcShannons } from "./utils";
 
 /**
  * Writes the params of `open_channel_with_external_funding`, leaving the rest to the node's defaults.
@@ -55,7 +55,7 @@ export function encodeOpenChannelWithExternalFundingParams(
     assertBoolean("public", params.public);
     return {
         pubkey: encodeBareHexBytes("peerPubkey", params.peerPubkey, COMPRESSED_POINT_LENGTH),
-        funding_amount: encodeShannons("fundingAmountShannons", params.fundingAmountShannons),
+        funding_amount: encodeRpcShannons("fundingAmountShannons", params.fundingAmountShannons),
         public: params.public,
         shutdown_script: encodeScript("shutdownScript", params.shutdownScript),
         funding_lock_script: encodeScript("fundingLockScript", params.fundingLockScript),
@@ -148,10 +148,10 @@ function decodeChannel(field: Field): Channel {
         peerPubkey: decodeBareHexBytes(at("pubkey"), COMPRESSED_POINT_LENGTH),
         fundingUdtTypeScript: decodeScriptOrNull(at("funding_udt_type_script")),
         state: decodeChannelState(at("state")),
-        localBalanceShannons: decodeShannons(at("local_balance")),
-        remoteBalanceShannons: decodeShannons(at("remote_balance")),
-        offeredTlcBalanceShannons: decodeShannons(at("offered_tlc_balance")),
-        receivedTlcBalanceShannons: decodeShannons(at("received_tlc_balance")),
+        localBalanceShannons: decodeRpcShannons(at("local_balance")),
+        remoteBalanceShannons: decodeRpcShannons(at("remote_balance")),
+        offeredTlcBalanceShannons: decodeRpcShannons(at("offered_tlc_balance")),
+        receivedTlcBalanceShannons: decodeRpcShannons(at("received_tlc_balance")),
         createdAtMs: decodeUintHex(at("created_at"), UINT64_MAX),
         shutdownTransactionHash: decodeOrNull(at("shutdown_transaction_hash"), (hash) => decodeHexBytes(hash, HASH256_LENGTH)),
         failureDetail: decodeOrNull(at("failure_detail"), decodeString),

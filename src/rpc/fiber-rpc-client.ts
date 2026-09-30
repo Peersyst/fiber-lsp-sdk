@@ -12,7 +12,7 @@ import {
 } from "./channels";
 import type { FetchResponseLike, IFetchLike } from "./interfaces";
 import { decodeRpcResponse, encodeRpcRequest } from "./json-rpc";
-import { BEARER_PREFIX, JSON_CONTENT_TYPE } from "./rpc.constants";
+import { RPC_BEARER_PREFIX, RPC_CONTENT_TYPE } from "./rpc.constants";
 import { RpcError, RpcResponseError, RpcTransportError } from "./rpc.error";
 import type {
     AbandonChannelParams,
@@ -42,17 +42,17 @@ export class FiberRpcClient {
 
     /**
      * Creates a client of one fiber node.
-     * @param options The node's url, its Biscuit token if any, and the host's fetch.
+     * @param options The node's url, its Biscuit token if any, and the host's fetch if not the runtime's.
      */
     constructor(options: FiberRpcClientOptions) {
         assertNonEmptyString("url", options.url);
         this.url = options.url;
-        this.headers = { "content-type": JSON_CONTENT_TYPE };
+        this.headers = { "content-type": RPC_CONTENT_TYPE };
         if (options.token !== undefined) {
             if (!TOKEN_PATTERN.test(options.token)) throw new TypeError("token must be printable ASCII without spaces");
-            this.headers.authorization = BEARER_PREFIX + options.token;
+            this.headers.authorization = RPC_BEARER_PREFIX + options.token;
         }
-        this.fetch = options.fetch;
+        this.fetch = options.fetch ?? this.runtimeFetch();
     }
 
     /**
@@ -69,9 +69,9 @@ export class FiberRpcClient {
     ): Promise<Result> {
         const id = this.nextId++;
         const text = await this.post(method, encodeRpcRequest(id, method, params));
-        const response = readAnswer(method, () => decodeRpcResponse(text, id));
+        const response = this.readAnswer(method, () => decodeRpcResponse(text, id));
         if ("error" in response) throw new RpcError(method, response.error.code, response.error.message);
-        return readAnswer(method, () => decode(response.result));
+        return this.readAnswer(method, () => decode(response.result));
     }
 
     /**
@@ -135,18 +135,28 @@ export class FiberRpcClient {
             throw new RpcTransportError(method, "the response body could not be read", status, { cause });
         }
     }
-}
 
-/**
- * Runs a read of the node's answer, turning a wire refusal into an `RpcResponseError`.
- * @param method Method being called.
- * @param read The read to run.
- * @returns What the read returned.
- */
-function readAnswer<Value>(method: RpcMethod, read: () => Value): Value {
-    try {
-        return read();
-    } catch (error) {
-        throw new RpcResponseError(method, asWireError(error));
+    /**
+     * Finds the runtime's global `fetch`, read once so a missing one fails at construction.
+     * @returns The runtime's `fetch`.
+     */
+    private runtimeFetch(): IFetchLike {
+        const candidate: unknown = (globalThis as { fetch?: unknown }).fetch;
+        if (typeof candidate !== "function") throw new TypeError("this runtime has no fetch: pass one in the options");
+        return candidate as IFetchLike;
+    }
+
+    /**
+     * Runs a read of the node's answer, turning a wire refusal into an `RpcResponseError`.
+     * @param method Method being called.
+     * @param read The read to run.
+     * @returns What the read returned.
+     */
+    private readAnswer<Value>(method: RpcMethod, read: () => Value): Value {
+        try {
+            return read();
+        } catch (error) {
+            throw new RpcResponseError(method, asWireError(error));
+        }
     }
 }

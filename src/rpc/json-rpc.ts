@@ -24,7 +24,7 @@ export function encodeRpcRequest(id: number, method: RpcMethod, params: RpcParam
  * @returns The result field, still to decode, or the error's code and message.
  */
 export function decodeRpcResponse(text: string, id: number): RpcResponse {
-    const response: Field = { value: parseResponse(text), path: RESPONSE_PATH };
+    const response: Field = { value: parseRpcResponse(text), path: RESPONSE_PATH };
     const at = readObject<RpcResponseWire>(response);
     const version = at("jsonrpc");
     if (version.value !== JSON_RPC_VERSION) malformed(version, `must be "${JSON_RPC_VERSION}"`);
@@ -36,7 +36,7 @@ export function decodeRpcResponse(text: string, id: number): RpcResponse {
     // A null id answers a request the node could not read.
     const unread = !hasResult && answered.value === null;
     if (answered.value !== id && !unread) malformed(answered, `must be ${id}, the id of the request`);
-    return hasResult ? { result: at("result") } : { error: decodeErrorObject(at("error")) };
+    return hasResult ? { result: at("result") } : { error: decodeRpcErrorObject(at("error")) };
 }
 
 /**
@@ -44,7 +44,7 @@ export function decodeRpcResponse(text: string, id: number): RpcResponse {
  * @param text The response body.
  * @returns The parsed value, still unknown.
  */
-function parseResponse(text: string): unknown {
+function parseRpcResponse(text: string): unknown {
     try {
         return JSON.parse(text) as unknown;
     } catch {
@@ -57,7 +57,7 @@ function parseResponse(text: string): unknown {
  * @param field Field to read.
  * @returns The error's code and message.
  */
-function decodeErrorObject(field: Field): RpcErrorObjectWire {
+function decodeRpcErrorObject(field: Field): RpcErrorObjectWire {
     const at = readObject<RpcErrorObjectWire>(field);
     const code = at("code");
     if (typeof code.value !== "number" || !Number.isSafeInteger(code.value)) malformed(code, "must be an integer");
