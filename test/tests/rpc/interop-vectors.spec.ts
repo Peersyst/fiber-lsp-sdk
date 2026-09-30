@@ -1,6 +1,7 @@
 import { UINT128_MAX, UINT64_MAX } from "../../../src/common";
+import { RPC_CALL_FAILED_CODE, RPC_METHODS, RPC_UNAUTHORIZED_CODE } from "../../../src/rpc";
 import { caseOf } from "../../utils/interop-vectors";
-import { RPC_VECTOR_METHODS, loadRpcVectors, type ChannelVector, type TransactionVector } from "../../utils/rpc-vectors";
+import { loadRpcVectors, type ChannelVector, type TransactionVector } from "../../utils/rpc-vectors";
 
 const CHANNEL_STATE_NAMES = [
     "NegotiatingFunding",
@@ -48,7 +49,7 @@ describe("rpc interop vectors", () => {
     });
 
     it("holds params and results for every method, under distinct case names", () => {
-        for (const method of RPC_VECTOR_METHODS) {
+        for (const method of RPC_METHODS) {
             const { params, results } = vectors.methods[method];
             expect(params.length).toBeGreaterThan(0);
             expect(results.length).toBeGreaterThan(0);
@@ -90,6 +91,12 @@ describe("rpc interop vectors", () => {
             expect(caseOf(vectors.envelopes.errors, "invalid params")).toMatchObject({ code: -32602, data: expect.any(String) });
             expect(caseOf(vectors.envelopes.errors, "method not found")).toMatchObject({ code: -32601, data: null });
             expect(caseOf(vectors.envelopes.errors, "invalid request")).toMatchObject({ code: -32600, id: null, data: null });
+        });
+
+        it("pin the two codes the client names", () => {
+            expect(caseOf(vectors.envelopes.errors, "call failed").code).toBe(RPC_CALL_FAILED_CODE);
+            expect(caseOf(vectors.envelopes.errors, "unauthorized").code).toBe(RPC_UNAUTHORIZED_CODE);
+            expect(caseOf(vectors.envelopes.errors, "unauthorized, run limit").code).toBe(RPC_UNAUTHORIZED_CODE);
         });
     });
 

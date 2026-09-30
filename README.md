@@ -10,7 +10,7 @@ blind-signs.
 - **Runs anywhere**: framework-agnostic TypeScript, shipped as both ESM and CommonJS. The same code runs unmodified in Node,
   browsers, and React Native (Hermes).
 - **No I/O of its own**: the SDK performs no platform calls. The host injects every external effect: an `ISignerStorage` (key-value
-  persistence), a WebSocket factory, and `fetch`.
+  persistence), a WebSocket factory, and `fetch`, which defaults to the runtime's own.
 - **Minimal, audited dependency surface**: the only runtime dependencies are `@noble/curves`, `@noble/hashes`, `@scure/bip32`, and
   `@scure/btc-signer`, accepted as `^2.2.0` so a host app on the same major converges on a single copy of each.
 - **Recoverable by design**: every derivation is a deterministic function of the master seed, so channel keys are recoverable from
@@ -31,11 +31,11 @@ These properties reflect the current specification and may evolve with it while 
 | [`session`](./src/session)       | Signer session client: challenge auth, sequential processing, heartbeat, reconnect            |
 | [`wire`](./src/wire)             | How fiber writes values in JSON, and the field readers that refuse anything else              |
 | [`protocol`](./src/protocol)     | Frames, methods and results of the remote signing protocol                                    |
-| `rpc`                            | Typed fiber JSON-RPC client (Biscuit-authed)                                                  |
+| [`rpc`](./src/rpc)               | Typed fiber JSON-RPC client (Biscuit-authed)                                                  |
 | `sdk`                            | Public facade wiring the above                                                                |
 
-`derivation`, `digest`, `signer`, `policy`, `wire`, `protocol` and `session` are implemented; `rpc` and `sdk` are still
-placeholders, so the public entrypoint stays small while the API settles.
+`derivation`, `digest`, `signer`, `policy`, `wire`, `protocol` and `session` are implemented; `rpc` has its transport and
+not yet its methods, and `sdk` is still a placeholder, so the public entrypoint stays small while the API settles.
 
 ## Repository layout
 
@@ -64,6 +64,8 @@ Full index in [docs/README.md](./docs/README.md). The load-bearing ones:
   what a frame that does not decode is answered with.
 - [How the session stays up](./docs/session.md): the outbound socket, its states, one request at a time, and the
   reconnect that runs only while the host wants it.
+- [How the node is called](./docs/rpc.md): one POST per call over the host's fetch, and the three errors a call fails
+  with, split by what the caller can conclude.
 - [Cross-implementation harness](./interop/README.md): how the vectors are generated and re-validated against a new fiber
   release.
 

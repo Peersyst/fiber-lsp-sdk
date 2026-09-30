@@ -1,5 +1,5 @@
 import { UINT64_MAX, UINT128_MAX } from "../../../src/common";
-import { WireError, decodeUintHex, decodeUintHexNumber } from "../../../src/wire";
+import { WireError, decodeUintHex, decodeUintHexNumber, encodeUintHex } from "../../../src/wire";
 
 const FIELD = { path: "root" };
 const FORM = "root must be an unsigned integer in 0x hex without leading zeros";
@@ -68,5 +68,37 @@ describe("decodeUintHexNumber", () => {
 
     it("rejects a bound a number cannot hold, which is a caller error and not a wire refusal", () => {
         expect(() => decodeUintHexNumber({ ...FIELD, value: "0x1" }, 2 ** 53)).toThrow(RangeError);
+    });
+});
+
+describe("encodeUintHex", () => {
+    it("writes fiber's hex form", () => {
+        expect(encodeUintHex(0n, UINT128_MAX)).toBe("0x0");
+        expect(encodeUintHex(1n, UINT128_MAX)).toBe("0x1");
+        expect(encodeUintHex(10n, UINT128_MAX)).toBe("0xa");
+        expect(encodeUintHex(255n, UINT128_MAX)).toBe("0xff");
+        expect(encodeUintHex(256n, UINT128_MAX)).toBe("0x100");
+        expect(encodeUintHex(UINT64_MAX, UINT64_MAX)).toBe(`0x${"f".repeat(16)}`);
+        expect(encodeUintHex(UINT128_MAX, UINT128_MAX)).toBe(`0x${"f".repeat(32)}`);
+    });
+
+    it("writes what the reader reads back", () => {
+        for (const value of [0n, 1n, 15n, 16n, 0xdeadbeefn, UINT64_MAX, UINT64_MAX + 1n, UINT128_MAX]) {
+            expect(decodeUintHex({ ...FIELD, value: encodeUintHex(value, UINT128_MAX) }, UINT128_MAX)).toBe(value);
+        }
+    });
+
+    it("holds the value to the bound", () => {
+        expect(encodeUintHex(255n, 255n)).toBe("0xff");
+        expect(() => encodeUintHex(256n, 255n)).toThrow(RangeError);
+        expect(() => encodeUintHex(UINT64_MAX + 1n, UINT64_MAX)).toThrow(RangeError);
+    });
+
+    it("refuses a negative value", () => {
+        expect(() => encodeUintHex(-1n, UINT128_MAX)).toThrow(RangeError);
+    });
+
+    it("refuses a number, which would lose precision past 2^53", () => {
+        expect(() => encodeUintHex(1 as unknown as bigint, UINT128_MAX)).toThrow(RangeError);
     });
 });
