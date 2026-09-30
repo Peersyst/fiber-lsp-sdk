@@ -93,7 +93,9 @@ describe("deriveNonceSeed", () => {
 
     it("rejects an unknown context", () => {
         const unknownContext = "SETTLE" as unknown as NonceContext;
-        expect(() => deriveNonceSeed(channelKeys, 0, unknownContext)).toThrow(TypeError);
+        expect(() => deriveNonceSeed(channelKeys, 0, unknownContext)).toThrow(
+            new TypeError("context must be one of COMMITMENT, REVOKE, CLOSE, ANNOUNCEMENT"),
+        );
     });
 
     // The only public derivation that takes a compound object: it validates nothing

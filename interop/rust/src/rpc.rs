@@ -43,6 +43,8 @@ const SECP256K1_SIGNATURE_LEN: usize = 65;
 pub struct RpcVectors {
     fiber_ref: String,
     jsonrpsee_version: String,
+    /// Per channel state, the flag names fiber writes with every bit set: the state's whole list, in declaration order.
+    channel_state_flags: BTreeMap<String, Vec<String>>,
     envelopes: EnvelopeVectors,
     methods: MethodVectors,
 }
@@ -462,8 +464,25 @@ fn channel_states() -> Vec<ChannelState> {
     all
 }
 
-fn close_flags() -> Vec<String> {
-    emitted_flags(&serde_json::to_value(ChannelState::Closed(CloseFlags(u32::MAX))).unwrap())
+fn channel_state_flags() -> BTreeMap<String, Vec<String>> {
+    use ChannelState::*;
+    channel_states()
+        .iter()
+        .map(|state| {
+            let saturated = match state {
+                NegotiatingFunding(_) => NegotiatingFunding(NegotiatingFundingFlags(u32::MAX)),
+                CollaboratingFundingTx(_) => CollaboratingFundingTx(CollaboratingFundingTxFlags(u32::MAX)),
+                SigningCommitment(_) => SigningCommitment(SigningCommitmentFlags(u32::MAX)),
+                AwaitingTxSignatures(_) => AwaitingTxSignatures(AwaitingTxSignaturesFlags(u32::MAX)),
+                AwaitingChannelReady(_) => AwaitingChannelReady(AwaitingChannelReadyFlags(u32::MAX)),
+                ChannelReady => ChannelReady,
+                ShuttingDown(_) => ShuttingDown(ShuttingDownFlags(u32::MAX)),
+                Closed(_) => Closed(CloseFlags(u32::MAX)),
+                Stale => Stale,
+            };
+            (state_name_of(state), emitted_flags(&serde_json::to_value(saturated).unwrap()))
+        })
+        .collect()
 }
 
 fn name_of<T: Serialize>(value: &T) -> String {
@@ -506,7 +525,7 @@ fn assert_coverage(methods: &MethodVectors) {
             .filter(|channel| channel["state"]["name"] == "Closed")
             .flat_map(|channel| channel["state"]["flags"].as_array().unwrap().iter().map(text).collect::<Vec<_>>())
             .collect()),
-        set(close_flags()),
+        set(channel_state_flags()["Closed"].clone()),
         "close flags"
     );
     assert_eq!(
@@ -1404,6 +1423,7 @@ pub fn gen_rpc_vectors(out_path: &str) {
     let vectors = RpcVectors {
         fiber_ref: FIBER_REF.to_string(),
         jsonrpsee_version: JSONRPSEE_VERSION.to_string(),
+        channel_state_flags: channel_state_flags(),
         envelopes: envelopes(),
         methods,
     };

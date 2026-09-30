@@ -20,6 +20,7 @@ import type { Field } from "../../../src/wire";
 import { toChannelAnnouncementInput, toCommitmentTxInput, toRevocationInput, toShutdownTxInput } from "../../utils/digest-inputs";
 import { caseOf, loadInteropVectors } from "../../utils/interop-vectors";
 import { refusal } from "../../utils/refusal";
+import { ABOVE_U64, ABOVE_U128, U64_MAX_HEX, U128_MAX_HEX } from "../../utils/uint-hex";
 import { withField } from "../../utils/with-field";
 import {
     toChannelAnnouncementWire,
@@ -44,9 +45,6 @@ const CKB_ANNOUNCEMENT = caseOf(digest.announcement_cases, "ckb");
 const U32_MAX_HEX = "0xffffffff";
 const U48_MAX_HEX = "0xffffffffffff";
 const MAX_SAFE_INTEGER_HEX = "0x1fffffffffffff";
-const U64_MAX_HEX = `0x${"f".repeat(16)}`;
-const U128_MAX_HEX = `0x${"f".repeat(32)}`;
-const ABOVE_U64 = `0x1${"0".repeat(16)}`;
 const U64_MAX = 2n ** 64n - 1n;
 const U128_MAX = 2n ** 128n - 1n;
 
@@ -159,7 +157,7 @@ describe("decodeCommitmentTx", () => {
         ["commitment_number", "0x01"],
         ["commitment_number", 5],
         ["commitment_number", undefined],
-        ["commitment_delay_epoch", `0x1${"0".repeat(16)}`],
+        ["commitment_delay_epoch", ABOVE_U64],
         ["commitment_delay_epoch", undefined],
         ["commitment_fee_rate", "0x"],
         ["commitment_fee_rate", "1000"],
@@ -170,12 +168,12 @@ describe("decodeCommitmentTx", () => {
         ["udt_type_script", undefined],
         ["udt_type_script", "null"],
         ["udt_type_script", []],
-        ["to_local", `0x1${"0".repeat(32)}`],
+        ["to_local", ABOVE_U128],
         ["to_local", undefined],
         ["to_remote", "0xFF"],
         ["settlement_local", ""],
         ["settlement_remote", "-1"],
-        ["local_reserved", `0x1${"0".repeat(16)}`],
+        ["local_reserved", ABOVE_U64],
         ["remote_reserved", -1],
         ["remote_reserved", ABOVE_U64],
         ["tlcs", {}],
@@ -190,9 +188,9 @@ describe("decodeCommitmentTx", () => {
         ["tlcs[0].hash_algorithm", "ckb-hash"],
         ["tlcs[0].hash_algorithm", "CkbHash"],
         ["tlcs[0].amount", "0x0f"],
-        ["tlcs[0].amount", `0x1${"0".repeat(32)}`],
+        ["tlcs[0].amount", ABOVE_U128],
         ["tlcs[0].payment_hash", `0x${"ab".repeat(31)}`],
-        ["tlcs[0].expiry_ms", `0x1${"0".repeat(16)}`],
+        ["tlcs[0].expiry_ms", ABOVE_U64],
         ["tlcs[0].created_at_remote_commitment_number", "0x1000000000000"],
         ["tlcs[0].remote_commitment_point", `0x${"02".repeat(32)}`],
         ["tlcs[1]", null],
@@ -245,9 +243,9 @@ describe("decodeShutdownTx", () => {
         ["remote_fee_rate", ABOVE_U64],
         ["cell_deps_count", "0x100"],
         ["udt_type_script", undefined],
-        ["to_local", `0x1${"0".repeat(32)}`],
+        ["to_local", ABOVE_U128],
         ["to_remote", "0xFF"],
-        ["local_reserved", `0x1${"0".repeat(16)}`],
+        ["local_reserved", ABOVE_U64],
         ["remote_reserved", undefined],
         ["remote_reserved", ABOVE_U64],
     ])("refuses %s = %p", (path, value) => {
@@ -291,16 +289,16 @@ describe("decodeRevocation", () => {
         ["payout_script", null],
         ["payout_script.args", "0xb"],
         ["remote_funding_pubkey", `0x${"02".repeat(34)}`],
-        ["commitment_delay_epoch", `0x1${"0".repeat(16)}`],
+        ["commitment_delay_epoch", ABOVE_U64],
         ["commitment_fee_rate", "0x"],
         ["commitment_fee_rate", ABOVE_U64],
         ["cell_deps_count", "0x100"],
         ["udt_type_script", undefined],
-        ["to_local", `0x1${"0".repeat(32)}`],
+        ["to_local", ABOVE_U128],
         ["to_remote", "0x00"],
         ["local_reserved", "4200000000"],
         ["local_reserved", ABOVE_U64],
-        ["remote_reserved", `0x1${"0".repeat(16)}`],
+        ["remote_reserved", ABOVE_U64],
     ])("refuses %s = %p", (path, value) => {
         const wire = withField(toRevocationWire(SEND_SIDE_REVOCATION, REMOTE), path, value);
         expect(refusal(() => decodeRevocation(field(wire, "revocation"), COMMITMENT_LOCK_TESTNET)).path).toBe(`revocation.${path}`);
@@ -335,7 +333,7 @@ describe("decodeChannelAnnouncement", () => {
         ["node_ids[0]", undefined],
         ["node_ids[1]", `0x${"02".repeat(32)}`],
         ["remote_funding_pubkey", `0x${"02".repeat(32)}`],
-        ["capacity", `0x1${"0".repeat(32)}`],
+        ["capacity", ABOVE_U128],
         ["capacity", "80500000000"],
         ["udt_type_script", undefined],
     ])("refuses %s = %p", (path, value) => {

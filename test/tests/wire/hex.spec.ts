@@ -1,5 +1,17 @@
 import { hexToBytes } from "@noble/hashes/utils.js";
-import { WireError, decodeAnyHexBytes, decodeHexBytes, encodeHexBytes, isWireHex, requireHexBytes } from "../../../src/wire";
+import {
+    WireError,
+    assertWireHexBytes,
+    decodeAnyHexBytes,
+    decodeBareHexBytes,
+    decodeHexBytes,
+    encodeAnyHexBytes,
+    encodeBareHexBytes,
+    encodeHexBytes,
+    isWireHex,
+    requireHexBytes,
+} from "../../../src/wire";
+import { refusal } from "../../utils/refusal";
 
 const FIELD = { path: "root" };
 
@@ -70,13 +82,102 @@ describe("decodeAnyHexBytes", () => {
 });
 
 describe("encodeHexBytes", () => {
-    it("writes 0x-prefixed lowercase hex", () => {
-        expect(encodeHexBytes(Uint8Array.of(0xde, 0xad, 0xbe, 0xef))).toBe("0xdeadbeef");
-        expect(encodeHexBytes(new Uint8Array(0))).toBe("0x");
+    it("writes 0x-prefixed lowercase hex of the exact length", () => {
+        expect(encodeHexBytes("hash", Uint8Array.of(0xde, 0xad, 0xbe, 0xef), 4)).toBe("0xdeadbeef");
+        expect(encodeHexBytes("hash", new Uint8Array(0), 0)).toBe("0x");
     });
 
     it("round-trips through the decoder", () => {
         const bytes = hexToBytes("00ff10a5");
-        expect(decodeHexBytes({ ...FIELD, value: encodeHexBytes(bytes) }, 4)).toEqual(bytes);
+        expect(decodeHexBytes({ ...FIELD, value: encodeHexBytes("hash", bytes, 4) }, 4)).toEqual(bytes);
+    });
+
+    it.each([3, 5])("refuses %i bytes where 4 are due, naming the value", (length) => {
+        expect(() => encodeHexBytes("hash", new Uint8Array(length), 4)).toThrow(new TypeError(`hash must be 4 bytes, got ${length}`));
+    });
+
+    it.each(["0xdeadbeef", [0xde, 0xad, 0xbe, 0xef], undefined])("refuses %p as not bytes", (value) => {
+        expect(() => encodeHexBytes("hash", value as unknown as Uint8Array, 4)).toThrow(new TypeError("hash must be a Uint8Array"));
+    });
+});
+
+describe("encodeAnyHexBytes", () => {
+    it("writes 0x-prefixed lowercase hex of any length, 0x for none", () => {
+        expect(encodeAnyHexBytes("args", Uint8Array.of(0xde, 0xad, 0xbe, 0xef))).toBe("0xdeadbeef");
+        expect(encodeAnyHexBytes("args", Uint8Array.of(0x00))).toBe("0x00");
+        expect(encodeAnyHexBytes("args", new Uint8Array(0))).toBe("0x");
+    });
+
+    it("round-trips through the any-length decoder", () => {
+        const bytes = hexToBytes("00ff10a5ee");
+        expect(decodeAnyHexBytes({ ...FIELD, value: encodeAnyHexBytes("args", bytes) })).toEqual(bytes);
+    });
+
+    it.each(["0xdeadbeef", "", [0xde], new ArrayBuffer(4), null])("refuses %p as not bytes", (value) => {
+        expect(() => encodeAnyHexBytes("args", value as unknown as Uint8Array)).toThrow(new TypeError("args must be a Uint8Array"));
+    });
+});
+
+describe("decodeBareHexBytes", () => {
+    const PUBKEY = `02${"ab".repeat(32)}`;
+    const FORM = "root must be 33 bytes of lowercase hex without a 0x prefix";
+
+    it("decodes lowercase hex without a prefix", () => {
+        expect(decodeBareHexBytes({ ...FIELD, value: PUBKEY }, 33)).toEqual(hexToBytes(PUBKEY));
+    });
+
+    it.each([
+        ["a 0x prefix", `0x${PUBKEY}`],
+        ["uppercase digits", PUBKEY.toUpperCase()],
+        ["an odd digit count", PUBKEY.slice(1)],
+        ["one byte short", PUBKEY.slice(2)],
+        ["one byte long", `${PUBKEY}00`],
+        ["an empty string", ""],
+        ["a non-hex digit", `0g${"ab".repeat(32)}`],
+    ])("refuses %s", (_, value) => {
+        expect(refusal(() => decodeBareHexBytes({ ...FIELD, value }, 33)).message).toBe(FORM);
+    });
+
+    it.each([undefined, null, 33, hexToBytes(PUBKEY)])("refuses %p", (value) => {
+        expect(() => decodeBareHexBytes({ ...FIELD, value }, 33)).toThrow(FORM);
+    });
+});
+
+describe("encodeBareHexBytes", () => {
+    it("writes lowercase hex without a prefix, which the reader reads back", () => {
+        const bytes = Uint8Array.of(0x02, 0xab, 0xcd);
+        expect(encodeBareHexBytes("pubkey", bytes, 3)).toBe("02abcd");
+        expect(decodeBareHexBytes({ ...FIELD, value: encodeBareHexBytes("pubkey", bytes, 3) }, 3)).toEqual(bytes);
+    });
+
+    it.each([2, 4])("refuses %i bytes where 3 are due, naming the value", (length) => {
+        expect(() => encodeBareHexBytes("pubkey", new Uint8Array(length), 3)).toThrow(
+            new TypeError(`pubkey must be 3 bytes, got ${length}`),
+        );
+    });
+
+    it("refuses what is not bytes", () => {
+        expect(() => encodeBareHexBytes("pubkey", "02abcd" as unknown as Uint8Array, 3)).toThrow(
+            new TypeError("pubkey must be a Uint8Array"),
+        );
+    });
+});
+
+describe("assertWireHexBytes", () => {
+    it("accepts wire hex of the exact length", () => {
+        expect(() => assertWireHexBytes("channelId", `0x${"11".repeat(32)}`, 32)).not.toThrow();
+    });
+
+    it.each([
+        ["no prefix", "11".repeat(32)],
+        ["uppercase digits", `0x${"AA".repeat(32)}`],
+        ["one byte short", `0x${"11".repeat(31)}`],
+        ["one byte long", `0x${"11".repeat(33)}`],
+        ["surrounding whitespace", ` 0x${"11".repeat(32)}`],
+        ["a number", 1],
+    ])("refuses %s, naming the value and not echoing it", (_, value) => {
+        expect(() => assertWireHexBytes("channelId", value, 32)).toThrow(
+            new TypeError("channelId must be 32 bytes of 0x-prefixed lowercase hex"),
+        );
     });
 });

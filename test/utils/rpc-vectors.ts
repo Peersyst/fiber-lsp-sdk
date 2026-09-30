@@ -142,6 +142,7 @@ export type ErrorEnvelopeVector = { name: string; id: number | null; code: numbe
 export type RpcVectors = {
     fiber_ref: string;
     jsonrpsee_version: string;
+    channel_state_flags: Record<string, string[]>;
     envelopes: { request: RequestEnvelopeVector; results: ResultEnvelopeVector[]; errors: ErrorEnvelopeVector[] };
     methods: { [Method in RpcMethod]: RpcMethodVectors<Method> };
 };
@@ -375,6 +376,7 @@ export function parseRpcVectors(value: unknown): RpcVectors {
     const root = asRecord(value, "rpc vectors");
     const envelopes = asRecord(root.envelopes, "envelopes");
     const request = asRecord(envelopes.request, "envelopes.request");
+    const stateFlags = asRecord(root.channel_state_flags, "channel_state_flags");
     const methods = asRecord(root.methods, "methods");
     const unknownMethod = Object.keys(methods).find((method) => !(RPC_METHODS as readonly string[]).includes(method));
     if (unknownMethod !== undefined) throw new Error(`methods.${unknownMethod} is not a method of the client`);
@@ -385,6 +387,9 @@ export function parseRpcVectors(value: unknown): RpcVectors {
     return {
         fiber_ref: asString(root.fiber_ref, "fiber_ref"),
         jsonrpsee_version: asString(root.jsonrpsee_version, "jsonrpsee_version"),
+        channel_state_flags: Object.fromEntries(
+            Object.entries(stateFlags).map(([state, flags]) => [state, asList(flags, `channel_state_flags.${state}`, asString)]),
+        ),
         envelopes: {
             request: {
                 id: asNumber(request.id, "envelopes.request.id"),

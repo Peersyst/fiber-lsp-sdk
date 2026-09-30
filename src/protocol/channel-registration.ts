@@ -1,4 +1,4 @@
-import { COMPRESSED_POINT_LENGTH, assertBytes } from "../common";
+import { COMPRESSED_POINT_LENGTH } from "../common";
 import { SECRET_KEY_LENGTH } from "../derivation";
 import type { Field } from "../wire";
 import { encodeHexBytes, readObject } from "../wire";
@@ -13,15 +13,12 @@ import { assertRequestId, decodeChannelId, decodeRequestId } from "./utils";
  */
 export function encodeRegisterChannel(requestId: string, registration: ChannelRegistration): RegisterChannelWire {
     assertRequestId(requestId);
-    assertBytes("fundingPubkey", registration.fundingPubkey, COMPRESSED_POINT_LENGTH);
-    assertBytes("tlcBasePubkey", registration.tlcBasePubkey, COMPRESSED_POINT_LENGTH);
-    assertBytes("localSettlementKey", registration.localSettlementKey, SECRET_KEY_LENGTH);
     return {
         type: "register_channel",
         request_id: requestId,
-        funding_pubkey: encodeHexBytes(registration.fundingPubkey),
-        tlc_base_pubkey: encodeHexBytes(registration.tlcBasePubkey),
-        local_settlement_key: encodeHexBytes(registration.localSettlementKey),
+        funding_pubkey: encodeHexBytes("fundingPubkey", registration.fundingPubkey, COMPRESSED_POINT_LENGTH),
+        tlc_base_pubkey: encodeHexBytes("tlcBasePubkey", registration.tlcBasePubkey, COMPRESSED_POINT_LENGTH),
+        local_settlement_key: encodeHexBytes("localSettlementKey", registration.localSettlementKey, SECRET_KEY_LENGTH),
     };
 }
 

@@ -118,3 +118,21 @@ export function decodeUnsignedInteger(field: Field, max: number): number {
     if (!isUnsignedInteger(field.value, max)) malformed(field, `must be an integer between 0 and ${max}`);
     return field.value;
 }
+
+/**
+ * Reads a field as an explicit JSON `null`.
+ * @param field Field to read.
+ */
+export function decodeNull(field: Field): void {
+    if (field.value !== null) malformed(field, "must be null");
+}
+
+/**
+ * Reads a field with a reader, or as an explicit `null`; absence is refused.
+ * @param field Field to read.
+ * @param read Reader of the value when it is not `null`.
+ * @returns The value, or `null`.
+ */
+export function decodeOrNull<Value>(field: Field, read: (field: Field) => Value): Value | null {
+    return field.value === null ? null : read(field);
+}

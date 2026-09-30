@@ -40,7 +40,7 @@ src/
   signer/         Signer-protocol dispatch, musig2 signing engine
   policy/         Policy engine + persisted per-channel records
   session/        Signer session client: challenge auth, correlation, resume
-  wire/           How fiber writes values in JSON, and the field readers that refuse anything else
+  wire/           How fiber writes values in JSON, the readers that refuse anything else, and the writers that produce it
   protocol/       Frames, methods and results of the remote signing protocol
   rpc/            Typed fiber JSON-RPC client
   sdk/            Public facade wiring the above
@@ -84,7 +84,8 @@ cargo run --release --manifest-path interop/rust/Cargo.toml -- gen-vectors inter
 - Prefer `??` over `||` when `0` or `""` are valid values; optional chaining over unguarded access.
 - String enums / literal unions for anything serialized; validate external data shapes, never trust them.
 - Amounts on the public surface are integer strings in shannons; conversion to fiber's 0x-hex u128 happens only in the `rpc`
-  module. No native `number` for on-chain amounts.
+  module. The one exception is a CKB `Transaction`, whose `capacityShannons` stays a `bigint`: it is CKB's structure, written
+  by `wire` below the conversion. No native `number` for on-chain amounts.
 
 ### File naming
 

@@ -1,11 +1,28 @@
 import {
+    assertAnyBytes,
+    assertBoolean,
     assertBytes,
     assertDecimalShannons,
     assertHexBytes,
     assertNonEmptyString,
+    assertOneOf,
     assertUnsignedBigInt,
     assertUnsignedInteger,
 } from "../../../../src/common/utils/assert.utils";
+
+describe("assertAnyBytes", () => {
+    it.each([0, 1, 32, 85])("accepts a byte array of %i bytes", (length) => {
+        expect(() => assertAnyBytes("witness", new Uint8Array(length))).not.toThrow();
+    });
+
+    it("accepts a Buffer", () => {
+        expect(() => assertAnyBytes("witness", Buffer.alloc(3))).not.toThrow();
+    });
+
+    it.each([undefined, null, "0x55", 85, [0x55], new ArrayBuffer(1), new Uint16Array(1)])("rejects %p", (value) => {
+        expect(() => assertAnyBytes("witness", value)).toThrow(new TypeError("witness must be a Uint8Array"));
+    });
+});
 
 describe("assertBytes", () => {
     it("accepts a byte array of the exact length", () => {
@@ -89,6 +106,16 @@ describe("assertNonEmptyString", () => {
     });
 });
 
+describe("assertBoolean", () => {
+    it.each([true, false])("accepts %p", (value) => {
+        expect(() => assertBoolean("public", value)).not.toThrow();
+    });
+
+    it.each(["true", "", 1, 0, null, undefined, [], {}, [true]])("rejects %p", (value) => {
+        expect(() => assertBoolean("public", value)).toThrow(new TypeError("public must be a boolean"));
+    });
+});
+
 describe("assertDecimalShannons", () => {
     it.each(["0", "62000000000"])("accepts %p", (value) => {
         expect(() => assertDecimalShannons("amountShannons", value)).not.toThrow();
@@ -98,5 +125,26 @@ describe("assertDecimalShannons", () => {
         expect(() => assertDecimalShannons("amountShannons", value)).toThrow(
             new TypeError("amountShannons must be an amount in decimal shannons"),
         );
+    });
+});
+
+describe("assertOneOf", () => {
+    const FILTERS = ["include_closed", "only_pending"] as const;
+
+    it.each(FILTERS)("accepts %s", (value) => {
+        expect(() => assertOneOf("filter", value, FILTERS)).not.toThrow();
+    });
+
+    it.each(["closed", "INCLUDE_CLOSED", " include_closed", "include_closed|only_pending", "", undefined, null, 1, ["include_closed"]])(
+        "rejects %p, naming the value and listing the set",
+        (value) => {
+            expect(() => assertOneOf("filter", value, FILTERS)).toThrow(
+                new TypeError("filter must be one of include_closed, only_pending"),
+            );
+        },
+    );
+
+    it("accepts nothing when the set is empty", () => {
+        expect(() => assertOneOf("filter", "include_closed", [])).toThrow(new TypeError("filter must be one of "));
     });
 });

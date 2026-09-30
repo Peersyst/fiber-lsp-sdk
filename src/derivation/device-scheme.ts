@@ -2,7 +2,7 @@
  * Derivations the SDK owns. The domain separators are inside the hash: changing one strands every channel opened under it.
  */
 import { utf8ToBytes } from "@noble/hashes/utils.js";
-import { assertBytes, assertUnsignedInteger, ckbBlake2b } from "../common";
+import { assertBytes, assertOneOf, assertUnsignedInteger, ckbBlake2b } from "../common";
 import { MASTER_SEED_LENGTH, MAX_CHANNEL_INDEX, MAX_COMMITMENT_NUMBER, NONCE_CONTEXTS } from "./derivation.constants";
 import type { FiberChannelKeys, NonceContext } from "./derivation.types";
 import { derivePrivateKey, getCommitmentPoint } from "./fiber-scheme";
@@ -38,9 +38,7 @@ export function deriveChannelSeed(masterSeed: Uint8Array, channelIndex: number):
  */
 export function deriveNonceSeed(keys: FiberChannelKeys, commitmentNumber: number, context: NonceContext): Uint8Array {
     assertUnsignedInteger("commitmentNumber", commitmentNumber, MAX_COMMITMENT_NUMBER);
-    if (!NONCE_CONTEXTS.includes(context)) {
-        throw new TypeError(`context must be one of ${NONCE_CONTEXTS.join(", ")}, got ${String(context)}`);
-    }
+    assertOneOf("context", context, NONCE_CONTEXTS);
     const commitmentPoint = getCommitmentPoint(keys.commitmentSeed, commitmentNumber);
     return ckbBlake2b(derivePrivateKey(keys.musig2BaseNonce, commitmentPoint), utf8ToBytes(context));
 }

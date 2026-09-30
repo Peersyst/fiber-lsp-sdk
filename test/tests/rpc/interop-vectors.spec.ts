@@ -1,28 +1,10 @@
+import { writeFileSync } from "node:fs";
 import { UINT128_MAX, UINT64_MAX } from "../../../src/common";
-import { RPC_CALL_FAILED_CODE, RPC_METHODS, RPC_UNAUTHORIZED_CODE } from "../../../src/rpc";
+import type { RpcMethod, RpcParamsWire } from "../../../src/rpc";
+import { CHANNEL_STATE_FLAGS, CHANNEL_STATE_NAMES, RPC_CALL_FAILED_CODE, RPC_METHODS, RPC_UNAUTHORIZED_CODE } from "../../../src/rpc";
 import { caseOf } from "../../utils/interop-vectors";
-import { loadRpcVectors, type ChannelVector, type TransactionVector } from "../../utils/rpc-vectors";
-
-const CHANNEL_STATE_NAMES = [
-    "NegotiatingFunding",
-    "CollaboratingFundingTx",
-    "SigningCommitment",
-    "AwaitingTxSignatures",
-    "AwaitingChannelReady",
-    "ChannelReady",
-    "ShuttingDown",
-    "Closed",
-    "Stale",
-];
-
-const CLOSE_FLAGS = [
-    "COOPERATIVE",
-    "UNCOOPERATIVE_LOCAL",
-    "UNCOOPERATIVE_REMOTE",
-    "WAITING_ONCHAIN_SETTLEMENT",
-    "FUNDING_ABORTED",
-    "ABANDONED",
-];
+import { RPC_PARAMS_ENCODERS, withoutNulls } from "../../utils/rpc-typed";
+import { loadRpcVectors, type ChannelVector, type RpcCaseVector, type TransactionVector } from "../../utils/rpc-vectors";
 
 const INVOICE_STATUSES = ["Open", "Cancelled", "Expired", "Received", "Paid"];
 
@@ -105,9 +87,13 @@ describe("rpc interop vectors", () => {
             expect(new Set(channels.map((channel) => channel.state.name))).toEqual(new Set(CHANNEL_STATE_NAMES));
         });
 
+        it("pin the flag names of every state, whole and in fiber's order", () => {
+            expect(vectors.channel_state_flags).toEqual(CHANNEL_STATE_FLAGS);
+        });
+
         it("cover every close flag", () => {
             const closeFlags = channels.filter((channel) => channel.state.name === "Closed").flatMap((channel) => channel.state.flags);
-            expect(new Set(closeFlags)).toEqual(new Set(CLOSE_FLAGS));
+            expect(new Set(closeFlags)).toEqual(new Set(CHANNEL_STATE_FLAGS.Closed));
         });
 
         it("cover a flag set that leaks its composite name, an empty flag set and a state without flags", () => {
@@ -197,5 +183,26 @@ describe("rpc interop vectors", () => {
             ...paymentResults.map((entry) => entry.values.fee),
         ];
         for (const amounts of [sent, read]) expect(amounts.some((amount) => BigInt(amount) === UINT128_MAX)).toBe(true);
+    });
+
+    describe("params the client encodes", () => {
+        const written: Partial<Record<RpcMethod, { name: string; params: RpcParamsWire }[]>> = {};
+
+        for (const method of RPC_METHODS) {
+            const encode = RPC_PARAMS_ENCODERS[method] as ((values: unknown) => RpcParamsWire) | undefined;
+            if (encode === undefined) continue;
+            const cases: RpcCaseVector<unknown>[] = vectors.methods[method].params;
+            it.each(cases.map((entry) => [method, entry.name, entry] as const))("write %s / %s as fiber's serde does", (_, name, entry) => {
+                const params = encode(entry.values);
+                expect(withoutNulls(params)).toEqual(withoutNulls(entry.json));
+                (written[method] ??= []).push({ name, params });
+            });
+        }
+
+        // Written only when asked, so `pnpm test` stays side-effect free; see interop/README.md.
+        afterAll(() => {
+            const outPath = process.env.INTEROP_RPC_OUT;
+            if (outPath) writeFileSync(outPath, `${JSON.stringify(written, null, 2)}\n`);
+        });
     });
 });
