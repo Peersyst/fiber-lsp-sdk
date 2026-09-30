@@ -1,37 +1,63 @@
 import { hexToBytes } from "@noble/hashes/utils.js";
-import type { DepType, Transaction } from "../../src/common";
+import type { DepType, TlcHashAlgorithm, Transaction } from "../../src/common";
 import type {
     AbandonChannelParams,
     RpcChannel,
     ChannelState,
+    InvoiceCurrency,
+    InvoiceStatus,
     ListChannelsParams,
+    NewInvoiceParams,
+    NewInvoiceResult,
     OpenChannelWithExternalFundingParams,
     OpenChannelWithExternalFundingResult,
+    PaymentStatus,
+    RpcInvoice,
     RpcMethod,
     RpcParamsWire,
+    RpcPayment,
+    RpcPaymentHashParams,
+    SendPaymentParams,
+    SettleInvoiceParams,
     SubmitSignedFundingTxParams,
     SubmitSignedFundingTxResult,
 } from "../../src/rpc";
 import {
     encodeAbandonChannelParams,
     encodeListChannelsParams,
+    encodeNewInvoiceParams,
     encodeOpenChannelWithExternalFundingParams,
+    encodeRpcPaymentHashParams,
+    encodeSendPaymentParams,
+    encodeSettleInvoiceParams,
     encodeSubmitSignedFundingTxParams,
 } from "../../src/rpc";
 import { toOutPoint, toScript, toScriptOrNull } from "./digest-inputs";
-import { wireHex } from "./wire-requests";
+import { HASH_ALGORITHM_WIRE, wireHex } from "./wire-requests";
 import type {
     ChannelIdParamsVector,
     ChannelStateVector,
     ChannelVector,
+    GetInvoiceResultVector,
+    InvoiceResultVector,
     ListChannelsParamsVector,
+    NewInvoiceParamsVector,
     OpenChannelParamsVector,
     OpenChannelResultVector,
+    PaymentHashParamsVector,
+    PaymentVector,
     RpcVectorShapes,
+    SendPaymentParamsVector,
+    SettleInvoiceParamsVector,
     SubmitSignedFundingTxParamsVector,
     SubmitSignedFundingTxResultVector,
     TransactionVector,
 } from "./rpc-vectors";
+
+const HASH_ALGORITHMS = Object.fromEntries(Object.entries(HASH_ALGORITHM_WIRE).map(([sdk, wire]) => [wire, sdk])) as Record<
+    string,
+    TlcHashAlgorithm
+>;
 
 export function toTransaction(vector: TransactionVector): Transaction {
     return {
@@ -102,17 +128,64 @@ export function toChannel(vector: ChannelVector): RpcChannel {
     };
 }
 
-type ParamsEncoders = { [Method in RpcMethod]: (values: RpcVectorShapes[Method]["params"]) => RpcParamsWire };
+export function toNewInvoiceParams(vector: NewInvoiceParamsVector): NewInvoiceParams {
+    const hashAlgorithm = HASH_ALGORITHMS[vector.hash_algorithm];
+    if (hashAlgorithm === undefined) throw new Error(`the vectors carry an unknown hash algorithm: ${vector.hash_algorithm}`);
+    const params: NewInvoiceParams = {
+        amountShannons: vector.amount,
+        currency: vector.currency as InvoiceCurrency,
+        paymentHash: hexToBytes(vector.payment_hash),
+        hashAlgorithm,
+        expirySeconds: BigInt(vector.expiry),
+    };
+    if (vector.description !== null) params.description = vector.description;
+    return params;
+}
 
-/**
- * Filled in as each method's encoder lands.
- */
-export const RPC_PARAMS_ENCODERS: Partial<ParamsEncoders> = {
+export function toNewInvoiceResult(vector: InvoiceResultVector): NewInvoiceResult {
+    return { invoiceAddress: vector.invoice_address };
+}
+
+export function toRpcInvoice(vector: GetInvoiceResultVector): RpcInvoice {
+    return { invoiceAddress: vector.invoice_address, status: vector.status as InvoiceStatus };
+}
+
+export function toRpcPaymentHashParams(vector: PaymentHashParamsVector): RpcPaymentHashParams {
+    return { paymentHash: hexToBytes(vector.payment_hash) };
+}
+
+export function toSettleInvoiceParams(vector: SettleInvoiceParamsVector): SettleInvoiceParams {
+    return { paymentHash: hexToBytes(vector.payment_hash), paymentPreimage: hexToBytes(vector.payment_preimage) };
+}
+
+export function toSendPaymentParams(vector: SendPaymentParamsVector): SendPaymentParams {
+    return { invoice: vector.invoice, maxFeeAmountShannons: vector.max_fee_amount, dryRun: vector.dry_run };
+}
+
+export function toRpcPayment(vector: PaymentVector): RpcPayment {
+    return {
+        paymentHash: hexToBytes(vector.payment_hash),
+        status: vector.status as PaymentStatus,
+        createdAtMs: BigInt(vector.created_at),
+        lastUpdatedAtMs: BigInt(vector.last_updated_at),
+        failedError: vector.failed_error,
+        feeShannons: vector.fee,
+    };
+}
+
+// Total by type: a method without an encoder does not compile.
+export const RPC_PARAMS_ENCODERS: { [Method in RpcMethod]: (values: RpcVectorShapes[Method]["params"]) => RpcParamsWire } = {
     open_channel_with_external_funding: (values) =>
         encodeOpenChannelWithExternalFundingParams(toOpenChannelWithExternalFundingParams(values)),
     submit_signed_funding_tx: (values) => encodeSubmitSignedFundingTxParams(toSubmitSignedFundingTxParams(values)),
     abandon_channel: (values) => encodeAbandonChannelParams(toAbandonChannelParams(values)),
     list_channels: (values) => encodeListChannelsParams(toListChannelsParams(values)),
+    new_invoice: (values) => encodeNewInvoiceParams(toNewInvoiceParams(values)),
+    get_invoice: (values) => encodeRpcPaymentHashParams(toRpcPaymentHashParams(values)),
+    settle_invoice: (values) => encodeSettleInvoiceParams(toSettleInvoiceParams(values)),
+    cancel_invoice: (values) => encodeRpcPaymentHashParams(toRpcPaymentHashParams(values)),
+    send_payment: (values) => encodeSendPaymentParams(toSendPaymentParams(values)),
+    get_payment: (values) => encodeRpcPaymentHashParams(toRpcPaymentHashParams(values)),
 };
 
 // Mirror of the harness's `without_nulls`: fiber reads an absent option and a `null` as one.

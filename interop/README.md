@@ -87,15 +87,15 @@ cargo run --release -- verify-rpc-params ../vectors/rpc.json /tmp/ts-rpc-out.jso
 
 `INTEROP_RPC_OUT` makes `test/tests/rpc/interop-vectors.spec.ts` write `{ "<method>": [ { "name": "<case>", "params": {...} } ] }`,
 the params the client's encoders produced for each `params` case of the vectors; unset, the spec writes nothing. It is the one
-writer, so the file holds every method whose encoders have landed: today the four channel methods, the invoice and payment
-ones joining with their encoders. The interop workflow sets it and runs the verifier right after `pnpm test`.
+writer, and the file holds the ten methods: the map of encoders the spec runs is total over them by type, so a method without
+an encoder does not compile. The interop workflow sets it and runs the verifier right after `pnpm test`.
 
 `verify-rpc-params` deserializes each case into fiber's params struct and serializes it back, and requires the round trip to
 return what was sent, an absent option and a `null` counting as one, and to equal the vector's own `json`. No fiber params
 struct denies unknown fields, so a misspelt optional field is dropped by the node in silence; the round trip is what catches it,
 along with a wrong form: a decimal amount, a hex with leading zeros and a field CKB's transaction does not know are refused, and a
 `0x` on a pubkey is accepted and written back bare. A method the TS side writes must be one of the ten and carry every case the
-vectors hold for it; methods it does not write yet are not checked, so the loop closes method by method as the encoders land, but
+vectors hold for it; a method it does not write is not checked, which is why the completeness is held on the TS side, and
 an output with no method at all is refused. `cargo test --release` pins each of those outcomes against the vectors, and the
 interop workflow runs it.
 

@@ -12,6 +12,8 @@ const URL = "http://fiber.example:8227";
 const TOKEN = "En0KEwoEMTIzNBgDIgkKBwgKEgMYgAgSJAgAEiDs-token_example=";
 const CHANNEL_ID = `0x${"11".repeat(32)}`;
 const PARAMS = { channel_id: CHANNEL_ID };
+const HASH_PARAMS = { payment_hash: `0x${"22".repeat(32)}` };
+const PAYMENT_PARAMS = { invoice: "fibt1invoice", max_fee_amount: "0x1312d0", dry_run: false };
 
 function ok(body: string): { status: number; body: string } {
     return { status: 200, body };
@@ -149,11 +151,11 @@ describe("FiberRpcClient", () => {
             );
             const client = clientOf(mock);
             await client.call("abandon_channel", PARAMS, passThrough);
-            await Promise.all([client.call("get_invoice", PARAMS, passThrough), client.call("get_payment", PARAMS, passThrough)]);
+            await Promise.all([client.call("get_invoice", HASH_PARAMS, passThrough), client.call("get_payment", HASH_PARAMS, passThrough)]);
             expect(mock.requests.map((request) => JSON.parse(request.init.body) as unknown)).toEqual([
                 { jsonrpc: "2.0", id: 1, method: "abandon_channel", params: [PARAMS] },
-                { jsonrpc: "2.0", id: 2, method: "get_invoice", params: [PARAMS] },
-                { jsonrpc: "2.0", id: 3, method: "get_payment", params: [PARAMS] },
+                { jsonrpc: "2.0", id: 2, method: "get_invoice", params: [HASH_PARAMS] },
+                { jsonrpc: "2.0", id: 3, method: "get_payment", params: [HASH_PARAMS] },
             ]);
         });
 
@@ -179,7 +181,7 @@ describe("FiberRpcClient", () => {
             async (_, entry) => {
                 const mock = new FetchMock().answer(ok(entry.text.replace(`"id":${entry.id}`, '"id":1')));
                 const decode = jest.fn(passThrough);
-                await expect(clientOf(mock).call("get_payment", PARAMS, decode)).resolves.toEqual(entry.result);
+                await expect(clientOf(mock).call("get_payment", HASH_PARAMS, decode)).resolves.toEqual(entry.result);
                 expect(decode).toHaveBeenCalledTimes(1);
                 expect(decode).toHaveBeenCalledWith({ value: entry.result, path: "response.result" });
             },
@@ -208,7 +210,7 @@ describe("FiberRpcClient", () => {
             const decode = (): never => {
                 throw bug;
             };
-            await expect(clientOf(mock).call("get_payment", PARAMS, decode)).rejects.toBe(bug);
+            await expect(clientOf(mock).call("get_payment", HASH_PARAMS, decode)).rejects.toBe(bug);
         });
     });
 
@@ -217,9 +219,9 @@ describe("FiberRpcClient", () => {
             const text = entry.id === null ? entry.text : entry.text.replace(`"id":${entry.id}`, '"id":1');
             const mock = new FetchMock().answer(ok(text));
             const decode = jest.fn(passThrough);
-            const error = await rejection(clientOf(mock).call("settle_invoice", PARAMS, decode));
+            const error = await rejection(clientOf(mock).call("cancel_invoice", HASH_PARAMS, decode));
             expect(error).toBeInstanceOf(RpcError);
-            expect(error).toMatchObject({ method: "settle_invoice", code: entry.code, message: entry.message });
+            expect(error).toMatchObject({ method: "cancel_invoice", code: entry.code, message: entry.message });
             expect(decode).not.toHaveBeenCalled();
         });
 
@@ -241,9 +243,9 @@ describe("FiberRpcClient", () => {
         ])("throws %s as an RpcResponseError, without decoding", async (_, text, path) => {
             const mock = new FetchMock().answer(ok(text));
             const decode = jest.fn(passThrough);
-            const error = await rejection(clientOf(mock).call("new_invoice", PARAMS, decode));
+            const error = await rejection(clientOf(mock).call("get_invoice", HASH_PARAMS, decode));
             expect(error).toBeInstanceOf(RpcResponseError);
-            expect(error).toMatchObject({ method: "new_invoice", path });
+            expect(error).toMatchObject({ method: "get_invoice", path });
             expect(decode).not.toHaveBeenCalled();
         });
     });
@@ -252,7 +254,7 @@ describe("FiberRpcClient", () => {
         it("throws a fetch that rejects as an RpcTransportError, with no status", async () => {
             const cause = new TypeError("fetch failed");
             const mock = new FetchMock().answer({ rejection: cause });
-            const error = await rejection(clientOf(mock).call("send_payment", PARAMS, passThrough));
+            const error = await rejection(clientOf(mock).call("send_payment", PAYMENT_PARAMS, passThrough));
             expect(error).toBeInstanceOf(RpcTransportError);
             expect(error).toMatchObject({ method: "send_payment", status: undefined, message: "send_payment: the request failed", cause });
         });
@@ -263,7 +265,10 @@ describe("FiberRpcClient", () => {
                 throw cause;
             };
             const client = new FiberRpcClient({ url: URL, fetch: throwing });
-            await expect(client.call("send_payment", PARAMS, passThrough)).rejects.toMatchObject({ name: "RpcTransportError", cause });
+            await expect(client.call("send_payment", PAYMENT_PARAMS, passThrough)).rejects.toMatchObject({
+                name: "RpcTransportError",
+                cause,
+            });
         });
 
         it.each([100, 199, 300, 304, 400, 401, 404, 413, 415, 500, 502, 503])(
@@ -271,7 +276,9 @@ describe("FiberRpcClient", () => {
             async (status) => {
                 const text = jest.fn(async () => '{"jsonrpc":"2.0","id":1,"result":null}');
                 const fetchLike: IFetchLike = async () => ({ status, text });
-                const error = await rejection(new FiberRpcClient({ url: URL, fetch: fetchLike }).call("get_invoice", PARAMS, passThrough));
+                const error = await rejection(
+                    new FiberRpcClient({ url: URL, fetch: fetchLike }).call("get_invoice", HASH_PARAMS, passThrough),
+                );
                 expect(error).toBeInstanceOf(RpcTransportError);
                 expect(error).toMatchObject({ method: "get_invoice", status, message: `get_invoice: HTTP status ${status}` });
                 expect(text).not.toHaveBeenCalled();
@@ -280,18 +287,18 @@ describe("FiberRpcClient", () => {
 
         it("throws a status that is not an integer", async () => {
             const mock = new FetchMock().answer({ status: NaN, body: '{"jsonrpc":"2.0","id":1,"result":null}' });
-            await expect(clientOf(mock).call("get_invoice", PARAMS, passThrough)).rejects.toBeInstanceOf(RpcTransportError);
+            await expect(clientOf(mock).call("get_invoice", HASH_PARAMS, passThrough)).rejects.toBeInstanceOf(RpcTransportError);
         });
 
         it.each([200, 201, 204, 299])("reads the body of status %i", async (status) => {
             const mock = new FetchMock().answer({ status, body: '{"jsonrpc":"2.0","id":1,"result":null}' });
-            await expect(clientOf(mock).call("get_invoice", PARAMS, passThrough)).resolves.toBeNull();
+            await expect(clientOf(mock).call("get_invoice", HASH_PARAMS, passThrough)).resolves.toBeNull();
         });
 
         it("throws a body that cannot be read as an RpcTransportError, with the status", async () => {
             const cause = new Error("connection reset");
             const mock = new FetchMock().answer({ status: 200, bodyError: cause });
-            const error = await rejection(clientOf(mock).call("send_payment", PARAMS, passThrough));
+            const error = await rejection(clientOf(mock).call("send_payment", PAYMENT_PARAMS, passThrough));
             expect(error).toBeInstanceOf(RpcTransportError);
             expect(error).toMatchObject({ status: 200, message: "send_payment: the response body could not be read", cause });
         });

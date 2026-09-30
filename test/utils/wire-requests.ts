@@ -35,7 +35,8 @@ export function wireUint(value: string | number | bigint): string {
     return `0x${BigInt(value).toString(16)}`;
 }
 
-const HASH_ALGORITHM_WIRE: Record<string, TlcHashAlgorithmWire> = { "ckb-hash": "ckb_hash", sha256: "sha256" };
+// Not read from `src`, so a map that swaps the names cannot round-trip green.
+export const HASH_ALGORITHM_WIRE: Record<string, TlcHashAlgorithmWire> = { "ckb-hash": "ckb_hash", sha256: "sha256" };
 
 export function toScriptWire(vector: ScriptVector): ScriptWire {
     return { code_hash: wireHex(vector.code_hash), hash_type: vector.hash_type as ScriptHashType, args: wireHex(vector.args) };
