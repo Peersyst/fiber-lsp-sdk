@@ -43,7 +43,7 @@ export type SubmitSignedFundingTxParamsWire = { channel_id: HexWire; signed_fund
 
 export type SubmitSignedFundingTxResultWire = { channel_id: HexWire; funding_tx_hash: HexWire };
 
-export type ChannelIdParamsWire = { channel_id: HexWire };
+export type RpcChannelIdParamsWire = { channel_id: HexWire };
 
 export type ListChannelsParamsWire = { include_closed?: true; only_pending?: true };
 
@@ -79,7 +79,7 @@ export type ListChannelsResultWire = { channels: ChannelWire[] };
 export type RpcParamsWireByMethod = {
     open_channel_with_external_funding: OpenChannelWithExternalFundingParamsWire;
     submit_signed_funding_tx: SubmitSignedFundingTxParamsWire;
-    abandon_channel: ChannelIdParamsWire;
+    abandon_channel: RpcChannelIdParamsWire;
     list_channels: ListChannelsParamsWire;
 };
 
@@ -123,7 +123,7 @@ export type ChannelStateFlag<Name extends ChannelStateName> = (typeof CHANNEL_ST
 
 export type ChannelState = { [Name in ChannelStateName]: { name: Name; flags: ChannelStateFlag<Name>[] } }[ChannelStateName];
 
-export type Channel = {
+export type RpcChannel = {
     /**
      * Wire hex: the key the policy's channel alias is stored under.
      */

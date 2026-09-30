@@ -209,6 +209,8 @@ inputs do, and the host hands it to its CKB signer as it is.
 - **The request**: the url, the method, the headers with and without a token, a token at the bounds of printable ASCII
   sent as it is, the exact body, the call without a receiver, headers a `fetch` alters not reaching the next call, ids
   from 1, distinct across concurrent calls, never reused after a failure, and counted per client.
+- **The runtime's fetch**: taken when the host passes none, read at construction and called without a receiver; the host's
+  preferred over it; a runtime without one, or with one that is not a function, refused at construction.
 - **The errors**: a `fetch` that rejects and one that throws before returning a promise; every non-2xx boundary
   (100, 199, 300) and common status, without reading the body; a status that is not an integer; 200, 201, 204 and 299
   read; a body that cannot be read; every error envelope as an `RpcError` without calling the decoder; an unreadable

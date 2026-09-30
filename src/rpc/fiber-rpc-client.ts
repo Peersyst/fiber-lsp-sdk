@@ -16,7 +16,7 @@ import { RPC_BEARER_PREFIX, RPC_CONTENT_TYPE } from "./rpc.constants";
 import { RpcError, RpcResponseError, RpcTransportError } from "./rpc.error";
 import type {
     AbandonChannelParams,
-    Channel,
+    RpcChannel,
     FiberRpcClientOptions,
     ListChannelsParams,
     OpenChannelWithExternalFundingParams,
@@ -109,7 +109,7 @@ export class FiberRpcClient {
      * @param params The filter, if any.
      * @returns The channels.
      */
-    async listChannels(params: ListChannelsParams = {}): Promise<Channel[]> {
+    async listChannels(params: ListChannelsParams = {}): Promise<RpcChannel[]> {
         return this.call("list_channels", encodeListChannelsParams(params), decodeListChannelsResult);
     }
 

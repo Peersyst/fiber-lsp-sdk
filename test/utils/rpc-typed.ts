@@ -2,7 +2,7 @@ import { hexToBytes } from "@noble/hashes/utils.js";
 import type { DepType, Transaction } from "../../src/common";
 import type {
     AbandonChannelParams,
-    Channel,
+    RpcChannel,
     ChannelState,
     ListChannelsParams,
     OpenChannelWithExternalFundingParams,
@@ -86,7 +86,7 @@ export function toChannelState(vector: ChannelStateVector): ChannelState {
     return { name: vector.name, flags: vector.flags } as ChannelState;
 }
 
-export function toChannel(vector: ChannelVector): Channel {
+export function toChannel(vector: ChannelVector): RpcChannel {
     return {
         channelId: wireHex(vector.channel_id),
         peerPubkey: hexToBytes(vector.pubkey),

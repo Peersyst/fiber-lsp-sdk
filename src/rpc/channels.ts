@@ -23,8 +23,8 @@ import {
 import { CHANNEL_STATE_FLAGS, CHANNEL_STATE_NAMES, LIST_CHANNELS_FILTERS } from "./rpc.constants";
 import type {
     AbandonChannelParams,
-    Channel,
-    ChannelIdParamsWire,
+    RpcChannel,
+    RpcChannelIdParamsWire,
     ChannelState,
     ChannelStateFlag,
     ChannelStateName,
@@ -103,7 +103,7 @@ export function decodeSubmitSignedFundingTxResult(field: Field): SubmitSignedFun
  * @param params The channel to abandon.
  * @returns The wire params.
  */
-export function encodeAbandonChannelParams(params: AbandonChannelParams): ChannelIdParamsWire {
+export function encodeAbandonChannelParams(params: AbandonChannelParams): RpcChannelIdParamsWire {
     assertWireHexBytes("channelId", params.channelId, HASH256_LENGTH);
     return { channel_id: params.channelId };
 }
@@ -132,8 +132,8 @@ export function encodeListChannelsParams(params: ListChannelsParams): ListChanne
  * @param field The result field.
  * @returns The channels.
  */
-export function decodeListChannelsResult(field: Field): Channel[] {
-    return readArray(readObject<ListChannelsResultWire>(field)("channels")).map(decodeChannel);
+export function decodeListChannelsResult(field: Field): RpcChannel[] {
+    return readArray(readObject<ListChannelsResultWire>(field)("channels")).map(decodeRpcChannel);
 }
 
 /**
@@ -141,7 +141,7 @@ export function decodeListChannelsResult(field: Field): Channel[] {
  * @param field Field to read.
  * @returns The channel.
  */
-function decodeChannel(field: Field): Channel {
+function decodeRpcChannel(field: Field): RpcChannel {
     const at = readObject<ChannelWire>(field);
     return {
         channelId: requireHexBytes(at("channel_id"), HASH256_LENGTH),
