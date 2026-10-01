@@ -93,6 +93,33 @@ cargo run --release --manifest-path interop/rust/Cargo.toml -- gen-vectors inter
 `*.error.ts`. Interfaces live in `interfaces/` as `i-<name>.ts` and are named `I<Name>`. A file that _is_ a concept takes the
 concept's name with no suffix (`fiber-scheme.ts`, `device-scheme.ts`).
 
+### Module-scoped names
+
+Two modules never export the same name, not even from a file their barrel leaves out, so a name too generic to say where it
+belongs takes its module's prefix. The test is whether another module, built or planned, could export a different thing under
+it: `Channel`, `Field`, `CLOSE_REASONS` and `EmptyParamsWire` could, so they are `RpcChannel`, `WireField`,
+`SESSION_CLOSE_REASONS` and `ProtocolEmptyParamsWire`. The prefix goes where the noun starts: after a function's verb
+(`decodeRpcInvoice`), after a `MAX_` or a `DEFAULT_` (`DEFAULT_SESSION_CONNECT_TIMEOUT_MS`). Where it would say something
+false, the module's own word for the thing takes its place: `ErrorFrameWire`, since `ProtocolErrorWire` would read as the wire
+form of `ProtocolError`.
+
+Only those names take it. One that is already specific stays as it is, and most are: it carries the module's name
+(`PolicyVerdict`, `computeRevocationDigest`), or it is spelled from something no other module has, such as a method of fiber's
+RPC (`ListChannelsParams`), a frame of the signing protocol (`SignRequest`), a function of fiber's the module ports
+(`derivePrivateKey`), the runtime effect it stands in for (`IFetchLike`) or a concept of its own (`ReconnectPolicy`,
+`DEFAULT_HEARTBEAT_INTERVAL_MS`: only a session reconnects or has a heartbeat).
+
+`common` exports bare names (`Script`, `assertHexBytes`): it holds what no module owns, so it is another module's form of one
+of them that carries the mark (`ScriptWire`, `assertWireHexBytes`). `wire` has the same room for its readers and writers alone,
+named after the value they read or write (`decodeScript`, `readObject`), JSON being the only form it knows; a second
+serialization of the same value says which one it is (`moleculeScript`).
+
+A module's name inside a name is no proof of where it belongs: several are plain words too. The `Wire` suffix says a type is
+a wire form, whoever owns it: `RpcChannelWire` is `rpc`'s. `Signer` is also the device's name across the SDK: `ISignerStorage`
+is `policy`'s and `SignerSession` is `session`'s. And `session`, `policy` and `digest` name things other modules own:
+`SESSION_CHALLENGE_LABEL` and `sessionChallengeDigest` are `protocol`'s, `SignSession` is `policy`'s, `ReconnectPolicy` is
+`session`'s, `MESSAGE_DIGEST_LENGTH` is `common`'s.
+
 ### Barrels
 
 Every folder has an `index.ts`, and it is imported as the folder (`../common`), never as `../common/index`. Barrels re-export

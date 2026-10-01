@@ -2,16 +2,16 @@ import { writeFileSync } from "node:fs";
 import { UINT128_MAX, UINT64_MAX } from "../../../src/common";
 import type { RpcMethod, RpcParamsWire } from "../../../src/rpc";
 import {
-    CHANNEL_STATE_FLAGS,
-    CHANNEL_STATE_NAMES,
-    INVOICE_CURRENCIES,
-    INVOICE_STATUSES,
-    PAYMENT_STATUSES,
     RPC_CALL_FAILED_CODE,
+    RPC_CHANNEL_STATE_FLAGS,
+    RPC_CHANNEL_STATE_NAMES,
+    RPC_INVOICE_CURRENCIES,
+    RPC_INVOICE_STATUSES,
     RPC_METHODS,
+    RPC_PAYMENT_STATUSES,
     RPC_UNAUTHORIZED_CODE,
 } from "../../../src/rpc";
-import { TLC_HASH_ALGORITHMS } from "../../../src/wire";
+import { WIRE_TLC_HASH_ALGORITHMS } from "../../../src/wire";
 import { caseOf } from "../../utils/interop-vectors";
 import { RPC_PARAMS_ENCODERS, withoutNulls } from "../../utils/rpc-typed";
 import { loadRpcVectors, type ChannelVector, type RpcCaseVector, type TransactionVector } from "../../utils/rpc-vectors";
@@ -90,16 +90,16 @@ describe("rpc interop vectors", () => {
 
     describe("channels", () => {
         it("cover every channel state name", () => {
-            expect(new Set(channels.map((channel) => channel.state.name))).toEqual(new Set(CHANNEL_STATE_NAMES));
+            expect(new Set(channels.map((channel) => channel.state.name))).toEqual(new Set(RPC_CHANNEL_STATE_NAMES));
         });
 
         it("pin the flag names of every state, whole and in fiber's order", () => {
-            expect(vectors.channel_state_flags).toEqual(CHANNEL_STATE_FLAGS);
+            expect(vectors.channel_state_flags).toEqual(RPC_CHANNEL_STATE_FLAGS);
         });
 
         it("cover every close flag", () => {
             const closeFlags = channels.filter((channel) => channel.state.name === "Closed").flatMap((channel) => channel.state.flags);
-            expect(new Set(closeFlags)).toEqual(new Set(CHANNEL_STATE_FLAGS.Closed));
+            expect(new Set(closeFlags)).toEqual(new Set(RPC_CHANNEL_STATE_FLAGS.Closed));
         });
 
         it("cover a flag set that leaks its composite name, an empty flag set and a state without flags", () => {
@@ -156,19 +156,19 @@ describe("rpc interop vectors", () => {
     describe("invoices and payments", () => {
         // The harness only generates with every variant fiber has, so these pin the client's lists to fiber's.
         it("cover every invoice status the client names, and no other", () => {
-            expect(new Set(invoiceResults.map((entry) => entry.values.status))).toEqual(new Set(INVOICE_STATUSES));
+            expect(new Set(invoiceResults.map((entry) => entry.values.status))).toEqual(new Set(RPC_INVOICE_STATUSES));
         });
 
         it("cover every payment status the client names, a failure message and a custom record", () => {
-            expect(new Set(paymentResults.map((entry) => entry.values.status))).toEqual(new Set(PAYMENT_STATUSES));
+            expect(new Set(paymentResults.map((entry) => entry.values.status))).toEqual(new Set(RPC_PAYMENT_STATUSES));
             expect(paymentResults.some((entry) => entry.values.failed_error !== null)).toBe(true);
             expect(paymentResults.some((entry) => entry.values.custom_records !== null)).toBe(true);
         });
 
         it("cover every currency and hash algorithm the client names, with, without and with an empty description", () => {
             const params = vectors.methods.new_invoice.params.map((entry) => entry.values);
-            expect(new Set(params.map((entry) => entry.currency))).toEqual(new Set(INVOICE_CURRENCIES));
-            expect(new Set(params.map((entry) => entry.hash_algorithm))).toEqual(new Set(Object.keys(TLC_HASH_ALGORITHMS)));
+            expect(new Set(params.map((entry) => entry.currency))).toEqual(new Set(RPC_INVOICE_CURRENCIES));
+            expect(new Set(params.map((entry) => entry.hash_algorithm))).toEqual(new Set(Object.keys(WIRE_TLC_HASH_ALGORITHMS)));
             expect(params.some((entry) => entry.description === null)).toBe(true);
             expect(params.some((entry) => entry.description === "")).toBe(true);
             expect(params.some((entry) => entry.description !== null && entry.description !== "")).toBe(true);

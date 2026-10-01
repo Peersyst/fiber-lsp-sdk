@@ -1,9 +1,9 @@
-import type { Field } from "../../src/wire";
+import type { WireField } from "../../src/wire";
 import { FetchMock } from "../mocks/rpc";
 
 export const RPC_RESULT_PATH = "response.result";
 
-export function resultField(value: unknown): Field {
+export function resultField(value: unknown): WireField {
     return { value, path: RPC_RESULT_PATH };
 }
 

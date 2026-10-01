@@ -20,6 +20,6 @@ export class PolicyRefusalError extends Error {
  * @param code Wire error code the node is answered with.
  * @param message Reason, safe to log.
  */
-export function refuse(code: SignerErrorCode, message: string): never {
+export function refusePolicyRequest(code: SignerErrorCode, message: string): never {
     throw new PolicyRefusalError(code, message);
 }

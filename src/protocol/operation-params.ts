@@ -14,9 +14,9 @@ import { MAX_COMMITMENT_NUMBER } from "../derivation";
 import type { ChannelAnnouncementInput, CommitmentTxInput, RevocationInput, SettlementTlc, ShutdownTxInput } from "../digest";
 import { MAX_CELL_DEPS_COUNT, MAX_SETTLEMENT_TLCS } from "../digest";
 import type { SignSession } from "../policy";
-import type { Field } from "../wire";
+import type { WireField } from "../wire";
 import {
-    TLC_HASH_ALGORITHMS,
+    WIRE_TLC_HASH_ALGORITHMS,
     decodeBoolean,
     decodeEnum,
     decodeHexBytes,
@@ -26,7 +26,7 @@ import {
     decodeScriptOrNull,
     decodeUintHex,
     decodeUintHexNumber,
-    malformed,
+    malformedWireField,
     readArray,
     readObject,
     readPair,
@@ -45,7 +45,7 @@ import type {
  * @param field Field to read.
  * @returns The session, shape-checked; whether it aggregates this channel's key is the policy gate's question.
  */
-export function decodeSignSession(field: Field): SignSession {
+export function decodeSignSession(field: WireField): SignSession {
     const at = readObject<SignSessionWire>(field);
     return {
         orderedPublicKeys: readArray(at("ordered_pubkeys"), MUSIG_PARTICIPANTS).map((key) => decodeHexBytes(key, COMPRESSED_POINT_LENGTH)),
@@ -60,11 +60,11 @@ export function decodeSignSession(field: Field): SignSession {
  * @param commitmentLock The network's commitment lock template, never read from the node.
  * @returns The typed input the digest module rebuilds the message from.
  */
-export function decodeCommitmentTx(field: Field, commitmentLock: ScriptTemplate): CommitmentTxInput {
+export function decodeCommitmentTx(field: WireField, commitmentLock: ScriptTemplate): CommitmentTxInput {
     const at = readObject<CommitmentTxWire>(field);
     const tlcsField = at("tlcs");
     const tlcs = readArray(tlcsField);
-    if (tlcs.length > MAX_SETTLEMENT_TLCS) malformed(tlcsField, `must have at most ${MAX_SETTLEMENT_TLCS} items`);
+    if (tlcs.length > MAX_SETTLEMENT_TLCS) malformedWireField(tlcsField, `must have at most ${MAX_SETTLEMENT_TLCS} items`);
     return {
         forRemote: decodeBoolean(at("for_remote")),
         fundingOutPoint: decodeOutPoint(at("funding_out_point")),
@@ -91,7 +91,7 @@ export function decodeCommitmentTx(field: Field, commitmentLock: ScriptTemplate)
  * @param field Field to read.
  * @returns The typed input the digest module rebuilds the message from.
  */
-export function decodeShutdownTx(field: Field): ShutdownTxInput {
+export function decodeShutdownTx(field: WireField): ShutdownTxInput {
     const at = readObject<ShutdownTxWire>(field);
     return {
         fundingOutPoint: decodeOutPoint(at("funding_out_point")),
@@ -115,7 +115,7 @@ export function decodeShutdownTx(field: Field): ShutdownTxInput {
  * @param commitmentLock The network's commitment lock template, never read from the node.
  * @returns The typed input the digest module rebuilds the message from.
  */
-export function decodeRevocation(field: Field, commitmentLock: ScriptTemplate): RevocationInput {
+export function decodeRevocation(field: WireField, commitmentLock: ScriptTemplate): RevocationInput {
     const at = readObject<RevocationWire>(field);
     return {
         forRemote: decodeBoolean(at("for_remote")),
@@ -139,7 +139,7 @@ export function decodeRevocation(field: Field, commitmentLock: ScriptTemplate): 
  * @param field Field to read.
  * @returns The typed input the digest module rebuilds the message from.
  */
-export function decodeChannelAnnouncement(field: Field): ChannelAnnouncementInput {
+export function decodeChannelAnnouncement(field: WireField): ChannelAnnouncementInput {
     const at = readObject<ChannelAnnouncementWire>(field);
     const [firstNode, secondNode] = readPair(at("node_ids"));
     return {
@@ -157,12 +157,12 @@ export function decodeChannelAnnouncement(field: Field): ChannelAnnouncementInpu
  * @param field Field to read.
  * @returns The TLC.
  */
-function decodeSettlementTlc(field: Field): SettlementTlc {
+function decodeSettlementTlc(field: WireField): SettlementTlc {
     const at = readObject<SettlementTlcWire>(field);
     return {
         id: decodeUintHexNumber(at("id"), Number.MAX_SAFE_INTEGER),
         direction: decodeEnum(at("direction"), TLC_DIRECTIONS),
-        hashAlgorithm: decodeMapped(at("hash_algorithm"), TLC_HASH_ALGORITHMS),
+        hashAlgorithm: decodeMapped(at("hash_algorithm"), WIRE_TLC_HASH_ALGORITHMS),
         amountShannons: decodeUintHex(at("amount"), UINT128_MAX),
         paymentHash: decodeHexBytes(at("payment_hash"), PAYMENT_HASH_LENGTH),
         expiryMs: decodeUintHex(at("expiry_ms"), UINT64_MAX),

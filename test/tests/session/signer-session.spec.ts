@@ -5,10 +5,10 @@ import { PROTOCOL_VERSION, decodeInboundFrame, sessionChallengeDigest } from "..
 import type { ISessionAuthenticator, SessionEvent, SessionOptions, SessionState } from "../../../src/session";
 import {
     BridgeError,
-    DEFAULT_CONNECT_TIMEOUT_MS,
     DEFAULT_HEARTBEAT_INTERVAL_MS,
     DEFAULT_HEARTBEAT_TIMEOUT_MS,
-    MAX_DELAY_MS,
+    DEFAULT_SESSION_CONNECT_TIMEOUT_MS,
+    MAX_SESSION_DELAY_MS,
     SessionError,
     SignerSession,
 } from "../../../src/session";
@@ -121,10 +121,10 @@ describe("SignerSession", () => {
             ["connectTimeoutMs", -1],
             ["connectTimeoutMs", 1.5],
             ["connectTimeoutMs", NaN],
-            ["connectTimeoutMs", MAX_DELAY_MS + 1],
+            ["connectTimeoutMs", MAX_SESSION_DELAY_MS + 1],
             ["heartbeatIntervalMs", -1],
             ["heartbeatIntervalMs", 0.5],
-            ["heartbeatIntervalMs", MAX_DELAY_MS + 1],
+            ["heartbeatIntervalMs", MAX_SESSION_DELAY_MS + 1],
             ["heartbeatTimeoutMs", 0],
             ["heartbeatTimeoutMs", -1],
             ["heartbeatTimeoutMs", Infinity],
@@ -136,10 +136,10 @@ describe("SignerSession", () => {
             { initialDelayMs: 0 },
             { initialDelayMs: -1 },
             { initialDelayMs: 1.5 },
-            { initialDelayMs: MAX_DELAY_MS + 1 },
+            { initialDelayMs: MAX_SESSION_DELAY_MS + 1 },
             { maxDelayMs: 999 },
             { maxDelayMs: 0 },
-            { maxDelayMs: MAX_DELAY_MS + 1 },
+            { maxDelayMs: MAX_SESSION_DELAY_MS + 1 },
             { factor: 0.99 },
             { factor: 0 },
             { factor: NaN },
@@ -153,7 +153,7 @@ describe("SignerSession", () => {
             { heartbeatIntervalMs: 0 },
             { reconnect: { maxDelayMs: 1000 } },
             { reconnect: { factor: 1 } },
-            { connectTimeoutMs: MAX_DELAY_MS },
+            { connectTimeoutMs: MAX_SESSION_DELAY_MS },
         ])("accepts %p, the edge of what it takes", (options) => {
             expect(() => harness(options)).not.toThrow();
         });
@@ -161,7 +161,7 @@ describe("SignerSession", () => {
         it("runs with the documented defaults: connect timeout, heartbeat interval and timeout, and the backoff", async () => {
             const h = harness({ heartbeatIntervalMs: undefined, random: undefined });
             const socket = await establish(h);
-            expect(h.timer.delays).toEqual([DEFAULT_CONNECT_TIMEOUT_MS, DEFAULT_HEARTBEAT_INTERVAL_MS]);
+            expect(h.timer.delays).toEqual([DEFAULT_SESSION_CONNECT_TIMEOUT_MS, DEFAULT_HEARTBEAT_INTERVAL_MS]);
             h.timer.advance(DEFAULT_HEARTBEAT_INTERVAL_MS);
             expect(h.timer.delays.at(-1)).toBe(DEFAULT_HEARTBEAT_TIMEOUT_MS);
             h.timer.advance(DEFAULT_HEARTBEAT_TIMEOUT_MS);
@@ -400,7 +400,7 @@ describe("SignerSession", () => {
                 expect(h.events.map((event) => event.type)).toEqual(["state", "state", "error"]);
                 const error = sessionError(h.errors()[0], "connection_lost");
                 expect(error.message).toBe('socket closed (code 1006, reason "")');
-                expect(h.timer.delays).toEqual([DEFAULT_CONNECT_TIMEOUT_MS, 1000]);
+                expect(h.timer.delays).toEqual([DEFAULT_SESSION_CONNECT_TIMEOUT_MS, 1000]);
                 h.timer.advance(1000);
                 expect(h.sockets).toHaveLength(2);
                 await h.factory.last.receive(CHALLENGE_FRAME);
@@ -424,7 +424,7 @@ describe("SignerSession", () => {
                 const h = harness();
                 const connected = h.session.connect();
                 const socket = h.factory.last;
-                h.timer.advance(DEFAULT_CONNECT_TIMEOUT_MS - 1);
+                h.timer.advance(DEFAULT_SESSION_CONNECT_TIMEOUT_MS - 1);
                 expect(h.session.state).toBe("connecting");
                 h.timer.advance(1);
                 expect(socket.closedWith).toEqual({ code: 1000, reason: "connect timeout" });
@@ -440,7 +440,7 @@ describe("SignerSession", () => {
                 void h.session.connect();
                 const socket = h.factory.last;
                 await socket.receive(CHALLENGE_FRAME);
-                h.timer.advance(DEFAULT_CONNECT_TIMEOUT_MS);
+                h.timer.advance(DEFAULT_SESSION_CONNECT_TIMEOUT_MS);
                 expect(socket.closedWith).toEqual({ code: 1000, reason: "connect timeout" });
                 expect(h.session.state).toBe("reconnecting");
             });
@@ -902,7 +902,7 @@ describe("SignerSession", () => {
         }
 
         function backoffs(h: Harness): number[] {
-            return h.timer.delays.filter((delay) => delay !== DEFAULT_CONNECT_TIMEOUT_MS);
+            return h.timer.delays.filter((delay) => delay !== DEFAULT_SESSION_CONNECT_TIMEOUT_MS);
         }
 
         it("waits an exponential, capped delay before each attempt", async () => {
@@ -1328,7 +1328,7 @@ describe("SignerSession", () => {
             const h = harness();
             h.timer.ignoreCancel = true;
             const socket = await establish(h);
-            h.timer.advance(DEFAULT_CONNECT_TIMEOUT_MS);
+            h.timer.advance(DEFAULT_SESSION_CONNECT_TIMEOUT_MS);
             expect(socket.closedWith).toBeUndefined();
             expect(h.session.state).toBe("established");
         });

@@ -30,7 +30,7 @@ export const RPC_UNAUTHORIZED_CODE = -32999;
  */
 export const RPC_CALL_FAILED_CODE = -32000;
 
-export const CHANNEL_STATE_NAMES = [
+export const RPC_CHANNEL_STATE_NAMES = [
     "NegotiatingFunding",
     "CollaboratingFundingTx",
     "SigningCommitment",
@@ -46,7 +46,7 @@ export const CHANNEL_STATE_NAMES = [
  * Fiber's flag names per channel state (`fiber-json-types/src/channel.rs`), composites included: a name is written whenever
  * its bits overlap, so `OUR_INIT_SENT` alone reads `OUR_INIT_SENT|INIT_SENT`.
  */
-export const CHANNEL_STATE_FLAGS = {
+export const RPC_CHANNEL_STATE_FLAGS = {
     NegotiatingFunding: ["OUR_INIT_SENT", "THEIR_INIT_SENT", "INIT_SENT", "AWAITING_EXTERNAL_FUNDING"],
     CollaboratingFundingTx: [
         "AWAITING_REMOTE_TX_COLLABORATION_MSG",
@@ -68,7 +68,7 @@ export const CHANNEL_STATE_FLAGS = {
     ],
     Closed: ["COOPERATIVE", "UNCOOPERATIVE_LOCAL", "ABANDONED", "FUNDING_ABORTED", "UNCOOPERATIVE_REMOTE", "WAITING_ONCHAIN_SETTLEMENT"],
     Stale: [],
-} as const satisfies Record<(typeof CHANNEL_STATE_NAMES)[number], readonly string[]>;
+} as const satisfies Record<(typeof RPC_CHANNEL_STATE_NAMES)[number], readonly string[]>;
 
 /**
  * Fiber refuses both `list_channels` options at once, hence one filter.
@@ -78,8 +78,8 @@ export const LIST_CHANNELS_FILTERS = ["include_closed", "only_pending"] as const
 /**
  * Mainnet, testnet and any other chain.
  */
-export const INVOICE_CURRENCIES = ["Fibb", "Fibt", "Fibd"] as const;
+export const RPC_INVOICE_CURRENCIES = ["Fibb", "Fibt", "Fibd"] as const;
 
-export const INVOICE_STATUSES = ["Open", "Cancelled", "Expired", "Received", "Paid"] as const;
+export const RPC_INVOICE_STATUSES = ["Open", "Cancelled", "Expired", "Received", "Paid"] as const;
 
-export const PAYMENT_STATUSES = ["Created", "Inflight", "Success", "Failed"] as const;
+export const RPC_PAYMENT_STATUSES = ["Created", "Inflight", "Success", "Failed"] as const;

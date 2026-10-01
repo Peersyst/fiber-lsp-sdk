@@ -1,13 +1,13 @@
 import { assertOneOf, isNonEmptyString, isPlainObject, isUnsignedInteger } from "../common";
 import { WireError } from "./wire.error";
-import type { Field, FieldReader } from "./wire.types";
+import type { WireField, WireFieldReader } from "./wire.types";
 
 /**
  * Refuses a field, ending the decode wherever it is.
  * @param field Field that failed.
  * @param reason What the field had to be.
  */
-export function malformed(field: Field, reason: string): never {
+export function malformedWireField(field: WireField, reason: string): never {
     throw new WireError(field.path, reason);
 }
 
@@ -16,8 +16,8 @@ export function malformed(field: Field, reason: string): never {
  * @param field Field to read.
  * @returns The object, still unknown member by member.
  */
-export function requireObject(field: Field): Record<string, unknown> {
-    if (!isPlainObject(field.value)) malformed(field, "must be an object");
+export function requireObject(field: WireField): Record<string, unknown> {
+    if (!isPlainObject(field.value)) malformedWireField(field, "must be an object");
     return field.value;
 }
 
@@ -26,7 +26,7 @@ export function requireObject(field: Field): Record<string, unknown> {
  * @param field Field to read.
  * @returns A reader of the object's members, each a field of its own.
  */
-export function readObject<Wire extends object>(field: Field): FieldReader<Wire> {
+export function readObject<Wire extends object>(field: WireField): WireFieldReader<Wire> {
     const record = requireObject(field);
     return (name) => ({ value: record[name], path: `${field.path}.${name}` });
 }
@@ -37,10 +37,10 @@ export function readObject<Wire extends object>(field: Field): FieldReader<Wire>
  * @param length Exact number of items, or `undefined` for any number.
  * @returns The items, each a field of its own.
  */
-export function readArray(field: Field, length?: number): Field[] {
-    if (!Array.isArray(field.value)) malformed(field, "must be an array");
+export function readArray(field: WireField, length?: number): WireField[] {
+    if (!Array.isArray(field.value)) malformedWireField(field, "must be an array");
     const items: unknown[] = field.value;
-    if (length !== undefined && items.length !== length) malformed(field, `must have exactly ${length} items`);
+    if (length !== undefined && items.length !== length) malformedWireField(field, `must have exactly ${length} items`);
     // Array.from visits holes too, which map skips: a sparse array cannot come from JSON, but an item must never go unread.
     return Array.from(items, (value, index) => ({ value, path: `${field.path}[${index}]` }));
 }
@@ -50,9 +50,9 @@ export function readArray(field: Field, length?: number): Field[] {
  * @param field Field to read.
  * @returns The two items, each a field of its own.
  */
-export function readPair(field: Field): [Field, Field] {
+export function readPair(field: WireField): [WireField, WireField] {
     const [first, second] = readArray(field, 2);
-    return [first as Field, second as Field];
+    return [first as WireField, second as WireField];
 }
 
 /**
@@ -60,8 +60,8 @@ export function readPair(field: Field): [Field, Field] {
  * @param field Field to read.
  * @returns The boolean.
  */
-export function decodeBoolean(field: Field): boolean {
-    if (typeof field.value !== "boolean") malformed(field, "must be a boolean");
+export function decodeBoolean(field: WireField): boolean {
+    if (typeof field.value !== "boolean") malformedWireField(field, "must be a boolean");
     return field.value;
 }
 
@@ -70,8 +70,8 @@ export function decodeBoolean(field: Field): boolean {
  * @param field Field to read.
  * @returns The string.
  */
-export function decodeString(field: Field): string {
-    if (typeof field.value !== "string") malformed(field, "must be a string");
+export function decodeString(field: WireField): string {
+    if (typeof field.value !== "string") malformedWireField(field, "must be a string");
     return field.value;
 }
 
@@ -80,8 +80,8 @@ export function decodeString(field: Field): string {
  * @param field Field to read.
  * @returns The string.
  */
-export function decodeNonEmptyString(field: Field): string {
-    if (!isNonEmptyString(field.value)) malformed(field, "must be a non-empty string");
+export function decodeNonEmptyString(field: WireField): string {
+    if (!isNonEmptyString(field.value)) malformedWireField(field, "must be a non-empty string");
     return field.value;
 }
 
@@ -91,9 +91,11 @@ export function decodeNonEmptyString(field: Field): string {
  * @param values The accepted values.
  * @returns The value, narrowed to the set.
  */
-export function decodeEnum<Values extends readonly string[]>(field: Field, values: Values): Values[number] {
+export function decodeEnum<Values extends readonly string[]>(field: WireField, values: Values): Values[number] {
     const accepted: readonly string[] = values;
-    if (typeof field.value !== "string" || !accepted.includes(field.value)) malformed(field, `must be one of ${values.join(", ")}`);
+    if (typeof field.value !== "string" || !accepted.includes(field.value)) {
+        malformedWireField(field, `must be one of ${values.join(", ")}`);
+    }
     return field.value;
 }
 
@@ -103,7 +105,7 @@ export function decodeEnum<Values extends readonly string[]>(field: Field, value
  * @param spellings Wire spelling to SDK spelling.
  * @returns The SDK spelling.
  */
-export function decodeMapped<Spellings extends Record<string, string>>(field: Field, spellings: Spellings): Spellings[keyof Spellings] {
+export function decodeMapped<Spellings extends Record<string, string>>(field: WireField, spellings: Spellings): Spellings[keyof Spellings] {
     const key = decodeEnum(field, Object.keys(spellings));
     return spellings[key] as Spellings[keyof Spellings];
 }
@@ -130,8 +132,8 @@ export function encodeMapped<Spellings extends Record<string, string>>(
  * @param max Highest accepted value, inclusive.
  * @returns The integer.
  */
-export function decodeUnsignedInteger(field: Field, max: number): number {
-    if (!isUnsignedInteger(field.value, max)) malformed(field, `must be an integer between 0 and ${max}`);
+export function decodeUnsignedInteger(field: WireField, max: number): number {
+    if (!isUnsignedInteger(field.value, max)) malformedWireField(field, `must be an integer between 0 and ${max}`);
     return field.value;
 }
 
@@ -139,8 +141,8 @@ export function decodeUnsignedInteger(field: Field, max: number): number {
  * Reads a field as an explicit JSON `null`.
  * @param field Field to read.
  */
-export function decodeNull(field: Field): void {
-    if (field.value !== null) malformed(field, "must be null");
+export function decodeNull(field: WireField): void {
+    if (field.value !== null) malformedWireField(field, "must be null");
 }
 
 /**
@@ -149,6 +151,6 @@ export function decodeNull(field: Field): void {
  * @param read Reader of the value when it is not `null`.
  * @returns The value, or `null`.
  */
-export function decodeOrNull<Value>(field: Field, read: (field: Field) => Value): Value | null {
+export function decodeOrNull<Value>(field: WireField, read: (field: WireField) => Value): Value | null {
     return field.value === null ? null : read(field);
 }

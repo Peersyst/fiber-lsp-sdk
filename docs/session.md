@@ -121,7 +121,7 @@ answer is a configuration change.
 ## Reconnection
 
 A lost socket is reported as a `connection_lost` error carrying the close code and reason, or the timeout that gave it up,
-then the session moves to `reconnecting` and waits `backoffDelayMs`: the initial delay doubled per failed attempt, capped,
+then the session moves to `reconnecting` and waits `sessionBackoffDelayMs`: the initial delay doubled per failed attempt, capped,
 and multiplied by one draw of `random`, which is full jitter, so a fleet of devices losing one bridge does not come back
 in lockstep. The defaults are one second, a factor of two and a cap of thirty seconds. The attempt count resets when a
 session is established and not before, so a `connect()` that cuts a backoff short opens now but leaves the count where it

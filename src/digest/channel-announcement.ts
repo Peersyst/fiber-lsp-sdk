@@ -10,7 +10,7 @@ import {
 import type { FiberChannelKeys } from "../derivation";
 import { pubkeyOf } from "../derivation";
 import type { ChannelAnnouncementInput } from "./digest.types";
-import { aggregateXOnlyPubkey, encodeOutPoint, encodeScriptOpt, moleculeTable, uint128Le, uint64Le } from "./utils";
+import { aggregateXOnlyPubkey, moleculeOutPoint, moleculeScriptOpt, moleculeTable, uint128Le, uint64Le } from "./utils";
 
 const SIGNATURE_PLACEHOLDER_LENGTH = 64;
 
@@ -43,11 +43,11 @@ export function computeChannelAnnouncementDigest(keys: FiberChannelKeys, input: 
         new Uint8Array(SIGNATURE_PLACEHOLDER_LENGTH),
         uint64Le(0n),
         input.chainHash,
-        encodeOutPoint(input.fundingOutPoint),
+        moleculeOutPoint(input.fundingOutPoint),
         ...sortedNodeIds,
         aggregateXOnlyPubkey(sortedFundingPubkeys),
         uint128Le(input.capacityShannons),
-        encodeScriptOpt(input.udtTypeScript),
+        moleculeScriptOpt(input.udtTypeScript),
     ]);
     return ckbBlake2b(announcement);
 }

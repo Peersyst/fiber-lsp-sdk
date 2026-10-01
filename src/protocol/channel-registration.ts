@@ -1,6 +1,6 @@
 import { COMPRESSED_POINT_LENGTH } from "../common";
 import { SECRET_KEY_LENGTH } from "../derivation";
-import type { Field } from "../wire";
+import type { WireField } from "../wire";
 import { encodeHexBytes, readObject } from "../wire";
 import type { ChannelRegisteredWire, ChannelRegistration, InboundFrame, RegisterChannelWire } from "./protocol.types";
 import { assertRequestId, decodeChannelId, decodeRequestId } from "./utils";
@@ -27,7 +27,7 @@ export function encodeRegisterChannel(requestId: string, registration: ChannelRe
  * @param field The frame, already known to be a registration acknowledgement.
  * @returns The acknowledgement.
  */
-export function decodeChannelRegistered(field: Field): Extract<InboundFrame, { type: "channel_registered" }> {
+export function decodeChannelRegistered(field: WireField): Extract<InboundFrame, { type: "channel_registered" }> {
     const at = readObject<ChannelRegisteredWire>(field);
     return { type: "channel_registered", requestId: decodeRequestId(at("request_id")), channelId: decodeChannelId(at("channel_id")) };
 }

@@ -1,6 +1,6 @@
 import { HASH256_LENGTH } from "../../common";
-import type { Field } from "../../wire";
-import { malformed, requireHexBytes } from "../../wire";
+import type { WireField } from "../../wire";
+import { malformedWireField, requireHexBytes } from "../../wire";
 import { MAX_REQUEST_ID_LENGTH } from "../protocol.constants";
 
 // Printable ASCII, so that a character and a byte count the same on both ends of the wire.
@@ -30,8 +30,8 @@ export function assertRequestId(requestId: string): void {
  * @param field Field to read.
  * @returns The id, echoed verbatim in the answer.
  */
-export function decodeRequestId(field: Field): string {
-    if (!isRequestId(field.value)) malformed(field, `must be ${REQUEST_ID_FORM}`);
+export function decodeRequestId(field: WireField): string {
+    if (!isRequestId(field.value)) malformedWireField(field, `must be ${REQUEST_ID_FORM}`);
     return field.value;
 }
 
@@ -40,6 +40,6 @@ export function decodeRequestId(field: Field): string {
  * @param field Field to read.
  * @returns The id in wire form.
  */
-export function decodeChannelId(field: Field): string {
+export function decodeChannelId(field: WireField): string {
     return requireHexBytes(field, HASH256_LENGTH);
 }

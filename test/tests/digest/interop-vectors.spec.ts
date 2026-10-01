@@ -3,7 +3,7 @@ import { deriveChannelKeys } from "../../../src/derivation/fiber-scheme";
 import { computeChannelAnnouncementDigest } from "../../../src/digest/channel-announcement";
 import { buildCommitmentLockArgs, computeCommitmentTxDigest } from "../../../src/digest/commitment-tx";
 import { COMMITMENT_LOCK_TESTNET } from "../../../src/digest/digest.constants";
-import { calculateFee, commitmentTxSize, shutdownTxSize } from "../../../src/digest/fee";
+import { calculateTxFee, commitmentTxSize, shutdownTxSize } from "../../../src/digest/fee";
 import { computeRevocationDigest } from "../../../src/digest/revocation";
 import { buildSettlementWitness } from "../../../src/digest/settlement-witness";
 import { computeShutdownTxDigest } from "../../../src/digest/shutdown-tx";
@@ -70,7 +70,7 @@ describe("digest cross-implementation vectors", () => {
                 it("sizes the mock tx and its fee", () => {
                     const txSize = commitmentTxSize(kase.cell_deps_count, toScriptOrNull(kase.udt_type_script), COMMITMENT_LOCK_TESTNET);
                     expect(txSize).toBe(kase.tx_size);
-                    expect(calculateFee(BigInt(kase.fee_rate), txSize)).toBe(BigInt(kase.fee));
+                    expect(calculateTxFee(BigInt(kase.fee_rate), txSize)).toBe(BigInt(kase.fee));
                 });
 
                 it("recomputes the digest", () => {
@@ -89,8 +89,8 @@ describe("digest cross-implementation vectors", () => {
                         toScript(kase.remote_close_script),
                     ]);
                     expect(txSize).toBe(kase.tx_size);
-                    expect(calculateFee(BigInt(kase.local_fee_rate), txSize)).toBe(BigInt(kase.local_fee));
-                    expect(calculateFee(BigInt(kase.remote_fee_rate), txSize)).toBe(BigInt(kase.remote_fee));
+                    expect(calculateTxFee(BigInt(kase.local_fee_rate), txSize)).toBe(BigInt(kase.local_fee));
+                    expect(calculateTxFee(BigInt(kase.remote_fee_rate), txSize)).toBe(BigInt(kase.remote_fee));
                 });
 
                 it("recomputes the digest", () => {

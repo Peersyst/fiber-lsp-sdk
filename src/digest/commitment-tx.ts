@@ -13,14 +13,14 @@ import type { FiberChannelKeys } from "../derivation";
 import { MAX_COMMITMENT_NUMBER, pubkeyOf } from "../derivation";
 import { MAX_CAPACITY_SHANNONS, MAX_SINCE_PAYLOAD, SINCE_RELATIVE_EPOCH_FLAGS } from "./digest.constants";
 import type { CommitmentTxInput } from "./digest.types";
-import { calculateFee, commitmentTxSize } from "./fee";
+import { calculateTxFee, commitmentTxSize } from "./fee";
 import { buildSettlementWitness } from "./settlement-witness";
 import {
     aggregateXOnlyPubkey,
-    encodeCellInput,
-    encodeCellOutput,
-    encodeRawTransaction,
-    subtractFee,
+    moleculeCellInput,
+    moleculeCellOutput,
+    moleculeRawTransaction,
+    subtractTxFee,
     uint128Le,
     uint64Be,
     uint64Le,
@@ -87,19 +87,19 @@ export function computeCommitmentTxDigest(keys: FiberChannelKeys, input: Commitm
     );
     const lock: Script = { ...input.commitmentLock, args: lockArgs };
 
-    const fee = calculateFee(input.commitmentFeeRate, commitmentTxSize(input.cellDepsCount, input.udtTypeScript, input.commitmentLock));
+    const fee = calculateTxFee(input.commitmentFeeRate, commitmentTxSize(input.cellDepsCount, input.udtTypeScript, input.commitmentLock));
     const liquidCapacity = input.toLocalShannons + input.toRemoteShannons;
     assertUnsignedBigInt("liquid capacity", liquidCapacity, MAX_AMOUNT_SHANNONS);
     const totalReserved = input.localReservedCkbShannons + input.remoteReservedCkbShannons;
-    const capacity = subtractFee(isUdt ? totalReserved : liquidCapacity + totalReserved, fee);
+    const capacity = subtractTxFee(isUdt ? totalReserved : liquidCapacity + totalReserved, fee);
     const outputData = isUdt ? uint128Le(liquidCapacity) : new Uint8Array(0);
 
-    const raw = encodeRawTransaction({
+    const raw = moleculeRawTransaction({
         version: 0,
         cellDeps: [],
         headerDeps: [],
-        inputs: [encodeCellInput(0n, input.fundingOutPoint)],
-        outputs: [encodeCellOutput(capacity, lock, input.udtTypeScript)],
+        inputs: [moleculeCellInput(0n, input.fundingOutPoint)],
+        outputs: [moleculeCellOutput(capacity, lock, input.udtTypeScript)],
         outputsData: [outputData],
     });
     return ckbBlake2b(raw);

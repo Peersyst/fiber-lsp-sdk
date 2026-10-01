@@ -1,7 +1,7 @@
 import { PAYMENT_HASH_LENGTH, UINT64_MAX, assertBoolean, assertNonEmptyString } from "../common";
-import type { Field } from "../wire";
+import type { WireField } from "../wire";
 import { decodeEnum, decodeHexBytes, decodeOrNull, decodeString, decodeUintHex, readObject } from "../wire";
-import { PAYMENT_STATUSES } from "./rpc.constants";
+import { RPC_PAYMENT_STATUSES } from "./rpc.constants";
 import type { RpcPayment, RpcPaymentWire, SendPaymentParams, SendPaymentParamsWire } from "./rpc.types";
 import { decodeRpcShannons, encodeRpcShannons } from "./utils";
 
@@ -25,11 +25,11 @@ export function encodeSendPaymentParams(params: SendPaymentParams): SendPaymentP
  * @param field The result field.
  * @returns The payment.
  */
-export function decodeRpcPayment(field: Field): RpcPayment {
+export function decodeRpcPayment(field: WireField): RpcPayment {
     const at = readObject<RpcPaymentWire>(field);
     return {
         paymentHash: decodeHexBytes(at("payment_hash"), PAYMENT_HASH_LENGTH),
-        status: decodeEnum(at("status"), PAYMENT_STATUSES),
+        status: decodeEnum(at("status"), RPC_PAYMENT_STATUSES),
         createdAtMs: decodeUintHex(at("created_at"), UINT64_MAX),
         lastUpdatedAtMs: decodeUintHex(at("last_updated_at"), UINT64_MAX),
         failedError: decodeOrNull(at("failed_error"), decodeString),

@@ -145,9 +145,9 @@ per state, and never turns the names back into bits:
 - **A name is written whenever its bits overlap**, so composites leak: `OUR_INIT_SENT` alone reads
   `OUR_INIT_SENT|INIT_SENT`. The client keeps what fiber wrote rather than normalizing it, and its lists are pinned whole:
   the vectors carry, per state, the names fiber's serializer writes with every bit set, composites included, and the
-  interop spec holds `CHANNEL_STATE_FLAGS` equal to them.
+  interop spec holds `RPC_CHANNEL_STATE_FLAGS` equal to them.
 - **`""` is the empty set**, which fiber writes for a state with flags when none is set.
-- **Each state accepts only its own names**, in `CHANNEL_STATE_FLAGS`; a name of another state, an unknown one, a name twice,
+- **Each state accepts only its own names**, in `RPC_CHANNEL_STATE_FLAGS`; a name of another state, an unknown one, a name twice,
   an empty segment or padding around `|` is refused, since none can come out of fiber's serializer.
 - **`ChannelReady` and `Stale` refuse any `state_flags`**, `""` included: fiber writes no member at all for them.
 
@@ -295,7 +295,7 @@ inputs do, and the host hands it to its CKB signer as it is.
   fiber's serde wrote, and read back unchanged by fiber's own deserializers through `verify-rpc-params`; every result case
   decoded and compared with the vector's input values, not with the JSON it read: both opens, the submit, the abandon's
   `null`, and the three listings and the empty one, which carry every state and every close flag.
-- **The flag names per state against fiber**: `CHANNEL_STATE_FLAGS` equal, state by state, to what fiber's serializer writes
+- **The flag names per state against fiber**: `RPC_CHANNEL_STATE_FLAGS` equal, state by state, to what fiber's serializer writes
   with every bit set, so a flag a release adds fails the interop spec instead of a listing in production.
 - **One refusal per field read**, with its full path from `response.result` (`response.result.channels[1].state.state_flags`):
   a hash or id bare or short, a key prefixed, short or uppercase, each balance and `created_at` in decimal, with a leading zero

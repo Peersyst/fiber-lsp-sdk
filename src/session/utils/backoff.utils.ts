@@ -7,7 +7,7 @@ import type { ReconnectPolicy } from "../session.types";
  * @param random Uniform in `[0, 1)`.
  * @returns The delay in whole milliseconds.
  */
-export function backoffDelayMs(policy: ReconnectPolicy, attempt: number, random: () => number): number {
+export function sessionBackoffDelayMs(policy: ReconnectPolicy, attempt: number, random: () => number): number {
     const base = Math.min(policy.maxDelayMs, policy.initialDelayMs * policy.factor ** attempt);
     return Math.floor(base * random());
 }

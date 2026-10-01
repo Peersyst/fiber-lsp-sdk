@@ -1,5 +1,5 @@
 import { MAX_AMOUNT_SHANNONS, assertDecimalShannons } from "../../common";
-import type { Field, UintHexWire } from "../../wire";
+import type { UintHexWire, WireField } from "../../wire";
 import { decodeUintHex, encodeUintHex } from "../../wire";
 
 /**
@@ -18,6 +18,6 @@ export function encodeRpcShannons(name: string, shannons: string): UintHexWire {
  * @param field Field to read.
  * @returns The amount in decimal shannons.
  */
-export function decodeRpcShannons(field: Field): string {
+export function decodeRpcShannons(field: WireField): string {
     return decodeUintHex(field, MAX_AMOUNT_SHANNONS).toString();
 }

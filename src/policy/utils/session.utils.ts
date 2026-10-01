@@ -23,7 +23,7 @@ const INFINITY = new Uint8Array(COMPRESSED_POINT_LENGTH);
  * @param session Session to check.
  * @returns The two validated 33-byte public keys, in the order the node sent them.
  */
-export function assertSessionShape(session: SignSession): [Uint8Array, Uint8Array] {
+export function assertSignSessionShape(session: SignSession): [Uint8Array, Uint8Array] {
     if (!Array.isArray(session.orderedPublicKeys) || session.orderedPublicKeys.length !== MUSIG_PARTICIPANTS) {
         throw new TypeError(`session.orderedPublicKeys must be exactly ${MUSIG_PARTICIPANTS} public keys`);
     }
@@ -44,7 +44,7 @@ export function assertSessionShape(session: SignSession): [Uint8Array, Uint8Arra
  * @param session Session to check.
  */
 export function assertSignSession(keys: FiberChannelKeys, session: SignSession): void {
-    const publicKeys = assertSessionShape(session);
+    const publicKeys = assertSignSessionShape(session);
     const fundingPubkey = pubkeyOf(keys.fundingKey);
     if (!publicKeys.some((key) => equalBytes(key, fundingPubkey))) {
         throw new TypeError("session.orderedPublicKeys must include the channel funding public key");
@@ -68,7 +68,7 @@ export function assertSignSession(keys: FiberChannelKeys, session: SignSession):
  * @returns The 32-byte commitment as lowercase hex, the value the sign-once registry stores.
  */
 export function buildSessionCommitment(session: SignSession): string {
-    const [firstKey, secondKey] = assertSessionShape(session);
+    const [firstKey, secondKey] = assertSignSessionShape(session);
     return bytesToHex(ckbBlake2b(LABEL, firstKey, secondKey, session.aggregatedNonce, session.message));
 }
 

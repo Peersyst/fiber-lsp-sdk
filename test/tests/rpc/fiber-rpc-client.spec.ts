@@ -1,6 +1,6 @@
 import type { FetchInit, FetchResponseLike, IFetchLike } from "../../../src/rpc";
 import { FiberRpcClient, RPC_UNAUTHORIZED_CODE, RpcError, RpcResponseError, RpcTransportError } from "../../../src/rpc";
-import type { Field } from "../../../src/wire";
+import type { WireField } from "../../../src/wire";
 import { WireError, decodeHexBytes, readObject } from "../../../src/wire";
 import { FetchMock } from "../../mocks/rpc";
 import { rejection } from "../../utils/rejection";
@@ -19,9 +19,9 @@ function ok(body: string): { status: number; body: string } {
     return { status: 200, body };
 }
 
-const passThrough = (field: Field): unknown => field.value;
+const passThrough = (field: WireField): unknown => field.value;
 
-function decodeChannelId(field: Field): Uint8Array {
+function decodeChannelId(field: WireField): Uint8Array {
     return decodeHexBytes(readObject<{ channel_id: string }>(field)("channel_id"), 32);
 }
 

@@ -17,7 +17,7 @@ export function aggregateXOnlyPubkey(orderedPubkeys: [Uint8Array, Uint8Array]): 
  * @param fee Fee to subtract, in shannons.
  * @returns The remaining capacity.
  */
-export function subtractFee(total: bigint, fee: bigint): bigint {
+export function subtractTxFee(total: bigint, fee: bigint): bigint {
     assertUnsignedBigInt("total capacity", total, MAX_CAPACITY_SHANNONS);
     if (fee > total) {
         throw new RangeError(`capacity ${total} cannot cover the fee ${fee}`);

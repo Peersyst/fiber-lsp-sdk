@@ -2,7 +2,7 @@ import type { ScriptTemplate } from "../common";
 import { COMPRESSED_POINT_LENGTH, PARTIAL_SIGNATURE_LENGTH, PUBLIC_NONCE_LENGTH, SIGNER_ERROR_CODES, assertOneOf } from "../common";
 import { MAX_COMMITMENT_NUMBER, SECRET_KEY_LENGTH } from "../derivation";
 import type { PolicySignRequest, SignOperation, SignSession } from "../policy";
-import type { Field, FieldReader } from "../wire";
+import type { WireField, WireFieldReader } from "../wire";
 import { asWireError, decodeEnum, decodeUintHexNumber, encodeHexBytes, readObject, requireObject } from "../wire";
 import { decodeChannelAnnouncement, decodeCommitmentTx, decodeRevocation, decodeShutdownTx, decodeSignSession } from "./operation-params";
 import { SIGNER_METHODS } from "./protocol.constants";
@@ -32,7 +32,7 @@ const PARAMS_PATH = `${"sign_request" satisfies SignRequestWire["type"]}.${"para
  * @param field The frame, already known to be a sign request.
  * @returns The envelope; a refusal past the request id carries that id, so it can be answered.
  */
-export function decodeSignRequest(field: Field): SignRequest {
+export function decodeSignRequest(field: WireField): SignRequest {
     const at = readObject<SignRequestWire>(field);
     const requestId = decodeRequestId(at("request_id"));
     return correlating(requestId, () => ({
@@ -51,7 +51,7 @@ export function decodeSignRequest(field: Field): SignRequest {
  * @returns The decoded params; a refusal carries the request id.
  */
 export function decodeSignParams(request: SignRequest, commitmentLock: ScriptTemplate): SignParams {
-    const params: Field = { value: request.params, path: PARAMS_PATH };
+    const params: WireField = { value: request.params, path: PARAMS_PATH };
     return correlating(request.requestId, () => {
         switch (request.method) {
             case "get_base_public_keys":
@@ -110,7 +110,7 @@ export function encodeSignResponse(frame: Extract<OutboundFrame, { type: "sign_r
  * @param operation The decoded operation.
  * @returns The policy engine's input.
  */
-function decodeSlotRequest(request: SignRequest, at: FieldReader<PartialSignParamsWire>, operation: SignOperation): PolicySignRequest {
+function decodeSlotRequest(request: SignRequest, at: WireFieldReader<PartialSignParamsWire>, operation: SignOperation): PolicySignRequest {
     const session = decodeSignSession(at("session"));
     const nonceCommitmentNumber = decodeUintHexNumber(at("nonce_commitment_number"), MAX_COMMITMENT_NUMBER);
     return policyRequest(request, session, nonceCommitmentNumber, operation);
