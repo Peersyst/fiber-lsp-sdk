@@ -16,11 +16,11 @@ import {
     encodeOpenChannelWithExternalFundingParams,
     encodeSubmitSignedFundingTxParams,
 } from "../../../src/rpc";
-import type { Field } from "../../../src/wire";
 import { FetchMock } from "../../mocks/rpc";
 import { caseOf } from "../../utils/interop-vectors";
 import { refusal } from "../../utils/refusal";
 import { rejection } from "../../utils/rejection";
+import { RPC_RESULT_PATH as RESULT, answering, refusing, resultField as result, sent } from "../../utils/rpc-answers";
 import {
     toChannel,
     toChannelState,
@@ -35,13 +35,8 @@ import { withField } from "../../utils/with-field";
 const vectors = loadRpcVectors();
 const { open_channel_with_external_funding: open, submit_signed_funding_tx: submit, list_channels: list } = vectors.methods;
 
-const RESULT = "response.result";
 const CHANNEL_ID = `0x${"11".repeat(32)}`;
 const PEER = `02${"ab".repeat(32)}`;
-
-function result(value: unknown): Field {
-    return { value, path: RESULT };
-}
 
 const SHUTDOWN: Script = { codeHash: hexToBytes("9b".repeat(32)), hashType: "type", args: hexToBytes("42".repeat(20)) };
 const FUNDING_LOCK: Script = { codeHash: hexToBytes("9b".repeat(32)), hashType: "type", args: hexToBytes("75".repeat(20)) };
@@ -416,14 +411,6 @@ describe("decodeChannelState", () => {
 describe("FiberRpcClient channel methods", () => {
     const URL = "http://fiber.example:8227";
 
-    function answering(result: unknown): FetchMock {
-        return new FetchMock().answer({ status: 200, body: JSON.stringify({ jsonrpc: "2.0", id: 1, result }) });
-    }
-
-    function sent(mock: FetchMock): unknown {
-        return JSON.parse(mock.last.init.body);
-    }
-
     it("opens a channel and reads the unsigned funding transaction", async () => {
         const entry = caseOf(open.results, "udt channel with deps");
         const mock = answering(entry.json);
@@ -476,10 +463,7 @@ describe("FiberRpcClient channel methods", () => {
     });
 
     it("passes the node's refusal through", async () => {
-        const mock = new FetchMock().answer({
-            status: 200,
-            body: '{"jsonrpc":"2.0","id":1,"error":{"code":-32000,"message":"only_pending and include_closed are mutually exclusive"}}',
-        });
+        const mock = refusing(-32000, "only_pending and include_closed are mutually exclusive");
         const error = await rejection(new FiberRpcClient({ url: URL, fetch: mock.fetch }).listChannels());
         expect(error).toBeInstanceOf(RpcError);
         expect(error).toMatchObject({ method: "list_channels", code: -32000 });

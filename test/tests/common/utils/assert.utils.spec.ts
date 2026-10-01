@@ -6,6 +6,7 @@ import {
     assertHexBytes,
     assertNonEmptyString,
     assertOneOf,
+    assertString,
     assertUnsignedBigInt,
     assertUnsignedInteger,
 } from "../../../../src/common/utils/assert.utils";
@@ -113,6 +114,16 @@ describe("assertBoolean", () => {
 
     it.each(["true", "", 1, 0, null, undefined, [], {}, [true]])("rejects %p", (value) => {
         expect(() => assertBoolean("public", value)).toThrow(new TypeError("public must be a boolean"));
+    });
+});
+
+describe("assertString", () => {
+    it.each(["coffee", "", " ", "0"])("accepts %p", (value) => {
+        expect(() => assertString("description", value)).not.toThrow();
+    });
+
+    it.each([undefined, null, 0, 5, true, [], ["coffee"], {}, new String("coffee")])("rejects %p", (value) => {
+        expect(() => assertString("description", value)).toThrow(new TypeError("description must be a string"));
     });
 });
 

@@ -74,3 +74,12 @@ export const CHANNEL_STATE_FLAGS = {
  * Fiber refuses both `list_channels` options at once, hence one filter.
  */
 export const LIST_CHANNELS_FILTERS = ["include_closed", "only_pending"] as const;
+
+/**
+ * Mainnet, testnet and any other chain.
+ */
+export const INVOICE_CURRENCIES = ["Fibb", "Fibt", "Fibd"] as const;
+
+export const INVOICE_STATUSES = ["Open", "Cancelled", "Expired", "Received", "Paid"] as const;
+
+export const PAYMENT_STATUSES = ["Created", "Inflight", "Success", "Failed"] as const;

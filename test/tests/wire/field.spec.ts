@@ -8,6 +8,7 @@ import {
     decodeNonEmptyString,
     decodeString,
     decodeUnsignedInteger,
+    encodeMapped,
     malformed,
     readArray,
     readObject,
@@ -139,6 +140,30 @@ describe("decodeMapped", () => {
     it.each(["ckb-hash", "CKB_HASH", "constructor", "toString", "__proto__", "hasOwnProperty", 1, undefined])("refuses %p", (value) => {
         expect(refusal(() => decodeMapped(field(value), SPELLINGS)).message).toBe("root must be one of ckb_hash, sha256");
     });
+});
+
+describe("encodeMapped", () => {
+    const SPELLINGS = { ckb_hash: "ckb-hash", sha256: "sha256" } as const;
+
+    it("writes an SDK spelling as the wire's", () => {
+        expect(encodeMapped("hashAlgorithm", "ckb-hash", SPELLINGS)).toBe("ckb_hash");
+        expect(encodeMapped("hashAlgorithm", "sha256", SPELLINGS)).toBe("sha256");
+    });
+
+    it("is the inverse of decodeMapped for every spelling", () => {
+        for (const wire of Object.keys(SPELLINGS)) {
+            expect(encodeMapped("hashAlgorithm", decodeMapped(field(wire), SPELLINGS), SPELLINGS)).toBe(wire);
+        }
+    });
+
+    it.each(["ckb_hash", "CKB-HASH", "ckb-hash ", "constructor", "toString", "__proto__", "", 1, null, undefined, ["sha256"]])(
+        "refuses %p, naming the value and listing the SDK's spellings",
+        (value) => {
+            expect(() => encodeMapped("hashAlgorithm", value, SPELLINGS)).toThrow(
+                new TypeError("hashAlgorithm must be one of ckb-hash, sha256"),
+            );
+        },
+    );
 });
 
 describe("decodeUnsignedInteger", () => {

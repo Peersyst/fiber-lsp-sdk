@@ -1,14 +1,20 @@
 import { writeFileSync } from "node:fs";
 import { UINT128_MAX, UINT64_MAX } from "../../../src/common";
 import type { RpcMethod, RpcParamsWire } from "../../../src/rpc";
-import { CHANNEL_STATE_FLAGS, CHANNEL_STATE_NAMES, RPC_CALL_FAILED_CODE, RPC_METHODS, RPC_UNAUTHORIZED_CODE } from "../../../src/rpc";
+import {
+    CHANNEL_STATE_FLAGS,
+    CHANNEL_STATE_NAMES,
+    INVOICE_CURRENCIES,
+    INVOICE_STATUSES,
+    PAYMENT_STATUSES,
+    RPC_CALL_FAILED_CODE,
+    RPC_METHODS,
+    RPC_UNAUTHORIZED_CODE,
+} from "../../../src/rpc";
+import { TLC_HASH_ALGORITHMS } from "../../../src/wire";
 import { caseOf } from "../../utils/interop-vectors";
 import { RPC_PARAMS_ENCODERS, withoutNulls } from "../../utils/rpc-typed";
 import { loadRpcVectors, type ChannelVector, type RpcCaseVector, type TransactionVector } from "../../utils/rpc-vectors";
-
-const INVOICE_STATUSES = ["Open", "Cancelled", "Expired", "Received", "Paid"];
-
-const PAYMENT_STATUSES = ["Created", "Inflight", "Success", "Failed"];
 
 function stateFlagsOf(json: unknown): unknown {
     const state = (json as { state: Record<string, unknown> }).state;
@@ -148,22 +154,31 @@ describe("rpc interop vectors", () => {
     });
 
     describe("invoices and payments", () => {
-        it("cover every invoice status", () => {
+        // The harness only generates with every variant fiber has, so these pin the client's lists to fiber's.
+        it("cover every invoice status the client names, and no other", () => {
             expect(new Set(invoiceResults.map((entry) => entry.values.status))).toEqual(new Set(INVOICE_STATUSES));
         });
 
-        it("cover every payment status, a failure message and a custom record", () => {
+        it("cover every payment status the client names, a failure message and a custom record", () => {
             expect(new Set(paymentResults.map((entry) => entry.values.status))).toEqual(new Set(PAYMENT_STATUSES));
             expect(paymentResults.some((entry) => entry.values.failed_error !== null)).toBe(true);
             expect(paymentResults.some((entry) => entry.values.custom_records !== null)).toBe(true);
         });
 
-        it("cover every currency and both hash algorithms, with and without a description", () => {
+        it("cover every currency and hash algorithm the client names, with, without and with an empty description", () => {
             const params = vectors.methods.new_invoice.params.map((entry) => entry.values);
-            expect(new Set(params.map((entry) => entry.currency))).toEqual(new Set(["Fibb", "Fibt", "Fibd"]));
-            expect(new Set(params.map((entry) => entry.hash_algorithm))).toEqual(new Set(["ckb_hash", "sha256"]));
+            expect(new Set(params.map((entry) => entry.currency))).toEqual(new Set(INVOICE_CURRENCIES));
+            expect(new Set(params.map((entry) => entry.hash_algorithm))).toEqual(new Set(Object.keys(TLC_HASH_ALGORITHMS)));
             expect(params.some((entry) => entry.description === null)).toBe(true);
-            expect(params.some((entry) => entry.description !== null)).toBe(true);
+            expect(params.some((entry) => entry.description === "")).toBe(true);
+            expect(params.some((entry) => entry.description !== null && entry.description !== "")).toBe(true);
+        });
+
+        it("cover a dry run and a real payment, and the largest expiry and timestamps", () => {
+            expect(new Set(vectors.methods.send_payment.params.map((entry) => entry.values.dry_run))).toEqual(new Set([true, false]));
+            expect(vectors.methods.new_invoice.params.some((entry) => BigInt(entry.values.expiry) === UINT64_MAX)).toBe(true);
+            expect(paymentResults.some((entry) => BigInt(entry.values.created_at) === UINT64_MAX)).toBe(true);
+            expect(paymentResults.some((entry) => BigInt(entry.values.last_updated_at) === UINT64_MAX)).toBe(true);
         });
 
         it("cover an invoice without an amount and one without a signature", () => {
@@ -189,8 +204,7 @@ describe("rpc interop vectors", () => {
         const written: Partial<Record<RpcMethod, { name: string; params: RpcParamsWire }[]>> = {};
 
         for (const method of RPC_METHODS) {
-            const encode = RPC_PARAMS_ENCODERS[method] as ((values: unknown) => RpcParamsWire) | undefined;
-            if (encode === undefined) continue;
+            const encode = RPC_PARAMS_ENCODERS[method] as (values: unknown) => RpcParamsWire;
             const cases: RpcCaseVector<unknown>[] = vectors.methods[method].params;
             it.each(cases.map((entry) => [method, entry.name, entry] as const))("write %s / %s as fiber's serde does", (_, name, entry) => {
                 const params = encode(entry.values);

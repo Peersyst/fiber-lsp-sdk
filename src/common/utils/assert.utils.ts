@@ -62,6 +62,17 @@ export function assertHexBytes(name: string, value: string, byteLength: number):
 }
 
 /**
+ * Asserts that a value is a string, empty included.
+ * @param name Name of the value, used in the error message.
+ * @param value Value to check.
+ */
+export function assertString(name: string, value: unknown): asserts value is string {
+    if (typeof value !== "string") {
+        throw new TypeError(`${name} must be a string`);
+    }
+}
+
+/**
  * Asserts that a value is a non-empty string.
  * @param name Name of the value, used in the error message.
  * @param value Value to check.

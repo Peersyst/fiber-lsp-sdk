@@ -1,4 +1,4 @@
-import { isNonEmptyString, isPlainObject, isUnsignedInteger } from "../common";
+import { assertOneOf, isNonEmptyString, isPlainObject, isUnsignedInteger } from "../common";
 import { WireError } from "./wire.error";
 import type { Field, FieldReader } from "./wire.types";
 
@@ -106,6 +106,22 @@ export function decodeEnum<Values extends readonly string[]>(field: Field, value
 export function decodeMapped<Spellings extends Record<string, string>>(field: Field, spellings: Spellings): Spellings[keyof Spellings] {
     const key = decodeEnum(field, Object.keys(spellings));
     return spellings[key] as Spellings[keyof Spellings];
+}
+
+/**
+ * Writes an SDK spelling as the wire spelling a map pairs it with.
+ * @param name Name of the value, used in the error message.
+ * @param value SDK spelling to write.
+ * @param spellings Wire spelling to SDK spelling.
+ * @returns The wire spelling.
+ */
+export function encodeMapped<Spellings extends Record<string, string>>(
+    name: string,
+    value: unknown,
+    spellings: Spellings,
+): keyof Spellings & string {
+    assertOneOf(name, value, Object.values(spellings));
+    return Object.keys(spellings).find((wire) => spellings[wire] === value) as keyof Spellings & string;
 }
 
 /**

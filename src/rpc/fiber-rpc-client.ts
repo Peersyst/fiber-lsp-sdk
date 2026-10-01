@@ -11,7 +11,15 @@ import {
     encodeSubmitSignedFundingTxParams,
 } from "./channels";
 import type { FetchResponseLike, IFetchLike } from "./interfaces";
+import {
+    decodeNewInvoiceResult,
+    decodeRpcInvoice,
+    decodeSettleInvoiceResult,
+    encodeNewInvoiceParams,
+    encodeSettleInvoiceParams,
+} from "./invoices";
 import { decodeRpcResponse, encodeRpcRequest } from "./json-rpc";
+import { decodeRpcPayment, encodeSendPaymentParams } from "./payments";
 import { RPC_BEARER_PREFIX, RPC_CONTENT_TYPE } from "./rpc.constants";
 import { RpcError, RpcResponseError, RpcTransportError } from "./rpc.error";
 import type {
@@ -19,14 +27,22 @@ import type {
     RpcChannel,
     FiberRpcClientOptions,
     ListChannelsParams,
+    NewInvoiceParams,
+    NewInvoiceResult,
     OpenChannelWithExternalFundingParams,
     OpenChannelWithExternalFundingResult,
+    RpcInvoice,
     RpcMethod,
-    RpcParamsWireOf,
+    RpcParamsWireByMethod,
+    RpcPayment,
+    RpcPaymentHashParams,
     RpcResultDecoder,
+    SendPaymentParams,
+    SettleInvoiceParams,
     SubmitSignedFundingTxParams,
     SubmitSignedFundingTxResult,
 } from "./rpc.types";
+import { encodeRpcPaymentHashParams } from "./utils";
 
 // A header value every runtime accepts, so a bad token fails at construction.
 const TOKEN_PATTERN = /^[\x21-\x7e]+$/;
@@ -64,7 +80,7 @@ export class FiberRpcClient {
      */
     async call<Method extends RpcMethod, Result>(
         method: Method,
-        params: RpcParamsWireOf<Method>,
+        params: RpcParamsWireByMethod[Method],
         decode: RpcResultDecoder<Result>,
     ): Promise<Result> {
         const id = this.nextId++;
@@ -111,6 +127,59 @@ export class FiberRpcClient {
      */
     async listChannels(params: ListChannelsParams = {}): Promise<RpcChannel[]> {
         return this.call("list_channels", encodeListChannelsParams(params), decodeListChannelsResult);
+    }
+
+    /**
+     * Creates a hold invoice: the node gets the hash, never the preimage.
+     * @param params The invoice to create.
+     * @returns The encoded invoice.
+     */
+    async newInvoice(params: NewInvoiceParams): Promise<NewInvoiceResult> {
+        return this.call("new_invoice", encodeNewInvoiceParams(params), decodeNewInvoiceResult);
+    }
+
+    /**
+     * Reads an invoice of the node.
+     * @param params The invoice's payment hash.
+     * @returns The encoded invoice and its status.
+     */
+    async getInvoice(params: RpcPaymentHashParams): Promise<RpcInvoice> {
+        return this.call("get_invoice", encodeRpcPaymentHashParams(params), decodeRpcInvoice);
+    }
+
+    /**
+     * Hands the node an invoice's preimage; the funds are claimed at `Paid`, not when this resolves.
+     * @param params The invoice and its preimage.
+     */
+    async settleInvoice(params: SettleInvoiceParams): Promise<void> {
+        await this.call("settle_invoice", encodeSettleInvoiceParams(params), decodeSettleInvoiceResult);
+    }
+
+    /**
+     * Cancels an unpaid invoice, failing the payment it holds, if any.
+     * @param params The invoice's payment hash.
+     * @returns The encoded invoice and its status, `Cancelled`.
+     */
+    async cancelInvoice(params: RpcPaymentHashParams): Promise<RpcInvoice> {
+        return this.call("cancel_invoice", encodeRpcPaymentHashParams(params), decodeRpcInvoice);
+    }
+
+    /**
+     * Pays an invoice, or with a dry run only finds its route.
+     * @param params The invoice to pay and the fee bound.
+     * @returns The payment as it stands, rarely final.
+     */
+    async sendPayment(params: SendPaymentParams): Promise<RpcPayment> {
+        return this.call("send_payment", encodeSendPaymentParams(params), decodeRpcPayment);
+    }
+
+    /**
+     * Reads a payment the node sent.
+     * @param params The payment's hash.
+     * @returns The payment.
+     */
+    async getPayment(params: RpcPaymentHashParams): Promise<RpcPayment> {
+        return this.call("get_payment", encodeRpcPaymentHashParams(params), decodeRpcPayment);
     }
 
     /**

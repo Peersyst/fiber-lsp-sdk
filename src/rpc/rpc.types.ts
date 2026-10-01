@@ -1,7 +1,16 @@
-import type { Script, Transaction } from "../common";
-import type { BareHexWire, Field, HexWire, ScriptWire, TransactionWire, UintHexWire } from "../wire";
+import type { Script, TlcHashAlgorithm, Transaction } from "../common";
+import type { BareHexWire, Field, HexWire, ScriptWire, TlcHashAlgorithmWire, TransactionWire, UintHexWire } from "../wire";
 import type { IFetchLike } from "./interfaces";
-import type { CHANNEL_STATE_FLAGS, CHANNEL_STATE_NAMES, JSON_RPC_VERSION, LIST_CHANNELS_FILTERS, RPC_METHODS } from "./rpc.constants";
+import type {
+    CHANNEL_STATE_FLAGS,
+    CHANNEL_STATE_NAMES,
+    INVOICE_CURRENCIES,
+    INVOICE_STATUSES,
+    JSON_RPC_VERSION,
+    LIST_CHANNELS_FILTERS,
+    PAYMENT_STATUSES,
+    RPC_METHODS,
+} from "./rpc.constants";
 
 export type RpcMethod = (typeof RPC_METHODS)[number];
 
@@ -73,19 +82,55 @@ export type ChannelWire = {
 
 export type ListChannelsResultWire = { channels: ChannelWire[] };
 
+export type InvoiceCurrency = (typeof INVOICE_CURRENCIES)[number];
+
+export type InvoiceStatus = (typeof INVOICE_STATUSES)[number];
+
+export type PaymentStatus = (typeof PAYMENT_STATUSES)[number];
+
+export type NewInvoiceParamsWire = {
+    amount: UintHexWire;
+    description?: string;
+    currency: InvoiceCurrency;
+    payment_hash: HexWire;
+    expiry: UintHexWire;
+    hash_algorithm: TlcHashAlgorithmWire;
+};
+
+export type NewInvoiceResultWire = { invoice_address: string };
+
+export type RpcPaymentHashParamsWire = { payment_hash: HexWire };
+
+export type RpcInvoiceWire = NewInvoiceResultWire & { status: InvoiceStatus };
+
+export type SettleInvoiceParamsWire = { payment_hash: HexWire; payment_preimage: HexWire };
+
+export type SendPaymentParamsWire = { invoice: string; max_fee_amount: UintHexWire; dry_run: boolean };
+
 /**
- * Filled in as each method's encoder lands.
+ * The members the client reads; fiber writes more.
  */
+export type RpcPaymentWire = {
+    payment_hash: HexWire;
+    status: PaymentStatus;
+    created_at: UintHexWire;
+    last_updated_at: UintHexWire;
+    failed_error: string | null;
+    fee: UintHexWire;
+};
+
 export type RpcParamsWireByMethod = {
     open_channel_with_external_funding: OpenChannelWithExternalFundingParamsWire;
     submit_signed_funding_tx: SubmitSignedFundingTxParamsWire;
     abandon_channel: RpcChannelIdParamsWire;
     list_channels: ListChannelsParamsWire;
+    new_invoice: NewInvoiceParamsWire;
+    get_invoice: RpcPaymentHashParamsWire;
+    settle_invoice: SettleInvoiceParamsWire;
+    cancel_invoice: RpcPaymentHashParamsWire;
+    send_payment: SendPaymentParamsWire;
+    get_payment: RpcPaymentHashParamsWire;
 };
-
-export type RpcParamsWireOf<Method extends RpcMethod> = Method extends keyof RpcParamsWireByMethod
-    ? RpcParamsWireByMethod[Method]
-    : RpcParamsWire;
 
 export type OpenChannelWithExternalFundingParams = {
     peerPubkey: Uint8Array;
@@ -144,4 +189,42 @@ export type RpcChannel = {
      * Fiber's free text on a failed opening, the only thing telling an abandon from a timeout.
      */
     failureDetail: string | null;
+};
+
+export type NewInvoiceParams = {
+    amountShannons: string;
+    currency: InvoiceCurrency;
+    paymentHash: Uint8Array;
+    hashAlgorithm: TlcHashAlgorithm;
+    /**
+     * Required: an invoice created without one never expires.
+     */
+    expirySeconds: bigint;
+    description?: string;
+};
+
+export type NewInvoiceResult = { invoiceAddress: string };
+
+export type RpcPaymentHashParams = { paymentHash: Uint8Array };
+
+export type RpcInvoice = NewInvoiceResult & { status: InvoiceStatus };
+
+export type SettleInvoiceParams = { paymentHash: Uint8Array; paymentPreimage: Uint8Array };
+
+export type SendPaymentParams = {
+    invoice: string;
+    maxFeeAmountShannons: string;
+    dryRun: boolean;
+};
+
+export type RpcPayment = {
+    paymentHash: Uint8Array;
+    status: PaymentStatus;
+    createdAtMs: bigint;
+    lastUpdatedAtMs: bigint;
+    failedError: string | null;
+    /**
+     * Planned until the payment succeeds.
+     */
+    feeShannons: string;
 };
