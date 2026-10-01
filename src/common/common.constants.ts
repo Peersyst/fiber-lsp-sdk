@@ -47,6 +47,8 @@ export const PREIMAGE_LENGTH = 32;
  */
 export const SCRIPT_HASH_TYPES = ["data", "type", "data1", "data2"] as const;
 
+export const DEP_TYPES = ["code", "dep_group"] as const;
+
 export const TLC_DIRECTIONS = ["offered", "received"] as const;
 
 export const SIGNER_ERROR_CODES = ["unknown_channel", "malformed", "stale_state", "policy_refusal"] as const;

@@ -1,3 +1,4 @@
+export * from "./channels";
 export * from "./fiber-rpc-client";
 export * from "./interfaces";
 export * from "./json-rpc";

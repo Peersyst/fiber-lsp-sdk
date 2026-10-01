@@ -1,6 +1,16 @@
 import { concatBytes } from "@noble/hashes/utils.js";
 import type { OutPoint, Script, ScriptHashType } from "../../common";
-import { HASH256_LENGTH, MAX_AMOUNT_SHANNONS, UINT32_MAX, assertBytes, assertUnsignedBigInt, assertUnsignedInteger } from "../../common";
+import {
+    HASH256_LENGTH,
+    MAX_AMOUNT_SHANNONS,
+    SCRIPT_HASH_TYPES,
+    UINT32_MAX,
+    assertAnyBytes,
+    assertBytes,
+    assertOneOf,
+    assertUnsignedBigInt,
+    assertUnsignedInteger,
+} from "../../common";
 import { CELL_DEP_LENGTH, CELL_INPUT_LENGTH, MAX_CAPACITY_SHANNONS } from "../digest.constants";
 
 const U32_LENGTH = 4;
@@ -120,12 +130,8 @@ export function moleculeBytes(data: Uint8Array): Uint8Array {
  */
 export function encodeScript(script: Script): Uint8Array {
     assertBytes("script.codeHash", script.codeHash, HASH256_LENGTH);
-    if (!(script.hashType in HASH_TYPE_BYTES)) {
-        throw new TypeError(`script.hashType must be one of ${Object.keys(HASH_TYPE_BYTES).join(", ")}`);
-    }
-    if (!(script.args instanceof Uint8Array)) {
-        throw new TypeError("script.args must be a Uint8Array");
-    }
+    assertOneOf("script.hashType", script.hashType, SCRIPT_HASH_TYPES);
+    assertAnyBytes("script.args", script.args);
     return moleculeTable([script.codeHash, Uint8Array.of(HASH_TYPE_BYTES[script.hashType]), moleculeBytes(script.args)]);
 }
 

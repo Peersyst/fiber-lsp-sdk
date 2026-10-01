@@ -1,10 +1,32 @@
 import { assertNonEmptyString } from "../common";
 import { asWireError } from "../wire";
+import {
+    decodeAbandonChannelResult,
+    decodeListChannelsResult,
+    decodeOpenChannelWithExternalFundingResult,
+    decodeSubmitSignedFundingTxResult,
+    encodeAbandonChannelParams,
+    encodeListChannelsParams,
+    encodeOpenChannelWithExternalFundingParams,
+    encodeSubmitSignedFundingTxParams,
+} from "./channels";
 import type { FetchResponseLike, IFetchLike } from "./interfaces";
 import { decodeRpcResponse, encodeRpcRequest } from "./json-rpc";
 import { RPC_BEARER_PREFIX, RPC_CONTENT_TYPE } from "./rpc.constants";
 import { RpcError, RpcResponseError, RpcTransportError } from "./rpc.error";
-import type { FiberRpcClientOptions, RpcMethod, RpcParamsWire, RpcResultDecoder } from "./rpc.types";
+import type {
+    AbandonChannelParams,
+    RpcChannel,
+    FiberRpcClientOptions,
+    ListChannelsParams,
+    OpenChannelWithExternalFundingParams,
+    OpenChannelWithExternalFundingResult,
+    RpcMethod,
+    RpcParamsWireOf,
+    RpcResultDecoder,
+    SubmitSignedFundingTxParams,
+    SubmitSignedFundingTxResult,
+} from "./rpc.types";
 
 // A header value every runtime accepts, so a bad token fails at construction.
 const TOKEN_PATTERN = /^[\x21-\x7e]+$/;
@@ -40,12 +62,55 @@ export class FiberRpcClient {
      * @param decode Reader of the method's result.
      * @returns The decoded result.
      */
-    async call<Result>(method: RpcMethod, params: RpcParamsWire, decode: RpcResultDecoder<Result>): Promise<Result> {
+    async call<Method extends RpcMethod, Result>(
+        method: Method,
+        params: RpcParamsWireOf<Method>,
+        decode: RpcResultDecoder<Result>,
+    ): Promise<Result> {
         const id = this.nextId++;
         const text = await this.post(method, encodeRpcRequest(id, method, params));
         const response = this.readAnswer(method, () => decodeRpcResponse(text, id));
         if ("error" in response) throw new RpcError(method, response.error.code, response.error.message);
         return this.readAnswer(method, () => decode(response.result));
+    }
+
+    /**
+     * Opens a channel funded by the user's cells, blocking until the node has built the funding transaction.
+     * @param params The channel to open.
+     * @returns The final channel id and the unsigned funding transaction.
+     */
+    async openChannelWithExternalFunding(params: OpenChannelWithExternalFundingParams): Promise<OpenChannelWithExternalFundingResult> {
+        return this.call(
+            "open_channel_with_external_funding",
+            encodeOpenChannelWithExternalFundingParams(params),
+            decodeOpenChannelWithExternalFundingResult,
+        );
+    }
+
+    /**
+     * Hands the node the funding transaction the host signed.
+     * @param params The channel and its signed funding transaction.
+     * @returns The channel id and the funding transaction's hash, before broadcast.
+     */
+    async submitSignedFundingTx(params: SubmitSignedFundingTxParams): Promise<SubmitSignedFundingTxResult> {
+        return this.call("submit_signed_funding_tx", encodeSubmitSignedFundingTxParams(params), decodeSubmitSignedFundingTxResult);
+    }
+
+    /**
+     * Abandons a channel whose opening has not released our signatures.
+     * @param params The channel to abandon.
+     */
+    async abandonChannel(params: AbandonChannelParams): Promise<void> {
+        await this.call("abandon_channel", encodeAbandonChannelParams(params), decodeAbandonChannelResult);
+    }
+
+    /**
+     * Lists the node's channels.
+     * @param params The filter, if any.
+     * @returns The channels.
+     */
+    async listChannels(params: ListChannelsParams = {}): Promise<RpcChannel[]> {
+        return this.call("list_channels", encodeListChannelsParams(params), decodeListChannelsResult);
     }
 
     /**

@@ -1,6 +1,53 @@
 {
   "fiber_ref": "b71a61c3",
   "jsonrpsee_version": "0.25.1",
+  "channel_state_flags": {
+    "AwaitingChannelReady": [
+      "OUR_CHANNEL_READY",
+      "THEIR_CHANNEL_READY",
+      "CHANNEL_READY"
+    ],
+    "AwaitingTxSignatures": [
+      "OUR_TX_SIGNATURES_SENT",
+      "THEIR_TX_SIGNATURES_SENT",
+      "TX_SIGNATURES_SENT"
+    ],
+    "ChannelReady": [],
+    "Closed": [
+      "COOPERATIVE",
+      "UNCOOPERATIVE_LOCAL",
+      "ABANDONED",
+      "FUNDING_ABORTED",
+      "UNCOOPERATIVE_REMOTE",
+      "WAITING_ONCHAIN_SETTLEMENT"
+    ],
+    "CollaboratingFundingTx": [
+      "AWAITING_REMOTE_TX_COLLABORATION_MSG",
+      "PREPARING_LOCAL_TX_COLLABORATION_MSG",
+      "OUR_TX_COMPLETE_SENT",
+      "THEIR_TX_COMPLETE_SENT",
+      "COLLABORATION_COMPLETED"
+    ],
+    "NegotiatingFunding": [
+      "OUR_INIT_SENT",
+      "THEIR_INIT_SENT",
+      "INIT_SENT",
+      "AWAITING_EXTERNAL_FUNDING"
+    ],
+    "ShuttingDown": [
+      "OUR_SHUTDOWN_SENT",
+      "THEIR_SHUTDOWN_SENT",
+      "AWAITING_PENDING_TLCS",
+      "DROPPING_PENDING",
+      "WAITING_COMMITMENT_CONFIRMATION"
+    ],
+    "SigningCommitment": [
+      "OUR_COMMITMENT_SIGNED_SENT",
+      "THEIR_COMMITMENT_SIGNED_SENT",
+      "COMMITMENT_SIGNED_SENT"
+    ],
+    "Stale": []
+  },
   "envelopes": {
     "request": {
       "id": 7,

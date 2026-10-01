@@ -3,6 +3,8 @@ import {
     decodeBoolean,
     decodeEnum,
     decodeMapped,
+    decodeNull,
+    decodeOrNull,
     decodeNonEmptyString,
     decodeString,
     decodeUnsignedInteger,
@@ -148,5 +150,32 @@ describe("decodeUnsignedInteger", () => {
 
     it.each([6, -1, 1.5, "1", NaN, Infinity, null, undefined, 2 ** 53])("refuses %p", (value) => {
         expect(refusal(() => decodeUnsignedInteger(field(value), 5)).message).toBe("root must be an integer between 0 and 5");
+    });
+});
+
+describe("decodeNull", () => {
+    it("reads an explicit null", () => {
+        expect(decodeNull(field(null))).toBeUndefined();
+    });
+
+    it.each([undefined, 0, "", "null", {}, [], false])("refuses %p", (value) => {
+        expect(refusal(() => decodeNull(field(value))).message).toBe("root must be null");
+    });
+});
+
+describe("decodeOrNull", () => {
+    it("reads an explicit null as no value, without calling the reader", () => {
+        const read = jest.fn(decodeString);
+        expect(decodeOrNull(field(null), read)).toBeNull();
+        expect(read).not.toHaveBeenCalled();
+    });
+
+    it("reads anything else with the reader", () => {
+        expect(decodeOrNull(field("x"), decodeString)).toBe("x");
+    });
+
+    it.each([undefined, 1, ""])("hands %p to the reader, so an absent field is refused as the value would be", (value) => {
+        const read = (at: Field): string => decodeNonEmptyString(at);
+        expect(refusal(() => decodeOrNull(field(value), read)).message).toBe("root must be a non-empty string");
     });
 });

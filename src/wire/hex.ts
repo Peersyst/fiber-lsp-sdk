@@ -1,7 +1,8 @@
 import { bytesToHex, hexToBytes } from "@noble/hashes/utils.js";
+import { assertAnyBytes, assertBytes, isHexBytes } from "../common";
 import { malformed } from "./field";
 import { WIRE_HEX_PREFIX } from "./wire.constants";
-import type { Field } from "./wire.types";
+import type { BareHexWire, Field, HexWire } from "./wire.types";
 
 const HEX_BYTES_PATTERN = /^0x(?:[0-9a-f]{2})*$/;
 
@@ -48,10 +49,59 @@ export function decodeAnyHexBytes(field: Field): Uint8Array {
 }
 
 /**
- * Writes bytes as wire hex.
+ * Writes bytes of an exact length as wire hex.
+ * @param name Name of the value, used in the error message.
+ * @param bytes Bytes to write.
+ * @param byteLength Exact number of bytes the value must have.
+ * @returns The `0x`-prefixed lowercase hex.
+ */
+export function encodeHexBytes(name: string, bytes: Uint8Array, byteLength: number): HexWire {
+    assertBytes(name, bytes, byteLength);
+    return WIRE_HEX_PREFIX + bytesToHex(bytes);
+}
+
+/**
+ * Writes bytes of any length as wire hex, `0x` for none.
+ * @param name Name of the value, used in the error message.
  * @param bytes Bytes to write.
  * @returns The `0x`-prefixed lowercase hex.
  */
-export function encodeHexBytes(bytes: Uint8Array): string {
+export function encodeAnyHexBytes(name: string, bytes: Uint8Array): HexWire {
+    assertAnyBytes(name, bytes);
     return WIRE_HEX_PREFIX + bytesToHex(bytes);
+}
+
+/**
+ * Reads a field as lowercase hex of an exact length without the `0x` prefix.
+ * @param field Field to read.
+ * @param byteLength Exact number of bytes the hex must encode.
+ * @returns The bytes.
+ */
+export function decodeBareHexBytes(field: Field, byteLength: number): Uint8Array {
+    if (!isHexBytes(field.value, byteLength)) malformed(field, `must be ${byteLength} bytes of lowercase hex without a 0x prefix`);
+    return hexToBytes(field.value);
+}
+
+/**
+ * Writes bytes of an exact length as lowercase hex without the `0x` prefix.
+ * @param name Name of the value, used in the error message.
+ * @param bytes Bytes to write.
+ * @param byteLength Exact number of bytes the value must have.
+ * @returns The bare hex.
+ */
+export function encodeBareHexBytes(name: string, bytes: Uint8Array, byteLength: number): BareHexWire {
+    assertBytes(name, bytes, byteLength);
+    return bytesToHex(bytes);
+}
+
+/**
+ * Asserts that a value is wire hex of an exact length.
+ * @param name Name of the value, used in the error message.
+ * @param value Value to check.
+ * @param byteLength Exact number of bytes the hex must encode.
+ */
+export function assertWireHexBytes(name: string, value: unknown, byteLength: number): asserts value is string {
+    if (!isWireHex(value, byteLength)) {
+        throw new TypeError(`${name} must be ${byteLength} bytes of 0x-prefixed lowercase hex`);
+    }
 }

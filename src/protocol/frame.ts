@@ -1,4 +1,4 @@
-import { SCHNORR_SIGNATURE_LENGTH, X_ONLY_PUBLIC_KEY_LENGTH, assertBytes } from "../common";
+import { SCHNORR_SIGNATURE_LENGTH, X_ONLY_PUBLIC_KEY_LENGTH } from "../common";
 import type { Field } from "../wire";
 import {
     decodeEnum,
@@ -123,13 +123,11 @@ function decodeErrorFrame(field: Field): Extract<InboundFrame, { type: "error" }
 function encodeFrame(frame: OutboundFrame): OutboundFrameWire {
     switch (frame.type) {
         case "signed_challenge":
-            assertBytes("publicKey", frame.publicKey, X_ONLY_PUBLIC_KEY_LENGTH);
-            assertBytes("signature", frame.signature, SCHNORR_SIGNATURE_LENGTH);
             return {
                 type: "signed_challenge",
                 protocol_version: PROTOCOL_VERSION,
-                public_key: encodeHexBytes(frame.publicKey),
-                signature: encodeHexBytes(frame.signature),
+                public_key: encodeHexBytes("publicKey", frame.publicKey, X_ONLY_PUBLIC_KEY_LENGTH),
+                signature: encodeHexBytes("signature", frame.signature, SCHNORR_SIGNATURE_LENGTH),
             };
         case "ping":
         case "pong":
