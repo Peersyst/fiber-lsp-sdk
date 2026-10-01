@@ -4,14 +4,14 @@ import { decodeEnum, readArray, readObject } from "./field";
 import { decodeAnyHexBytes, decodeHexBytes, encodeAnyHexBytes, encodeHexBytes } from "./hex";
 import { decodeOutPoint, decodeScript, decodeScriptOrNull, encodeOutPoint, encodeScript, encodeScriptOrNull } from "./script";
 import { decodeUintHex, decodeUintHexNumber, encodeUintHex, encodeUintHexNumber } from "./uint";
-import type { CellDepWire, CellInputWire, CellOutputWire, Field, TransactionWire } from "./wire.types";
+import type { CellDepWire, CellInputWire, CellOutputWire, TransactionWire, WireField } from "./wire.types";
 
 /**
  * Reads a field as a transaction in CKB's JSON shape.
  * @param field Field to read.
  * @returns The transaction.
  */
-export function decodeTransaction(field: Field): Transaction {
+export function decodeTransaction(field: WireField): Transaction {
     const at = readObject<TransactionWire>(field);
     return {
         version: decodeUintHexNumber(at("version"), UINT32_MAX),
@@ -47,7 +47,7 @@ export function encodeTransaction(name: string, tx: Transaction): TransactionWir
  * @param field Field to read.
  * @returns The cell dep.
  */
-function decodeCellDep(field: Field): CellDep {
+function decodeCellDep(field: WireField): CellDep {
     const at = readObject<CellDepWire>(field);
     return { outPoint: decodeOutPoint(at("out_point")), depType: decodeEnum(at("dep_type"), DEP_TYPES) };
 }
@@ -57,7 +57,7 @@ function decodeCellDep(field: Field): CellDep {
  * @param field Field to read.
  * @returns The cell input.
  */
-function decodeCellInput(field: Field): CellInput {
+function decodeCellInput(field: WireField): CellInput {
     const at = readObject<CellInputWire>(field);
     return { since: decodeUintHex(at("since"), UINT64_MAX), previousOutput: decodeOutPoint(at("previous_output")) };
 }
@@ -67,7 +67,7 @@ function decodeCellInput(field: Field): CellInput {
  * @param field Field to read.
  * @returns The cell output.
  */
-function decodeCellOutput(field: Field): CellOutput {
+function decodeCellOutput(field: WireField): CellOutput {
     const at = readObject<CellOutputWire>(field);
     return {
         capacityShannons: decodeUintHex(at("capacity"), UINT64_MAX),

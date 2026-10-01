@@ -1,17 +1,17 @@
 import { bytesToHex, hexToBytes } from "@noble/hashes/utils.js";
 import type { Script } from "../../../../src/common";
 import {
-    encodeCellInput,
-    encodeCellOutput,
-    encodeOutPoint,
-    encodeRawTransaction,
-    encodeScript,
-    encodeScriptOpt,
-    encodeTransaction,
     moleculeBytes,
+    moleculeCellInput,
+    moleculeCellOutput,
     moleculeDynvec,
     moleculeFixvec,
+    moleculeOutPoint,
+    moleculeRawTransaction,
+    moleculeScript,
+    moleculeScriptOpt,
     moleculeTable,
+    moleculeTransaction,
     uint128Le,
     uint32Le,
     uint64Be,
@@ -72,9 +72,9 @@ describe("moleculeBytes", () => {
     });
 });
 
-describe("encodeScript", () => {
+describe("moleculeScript", () => {
     it("matches the canonical 53-byte default Script", () => {
-        expect(bytesToHex(encodeScript(ZERO_SCRIPT))).toBe("35000000100000003000000031000000" + "00".repeat(32) + "00" + "00000000");
+        expect(bytesToHex(moleculeScript(ZERO_SCRIPT))).toBe("35000000100000003000000031000000" + "00".repeat(32) + "00" + "00000000");
     });
 
     it.each([
@@ -83,59 +83,59 @@ describe("encodeScript", () => {
         ["data1", 0x02],
         ["data2", 0x04],
     ] as const)("encodes hash_type %s as 0x%s", (hashType, byte) => {
-        expect(encodeScript({ ...ZERO_SCRIPT, hashType })[48]).toBe(byte);
+        expect(moleculeScript({ ...ZERO_SCRIPT, hashType })[48]).toBe(byte);
     });
 
     it("rejects a malformed code hash and an unknown hash type", () => {
-        expect(() => encodeScript({ ...ZERO_SCRIPT, codeHash: new Uint8Array(31) })).toThrow(TypeError);
-        expect(() => encodeScript({ ...ZERO_SCRIPT, hashType: "data3" as never })).toThrow(TypeError);
-        expect(() => encodeScript({ ...ZERO_SCRIPT, args: "00" as never })).toThrow(TypeError);
+        expect(() => moleculeScript({ ...ZERO_SCRIPT, codeHash: new Uint8Array(31) })).toThrow(TypeError);
+        expect(() => moleculeScript({ ...ZERO_SCRIPT, hashType: "data3" as never })).toThrow(TypeError);
+        expect(() => moleculeScript({ ...ZERO_SCRIPT, args: "00" as never })).toThrow(TypeError);
     });
 });
 
-describe("encodeScriptOpt", () => {
+describe("moleculeScriptOpt", () => {
     it("serializes None as zero bytes", () => {
-        expect(encodeScriptOpt(null)).toHaveLength(0);
-        expect(bytesToHex(encodeScriptOpt(ZERO_SCRIPT))).toBe(bytesToHex(encodeScript(ZERO_SCRIPT)));
+        expect(moleculeScriptOpt(null)).toHaveLength(0);
+        expect(bytesToHex(moleculeScriptOpt(ZERO_SCRIPT))).toBe(bytesToHex(moleculeScript(ZERO_SCRIPT)));
     });
 });
 
-describe("encodeOutPoint", () => {
+describe("moleculeOutPoint", () => {
     it("concatenates the tx hash and the little-endian index", () => {
-        expect(bytesToHex(encodeOutPoint(OUT_POINT))).toBe("aa".repeat(32) + "07000000");
+        expect(bytesToHex(moleculeOutPoint(OUT_POINT))).toBe("aa".repeat(32) + "07000000");
     });
 
     it("rejects a malformed hash and an out-of-range index", () => {
-        expect(() => encodeOutPoint({ ...OUT_POINT, txHash: new Uint8Array(33) })).toThrow(TypeError);
-        expect(() => encodeOutPoint({ ...OUT_POINT, index: -1 })).toThrow(RangeError);
-        expect(() => encodeOutPoint({ ...OUT_POINT, index: 2 ** 32 })).toThrow(RangeError);
+        expect(() => moleculeOutPoint({ ...OUT_POINT, txHash: new Uint8Array(33) })).toThrow(TypeError);
+        expect(() => moleculeOutPoint({ ...OUT_POINT, index: -1 })).toThrow(RangeError);
+        expect(() => moleculeOutPoint({ ...OUT_POINT, index: 2 ** 32 })).toThrow(RangeError);
     });
 });
 
-describe("encodeCellInput", () => {
+describe("moleculeCellInput", () => {
     it("puts the little-endian since before the out point", () => {
-        expect(bytesToHex(encodeCellInput(0x0102030405060708n, OUT_POINT))).toBe("0807060504030201" + "aa".repeat(32) + "07000000");
+        expect(bytesToHex(moleculeCellInput(0x0102030405060708n, OUT_POINT))).toBe("0807060504030201" + "aa".repeat(32) + "07000000");
     });
 });
 
-describe("encodeCellOutput", () => {
+describe("moleculeCellOutput", () => {
     it("gives a None type script an offset equal to the total size", () => {
-        const output = encodeCellOutput(500n, ZERO_SCRIPT, null);
+        const output = moleculeCellOutput(500n, ZERO_SCRIPT, null);
         const view = new DataView(output.buffer);
         expect(view.getUint32(0, true)).toBe(output.length);
         expect(view.getUint32(12, true)).toBe(output.length);
     });
 
     it("appends the type script when present", () => {
-        const withType = encodeCellOutput(500n, ZERO_SCRIPT, ZERO_SCRIPT);
-        const withoutType = encodeCellOutput(500n, ZERO_SCRIPT, null);
-        expect(withType.length).toBe(withoutType.length + encodeScript(ZERO_SCRIPT).length);
+        const withType = moleculeCellOutput(500n, ZERO_SCRIPT, ZERO_SCRIPT);
+        const withoutType = moleculeCellOutput(500n, ZERO_SCRIPT, null);
+        expect(withType.length).toBe(withoutType.length + moleculeScript(ZERO_SCRIPT).length);
     });
 });
 
-describe("encodeRawTransaction", () => {
+describe("moleculeRawTransaction", () => {
     it("matches the canonical 52-byte all-empty RawTransaction", () => {
-        const raw = encodeRawTransaction({ version: 0, cellDeps: [], headerDeps: [], inputs: [], outputs: [], outputsData: [] });
+        const raw = moleculeRawTransaction({ version: 0, cellDeps: [], headerDeps: [], inputs: [], outputs: [], outputsData: [] });
         expect(bytesToHex(raw)).toBe(
             "34000000" +
                 "1c000000" +
@@ -155,16 +155,16 @@ describe("encodeRawTransaction", () => {
 
     it("rejects malformed deps, header deps and inputs", () => {
         const empty = { version: 0, cellDeps: [], headerDeps: [], inputs: [], outputs: [], outputsData: [] };
-        expect(() => encodeRawTransaction({ ...empty, cellDeps: [new Uint8Array(36)] })).toThrow(TypeError);
-        expect(() => encodeRawTransaction({ ...empty, headerDeps: [new Uint8Array(31)] })).toThrow(TypeError);
-        expect(() => encodeRawTransaction({ ...empty, inputs: [new Uint8Array(43)] })).toThrow(TypeError);
+        expect(() => moleculeRawTransaction({ ...empty, cellDeps: [new Uint8Array(36)] })).toThrow(TypeError);
+        expect(() => moleculeRawTransaction({ ...empty, headerDeps: [new Uint8Array(31)] })).toThrow(TypeError);
+        expect(() => moleculeRawTransaction({ ...empty, inputs: [new Uint8Array(43)] })).toThrow(TypeError);
     });
 });
 
-describe("encodeTransaction", () => {
+describe("moleculeTransaction", () => {
     it("wraps the raw tx and the witnesses in a two-field table", () => {
-        const raw = encodeRawTransaction({ version: 0, cellDeps: [], headerDeps: [], inputs: [], outputs: [], outputsData: [] });
-        const transaction = encodeTransaction(raw, [hexToBytes("deadbeef")]);
+        const raw = moleculeRawTransaction({ version: 0, cellDeps: [], headerDeps: [], inputs: [], outputs: [], outputsData: [] });
+        const transaction = moleculeTransaction(raw, [hexToBytes("deadbeef")]);
         expect(bytesToHex(transaction)).toBe(
             "50000000" + "0c000000" + "40000000" + bytesToHex(raw) + "10000000" + "08000000" + "04000000" + "deadbeef",
         );

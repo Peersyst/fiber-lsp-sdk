@@ -3,14 +3,14 @@ import { HASH256_LENGTH, SCRIPT_HASH_TYPES, UINT32_MAX, assertOneOf } from "../c
 import { decodeEnum, decodeOrNull, readObject } from "./field";
 import { decodeAnyHexBytes, decodeHexBytes, encodeAnyHexBytes, encodeHexBytes } from "./hex";
 import { decodeUintHexNumber, encodeUintHexNumber } from "./uint";
-import type { Field, OutPointWire, ScriptWire } from "./wire.types";
+import type { OutPointWire, ScriptWire, WireField } from "./wire.types";
 
 /**
  * Reads a field as a script in CKB's JSON shape.
  * @param field Field to read.
  * @returns The script.
  */
-export function decodeScript(field: Field): Script {
+export function decodeScript(field: WireField): Script {
     const at = readObject<ScriptWire>(field);
     return {
         codeHash: decodeHexBytes(at("code_hash"), HASH256_LENGTH),
@@ -24,7 +24,7 @@ export function decodeScript(field: Field): Script {
  * @param field Field to read.
  * @returns The script, or `null`.
  */
-export function decodeScriptOrNull(field: Field): Script | null {
+export function decodeScriptOrNull(field: WireField): Script | null {
     return decodeOrNull(field, decodeScript);
 }
 
@@ -33,7 +33,7 @@ export function decodeScriptOrNull(field: Field): Script | null {
  * @param field Field to read.
  * @returns The outpoint.
  */
-export function decodeOutPoint(field: Field): OutPoint {
+export function decodeOutPoint(field: WireField): OutPoint {
     const at = readObject<OutPointWire>(field);
     return { txHash: decodeHexBytes(at("tx_hash"), HASH256_LENGTH), index: decodeUintHexNumber(at("index"), UINT32_MAX) };
 }

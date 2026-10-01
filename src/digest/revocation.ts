@@ -12,8 +12,8 @@ import type { FiberChannelKeys } from "../derivation";
 import { MAX_COMMITMENT_NUMBER, pubkeyOf } from "../derivation";
 import { MAX_CAPACITY_SHANNONS, MAX_SINCE_PAYLOAD, SINCE_RELATIVE_EPOCH_FLAGS } from "./digest.constants";
 import type { RevocationInput } from "./digest.types";
-import { calculateFee, commitmentTxSize } from "./fee";
-import { aggregateXOnlyPubkey, encodeCellOutput, moleculeBytes, subtractFee, uint128Le, uint64Be, uint64Le } from "./utils";
+import { calculateTxFee, commitmentTxSize } from "./fee";
+import { aggregateXOnlyPubkey, moleculeBytes, moleculeCellOutput, subtractTxFee, uint128Le, uint64Be, uint64Le } from "./utils";
 
 /**
  * Recomputes a revocation digest: fiber's hash over the punishment output, its data, and the revoked cell's lock args.
@@ -36,14 +36,14 @@ export function computeRevocationDigest(keys: FiberChannelKeys, input: Revocatio
         ? [localFundingPubkey, input.remoteFundingPubkey]
         : [input.remoteFundingPubkey, localFundingPubkey];
 
-    const fee = calculateFee(input.commitmentFeeRate, commitmentTxSize(input.cellDepsCount, input.udtTypeScript, input.commitmentLock));
+    const fee = calculateTxFee(input.commitmentFeeRate, commitmentTxSize(input.cellDepsCount, input.udtTypeScript, input.commitmentLock));
     const isUdt = input.udtTypeScript !== null;
     const liquidCapacity = input.toLocalShannons + input.toRemoteShannons;
     assertUnsignedBigInt("liquid capacity", liquidCapacity, MAX_AMOUNT_SHANNONS);
     const totalReserved = input.localReservedCkbShannons + input.remoteReservedCkbShannons;
-    const capacity = subtractFee(isUdt ? totalReserved : liquidCapacity + totalReserved, fee);
+    const capacity = subtractTxFee(isUdt ? totalReserved : liquidCapacity + totalReserved, fee);
 
-    const output = encodeCellOutput(capacity, input.payoutScript, input.udtTypeScript);
+    const output = moleculeCellOutput(capacity, input.payoutScript, input.udtTypeScript);
     const outputData = moleculeBytes(isUdt ? uint128Le(liquidCapacity) : new Uint8Array(0));
     const lockArgs = concatBytes(
         blake160(aggregateXOnlyPubkey(orderedPubkeys)),

@@ -1,7 +1,7 @@
 import { UINT128_MAX, assertUnsignedBigInt, assertUnsignedInteger } from "../common";
-import { malformed } from "./field";
+import { malformedWireField } from "./field";
 import { WIRE_HEX_PREFIX } from "./wire.constants";
-import type { Field, UintHexWire } from "./wire.types";
+import type { UintHexWire, WireField } from "./wire.types";
 
 const UINT_HEX_PATTERN = /^0x(?:0|[1-9a-f][0-9a-f]*)$/;
 
@@ -14,13 +14,13 @@ const MAX_UINT_HEX_LENGTH = WIRE_HEX_PREFIX.length + UINT128_MAX.toString(16).le
  * @param max Highest accepted value, inclusive: the wire width, or the domain bound when it is narrower.
  * @returns The integer.
  */
-export function decodeUintHex(field: Field, max: bigint): bigint {
+export function decodeUintHex(field: WireField, max: bigint): bigint {
     const { value } = field;
     if (typeof value !== "string" || value.length > MAX_UINT_HEX_LENGTH || !UINT_HEX_PATTERN.test(value)) {
-        malformed(field, "must be an unsigned integer in 0x hex without leading zeros");
+        malformedWireField(field, "must be an unsigned integer in 0x hex without leading zeros");
     }
     const parsed = BigInt(value);
-    if (parsed > max) malformed(field, `must be at most ${max}`);
+    if (parsed > max) malformedWireField(field, `must be at most ${max}`);
     return parsed;
 }
 
@@ -30,7 +30,7 @@ export function decodeUintHex(field: Field, max: bigint): bigint {
  * @param max Highest accepted value, inclusive, at most `Number.MAX_SAFE_INTEGER`.
  * @returns The integer.
  */
-export function decodeUintHexNumber(field: Field, max: number): number {
+export function decodeUintHexNumber(field: WireField, max: number): number {
     assertUnsignedInteger("max", max, Number.MAX_SAFE_INTEGER);
     return Number(decodeUintHex(field, BigInt(max)));
 }

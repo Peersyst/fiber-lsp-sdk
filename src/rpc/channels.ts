@@ -1,5 +1,5 @@
 import { COMPRESSED_POINT_LENGTH, HASH256_LENGTH, UINT64_MAX, assertBoolean, assertOneOf } from "../common";
-import type { Field } from "../wire";
+import type { WireField } from "../wire";
 import {
     assertWireHexBytes,
     decodeBareHexBytes,
@@ -15,21 +15,14 @@ import {
     encodeBareHexBytes,
     encodeScript,
     encodeTransaction,
-    malformed,
+    malformedWireField,
     readArray,
     readObject,
     requireHexBytes,
 } from "../wire";
-import { CHANNEL_STATE_FLAGS, CHANNEL_STATE_NAMES, LIST_CHANNELS_FILTERS } from "./rpc.constants";
+import { LIST_CHANNELS_FILTERS, RPC_CHANNEL_STATE_FLAGS, RPC_CHANNEL_STATE_NAMES } from "./rpc.constants";
 import type {
     AbandonChannelParams,
-    RpcChannel,
-    RpcChannelIdParamsWire,
-    ChannelState,
-    ChannelStateFlag,
-    ChannelStateName,
-    ChannelStateWire,
-    ChannelWire,
     ListChannelsParams,
     ListChannelsParamsWire,
     ListChannelsResultWire,
@@ -37,6 +30,13 @@ import type {
     OpenChannelWithExternalFundingParamsWire,
     OpenChannelWithExternalFundingResult,
     OpenChannelWithExternalFundingResultWire,
+    RpcChannel,
+    RpcChannelIdParamsWire,
+    RpcChannelState,
+    RpcChannelStateFlag,
+    RpcChannelStateName,
+    RpcChannelStateWire,
+    RpcChannelWire,
     SubmitSignedFundingTxParams,
     SubmitSignedFundingTxParamsWire,
     SubmitSignedFundingTxResult,
@@ -67,7 +67,7 @@ export function encodeOpenChannelWithExternalFundingParams(
  * @param field The result field.
  * @returns The final channel id and the unsigned funding transaction.
  */
-export function decodeOpenChannelWithExternalFundingResult(field: Field): OpenChannelWithExternalFundingResult {
+export function decodeOpenChannelWithExternalFundingResult(field: WireField): OpenChannelWithExternalFundingResult {
     const at = readObject<OpenChannelWithExternalFundingResultWire>(field);
     return {
         channelId: requireHexBytes(at("channel_id"), HASH256_LENGTH),
@@ -90,7 +90,7 @@ export function encodeSubmitSignedFundingTxParams(params: SubmitSignedFundingTxP
  * @param field The result field.
  * @returns The channel id and the funding transaction's hash.
  */
-export function decodeSubmitSignedFundingTxResult(field: Field): SubmitSignedFundingTxResult {
+export function decodeSubmitSignedFundingTxResult(field: WireField): SubmitSignedFundingTxResult {
     const at = readObject<SubmitSignedFundingTxResultWire>(field);
     return {
         channelId: requireHexBytes(at("channel_id"), HASH256_LENGTH),
@@ -112,7 +112,7 @@ export function encodeAbandonChannelParams(params: AbandonChannelParams): RpcCha
  * Reads the result of `abandon_channel`, which is `null`.
  * @param field The result field.
  */
-export function decodeAbandonChannelResult(field: Field): void {
+export function decodeAbandonChannelResult(field: WireField): void {
     decodeNull(field);
 }
 
@@ -132,7 +132,7 @@ export function encodeListChannelsParams(params: ListChannelsParams): ListChanne
  * @param field The result field.
  * @returns The channels.
  */
-export function decodeListChannelsResult(field: Field): RpcChannel[] {
+export function decodeListChannelsResult(field: WireField): RpcChannel[] {
     return readArray(readObject<ListChannelsResultWire>(field)("channels")).map(decodeRpcChannel);
 }
 
@@ -141,13 +141,13 @@ export function decodeListChannelsResult(field: Field): RpcChannel[] {
  * @param field Field to read.
  * @returns The channel.
  */
-function decodeRpcChannel(field: Field): RpcChannel {
-    const at = readObject<ChannelWire>(field);
+function decodeRpcChannel(field: WireField): RpcChannel {
+    const at = readObject<RpcChannelWire>(field);
     return {
         channelId: requireHexBytes(at("channel_id"), HASH256_LENGTH),
         peerPubkey: decodeBareHexBytes(at("pubkey"), COMPRESSED_POINT_LENGTH),
         fundingUdtTypeScript: decodeScriptOrNull(at("funding_udt_type_script")),
-        state: decodeChannelState(at("state")),
+        state: decodeRpcChannelState(at("state")),
         localBalanceShannons: decodeRpcShannons(at("local_balance")),
         remoteBalanceShannons: decodeRpcShannons(at("remote_balance")),
         offeredTlcBalanceShannons: decodeRpcShannons(at("offered_tlc_balance")),
@@ -163,9 +163,9 @@ function decodeRpcChannel(field: Field): RpcChannel {
  * @param field Field to read.
  * @returns The state.
  */
-export function decodeChannelState(field: Field): ChannelState {
-    const at = readObject<ChannelStateWire>(field);
-    return stateOf(decodeEnum(at("state_name"), CHANNEL_STATE_NAMES), at("state_flags"));
+export function decodeRpcChannelState(field: WireField): RpcChannelState {
+    const at = readObject<RpcChannelStateWire>(field);
+    return stateOf(decodeEnum(at("state_name"), RPC_CHANNEL_STATE_NAMES), at("state_flags"));
 }
 
 /**
@@ -174,10 +174,10 @@ export function decodeChannelState(field: Field): ChannelState {
  * @param flagsField The `state_flags` field.
  * @returns The state.
  */
-function stateOf<Name extends ChannelStateName>(name: Name, flagsField: Field): ChannelState {
-    const names: readonly ChannelStateFlag<Name>[] = CHANNEL_STATE_FLAGS[name];
-    if (names.length > 0) return { name, flags: decodeFlags(flagsField, names) } as ChannelState;
+function stateOf<Name extends RpcChannelStateName>(name: Name, flagsField: WireField): RpcChannelState {
+    const names: readonly RpcChannelStateFlag<Name>[] = RPC_CHANNEL_STATE_FLAGS[name];
+    if (names.length > 0) return { name, flags: decodeFlags(flagsField, names) } as RpcChannelState;
     // Fiber's unit variants carry no `state_flags` at all, so even `""` did not come from it.
-    if (flagsField.value !== undefined) malformed(flagsField, `must be absent for ${name}`);
-    return { name, flags: [] } as ChannelState;
+    if (flagsField.value !== undefined) malformedWireField(flagsField, `must be absent for ${name}`);
+    return { name, flags: [] } as RpcChannelState;
 }

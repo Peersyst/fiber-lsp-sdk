@@ -1,7 +1,7 @@
 import { hexToBytes } from "@noble/hashes/utils.js";
 import { COMMITMENT_LOCK_TESTNET } from "../../../src/digest/digest.constants";
 import type { Script } from "../../../src/common";
-import { calculateFee, commitmentTxSize, shutdownTxSize } from "../../../src/digest/fee";
+import { calculateTxFee, commitmentTxSize, shutdownTxSize } from "../../../src/digest/fee";
 
 const UDT_SCRIPT: Script = {
     codeHash: hexToBytes("aa".repeat(32)),
@@ -52,15 +52,15 @@ describe("shutdownTxSize", () => {
     });
 });
 
-describe("calculateFee", () => {
+describe("calculateTxFee", () => {
     it("truncates towards zero", () => {
-        expect(calculateFee(1000n, 456)).toBe(456n);
-        expect(calculateFee(1537n, 456)).toBe(700n);
-        expect(calculateFee(1n, 456)).toBe(0n);
+        expect(calculateTxFee(1000n, 456)).toBe(456n);
+        expect(calculateTxFee(1537n, 456)).toBe(700n);
+        expect(calculateTxFee(1n, 456)).toBe(0n);
     });
 
     it("refuses a negative rate and a fee beyond u64", () => {
-        expect(() => calculateFee(-1n, 456)).toThrow(RangeError);
-        expect(() => calculateFee((1n << 64n) - 1n, 1001)).toThrow(RangeError);
+        expect(() => calculateTxFee(-1n, 456)).toThrow(RangeError);
+        expect(() => calculateTxFee((1n << 64n) - 1n, 1001)).toThrow(RangeError);
     });
 });

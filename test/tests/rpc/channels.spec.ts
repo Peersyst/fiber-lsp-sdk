@@ -2,14 +2,14 @@ import { hexToBytes } from "@noble/hashes/utils.js";
 import type { Script } from "../../../src/common";
 import type { OpenChannelWithExternalFundingParams, SubmitSignedFundingTxParams } from "../../../src/rpc";
 import {
-    CHANNEL_STATE_FLAGS,
     FiberRpcClient,
+    RPC_CHANNEL_STATE_FLAGS,
     RpcError,
     RpcResponseError,
     decodeAbandonChannelResult,
-    decodeChannelState,
     decodeListChannelsResult,
     decodeOpenChannelWithExternalFundingResult,
+    decodeRpcChannelState,
     decodeSubmitSignedFundingTxResult,
     encodeAbandonChannelParams,
     encodeListChannelsParams,
@@ -369,9 +369,9 @@ describe("list_channels", () => {
     });
 });
 
-describe("decodeChannelState", () => {
+describe("decodeRpcChannelState", () => {
     function state(value: unknown): unknown {
-        return decodeChannelState({ value, path: "state" });
+        return decodeRpcChannelState({ value, path: "state" });
     }
 
     it("reads each state the vectors carry as the name and the flags fiber wrote", () => {
@@ -383,7 +383,7 @@ describe("decodeChannelState", () => {
         }
     });
 
-    it.each(Object.entries(CHANNEL_STATE_FLAGS).filter(([, flags]) => flags.length > 0))(
+    it.each(Object.entries(RPC_CHANNEL_STATE_FLAGS).filter(([, flags]) => flags.length > 0))(
         "reads every flag %s has, and none",
         (name, flags) => {
             expect(state({ state_name: name, state_flags: flags.join("|") })).toEqual({ name, flags: [...flags] });

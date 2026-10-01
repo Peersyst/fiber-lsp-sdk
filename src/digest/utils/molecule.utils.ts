@@ -128,7 +128,7 @@ export function moleculeBytes(data: Uint8Array): Uint8Array {
  * @param script Script to serialize.
  * @returns The Script bytes.
  */
-export function encodeScript(script: Script): Uint8Array {
+export function moleculeScript(script: Script): Uint8Array {
     assertBytes("script.codeHash", script.codeHash, HASH256_LENGTH);
     assertOneOf("script.hashType", script.hashType, SCRIPT_HASH_TYPES);
     assertAnyBytes("script.args", script.args);
@@ -140,8 +140,8 @@ export function encodeScript(script: Script): Uint8Array {
  * @param script Script to serialize, or `null` for none.
  * @returns The ScriptOpt bytes.
  */
-export function encodeScriptOpt(script: Script | null): Uint8Array {
-    return script === null ? new Uint8Array(0) : encodeScript(script);
+export function moleculeScriptOpt(script: Script | null): Uint8Array {
+    return script === null ? new Uint8Array(0) : moleculeScript(script);
 }
 
 /**
@@ -149,7 +149,7 @@ export function encodeScriptOpt(script: Script | null): Uint8Array {
  * @param outPoint Out point to serialize.
  * @returns The 36 bytes.
  */
-export function encodeOutPoint(outPoint: OutPoint): Uint8Array {
+export function moleculeOutPoint(outPoint: OutPoint): Uint8Array {
     assertBytes("outPoint.txHash", outPoint.txHash, HASH256_LENGTH);
     assertUnsignedInteger("outPoint.index", outPoint.index, UINT32_MAX);
     return concatBytes(outPoint.txHash, uint32Le(outPoint.index));
@@ -161,8 +161,8 @@ export function encodeOutPoint(outPoint: OutPoint): Uint8Array {
  * @param previousOutput The consumed cell's out point.
  * @returns The 44 bytes.
  */
-export function encodeCellInput(since: bigint, previousOutput: OutPoint): Uint8Array {
-    return concatBytes(uint64Le(since), encodeOutPoint(previousOutput));
+export function moleculeCellInput(since: bigint, previousOutput: OutPoint): Uint8Array {
+    return concatBytes(uint64Le(since), moleculeOutPoint(previousOutput));
 }
 
 /**
@@ -172,8 +172,8 @@ export function encodeCellInput(since: bigint, previousOutput: OutPoint): Uint8A
  * @param type Type script of the cell, or `null` for none.
  * @returns The CellOutput bytes.
  */
-export function encodeCellOutput(capacity: bigint, lock: Script, type: Script | null): Uint8Array {
-    return moleculeTable([uint64Le(capacity), encodeScript(lock), encodeScriptOpt(type)]);
+export function moleculeCellOutput(capacity: bigint, lock: Script, type: Script | null): Uint8Array {
+    return moleculeTable([uint64Le(capacity), moleculeScript(lock), moleculeScriptOpt(type)]);
 }
 
 export type RawTransactionFields = {
@@ -202,7 +202,7 @@ export type RawTransactionFields = {
  * @param fields The six schema fields.
  * @returns The RawTransaction bytes.
  */
-export function encodeRawTransaction(fields: RawTransactionFields): Uint8Array {
+export function moleculeRawTransaction(fields: RawTransactionFields): Uint8Array {
     for (const [index, cellDep] of fields.cellDeps.entries()) assertBytes(`cellDeps[${index}]`, cellDep, CELL_DEP_LENGTH);
     for (const [index, headerDep] of fields.headerDeps.entries()) assertBytes(`headerDeps[${index}]`, headerDep, HASH256_LENGTH);
     for (const [index, input] of fields.inputs.entries()) assertBytes(`inputs[${index}]`, input, CELL_INPUT_LENGTH);
@@ -222,6 +222,6 @@ export function encodeRawTransaction(fields: RawTransactionFields): Uint8Array {
  * @param witnesses Raw witnesses, wrapped into molecule `Bytes` here.
  * @returns The Transaction bytes.
  */
-export function encodeTransaction(raw: Uint8Array, witnesses: Uint8Array[]): Uint8Array {
+export function moleculeTransaction(raw: Uint8Array, witnesses: Uint8Array[]): Uint8Array {
     return moleculeTable([raw, moleculeDynvec(witnesses.map(moleculeBytes))]);
 }

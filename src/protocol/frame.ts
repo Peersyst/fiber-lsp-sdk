@@ -1,5 +1,5 @@
 import { SCHNORR_SIGNATURE_LENGTH, X_ONLY_PUBLIC_KEY_LENGTH } from "../common";
-import type { Field } from "../wire";
+import type { WireField } from "../wire";
 import {
     decodeEnum,
     decodeHexBytes,
@@ -7,14 +7,14 @@ import {
     decodeString,
     decodeUnsignedInteger,
     encodeHexBytes,
-    malformed,
+    malformedWireField,
     readObject,
 } from "../wire";
 import { decodeChannelRegistered, encodeRegisterChannel } from "./channel-registration";
 import { CHALLENGE_LENGTH, INBOUND_FRAME_TYPES, PROTOCOL_VERSION } from "./protocol.constants";
 import type {
     ChallengeWire,
-    ErrorWire,
+    ErrorFrameWire,
     InboundFrame,
     InboundFrameWire,
     OutboundFrame,
@@ -32,9 +32,9 @@ const FRAME_PATH = "frame";
  * @returns The frame; a `sign_request` carries its envelope, with the params still to decode.
  */
 export function decodeInboundFrame(data: unknown): InboundFrame {
-    const frame: Field = { value: parseFrame(data), path: FRAME_PATH };
+    const frame: WireField = { value: parseFrame(data), path: FRAME_PATH };
     const type = decodeEnum(readObject<InboundFrameWire>(frame)("type"), INBOUND_FRAME_TYPES);
-    const body: Field = { value: frame.value, path: type };
+    const body: WireField = { value: frame.value, path: type };
     switch (type) {
         case "challenge":
             return decodeChallenge(body);
@@ -67,12 +67,12 @@ export function encodeOutboundFrame(frame: OutboundFrame): string {
  * @returns The parsed value, still unknown.
  */
 function parseFrame(data: unknown): unknown {
-    const field: Field = { value: data, path: FRAME_PATH };
-    if (typeof data !== "string") malformed(field, "must be a text frame");
+    const field: WireField = { value: data, path: FRAME_PATH };
+    if (typeof data !== "string") malformedWireField(field, "must be a text frame");
     try {
         return JSON.parse(data) as unknown;
     } catch {
-        malformed(field, "must be valid JSON");
+        malformedWireField(field, "must be valid JSON");
     }
 }
 
@@ -81,7 +81,7 @@ function parseFrame(data: unknown): unknown {
  * @param field The frame.
  * @returns The challenge bytes.
  */
-function decodeChallenge(field: Field): Extract<InboundFrame, { type: "challenge" }> {
+function decodeChallenge(field: WireField): Extract<InboundFrame, { type: "challenge" }> {
     const at = readObject<ChallengeWire>(field);
     return { type: "challenge", challenge: decodeHexBytes(at("challenge"), CHALLENGE_LENGTH) };
 }
@@ -91,7 +91,7 @@ function decodeChallenge(field: Field): Extract<InboundFrame, { type: "challenge
  * @param field The frame.
  * @returns The bridge's version and pending count.
  */
-function decodeSessionEstablished(field: Field): Extract<InboundFrame, { type: "session_established" }> {
+function decodeSessionEstablished(field: WireField): Extract<InboundFrame, { type: "session_established" }> {
     const at = readObject<SessionEstablishedWire>(field);
     return {
         type: "session_established",
@@ -105,8 +105,8 @@ function decodeSessionEstablished(field: Field): Extract<InboundFrame, { type: "
  * @param field The frame.
  * @returns The failure, with the bridge's own code.
  */
-function decodeErrorFrame(field: Field): Extract<InboundFrame, { type: "error" }> {
-    const at = readObject<ErrorWire>(field);
+function decodeErrorFrame(field: WireField): Extract<InboundFrame, { type: "error" }> {
+    const at = readObject<ErrorFrameWire>(field);
     return {
         type: "error",
         requestId: decodeRequestId(at("request_id")),

@@ -16,7 +16,7 @@ import {
     decodeSignSession,
 } from "../../../src/protocol/operation-params";
 import type { ChannelAnnouncementInput, CommitmentTxInput, RevocationInput, ShutdownTxInput } from "../../../src/digest";
-import type { Field } from "../../../src/wire";
+import type { WireField } from "../../../src/wire";
 import { toChannelAnnouncementInput, toCommitmentTxInput, toRevocationInput, toShutdownTxInput } from "../../utils/digest-inputs";
 import { caseOf, loadInteropVectors } from "../../utils/interop-vectors";
 import { refusal } from "../../utils/refusal";
@@ -50,7 +50,7 @@ const U128_MAX = 2n ** 128n - 1n;
 
 type BoundCase<Input> = [string, string, (input: Input) => number | bigint | undefined, number | bigint];
 
-function field(value: unknown, path: string): Field {
+function field(value: unknown, path: string): WireField {
     return { value, path };
 }
 

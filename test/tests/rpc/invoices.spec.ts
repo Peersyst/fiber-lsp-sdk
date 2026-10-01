@@ -2,8 +2,8 @@ import { hexToBytes } from "@noble/hashes/utils.js";
 import type { NewInvoiceParams, SettleInvoiceParams } from "../../../src/rpc";
 import {
     FiberRpcClient,
-    INVOICE_CURRENCIES,
-    INVOICE_STATUSES,
+    RPC_INVOICE_CURRENCIES,
+    RPC_INVOICE_STATUSES,
     RpcError,
     RpcResponseError,
     decodeNewInvoiceResult,
@@ -94,7 +94,7 @@ describe("new_invoice", () => {
             expect(encodeNewInvoiceParams({ ...NEW_INVOICE, hashAlgorithm: "sha256" }).hash_algorithm).toBe("sha256");
         });
 
-        it.each(INVOICE_CURRENCIES)("writes the currency %s as it is", (currency) => {
+        it.each(RPC_INVOICE_CURRENCIES)("writes the currency %s as it is", (currency) => {
             expect(encodeNewInvoiceParams({ ...NEW_INVOICE, currency }).currency).toBe(currency);
         });
 
@@ -211,7 +211,7 @@ describe("get_invoice and cancel_invoice", () => {
             expect(decodeRpcInvoice(result(RECEIVED))).toEqual({ invoiceAddress: ADDRESS, status: "Received" });
         });
 
-        it.each(INVOICE_STATUSES)("reads the status %s", (status) => {
+        it.each(RPC_INVOICE_STATUSES)("reads the status %s", (status) => {
             expect(decodeRpcInvoice(result({ ...RECEIVED, status })).status).toBe(status);
         });
 

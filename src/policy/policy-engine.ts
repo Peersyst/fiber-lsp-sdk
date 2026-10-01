@@ -5,7 +5,7 @@ import type { FiberChannelKeys } from "../derivation";
 import { MAX_CHANNEL_INDEX } from "../derivation";
 import { computeChannelAnnouncementDigest, computeCommitmentTxDigest, computeRevocationDigest, computeShutdownTxDigest } from "../digest";
 import { CHANNEL_POLICY_RECORD_VERSION } from "./policy.constants";
-import { refuse } from "./policy.error";
+import { refusePolicyRequest } from "./policy.error";
 import type { ChannelPolicyRecord, PolicySignRequest, PolicyVerdict, SignOperation } from "./policy.types";
 import type { SignerStore } from "./signer-store";
 import { assertSignSession, buildSessionCommitment, resolveSignSlot, signSlotKey } from "./utils";
@@ -67,7 +67,7 @@ export class PolicyEngine {
     async requireChannelIndex(channelId: string): Promise<number> {
         assertNonEmptyString("channelId", channelId);
         const channelIndex = await this.store.resolveChannelIndex(channelId);
-        if (channelIndex === null) refuse("unknown_channel", `channel ${channelId} is not registered on this device`);
+        if (channelIndex === null) refusePolicyRequest("unknown_channel", `channel ${channelId} is not registered on this device`);
         return channelIndex;
     }
 
@@ -109,13 +109,13 @@ export class PolicyEngine {
 
             const expected = refusing("malformed", () => recomputeDigest(keys, operation));
             if (!equalBytes(expected, session.message)) {
-                refuse("malformed", "the message does not match the attached channel state");
+                refusePolicyRequest("malformed", "the message does not match the attached channel state");
             }
 
             const served = current.signedSessions[slotKey];
             if (served !== undefined) {
                 if (served !== sessionCommitment) {
-                    refuse("policy_refusal", `slot ${slotKey} has already served a different signing session`);
+                    refusePolicyRequest("policy_refusal", `slot ${slotKey} has already served a different signing session`);
                 }
                 status = "already-signed";
                 return current;
@@ -123,13 +123,13 @@ export class PolicyEngine {
 
             const lastSigned = current.lastSignedCommitmentNumbers[slot.context];
             if (lastSigned !== undefined && slot.commitmentNumber <= lastSigned) {
-                refuse(
+                refusePolicyRequest(
                     "stale_state",
                     `commitment number ${slot.commitmentNumber} is not above the last ${slot.context} signed, ${lastSigned}`,
                 );
             }
             if (stateVersion < current.lastStateVersion) {
-                refuse("stale_state", `state version ${stateVersion} is below the last seen, ${current.lastStateVersion}`);
+                refusePolicyRequest("stale_state", `state version ${stateVersion} is below the last seen, ${current.lastStateVersion}`);
             }
 
             return {
@@ -208,7 +208,10 @@ function applyExposureRule(
     const decrease = previous - exposure;
     const intent = smallestSufficientIntent(record.pendingDebitsShannons, decrease);
     if (intent === -1) {
-        refuse("policy_refusal", `the message lowers the local amount by ${decrease} shannons with no debit intent covering it`);
+        refusePolicyRequest(
+            "policy_refusal",
+            `the message lowers the local amount by ${decrease} shannons with no debit intent covering it`,
+        );
     }
     return {
         localExposureShannons: exposure.toString(),
@@ -263,6 +266,6 @@ function refusing<T>(code: SignerErrorCode, step: () => T): T {
     try {
         return step();
     } catch (error) {
-        refuse(code, String(error));
+        refusePolicyRequest(code, String(error));
     }
 }

@@ -1,9 +1,9 @@
 import type { DepType, ScriptHashType } from "../common";
-import type { TLC_HASH_ALGORITHMS } from "./wire.constants";
+import type { WIRE_TLC_HASH_ALGORITHMS } from "./wire.constants";
 
-export type Field = { value: unknown; path: string };
+export type WireField = { value: unknown; path: string };
 
-export type FieldReader<Wire> = (name: keyof Wire & string) => Field;
+export type WireFieldReader<Wire> = (name: keyof Wire & string) => WireField;
 
 /**
  * Bytes as `0x`-prefixed lowercase hex.
@@ -20,7 +20,7 @@ export type BareHexWire = string;
  */
 export type UintHexWire = string;
 
-export type TlcHashAlgorithmWire = keyof typeof TLC_HASH_ALGORITHMS;
+export type TlcHashAlgorithmWire = keyof typeof WIRE_TLC_HASH_ALGORITHMS;
 
 export type ScriptWire = { code_hash: HexWire; hash_type: ScriptHashType; args: HexWire };
 

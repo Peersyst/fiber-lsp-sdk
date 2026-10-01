@@ -1,15 +1,15 @@
 import type { Script, TlcHashAlgorithm, Transaction } from "../common";
-import type { BareHexWire, Field, HexWire, ScriptWire, TlcHashAlgorithmWire, TransactionWire, UintHexWire } from "../wire";
+import type { BareHexWire, HexWire, ScriptWire, TlcHashAlgorithmWire, TransactionWire, UintHexWire, WireField } from "../wire";
 import type { IFetchLike } from "./interfaces";
 import type {
-    CHANNEL_STATE_FLAGS,
-    CHANNEL_STATE_NAMES,
-    INVOICE_CURRENCIES,
-    INVOICE_STATUSES,
     JSON_RPC_VERSION,
     LIST_CHANNELS_FILTERS,
-    PAYMENT_STATUSES,
+    RPC_CHANNEL_STATE_FLAGS,
+    RPC_CHANNEL_STATE_NAMES,
+    RPC_INVOICE_CURRENCIES,
+    RPC_INVOICE_STATUSES,
     RPC_METHODS,
+    RPC_PAYMENT_STATUSES,
 } from "./rpc.constants";
 
 export type RpcMethod = (typeof RPC_METHODS)[number];
@@ -22,9 +22,9 @@ export type RpcErrorObjectWire = { code: number; message: string };
 
 export type RpcResponseWire = { jsonrpc: string; id: number | null; result: unknown; error: RpcErrorObjectWire };
 
-export type RpcResponse = { result: Field } | { error: RpcErrorObjectWire };
+export type RpcResponse = { result: WireField } | { error: RpcErrorObjectWire };
 
-export type RpcResultDecoder<Result> = (field: Field) => Result;
+export type RpcResultDecoder<Result> = (field: WireField) => Result;
 
 export type FiberRpcClientOptions = {
     url: string;
@@ -56,21 +56,21 @@ export type RpcChannelIdParamsWire = { channel_id: HexWire };
 
 export type ListChannelsParamsWire = { include_closed?: true; only_pending?: true };
 
-export type ChannelStateName = (typeof CHANNEL_STATE_NAMES)[number];
+export type RpcChannelStateName = (typeof RPC_CHANNEL_STATE_NAMES)[number];
 
 /**
  * Absent on the two states without flags.
  */
-export type ChannelStateWire = { state_name: ChannelStateName; state_flags?: string };
+export type RpcChannelStateWire = { state_name: RpcChannelStateName; state_flags?: string };
 
 /**
  * The members the client reads; fiber writes more.
  */
-export type ChannelWire = {
+export type RpcChannelWire = {
     channel_id: HexWire;
     pubkey: BareHexWire;
     funding_udt_type_script: ScriptWire | null;
-    state: ChannelStateWire;
+    state: RpcChannelStateWire;
     local_balance: UintHexWire;
     offered_tlc_balance: UintHexWire;
     remote_balance: UintHexWire;
@@ -80,18 +80,18 @@ export type ChannelWire = {
     failure_detail: string | null;
 };
 
-export type ListChannelsResultWire = { channels: ChannelWire[] };
+export type ListChannelsResultWire = { channels: RpcChannelWire[] };
 
-export type InvoiceCurrency = (typeof INVOICE_CURRENCIES)[number];
+export type RpcInvoiceCurrency = (typeof RPC_INVOICE_CURRENCIES)[number];
 
-export type InvoiceStatus = (typeof INVOICE_STATUSES)[number];
+export type RpcInvoiceStatus = (typeof RPC_INVOICE_STATUSES)[number];
 
-export type PaymentStatus = (typeof PAYMENT_STATUSES)[number];
+export type RpcPaymentStatus = (typeof RPC_PAYMENT_STATUSES)[number];
 
 export type NewInvoiceParamsWire = {
     amount: UintHexWire;
     description?: string;
-    currency: InvoiceCurrency;
+    currency: RpcInvoiceCurrency;
     payment_hash: HexWire;
     expiry: UintHexWire;
     hash_algorithm: TlcHashAlgorithmWire;
@@ -101,7 +101,7 @@ export type NewInvoiceResultWire = { invoice_address: string };
 
 export type RpcPaymentHashParamsWire = { payment_hash: HexWire };
 
-export type RpcInvoiceWire = NewInvoiceResultWire & { status: InvoiceStatus };
+export type RpcInvoiceWire = NewInvoiceResultWire & { status: RpcInvoiceStatus };
 
 export type SettleInvoiceParamsWire = { payment_hash: HexWire; payment_preimage: HexWire };
 
@@ -112,7 +112,7 @@ export type SendPaymentParamsWire = { invoice: string; max_fee_amount: UintHexWi
  */
 export type RpcPaymentWire = {
     payment_hash: HexWire;
-    status: PaymentStatus;
+    status: RpcPaymentStatus;
     created_at: UintHexWire;
     last_updated_at: UintHexWire;
     failed_error: string | null;
@@ -164,9 +164,9 @@ export type ListChannelsFilter = (typeof LIST_CHANNELS_FILTERS)[number];
 
 export type ListChannelsParams = { filter?: ListChannelsFilter };
 
-export type ChannelStateFlag<Name extends ChannelStateName> = (typeof CHANNEL_STATE_FLAGS)[Name][number];
+export type RpcChannelStateFlag<Name extends RpcChannelStateName> = (typeof RPC_CHANNEL_STATE_FLAGS)[Name][number];
 
-export type ChannelState = { [Name in ChannelStateName]: { name: Name; flags: ChannelStateFlag<Name>[] } }[ChannelStateName];
+export type RpcChannelState = { [Name in RpcChannelStateName]: { name: Name; flags: RpcChannelStateFlag<Name>[] } }[RpcChannelStateName];
 
 export type RpcChannel = {
     /**
@@ -175,7 +175,7 @@ export type RpcChannel = {
     channelId: string;
     peerPubkey: Uint8Array;
     fundingUdtTypeScript: Script | null;
-    state: ChannelState;
+    state: RpcChannelState;
     localBalanceShannons: string;
     remoteBalanceShannons: string;
     offeredTlcBalanceShannons: string;
@@ -193,7 +193,7 @@ export type RpcChannel = {
 
 export type NewInvoiceParams = {
     amountShannons: string;
-    currency: InvoiceCurrency;
+    currency: RpcInvoiceCurrency;
     paymentHash: Uint8Array;
     hashAlgorithm: TlcHashAlgorithm;
     /**
@@ -207,7 +207,7 @@ export type NewInvoiceResult = { invoiceAddress: string };
 
 export type RpcPaymentHashParams = { paymentHash: Uint8Array };
 
-export type RpcInvoice = NewInvoiceResult & { status: InvoiceStatus };
+export type RpcInvoice = NewInvoiceResult & { status: RpcInvoiceStatus };
 
 export type SettleInvoiceParams = { paymentHash: Uint8Array; paymentPreimage: Uint8Array };
 
@@ -219,7 +219,7 @@ export type SendPaymentParams = {
 
 export type RpcPayment = {
     paymentHash: Uint8Array;
-    status: PaymentStatus;
+    status: RpcPaymentStatus;
     createdAtMs: bigint;
     lastUpdatedAtMs: bigint;
     failedError: string | null;

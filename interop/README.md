@@ -112,7 +112,7 @@ interop workflow runs it.
 A green suite means upstream did not move. A red derivation is the decision point: fiber changed its scheme, and existing
 channels derived under the old one stay on it (`DERIVATION_SCHEME_VERSION` is additive only). A red RPC form, or a generation
 that fails its coverage check, means the client's codecs follow the new forms; a flag a release adds to a state shows as a
-diff in `channel_state_flags` and fails the interop spec until `CHANNEL_STATE_FLAGS` follows.
+diff in `channel_state_flags` and fails the interop spec until `RPC_CHANNEL_STATE_FLAGS` follows.
 
 ## Verifying a partial signature
 

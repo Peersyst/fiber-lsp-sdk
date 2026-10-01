@@ -1,7 +1,7 @@
 import { PAYMENT_HASH_LENGTH, PREIMAGE_LENGTH, UINT64_MAX, assertOneOf, assertString } from "../common";
-import type { Field } from "../wire";
+import type { WireField } from "../wire";
 import {
-    TLC_HASH_ALGORITHMS,
+    WIRE_TLC_HASH_ALGORITHMS,
     decodeEnum,
     decodeNonEmptyString,
     encodeHexBytes,
@@ -10,7 +10,7 @@ import {
     readObject,
     requireObject,
 } from "../wire";
-import { INVOICE_CURRENCIES, INVOICE_STATUSES } from "./rpc.constants";
+import { RPC_INVOICE_CURRENCIES, RPC_INVOICE_STATUSES } from "./rpc.constants";
 import type {
     NewInvoiceParams,
     NewInvoiceParamsWire,
@@ -31,14 +31,14 @@ import { encodeRpcPaymentHashParams, encodeRpcShannons } from "./utils";
 export function encodeNewInvoiceParams(params: NewInvoiceParams): NewInvoiceParamsWire {
     const { description } = params;
     if (description !== undefined) assertString("description", description);
-    assertOneOf("currency", params.currency, INVOICE_CURRENCIES);
+    assertOneOf("currency", params.currency, RPC_INVOICE_CURRENCIES);
     return {
         amount: encodeRpcShannons("amountShannons", params.amountShannons),
         ...(description === undefined ? {} : { description }),
         currency: params.currency,
         payment_hash: encodeHexBytes("paymentHash", params.paymentHash, PAYMENT_HASH_LENGTH),
         expiry: encodeUintHex("expirySeconds", params.expirySeconds, UINT64_MAX),
-        hash_algorithm: encodeMapped("hashAlgorithm", params.hashAlgorithm, TLC_HASH_ALGORITHMS),
+        hash_algorithm: encodeMapped("hashAlgorithm", params.hashAlgorithm, WIRE_TLC_HASH_ALGORITHMS),
     };
 }
 
@@ -47,7 +47,7 @@ export function encodeNewInvoiceParams(params: NewInvoiceParams): NewInvoicePara
  * @param field The result field.
  * @returns The encoded invoice.
  */
-export function decodeNewInvoiceResult(field: Field): NewInvoiceResult {
+export function decodeNewInvoiceResult(field: WireField): NewInvoiceResult {
     return { invoiceAddress: decodeNonEmptyString(readObject<NewInvoiceResultWire>(field)("invoice_address")) };
 }
 
@@ -56,8 +56,8 @@ export function decodeNewInvoiceResult(field: Field): NewInvoiceResult {
  * @param field The result field.
  * @returns The encoded invoice and its status.
  */
-export function decodeRpcInvoice(field: Field): RpcInvoice {
-    return { ...decodeNewInvoiceResult(field), status: decodeEnum(readObject<RpcInvoiceWire>(field)("status"), INVOICE_STATUSES) };
+export function decodeRpcInvoice(field: WireField): RpcInvoice {
+    return { ...decodeNewInvoiceResult(field), status: decodeEnum(readObject<RpcInvoiceWire>(field)("status"), RPC_INVOICE_STATUSES) };
 }
 
 /**
@@ -76,6 +76,6 @@ export function encodeSettleInvoiceParams(params: SettleInvoiceParams): SettleIn
  * Reads the result of `settle_invoice`, which is an empty object.
  * @param field The result field.
  */
-export function decodeSettleInvoiceResult(field: Field): void {
+export function decodeSettleInvoiceResult(field: WireField): void {
     requireObject(field);
 }

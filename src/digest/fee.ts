@@ -9,7 +9,7 @@ import {
     MAX_CAPACITY_SHANNONS,
     MAX_CELL_DEPS_COUNT,
 } from "./digest.constants";
-import { encodeCellOutput, encodeRawTransaction, encodeTransaction } from "./utils";
+import { moleculeCellOutput, moleculeRawTransaction, moleculeTransaction } from "./utils";
 
 const UDT_AMOUNT_DATA_LENGTH = 16;
 
@@ -27,7 +27,7 @@ const BLOCK_SIZE_OVERHEAD = 4;
  */
 export function commitmentTxSize(cellDepsCount: number, udtTypeScript: Script | null, commitmentLock: ScriptTemplate): number {
     const mockLock: Script = { ...commitmentLock, args: new Uint8Array(COMMITMENT_LOCK_ARGS_LENGTH) };
-    const outputs = [encodeCellOutput(0n, mockLock, udtTypeScript)];
+    const outputs = [moleculeCellOutput(0n, mockLock, udtTypeScript)];
     const outputsData = [udtTypeScript === null ? new Uint8Array(0) : new Uint8Array(UDT_AMOUNT_DATA_LENGTH)];
     return mockTxSize(cellDepsCount, outputs, outputsData);
 }
@@ -40,7 +40,7 @@ export function commitmentTxSize(cellDepsCount: number, udtTypeScript: Script | 
  * @returns The size in bytes.
  */
 export function shutdownTxSize(cellDepsCount: number, udtTypeScript: Script | null, closeScripts: [Script, Script]): number {
-    const outputs = closeScripts.map((script) => encodeCellOutput(0n, script, udtTypeScript));
+    const outputs = closeScripts.map((script) => moleculeCellOutput(0n, script, udtTypeScript));
     const data = udtTypeScript === null ? new Uint8Array(0) : new Uint8Array(UDT_AMOUNT_DATA_LENGTH);
     return mockTxSize(cellDepsCount, outputs, [data, data]);
 }
@@ -51,7 +51,7 @@ export function shutdownTxSize(cellDepsCount: number, udtTypeScript: Script | nu
  * @param txSize Transaction size in bytes.
  * @returns The fee in shannons.
  */
-export function calculateFee(feeRate: bigint, txSize: number): bigint {
+export function calculateTxFee(feeRate: bigint, txSize: number): bigint {
     assertUnsignedBigInt("feeRate", feeRate, MAX_CAPACITY_SHANNONS);
     assertUnsignedInteger("txSize", txSize, Number.MAX_SAFE_INTEGER);
     const fee = (feeRate * BigInt(txSize)) / FEE_RATE_WEIGHT_SCALE;
@@ -68,7 +68,7 @@ export function calculateFee(feeRate: bigint, txSize: number): bigint {
  */
 function mockTxSize(cellDepsCount: number, outputs: Uint8Array[], outputsData: Uint8Array[]): number {
     assertUnsignedInteger("cellDepsCount", cellDepsCount, MAX_CELL_DEPS_COUNT);
-    const raw = encodeRawTransaction({
+    const raw = moleculeRawTransaction({
         version: 0,
         cellDeps: Array.from({ length: cellDepsCount }, () => new Uint8Array(CELL_DEP_LENGTH)),
         headerDeps: [],
@@ -76,6 +76,6 @@ function mockTxSize(cellDepsCount: number, outputs: Uint8Array[], outputsData: U
         outputs,
         outputsData,
     });
-    const transaction = encodeTransaction(raw, [new Uint8Array(FUNDING_CELL_WITNESS_LENGTH)]);
+    const transaction = moleculeTransaction(raw, [new Uint8Array(FUNDING_CELL_WITNESS_LENGTH)]);
     return transaction.length + BLOCK_SIZE_OVERHEAD;
 }

@@ -1,8 +1,8 @@
 import { bytesToHex, hexToBytes } from "@noble/hashes/utils.js";
 import { assertAnyBytes, assertBytes, isHexBytes } from "../common";
-import { malformed } from "./field";
+import { malformedWireField } from "./field";
 import { WIRE_HEX_PREFIX } from "./wire.constants";
-import type { BareHexWire, Field, HexWire } from "./wire.types";
+import type { BareHexWire, HexWire, WireField } from "./wire.types";
 
 const HEX_BYTES_PATTERN = /^0x(?:[0-9a-f]{2})*$/;
 
@@ -23,8 +23,8 @@ export function isWireHex(value: unknown, byteLength?: number): value is string 
  * @param byteLength Exact number of bytes the hex must encode.
  * @returns The wire string, validated.
  */
-export function requireHexBytes(field: Field, byteLength: number): string {
-    if (!isWireHex(field.value, byteLength)) malformed(field, `must be ${byteLength} bytes of 0x-prefixed lowercase hex`);
+export function requireHexBytes(field: WireField, byteLength: number): string {
+    if (!isWireHex(field.value, byteLength)) malformedWireField(field, `must be ${byteLength} bytes of 0x-prefixed lowercase hex`);
     return field.value;
 }
 
@@ -34,7 +34,7 @@ export function requireHexBytes(field: Field, byteLength: number): string {
  * @param byteLength Exact number of bytes the hex must encode.
  * @returns The bytes.
  */
-export function decodeHexBytes(field: Field, byteLength: number): Uint8Array {
+export function decodeHexBytes(field: WireField, byteLength: number): Uint8Array {
     return hexToBytes(requireHexBytes(field, byteLength).slice(WIRE_HEX_PREFIX.length));
 }
 
@@ -43,8 +43,8 @@ export function decodeHexBytes(field: Field, byteLength: number): Uint8Array {
  * @param field Field to read.
  * @returns The bytes.
  */
-export function decodeAnyHexBytes(field: Field): Uint8Array {
-    if (!isWireHex(field.value)) malformed(field, "must be whole bytes of 0x-prefixed lowercase hex");
+export function decodeAnyHexBytes(field: WireField): Uint8Array {
+    if (!isWireHex(field.value)) malformedWireField(field, "must be whole bytes of 0x-prefixed lowercase hex");
     return hexToBytes(field.value.slice(WIRE_HEX_PREFIX.length));
 }
 
@@ -77,8 +77,8 @@ export function encodeAnyHexBytes(name: string, bytes: Uint8Array): HexWire {
  * @param byteLength Exact number of bytes the hex must encode.
  * @returns The bytes.
  */
-export function decodeBareHexBytes(field: Field, byteLength: number): Uint8Array {
-    if (!isHexBytes(field.value, byteLength)) malformed(field, `must be ${byteLength} bytes of lowercase hex without a 0x prefix`);
+export function decodeBareHexBytes(field: WireField, byteLength: number): Uint8Array {
+    if (!isHexBytes(field.value, byteLength)) malformedWireField(field, `must be ${byteLength} bytes of lowercase hex without a 0x prefix`);
     return hexToBytes(field.value);
 }
 

@@ -79,7 +79,7 @@ export type ChannelAnnouncementWire = {
     udt_type_script: ScriptWire | null;
 };
 
-export type EmptyParamsWire = Record<string, never>;
+export type ProtocolEmptyParamsWire = Record<string, never>;
 
 export type CommitmentNumberParamsWire = { commitment_number: UintHexWire };
 
@@ -97,11 +97,11 @@ export type PartialSignRevocationParamsWire = PartialSignParamsWire & { revocati
 export type PartialSignChannelAnnouncementParamsWire = { session: SignSessionWire; channel_announcement: ChannelAnnouncementWire };
 
 export type SignParamsWireByMethod = {
-    get_base_public_keys: EmptyParamsWire;
+    get_base_public_keys: ProtocolEmptyParamsWire;
     get_commitment_point: CommitmentNumberParamsWire;
     get_commitment_pub_nonce: CommitmentNumberParamsWire;
     get_revocation_pub_nonce: CommitmentNumberParamsWire;
-    get_channel_announcement_pub_nonce: EmptyParamsWire;
+    get_channel_announcement_pub_nonce: ProtocolEmptyParamsWire;
     get_settlement_keys: CommitmentNumberParamsWire;
     partial_sign_commitment_tx: PartialSignCommitmentTxParamsWire;
     partial_sign_closing_tx: PartialSignClosingTxParamsWire;
@@ -142,7 +142,7 @@ export type ChannelRegisteredWire = { type: "channel_registered"; request_id: st
 /**
  * The codes are the bridge's own, not the device's four.
  */
-export type ErrorWire = { type: "error"; request_id: string; code: string; message: string };
+export type ErrorFrameWire = { type: "error"; request_id: string; code: string; message: string };
 
 export type SignedChallengeWire = { type: "signed_challenge"; protocol_version: number; public_key: HexWire; signature: HexWire };
 
@@ -155,7 +155,7 @@ export type RegisterChannelWire = {
 };
 
 export type InboundFrameWire =
-    ChallengeWire | SessionEstablishedWire | PingWire | PongWire | ChannelRegisteredWire | ErrorWire | SignRequestWire;
+    ChallengeWire | SessionEstablishedWire | PingWire | PongWire | ChannelRegisteredWire | ErrorFrameWire | SignRequestWire;
 
 export type OutboundFrameWire = SignedChallengeWire | PingWire | PongWire | RegisterChannelWire | SignResponseWire;
 

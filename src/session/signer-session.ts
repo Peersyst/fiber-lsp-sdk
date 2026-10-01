@@ -5,17 +5,17 @@ import type { DispatchOutcome, PendingChannelRegistration } from "../signer";
 import { asWireError } from "../wire";
 import type { ISessionAuthenticator, ISessionHandler, IWebSocketLike, WebSocketCloseEvent, WebSocketFactory } from "./interfaces";
 import {
-    CLOSE_REASONS,
-    DEFAULT_CONNECT_TIMEOUT_MS,
     DEFAULT_HEARTBEAT_INTERVAL_MS,
     DEFAULT_HEARTBEAT_TIMEOUT_MS,
     DEFAULT_RECONNECT_POLICY,
-    MAX_DELAY_MS,
-    NORMAL_CLOSE_CODE,
+    DEFAULT_SESSION_CONNECT_TIMEOUT_MS,
+    MAX_SESSION_DELAY_MS,
+    SESSION_CLOSE_REASONS,
+    SESSION_NORMAL_CLOSE_CODE,
 } from "./session.constants";
 import { BridgeError, SessionError } from "./session.error";
 import type { ReconnectPolicy, SessionEvent, SessionListener, SessionOptions, SessionState } from "./session.types";
-import { TimerSlot, backoffDelayMs } from "./utils";
+import { TimerSlot, sessionBackoffDelayMs } from "./utils";
 
 type ConnectWaiter = { resolve: () => void; reject: (error: SessionError) => void };
 
@@ -87,7 +87,7 @@ export class SignerSession {
         this.backoff = new TimerSlot(options.timer);
         this.authenticator = options.authenticator;
         this.handler = options.handler;
-        this.connectTimeoutMs = options.connectTimeoutMs ?? DEFAULT_CONNECT_TIMEOUT_MS;
+        this.connectTimeoutMs = options.connectTimeoutMs ?? DEFAULT_SESSION_CONNECT_TIMEOUT_MS;
         this.heartbeatIntervalMs = options.heartbeatIntervalMs ?? DEFAULT_HEARTBEAT_INTERVAL_MS;
         this.heartbeatTimeoutMs = options.heartbeatTimeoutMs ?? DEFAULT_HEARTBEAT_TIMEOUT_MS;
         this.reconnect = { ...DEFAULT_RECONNECT_POLICY, ...options.reconnect };
@@ -140,7 +140,7 @@ export class SignerSession {
      */
     disconnect(): void {
         if (this.currentState === "idle" || this.currentState === "closed") return;
-        this.teardown(CLOSE_REASONS.disconnect);
+        this.teardown(SESSION_CLOSE_REASONS.disconnect);
         const reject = this.takeWaiting();
         this.setState("closed");
         reject(new SessionError("disconnected", "disconnect() was called"));
@@ -183,7 +183,7 @@ export class SignerSession {
         socket.onmessage = (event) => this.onMessage(socket, event.data);
         socket.onclose = (event) => this.onClose(socket, event);
         socket.onerror = (cause) => this.onError(socket, cause);
-        this.connectTimeout.arm(() => this.giveUp(CLOSE_REASONS.connectTimeout), this.connectTimeoutMs);
+        this.connectTimeout.arm(() => this.giveUp(SESSION_CLOSE_REASONS.connectTimeout), this.connectTimeoutMs);
     }
 
     /**
@@ -230,18 +230,18 @@ export class SignerSession {
                 assertBytes("publicKey", this.authenticator.publicKey, X_ONLY_PUBLIC_KEY_LENGTH);
             } catch (cause) {
                 const error = new SessionError("authentication_failed", "the authenticator could not answer the challenge", { cause });
-                this.fail(error, CLOSE_REASONS.authenticationFailed);
+                this.fail(error, SESSION_CLOSE_REASONS.authenticationFailed);
                 return;
             }
             if (!this.send(socket, { type: "signed_challenge", publicKey: this.authenticator.publicKey, signature })) {
-                this.giveUp(CLOSE_REASONS.sendFailed, "the socket refused the signed_challenge frame");
+                this.giveUp(SESSION_CLOSE_REASONS.sendFailed, "the socket refused the signed_challenge frame");
                 return;
             }
             this.setState("authenticating");
         } else if (this.currentState === "authenticating" && frame.type === "session_established") {
             if (frame.protocolVersion !== PROTOCOL_VERSION) {
                 const message = `the bridge speaks protocol version ${frame.protocolVersion}, this device speaks ${PROTOCOL_VERSION}`;
-                this.fail(new SessionError("version_mismatch", message), CLOSE_REASONS.versionMismatch);
+                this.fail(new SessionError("version_mismatch", message), SESSION_CLOSE_REASONS.versionMismatch);
                 return;
             }
             this.establish(socket);
@@ -288,7 +288,7 @@ export class SignerSession {
     private violation(detail: string): void {
         const error = new SessionError("protocol_violation", detail);
         if (this.currentState === "established") this.emit({ type: "error", cause: error });
-        else this.fail(error, CLOSE_REASONS.protocolViolation);
+        else this.fail(error, SESSION_CLOSE_REASONS.protocolViolation);
     }
 
     /**
@@ -370,7 +370,7 @@ export class SignerSession {
      */
     private scheduleReconnect(): void {
         if (this.currentState === "closed") return;
-        const delay = backoffDelayMs(this.reconnect, this.attempts, this.random);
+        const delay = sessionBackoffDelayMs(this.reconnect, this.attempts, this.random);
         this.attempts += 1;
         // Armed before setState, so a listener's disconnect() can clear it.
         this.backoff.arm(() => this.open(), delay);
@@ -385,10 +385,10 @@ export class SignerSession {
         if (this.currentState !== "established" || this.heartbeatIntervalMs === 0) return;
         this.heartbeat.arm(() => {
             if (!this.send(socket, { type: "ping" })) {
-                this.giveUp(CLOSE_REASONS.sendFailed, "the socket refused the ping frame");
+                this.giveUp(SESSION_CLOSE_REASONS.sendFailed, "the socket refused the ping frame");
                 return;
             }
-            this.heartbeat.arm(() => this.giveUp(CLOSE_REASONS.heartbeatTimeout), this.heartbeatTimeoutMs);
+            this.heartbeat.arm(() => this.giveUp(SESSION_CLOSE_REASONS.heartbeatTimeout), this.heartbeatTimeoutMs);
         }, this.heartbeatIntervalMs);
     }
 
@@ -549,7 +549,7 @@ export class SignerSession {
         socket.onerror = null;
         if (reason === undefined) return;
         try {
-            socket.close(NORMAL_CLOSE_CODE, reason);
+            socket.close(SESSION_NORMAL_CLOSE_CODE, reason);
         } catch (cause) {
             this.emit({ type: "error", cause });
         }
@@ -586,7 +586,7 @@ export class SignerSession {
  * @param min Lowest accepted value, inclusive.
  */
 function assertDelayMs(name: string, value: number, min: number): void {
-    if (!isUnsignedInteger(value, MAX_DELAY_MS) || value < min) {
-        throw new RangeError(`${name} must be an integer between ${min} and ${MAX_DELAY_MS}, got ${value}`);
+    if (!isUnsignedInteger(value, MAX_SESSION_DELAY_MS) || value < min) {
+        throw new RangeError(`${name} must be an integer between ${min} and ${MAX_SESSION_DELAY_MS}, got ${value}`);
     }
 }

@@ -2,21 +2,21 @@ import { hexToBytes } from "@noble/hashes/utils.js";
 import type { DepType, TlcHashAlgorithm, Transaction } from "../../src/common";
 import type {
     AbandonChannelParams,
-    RpcChannel,
-    ChannelState,
-    InvoiceCurrency,
-    InvoiceStatus,
     ListChannelsParams,
     NewInvoiceParams,
     NewInvoiceResult,
     OpenChannelWithExternalFundingParams,
     OpenChannelWithExternalFundingResult,
-    PaymentStatus,
+    RpcChannel,
+    RpcChannelState,
     RpcInvoice,
+    RpcInvoiceCurrency,
+    RpcInvoiceStatus,
     RpcMethod,
     RpcParamsWire,
     RpcPayment,
     RpcPaymentHashParams,
+    RpcPaymentStatus,
     SendPaymentParams,
     SettleInvoiceParams,
     SubmitSignedFundingTxParams,
@@ -108,8 +108,8 @@ export function toListChannelsParams(vector: ListChannelsParamsVector): ListChan
     return {};
 }
 
-export function toChannelState(vector: ChannelStateVector): ChannelState {
-    return { name: vector.name, flags: vector.flags } as ChannelState;
+export function toChannelState(vector: ChannelStateVector): RpcChannelState {
+    return { name: vector.name, flags: vector.flags } as RpcChannelState;
 }
 
 export function toChannel(vector: ChannelVector): RpcChannel {
@@ -133,7 +133,7 @@ export function toNewInvoiceParams(vector: NewInvoiceParamsVector): NewInvoicePa
     if (hashAlgorithm === undefined) throw new Error(`the vectors carry an unknown hash algorithm: ${vector.hash_algorithm}`);
     const params: NewInvoiceParams = {
         amountShannons: vector.amount,
-        currency: vector.currency as InvoiceCurrency,
+        currency: vector.currency as RpcInvoiceCurrency,
         paymentHash: hexToBytes(vector.payment_hash),
         hashAlgorithm,
         expirySeconds: BigInt(vector.expiry),
@@ -147,7 +147,7 @@ export function toNewInvoiceResult(vector: InvoiceResultVector): NewInvoiceResul
 }
 
 export function toRpcInvoice(vector: GetInvoiceResultVector): RpcInvoice {
-    return { invoiceAddress: vector.invoice_address, status: vector.status as InvoiceStatus };
+    return { invoiceAddress: vector.invoice_address, status: vector.status as RpcInvoiceStatus };
 }
 
 export function toRpcPaymentHashParams(vector: PaymentHashParamsVector): RpcPaymentHashParams {
@@ -165,7 +165,7 @@ export function toSendPaymentParams(vector: SendPaymentParamsVector): SendPaymen
 export function toRpcPayment(vector: PaymentVector): RpcPayment {
     return {
         paymentHash: hexToBytes(vector.payment_hash),
-        status: vector.status as PaymentStatus,
+        status: vector.status as RpcPaymentStatus,
         createdAtMs: BigInt(vector.created_at),
         lastUpdatedAtMs: BigInt(vector.last_updated_at),
         failedError: vector.failed_error,

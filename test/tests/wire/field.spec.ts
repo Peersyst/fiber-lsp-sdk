@@ -1,15 +1,15 @@
-import type { Field } from "../../../src/wire";
+import type { WireField } from "../../../src/wire";
 import {
     decodeBoolean,
     decodeEnum,
     decodeMapped,
+    decodeNonEmptyString,
     decodeNull,
     decodeOrNull,
-    decodeNonEmptyString,
     decodeString,
     decodeUnsignedInteger,
     encodeMapped,
-    malformed,
+    malformedWireField,
     readArray,
     readObject,
     readPair,
@@ -17,13 +17,13 @@ import {
 } from "../../../src/wire";
 import { refusal } from "../../utils/refusal";
 
-function field(value: unknown, path = "root"): Field {
+function field(value: unknown, path = "root"): WireField {
     return { value, path };
 }
 
-describe("malformed", () => {
+describe("malformedWireField", () => {
     it("refuses with the field's path and the reason", () => {
-        const error = refusal(() => malformed(field(1, "a.b[2]"), "must be bytes"));
+        const error = refusal(() => malformedWireField(field(1, "a.b[2]"), "must be bytes"));
         expect(error.path).toBe("a.b[2]");
         expect(error.reason).toBe("must be bytes");
         expect(error.message).toBe("a.b[2] must be bytes");
@@ -200,7 +200,7 @@ describe("decodeOrNull", () => {
     });
 
     it.each([undefined, 1, ""])("hands %p to the reader, so an absent field is refused as the value would be", (value) => {
-        const read = (at: Field): string => decodeNonEmptyString(at);
+        const read = (at: WireField): string => decodeNonEmptyString(at);
         expect(refusal(() => decodeOrNull(field(value), read)).message).toBe("root must be a non-empty string");
     });
 });

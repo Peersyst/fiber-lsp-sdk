@@ -1,6 +1,6 @@
 import { bytesToHex } from "@noble/hashes/utils.js";
 import { pubkeyOf } from "../../../../src/derivation/fiber-scheme";
-import { aggregateXOnlyPubkey, subtractFee } from "../../../../src/digest/utils/digest.utils";
+import { aggregateXOnlyPubkey, subtractTxFee } from "../../../../src/digest/utils/digest.utils";
 
 const KEY_A = pubkeyOf(new Uint8Array(32).fill(0x11));
 const KEY_B = pubkeyOf(new Uint8Array(32).fill(0x22));
@@ -16,17 +16,17 @@ describe("aggregateXOnlyPubkey", () => {
     });
 });
 
-describe("subtractFee", () => {
+describe("subtractTxFee", () => {
     it("subtracts within bounds", () => {
-        expect(subtractFee(1000n, 456n)).toBe(544n);
-        expect(subtractFee(456n, 456n)).toBe(0n);
+        expect(subtractTxFee(1000n, 456n)).toBe(544n);
+        expect(subtractTxFee(456n, 456n)).toBe(0n);
     });
 
     it("refuses a fee above the capacity", () => {
-        expect(() => subtractFee(455n, 456n)).toThrow(RangeError);
+        expect(() => subtractTxFee(455n, 456n)).toThrow(RangeError);
     });
 
     it("refuses a total beyond u64, before subtracting", () => {
-        expect(() => subtractFee(1n << 64n, 1n)).toThrow(RangeError);
+        expect(() => subtractTxFee(1n << 64n, 1n)).toThrow(RangeError);
     });
 });

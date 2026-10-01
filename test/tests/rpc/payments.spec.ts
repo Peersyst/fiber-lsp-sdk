@@ -1,6 +1,13 @@
 import { hexToBytes } from "@noble/hashes/utils.js";
 import type { SendPaymentParams } from "../../../src/rpc";
-import { FiberRpcClient, PAYMENT_STATUSES, RpcError, RpcResponseError, decodeRpcPayment, encodeSendPaymentParams } from "../../../src/rpc";
+import {
+    FiberRpcClient,
+    RPC_PAYMENT_STATUSES,
+    RpcError,
+    RpcResponseError,
+    decodeRpcPayment,
+    encodeSendPaymentParams,
+} from "../../../src/rpc";
 import { FetchMock } from "../../mocks/rpc";
 import { caseOf } from "../../utils/interop-vectors";
 import { refusal } from "../../utils/refusal";
@@ -122,7 +129,7 @@ describe("decodeRpcPayment", () => {
         });
     });
 
-    it.each(PAYMENT_STATUSES)("reads the status %s, with or without an error beside it", (status) => {
+    it.each(RPC_PAYMENT_STATUSES)("reads the status %s, with or without an error beside it", (status) => {
         expect(decodeRpcPayment(result({ ...INFLIGHT, status })).status).toBe(status);
         expect(decodeRpcPayment(result({ ...INFLIGHT, status, failed_error: "" }))).toMatchObject({ status, failedError: "" });
     });
