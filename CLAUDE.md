@@ -36,7 +36,8 @@ Upstream reference: `nervosnetwork/fiber` @ `b71a61c3` (v0.9.0-rc7). The key der
 src/
   common/         Input guards, and the chain and protocol vocabulary that belongs to no single module
   derivation/     Fiber key scheme port + SDK-owned derivations
-  digest/         Rebuilds the four messages fiber signs (no-blind-signing); minimal molecule serializer
+  digest/         Rebuilds the four messages fiber signs (no-blind-signing); the transaction serializers
+  invoice/        Fiber's invoice string, read and written bit for bit: bech32m, the arithmetic coder, the molecule, the signature
   signer/         Signer-protocol dispatch, musig2 signing engine
   policy/         Policy engine + persisted per-channel records
   session/        Signer session client: challenge auth, correlation, resume
@@ -123,10 +124,11 @@ is `policy`'s and `SignerSession` is `session`'s. And `session`, `policy` and `d
 ### Barrels
 
 Every folder has an `index.ts`, and it is imported as the folder (`../common`), never as `../common/index`. Barrels re-export
-wholesale with `export *`. Four exceptions list their exports one by one: `src/derivation/index.ts` and `src/digest/index.ts`,
-which keep the internals of their fiber ports out of reach of the other modules, `src/protocol/index.ts`, which keeps the decoders
-behind its two entry points out of reach of them too, and `src/index.ts`, which is the published surface. Those lists are read as
-code, not pinned by a test: a test that restates a list of names only asks to be updated alongside it.
+wholesale with `export *`. Five exceptions list their exports one by one: `src/derivation/index.ts`, `src/digest/index.ts` and
+`src/invoice/index.ts`, which keep the internals of their fiber ports out of reach of the other modules,
+`src/protocol/index.ts`, which keeps the decoders behind its two entry points out of reach of them too, and `src/index.ts`,
+which is the published surface. Those lists are read as code, not pinned by a test: a test that restates a list of names only
+asks to be updated alongside it.
 
 ### Comments
 

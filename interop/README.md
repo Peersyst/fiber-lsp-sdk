@@ -4,23 +4,26 @@ The key derivation in `src/derivation/` is a compatibility contract: the LSP nod
 fiber's Rust code, so a one-byte divergence makes every channel unusable. This folder holds the second implementation that contract
 is checked against, plus the vectors it produces. The `rpc` module has a contract of the same kind, fiber's JSON forms, and the
 same harness pins it in `vectors/rpc.json`: params and results serialized by fiber's own JSON types, and the envelopes as the
-jsonrpsee version fiber serves writes them.
+jsonrpsee version fiber serves writes them. And the `invoice` module reads and writes fiber's invoice string, which the harness
+pins in `vectors/invoice.json` from fiber's own encoder and decoder.
 
 `test/tests/derivation/interop-vectors.spec.ts` runs against `vectors/vectors.json` on every `pnpm test`, so the contract is
 checked without a Rust toolchain. Rust is only needed to regenerate the vectors and to verify, under fiber's own crates, the
 SDK's partial signature and the RPC params it encodes; the interop workflow does all of it on every pull request that touches
-the harness, the modules the vectors pin (`common`, `derivation`, `digest`, `signer`, `wire`, `rpc`), the tests or the lockfile.
+the harness, the modules the vectors pin (`common`, `derivation`, `digest`, `invoice`, `signer`, `wire`, `rpc`), the tests or the
+lockfile.
 
 For the scheme those vectors pin, see [`docs/derivation.md`](../docs/derivation.md).
 
-## The four parts
+## The five parts
 
-| Part           | What it is                                                                                                                                                                                                                                                                                                                                                                  |
-| -------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `fiber_scheme` | Verbatim ports of the pure derivation functions of `nervosnetwork/fiber` @ `b71a61c3` (v0.9.0-rc7), `crates/fiber-types/src/channel.rs`                                                                                                                                                                                                                                     |
-| `sdk_scheme`   | The SDK-owned derivations (master seed path, wallet identity key, per-channel seed, musig2 nonce seed), written from their definition rather than ported, so the TypeScript side is checked against an independent implementation instead of against itself                                                                                                                 |
-| `digest`       | Verbatim ports of fiber's signed-message reconstruction (`crates/fiber-lib/src/fiber/channel.rs` and `fee.rs`): fixture channels through settlement witness, lock args, fee mocks, and the four digests, with per-case intermediates so a divergence localizes itself (see [`docs/digest.md`](../docs/digest.md))                                                           |
-| `rpc`          | Nothing ported: fiber's RPC forms for the ten methods the client speaks, built from fixed values and serialized by `fiber-json-types` (fiber's serde-only crate, pinned by git rev), plus the request, result and error envelopes as `jsonrpsee-types 0.25.1` writes them; and the other direction, the params the TS client encodes read back by fiber's own deserializers |
+| Part           | What it is                                                                                                                                                                                                                                                                                                                                                                                                                            |
+| -------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `fiber_scheme` | Verbatim ports of the pure derivation functions of `nervosnetwork/fiber` @ `b71a61c3` (v0.9.0-rc7), `crates/fiber-types/src/channel.rs`                                                                                                                                                                                                                                                                                               |
+| `sdk_scheme`   | The SDK-owned derivations (master seed path, wallet identity key, per-channel seed, musig2 nonce seed), written from their definition rather than ported, so the TypeScript side is checked against an independent implementation instead of against itself                                                                                                                                                                           |
+| `digest`       | Verbatim ports of fiber's signed-message reconstruction (`crates/fiber-lib/src/fiber/channel.rs` and `fee.rs`): fixture channels through settlement witness, lock args, fee mocks, and the four digests, with per-case intermediates so a divergence localizes itself (see [`docs/digest.md`](../docs/digest.md))                                                                                                                     |
+| `rpc`          | Nothing ported: fiber's RPC forms for the ten methods the client speaks, built from fixed values and serialized by `fiber-json-types` (fiber's serde-only crate, pinned by git rev), plus the request, result and error envelopes as `jsonrpsee-types 0.25.1` writes them; and the other direction, the params the TS client encodes read back by fiber's own deserializers                                                           |
+| `invoice`      | Nothing ported but the coder: invoices built from fixed values and written by `fiber-types`' own `CkbInvoice`, pinned by git rev, with each layer beside the string; the `arcode` coder, ported verbatim because fiber keeps it private, checked against those strings; UTF-8 as Rust reads it; variants of one invoice with fiber's verdict on each; and the other direction, fiber's decoder over the strings the TS encoder writes |
 
 The master seed half needs BIP32, and the harness implements hardened derivation from the spec (`hmac` + `sha2`) rather than
 pulling a BIP32 crate: a second implementation is the whole point, and agreeing with `@scure/bip32` only means something if the
@@ -42,10 +45,11 @@ All seeds are fixed public constants: the keys in `vectors/` are test keys and n
 cd interop/rust
 cargo run --release -- gen-vectors ../vectors/vectors.json
 cargo run --release -- gen-rpc-vectors ../vectors/rpc.json
+cargo run --release -- gen-invoice-vectors ../vectors/invoice.json
 cd ../.. && pnpm test
 ```
 
-Never hand-edit a file under `vectors/`: CI regenerates both and fails on any diff, which is what turns "someone changed a
+Never hand-edit a file under `vectors/`: CI regenerates all three and fails on any diff, which is what turns "someone changed a
 derivation" or "someone changed a fixture" into a red build. `gen-rpc-vectors` refuses a debug build: fiber's
 `GetPaymentCommandResult` carries a field that exists only under `debug_assertions`, so the forms a release node writes are the
 ones pinned.
@@ -73,7 +77,7 @@ exhaustive `match`, so a variant a new release adds fails to compile until it is
 fiber's serializer with every bit set.
 
 The `invoice_address` strings are fixture strings, not decodable invoices: fiber's invoice encoding is pinned by vectors of its
-own when the SDK decodes it. The attributes inside an invoice are in fiber's forms: `udt_script` is the molecule `Script`
+own, `vectors/invoice.json` (see below). The attributes inside an invoice are in fiber's forms: `udt_script` is the molecule `Script`
 bytes, and `feature` the bit names fiber's `enabled_features_names` lists, checked against it at generation. The signature
 is a real recoverable one, written by fiber's `InvoiceSignature`: the 65 bytes regrouped into 104 five-bit values, as hex.
 
@@ -107,12 +111,43 @@ interop workflow runs it.
    set it in `rust/Cargo.toml` and in `JSONRPSEE_VERSION` in `rust/src/rpc.rs`.
 4. Re-read the refused-token path at the `file:line` the comment on `UNAUTHORIZED_CODE` in `rust/src/rpc.rs` cites: its code and its
    messages are literals there, so a change reaches the vectors only through the harness.
-5. Regenerate both vector files, then run `cargo test --release` and `pnpm test`.
+5. Diff `crates/fiber-types/src/invoice.rs` and `schema/invoice.mol`, and read the `arcode` and `bech32` versions in fiber's own
+   `Cargo.lock`: the harness pins both crates and ports fiber's two coder functions verbatim into `rust/src/invoice.rs`.
+6. Regenerate the three vector files, then run `cargo test --release` and `pnpm test`.
 
 A green suite means upstream did not move. A red derivation is the decision point: fiber changed its scheme, and existing
 channels derived under the old one stay on it (`DERIVATION_SCHEME_VERSION` is additive only). A red RPC form, or a generation
 that fails its coverage check, means the client's codecs follow the new forms; a flag a release adds to a state shows as a
-diff in `channel_state_flags` and fails the interop spec until `RPC_CHANNEL_STATE_FLAGS` follows.
+diff in `channel_state_flags` and fails the interop spec until `RPC_CHANNEL_STATE_FLAGS` follows. A red invoice layer names
+where the format moved; an attribute a release adds fails to compile in the harness until it is listed, and then fails the
+TS reader, which refuses an item id it does not know.
+
+## The invoice string
+
+`vectors/invoice.json` holds `invoices`, each built from fixed values by fiber's `CkbInvoice`, signed with a fixed test key by
+its `update_signature` and written by its `Display`, with the molecule, the compressed stream, the signed digest and the
+signature beside the string: each attribute alone and all together, the three currencies, no amount and `u128::MAX`, signed
+and unsigned, the hold and multi-path invoices as `new_invoice` shapes them, and data at the decoder's 16384-byte limit. The
+harness writes each one again from its own parts and requires fiber's string, which pins its coder port. `coder` holds streams
+compressed and decompressed past what an invoice reaches, `utf8` byte sequences with what `String::from_utf8` reads, and
+`variants` 67 malformed or malleated strings, each with the verdict of fiber's signed-only decoder: `accepted`, `rewritten`
+(read, but written back as another string), `refused` with its message, or `panicked`. The variants are generated, so every
+verdict is fiber's and none is copied from a document. `test/tests/invoice/interop-vectors.spec.ts` holds the SDK to them,
+and [`docs/invoice.md`](../docs/invoice.md) states the rule.
+
+## Verifying the invoice strings
+
+```bash
+INTEROP_INVOICE_OUT=/tmp/ts-invoice-out.json pnpm test -- test/tests/invoice/interop-vectors.spec.ts
+cd interop/rust
+cargo run --release -- verify-invoices ../vectors/invoice.json /tmp/ts-invoice-out.json
+```
+
+`INTEROP_INVOICE_OUT` makes the spec write `{ "cases": [ { "name", "values", "signature", "string" } ] }`: every signed
+invoice of the vectors encoded again by the SDK, and 64 invoices it generates from a fixed seed. `verify-invoices` requires the
+vectors' strings unchanged and at least one string beyond them, and parses each string with fiber's decoder, which must read
+the values the SDK wrote it from and write the string back unchanged. `cargo test --release` pins each of those outcomes, and
+the interop workflow runs the verifier right after `pnpm test`.
 
 ## Verifying a partial signature
 

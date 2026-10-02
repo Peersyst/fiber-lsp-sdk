@@ -22,19 +22,20 @@ These properties reflect the current specification and may evolve with it while 
 
 ## Modules
 
-| Module                           | Responsibility                                                                                          |
-| -------------------------------- | ------------------------------------------------------------------------------------------------------- |
-| [`derivation`](./src/derivation) | Fiber key scheme port + SDK-owned derivations (channel seed, wallet identity key, nonce seed)           |
-| [`digest`](./src/digest)         | Rebuilds the four messages fiber signs, so the device never blind-signs                                 |
-| [`signer`](./src/signer)         | Dispatches signer-protocol methods, musig2 signing engine                                               |
-| [`policy`](./src/policy)         | Policy engine + persisted per-channel records                                                           |
-| [`session`](./src/session)       | Signer session client: challenge auth, sequential processing, heartbeat, reconnect                      |
-| [`wire`](./src/wire)             | How fiber writes values in JSON, the readers that refuse anything else, and the writers that produce it |
-| [`protocol`](./src/protocol)     | Frames, methods and results of the remote signing protocol                                              |
-| [`rpc`](./src/rpc)               | Typed fiber JSON-RPC client (Biscuit-authed)                                                            |
-| `sdk`                            | Public facade wiring the above                                                                          |
+| Module                           | Responsibility                                                                                               |
+| -------------------------------- | ------------------------------------------------------------------------------------------------------------ |
+| [`derivation`](./src/derivation) | Fiber key scheme port + SDK-owned derivations (channel seed, wallet identity key, nonce seed)                |
+| [`digest`](./src/digest)         | Rebuilds the four messages fiber signs, so the device never blind-signs                                      |
+| [`invoice`](./src/invoice)       | Fiber's invoice string, read and written bit for bit, so the device knows what it pays and what it asked for |
+| [`signer`](./src/signer)         | Dispatches signer-protocol methods, musig2 signing engine                                                    |
+| [`policy`](./src/policy)         | Policy engine + persisted per-channel records                                                                |
+| [`session`](./src/session)       | Signer session client: challenge auth, sequential processing, heartbeat, reconnect                           |
+| [`wire`](./src/wire)             | How fiber writes values in JSON, the readers that refuse anything else, and the writers that produce it      |
+| [`protocol`](./src/protocol)     | Frames, methods and results of the remote signing protocol                                                   |
+| [`rpc`](./src/rpc)               | Typed fiber JSON-RPC client (Biscuit-authed)                                                                 |
+| `sdk`                            | Public facade wiring the above                                                                               |
 
-`derivation`, `digest`, `signer`, `policy`, `wire`, `protocol`, `session` and `rpc` are implemented; `sdk` is still a
+`derivation`, `digest`, `invoice`, `signer`, `policy`, `wire`, `protocol`, `session` and `rpc` are implemented; `sdk` is still a
 placeholder, so the public entrypoint stays small while the API settles.
 
 ## Repository layout
@@ -64,6 +65,8 @@ Full index in [docs/README.md](./docs/README.md). The load-bearing ones:
   what a frame that does not decode is answered with.
 - [How the session stays up](./docs/session.md): the outbound socket, its states, one request at a time, and the
   reconnect that runs only while the host wants it.
+- [How an invoice is read](./docs/invoice.md): fiber's string decoded and written by the device itself, one string per
+  invoice, and where the reader is stricter than fiber's.
 - [How the node is called](./docs/rpc.md): one POST per call over the host's fetch, the three errors a call fails
   with, split by what the caller can conclude, and the channel, invoice and payment methods on top.
 - [Cross-implementation harness](./interop/README.md): how the vectors are generated and re-validated against a new fiber

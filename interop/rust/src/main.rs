@@ -7,7 +7,10 @@
 //!   verify-ts <vectors.json> <ts-out.json>
 //!   gen-rpc-vectors <out.json>
 //!   verify-rpc-params <rpc.json> <ts-rpc-out.json>
+//!   gen-invoice-vectors <out.json>
+//!   verify-invoices <invoice.json> <ts-invoice-out.json>
 
+mod invoice;
 mod rpc;
 
 use musig2::{
@@ -1293,9 +1296,11 @@ fn main() {
         Some("verify-ts") => verify_ts(&args[2], &args[3]),
         Some("gen-rpc-vectors") => rpc::gen_rpc_vectors(&args[2]),
         Some("verify-rpc-params") => rpc::verify_rpc_params(&args[2], &args[3]),
+        Some("gen-invoice-vectors") => invoice::gen_invoice_vectors(&args[2]),
+        Some("verify-invoices") => invoice::verify_invoices(&args[2], &args[3]),
         _ => {
             eprintln!(
-                "usage: gen-vectors <out.json> | verify-ts <vectors.json> <ts-out.json> | gen-rpc-vectors <out.json> | verify-rpc-params <rpc.json> <ts-rpc-out.json>"
+                "usage: gen-vectors <out.json> | verify-ts <vectors.json> <ts-out.json> | gen-rpc-vectors <out.json> | verify-rpc-params <rpc.json> <ts-rpc-out.json> | gen-invoice-vectors <out.json> | verify-invoices <invoice.json> <ts-invoice-out.json>"
             );
             std::process::exit(1);
         }

@@ -1,48 +1,23 @@
 import { concatBytes } from "@noble/hashes/utils.js";
-import type { OutPoint, Script, ScriptHashType } from "../../common";
+import type { OutPoint, Script } from "../../common";
 import {
     HASH256_LENGTH,
-    MAX_AMOUNT_SHANNONS,
-    SCRIPT_HASH_TYPES,
     UINT32_MAX,
-    assertAnyBytes,
+    UINT64_LENGTH,
+    UINT64_MAX,
     assertBytes,
-    assertOneOf,
     assertUnsignedBigInt,
     assertUnsignedInteger,
+    moleculeBytes,
+    moleculeDynvec,
+    moleculeFixvec,
+    moleculeScript,
+    moleculeScriptOpt,
+    moleculeTable,
+    uint32Le,
+    uint64Le,
 } from "../../common";
-import { CELL_DEP_LENGTH, CELL_INPUT_LENGTH, MAX_CAPACITY_SHANNONS } from "../digest.constants";
-
-const U32_LENGTH = 4;
-
-/**
- * The molecule `hash_type` byte: `DataN` encodes as `N << 1`, `type` as 1.
- */
-const HASH_TYPE_BYTES: Record<ScriptHashType, number> = { data: 0, type: 1, data1: 2, data2: 4 };
-
-/**
- * Serializes a molecule `Uint32`, little-endian.
- * @param value Value to serialize.
- * @returns The 4 bytes.
- */
-export function uint32Le(value: number): Uint8Array {
-    assertUnsignedInteger("uint32 value", value, UINT32_MAX);
-    const bytes = new Uint8Array(U32_LENGTH);
-    new DataView(bytes.buffer).setUint32(0, value, true);
-    return bytes;
-}
-
-/**
- * Serializes a molecule `Uint64`, little-endian.
- * @param value Value to serialize.
- * @returns The 8 bytes.
- */
-export function uint64Le(value: bigint): Uint8Array {
-    assertUnsignedBigInt("uint64 value", value, MAX_CAPACITY_SHANNONS);
-    const bytes = new Uint8Array(8);
-    new DataView(bytes.buffer).setBigUint64(0, value, true);
-    return bytes;
-}
+import { CELL_DEP_LENGTH, CELL_INPUT_LENGTH } from "../digest.constants";
 
 /**
  * Serializes a molecule `Uint64`, big-endian, the byte order of the commitment number in lock args.
@@ -50,98 +25,10 @@ export function uint64Le(value: bigint): Uint8Array {
  * @returns The 8 bytes.
  */
 export function uint64Be(value: bigint): Uint8Array {
-    assertUnsignedBigInt("uint64 value", value, MAX_CAPACITY_SHANNONS);
-    const bytes = new Uint8Array(8);
+    assertUnsignedBigInt("uint64 value", value, UINT64_MAX);
+    const bytes = new Uint8Array(UINT64_LENGTH);
     new DataView(bytes.buffer).setBigUint64(0, value, false);
     return bytes;
-}
-
-/**
- * Serializes a molecule `Uint128`, little-endian.
- * @param value Value to serialize.
- * @returns The 16 bytes.
- */
-export function uint128Le(value: bigint): Uint8Array {
-    assertUnsignedBigInt("uint128 value", value, MAX_AMOUNT_SHANNONS);
-    const bytes = new Uint8Array(16);
-    const view = new DataView(bytes.buffer);
-    view.setBigUint64(0, value & 0xffffffffffffffffn, true);
-    view.setBigUint64(8, value >> 64n, true);
-    return bytes;
-}
-
-/**
- * Serializes a molecule `table`: total size, one offset per field, then the field bodies.
- * @param fields Serialized field bodies, in schema order.
- * @returns The table bytes.
- */
-export function moleculeTable(fields: Uint8Array[]): Uint8Array {
-    const headerLength = U32_LENGTH * (fields.length + 1);
-    const totalLength = headerLength + fields.reduce((sum, field) => sum + field.length, 0);
-    const parts = [uint32Le(totalLength)];
-    let offset = headerLength;
-    for (const field of fields) {
-        parts.push(uint32Le(offset));
-        offset += field.length;
-    }
-    return concatBytes(...parts, ...fields);
-}
-
-/**
- * Serializes a molecule `fixvec`: item count, then the items; items must share one fixed size.
- * @param items Serialized items.
- * @returns The fixvec bytes.
- */
-export function moleculeFixvec(items: Uint8Array[]): Uint8Array {
-    return concatBytes(uint32Le(items.length), ...items);
-}
-
-/**
- * Serializes a molecule `dynvec`: total size and one offset per item, or a bare 4-byte size when empty.
- * @param items Serialized items.
- * @returns The dynvec bytes.
- */
-export function moleculeDynvec(items: Uint8Array[]): Uint8Array {
-    if (items.length === 0) return uint32Le(U32_LENGTH);
-    const headerLength = U32_LENGTH * (items.length + 1);
-    const totalLength = headerLength + items.reduce((sum, item) => sum + item.length, 0);
-    const parts = [uint32Le(totalLength)];
-    let offset = headerLength;
-    for (const item of items) {
-        parts.push(uint32Le(offset));
-        offset += item.length;
-    }
-    return concatBytes(...parts, ...items);
-}
-
-/**
- * Serializes a molecule `Bytes`: a fixvec of bytes, so a length prefix and the raw data.
- * @param data Raw data to wrap.
- * @returns The Bytes bytes.
- */
-export function moleculeBytes(data: Uint8Array): Uint8Array {
-    return concatBytes(uint32Le(data.length), data);
-}
-
-/**
- * Serializes a molecule `Script` table.
- * @param script Script to serialize.
- * @returns The Script bytes.
- */
-export function moleculeScript(script: Script): Uint8Array {
-    assertBytes("script.codeHash", script.codeHash, HASH256_LENGTH);
-    assertOneOf("script.hashType", script.hashType, SCRIPT_HASH_TYPES);
-    assertAnyBytes("script.args", script.args);
-    return moleculeTable([script.codeHash, Uint8Array.of(HASH_TYPE_BYTES[script.hashType]), moleculeBytes(script.args)]);
-}
-
-/**
- * Serializes a molecule `ScriptOpt`: the script's bytes, or zero bytes for `null`.
- * @param script Script to serialize, or `null` for none.
- * @returns The ScriptOpt bytes.
- */
-export function moleculeScriptOpt(script: Script | null): Uint8Array {
-    return script === null ? new Uint8Array(0) : moleculeScript(script);
 }
 
 /**

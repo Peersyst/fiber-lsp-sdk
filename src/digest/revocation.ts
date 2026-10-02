@@ -7,13 +7,16 @@ import {
     assertUnsignedInteger,
     blake160,
     ckbBlake2b,
+    moleculeBytes,
+    uint128Le,
+    uint64Le,
 } from "../common";
 import type { FiberChannelKeys } from "../derivation";
 import { MAX_COMMITMENT_NUMBER, pubkeyOf } from "../derivation";
 import { MAX_CAPACITY_SHANNONS, MAX_SINCE_PAYLOAD, SINCE_RELATIVE_EPOCH_FLAGS } from "./digest.constants";
 import type { RevocationInput } from "./digest.types";
 import { calculateTxFee, commitmentTxSize } from "./fee";
-import { aggregateXOnlyPubkey, moleculeBytes, moleculeCellOutput, subtractTxFee, uint128Le, uint64Be, uint64Le } from "./utils";
+import { aggregateXOnlyPubkey, moleculeCellOutput, subtractTxFee, uint64Be } from "./utils";
 
 /**
  * Recomputes a revocation digest: fiber's hash over the punishment output, its data, and the revoked cell's lock args.

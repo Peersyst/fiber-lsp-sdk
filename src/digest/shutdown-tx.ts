@@ -1,10 +1,18 @@
-import { COMPRESSED_POINT_LENGTH, MAX_AMOUNT_SHANNONS, assertBytes, assertUnsignedBigInt, ckbBlake2b, compareBytes } from "../common";
+import {
+    COMPRESSED_POINT_LENGTH,
+    MAX_AMOUNT_SHANNONS,
+    assertBytes,
+    assertUnsignedBigInt,
+    ckbBlake2b,
+    compareBytes,
+    uint128Le,
+} from "../common";
 import type { FiberChannelKeys } from "../derivation";
 import { pubkeyOf } from "../derivation";
 import { MAX_CAPACITY_SHANNONS } from "./digest.constants";
 import type { ShutdownTxInput } from "./digest.types";
 import { calculateTxFee, shutdownTxSize } from "./fee";
-import { moleculeCellInput, moleculeCellOutput, moleculeRawTransaction, subtractTxFee, uint128Le } from "./utils";
+import { moleculeCellInput, moleculeCellOutput, moleculeRawTransaction, subtractTxFee } from "./utils";
 
 /**
  * Recomputes the digest of a cooperative-close (shutdown) tx: fiber's `compute_tx_message` over `build_shutdown_tx`.
