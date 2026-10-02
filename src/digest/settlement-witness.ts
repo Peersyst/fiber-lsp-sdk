@@ -1,21 +1,23 @@
 import { concatBytes } from "@noble/hashes/utils.js";
-import type { TlcDirection, TlcHashAlgorithm } from "../common";
+import type { TlcDirection } from "../common";
 import {
     COMPRESSED_POINT_LENGTH,
     MAX_AMOUNT_SHANNONS,
     PAYMENT_HASH_LENGTH,
+    TLC_HASH_ALGORITHMS,
+    TLC_HASH_ALGORITHM_BYTES,
     assertBytes,
+    assertOneOf,
     assertUnsignedBigInt,
     assertUnsignedInteger,
     blake160,
+    uint128Le,
+    uint64Le,
 } from "../common";
 import type { FiberChannelKeys } from "../derivation";
 import { MAX_COMMITMENT_NUMBER, derivePublicKey, deriveTlcKey, pubkeyOf } from "../derivation";
 import { MAX_SETTLEMENT_TLCS, MAX_SINCE_PAYLOAD, SINCE_ABSOLUTE_TIMESTAMP_FLAG } from "./digest.constants";
 import type { SettlementTlc } from "./digest.types";
-import { uint128Le, uint64Le } from "./utils";
-
-const HASH_ALGORITHM_BITS: Record<TlcHashAlgorithm, number> = { "ckb-hash": 0, sha256: 1 };
 
 const TRUNCATED_PAYMENT_HASH_LENGTH = 20;
 
@@ -97,13 +99,11 @@ function buildTlcRecord(keys: FiberChannelKeys, tlc: SettlementTlc, forRemote: b
     if (tlc.direction !== "offered" && tlc.direction !== "received") {
         throw new TypeError("tlc.direction must be offered or received");
     }
-    if (!(tlc.hashAlgorithm in HASH_ALGORITHM_BITS)) {
-        throw new TypeError(`tlc.hashAlgorithm must be one of ${Object.keys(HASH_ALGORITHM_BITS).join(", ")}`);
-    }
+    assertOneOf("tlc.hashAlgorithm", tlc.hashAlgorithm, TLC_HASH_ALGORITHMS);
 
     // A for_remote=false witness flips every TLC id (fiber's flip_mut), which only shows up here, in the flag bit.
     const offeredBit = (tlc.direction === "offered") === forRemote ? 0 : 1;
-    const flag = (HASH_ALGORITHM_BITS[tlc.hashAlgorithm] << 1) | offeredBit;
+    const flag = (TLC_HASH_ALGORITHM_BYTES[tlc.hashAlgorithm] << 1) | offeredBit;
     const localHash = blake160(pubkeyOf(deriveTlcKey(keys, tlc.createdAtRemoteCommitmentNumber)));
     const remoteHash = blake160(derivePublicKey(remoteTlcBasePubkey, tlc.remoteCommitmentPoint));
     const keyHashes = forRemote ? [remoteHash, localHash] : [localHash, remoteHash];

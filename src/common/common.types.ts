@@ -1,4 +1,4 @@
-import type { DEP_TYPES, SCRIPT_HASH_TYPES, SIGNER_ERROR_CODES, TLC_DIRECTIONS } from "./common.constants";
+import type { DEP_TYPES, SCRIPT_HASH_TYPES, SIGNER_ERROR_CODES, TLC_DIRECTIONS, TLC_HASH_ALGORITHMS } from "./common.constants";
 
 export type SignerErrorCode = (typeof SIGNER_ERROR_CODES)[number];
 
@@ -56,7 +56,4 @@ export type Transaction = {
 
 export type TlcDirection = (typeof TLC_DIRECTIONS)[number];
 
-/**
- * The two hash locks fiber's TLCs support, encoded in the witness flag byte as `ckb-hash 0, sha256 1`.
- */
-export type TlcHashAlgorithm = "ckb-hash" | "sha256";
+export type TlcHashAlgorithm = (typeof TLC_HASH_ALGORITHMS)[number];

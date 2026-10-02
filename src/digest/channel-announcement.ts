@@ -6,11 +6,15 @@ import {
     assertUnsignedBigInt,
     ckbBlake2b,
     compareBytes,
+    moleculeScriptOpt,
+    moleculeTable,
+    uint128Le,
+    uint64Le,
 } from "../common";
 import type { FiberChannelKeys } from "../derivation";
 import { pubkeyOf } from "../derivation";
 import type { ChannelAnnouncementInput } from "./digest.types";
-import { aggregateXOnlyPubkey, moleculeOutPoint, moleculeScriptOpt, moleculeTable, uint128Le, uint64Le } from "./utils";
+import { aggregateXOnlyPubkey, moleculeOutPoint } from "./utils";
 
 const SIGNATURE_PLACEHOLDER_LENGTH = 64;
 

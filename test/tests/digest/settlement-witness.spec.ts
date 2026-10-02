@@ -134,7 +134,13 @@ describe("buildSettlementWitness", () => {
         const witnessWith = (tlc: SettlementTlc) => () => buildSettlementWitness(channelKeys, { ...BASE_INPUT, tlcs: [tlc] });
         expect(witnessWith({ ...OFFERED_TLC, id: -1 })).toThrow(RangeError);
         expect(witnessWith({ ...OFFERED_TLC, direction: "inbound" as never })).toThrow(TypeError);
-        expect(witnessWith({ ...OFFERED_TLC, hashAlgorithm: "sha512" as never })).toThrow(TypeError);
+        expect(witnessWith({ ...OFFERED_TLC, hashAlgorithm: "sha512" as never })).toThrow(
+            new TypeError("tlc.hashAlgorithm must be one of ckb-hash, sha256"),
+        );
+        // An inherited key of a plain object is no algorithm either.
+        expect(witnessWith({ ...OFFERED_TLC, hashAlgorithm: "constructor" as never })).toThrow(
+            new TypeError("tlc.hashAlgorithm must be one of ckb-hash, sha256"),
+        );
         expect(witnessWith({ ...OFFERED_TLC, amountShannons: 1n << 128n })).toThrow(RangeError);
         expect(witnessWith({ ...OFFERED_TLC, paymentHash: new Uint8Array(31) })).toThrow(TypeError);
         expect(witnessWith({ ...OFFERED_TLC, expiryMs: -1n })).toThrow(RangeError);

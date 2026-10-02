@@ -1,4 +1,5 @@
 import { PAYMENT_HASH_LENGTH, PREIMAGE_LENGTH, UINT64_MAX, assertOneOf, assertString } from "../common";
+import { INVOICE_CURRENCIES } from "../invoice";
 import type { WireField } from "../wire";
 import {
     WIRE_TLC_HASH_ALGORITHMS,
@@ -10,7 +11,7 @@ import {
     readObject,
     requireObject,
 } from "../wire";
-import { RPC_INVOICE_CURRENCIES, RPC_INVOICE_STATUSES } from "./rpc.constants";
+import { RPC_INVOICE_STATUSES } from "./rpc.constants";
 import type {
     NewInvoiceParams,
     NewInvoiceParamsWire,
@@ -31,7 +32,7 @@ import { encodeRpcPaymentHashParams, encodeRpcShannons } from "./utils";
 export function encodeNewInvoiceParams(params: NewInvoiceParams): NewInvoiceParamsWire {
     const { description } = params;
     if (description !== undefined) assertString("description", description);
-    assertOneOf("currency", params.currency, RPC_INVOICE_CURRENCIES);
+    assertOneOf("currency", params.currency, INVOICE_CURRENCIES);
     return {
         amount: encodeRpcShannons("amountShannons", params.amountShannons),
         ...(description === undefined ? {} : { description }),

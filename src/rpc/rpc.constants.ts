@@ -75,11 +75,6 @@ export const RPC_CHANNEL_STATE_FLAGS = {
  */
 export const LIST_CHANNELS_FILTERS = ["include_closed", "only_pending"] as const;
 
-/**
- * Mainnet, testnet and any other chain.
- */
-export const RPC_INVOICE_CURRENCIES = ["Fibb", "Fibt", "Fibd"] as const;
-
 export const RPC_INVOICE_STATUSES = ["Open", "Cancelled", "Expired", "Received", "Paid"] as const;
 
 export const RPC_PAYMENT_STATUSES = ["Created", "Inflight", "Success", "Failed"] as const;

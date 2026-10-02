@@ -1,11 +1,11 @@
 import { writeFileSync } from "node:fs";
 import { UINT128_MAX, UINT64_MAX } from "../../../src/common";
+import { INVOICE_CURRENCIES } from "../../../src/invoice";
 import type { RpcMethod, RpcParamsWire } from "../../../src/rpc";
 import {
     RPC_CALL_FAILED_CODE,
     RPC_CHANNEL_STATE_FLAGS,
     RPC_CHANNEL_STATE_NAMES,
-    RPC_INVOICE_CURRENCIES,
     RPC_INVOICE_STATUSES,
     RPC_METHODS,
     RPC_PAYMENT_STATUSES,
@@ -167,7 +167,7 @@ describe("rpc interop vectors", () => {
 
         it("cover every currency and hash algorithm the client names, with, without and with an empty description", () => {
             const params = vectors.methods.new_invoice.params.map((entry) => entry.values);
-            expect(new Set(params.map((entry) => entry.currency))).toEqual(new Set(RPC_INVOICE_CURRENCIES));
+            expect(new Set(params.map((entry) => entry.currency))).toEqual(new Set(INVOICE_CURRENCIES));
             expect(new Set(params.map((entry) => entry.hash_algorithm))).toEqual(new Set(Object.keys(WIRE_TLC_HASH_ALGORITHMS)));
             expect(params.some((entry) => entry.description === null)).toBe(true);
             expect(params.some((entry) => entry.description === "")).toBe(true);
