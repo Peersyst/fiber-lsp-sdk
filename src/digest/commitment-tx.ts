@@ -8,6 +8,8 @@ import {
     assertUnsignedInteger,
     blake160,
     ckbBlake2b,
+    uint128Le,
+    uint64Le,
 } from "../common";
 import type { FiberChannelKeys } from "../derivation";
 import { MAX_COMMITMENT_NUMBER, pubkeyOf } from "../derivation";
@@ -15,16 +17,7 @@ import { MAX_CAPACITY_SHANNONS, MAX_SINCE_PAYLOAD, SINCE_RELATIVE_EPOCH_FLAGS } 
 import type { CommitmentTxInput } from "./digest.types";
 import { calculateTxFee, commitmentTxSize } from "./fee";
 import { buildSettlementWitness } from "./settlement-witness";
-import {
-    aggregateXOnlyPubkey,
-    moleculeCellInput,
-    moleculeCellOutput,
-    moleculeRawTransaction,
-    subtractTxFee,
-    uint128Le,
-    uint64Be,
-    uint64Le,
-} from "./utils";
+import { aggregateXOnlyPubkey, moleculeCellInput, moleculeCellOutput, moleculeRawTransaction, subtractTxFee, uint64Be } from "./utils";
 
 /**
  * Builds the 57-byte commitment lock args: key hash, delay, version, settlement hash, trailing zero.

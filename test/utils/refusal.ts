@@ -1,3 +1,4 @@
+import { InvoiceError } from "../../src/invoice";
 import { ProtocolError } from "../../src/protocol";
 import type { WireError } from "../../src/wire";
 import { asWireError } from "../../src/wire";
@@ -25,4 +26,19 @@ export function answerableRefusal(step: () => unknown): ProtocolError {
     const error = refusal(step);
     if (!(error instanceof ProtocolError)) throw new Error("the refusal carries no request id to answer with");
     return error;
+}
+
+/**
+ * Runs an invoice read that must refuse, and returns the refusal.
+ * @param step Step to run.
+ * @returns The invoice refusal it threw; anything else it throws propagates.
+ */
+export function invoiceRefusal(step: () => unknown): InvoiceError {
+    try {
+        step();
+    } catch (error) {
+        if (error instanceof InvoiceError) return error;
+        throw error;
+    }
+    throw new Error("the step did not refuse");
 }

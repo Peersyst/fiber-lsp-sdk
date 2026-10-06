@@ -1,4 +1,5 @@
 import type { Script, TlcHashAlgorithm, Transaction } from "../common";
+import type { InvoiceCurrency } from "../invoice";
 import type { BareHexWire, HexWire, ScriptWire, TlcHashAlgorithmWire, TransactionWire, UintHexWire, WireField } from "../wire";
 import type { IFetchLike } from "./interfaces";
 import type {
@@ -6,7 +7,6 @@ import type {
     LIST_CHANNELS_FILTERS,
     RPC_CHANNEL_STATE_FLAGS,
     RPC_CHANNEL_STATE_NAMES,
-    RPC_INVOICE_CURRENCIES,
     RPC_INVOICE_STATUSES,
     RPC_METHODS,
     RPC_PAYMENT_STATUSES,
@@ -82,8 +82,6 @@ export type RpcChannelWire = {
 
 export type ListChannelsResultWire = { channels: RpcChannelWire[] };
 
-export type RpcInvoiceCurrency = (typeof RPC_INVOICE_CURRENCIES)[number];
-
 export type RpcInvoiceStatus = (typeof RPC_INVOICE_STATUSES)[number];
 
 export type RpcPaymentStatus = (typeof RPC_PAYMENT_STATUSES)[number];
@@ -91,7 +89,7 @@ export type RpcPaymentStatus = (typeof RPC_PAYMENT_STATUSES)[number];
 export type NewInvoiceParamsWire = {
     amount: UintHexWire;
     description?: string;
-    currency: RpcInvoiceCurrency;
+    currency: InvoiceCurrency;
     payment_hash: HexWire;
     expiry: UintHexWire;
     hash_algorithm: TlcHashAlgorithmWire;
@@ -193,7 +191,7 @@ export type RpcChannel = {
 
 export type NewInvoiceParams = {
     amountShannons: string;
-    currency: RpcInvoiceCurrency;
+    currency: InvoiceCurrency;
     paymentHash: Uint8Array;
     hashAlgorithm: TlcHashAlgorithm;
     /**

@@ -171,7 +171,8 @@ the preimage, the one call that carries one.
 - **`hash_algorithm` is always sent**, because the caller computed the hash and has to name how. The SDK's `ckb-hash` is
   written `ckb_hash`, fiber's spelling, through the one map `wire` also reads it with.
 - **`currency` is fiber's name**, `Fibb`, `Fibt` or `Fibd` for mainnet, testnet and any other chain. Fiber refuses one that
-  is not the node's.
+  is not the node's. The list is `invoice`'s `INVOICE_CURRENCIES`, shared with the invoice reader, which knows the same three by
+  the prefix of the string ([invoice.md](./invoice.md)).
 - **`description` is optional**, and an empty one is sent as it is: fiber stores it as a description, which is not the
   invoice it builds without one. Fiber refuses more than 639 bytes; the client leaves that bound to the node.
 - **Left to the node on the creation**: `fallback_address`, `final_expiry_delta` (fiber's minimum when absent),
@@ -254,23 +255,23 @@ inputs do, and the host hands it to its CKB signer as it is.
 
 ## Where it lives
 
-| File                                  | Contents                                                                                                                                                                              |
-| ------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `src/rpc/fiber-rpc-client.ts`         | `FiberRpcClient`: the request, the status, the three errors, the methods                                                                                                              |
-| `src/rpc/channels.ts`                 | The codecs of the four channel methods, the channel and its state                                                                                                                     |
-| `src/rpc/invoices.ts`                 | The codecs of the four invoice methods                                                                                                                                                |
-| `src/rpc/payments.ts`                 | The codecs of the two payment methods                                                                                                                                                 |
-| `src/rpc/json-rpc.ts`                 | The pure envelope codec: the request text, the response read against its id                                                                                                           |
-| `src/rpc/rpc.error.ts`                | `RpcTransportError`, `RpcError`, `RpcResponseError`                                                                                                                                   |
-| `src/rpc/rpc.constants.ts`            | The ten methods, the version, the Bearer prefix, fiber's two error codes, the channel states and their flags, the listing's filters, the currencies, the invoice and payment statuses |
-| `src/rpc/interfaces/i-fetch.ts`       | `IFetchLike`                                                                                                                                                                          |
-| `src/rpc/utils/amount.utils.ts`       | Decimal shannons to and from `U128Hex`                                                                                                                                                |
-| `src/rpc/utils/payment-hash.utils.ts` | The params of the three methods that take a payment hash and nothing else                                                                                                             |
-| `src/wire/flags.ts`                   | Fiber's flag sets                                                                                                                                                                     |
-| `src/wire/transaction.ts`             | CKB's transaction JSON, read and written                                                                                                                                              |
-| `test/mocks/rpc/fetch.mock.ts`        | `FetchMock`: records every request and its receiver, answers from a script                                                                                                            |
-| `test/utils/rpc-typed.ts`             | The vectors' values projected into the client's typed params and results                                                                                                              |
-| `test/utils/rpc-answers.ts`           | The result field and the scripted answers the method specs share                                                                                                                      |
+| File                                  | Contents                                                                                                                                                              |
+| ------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `src/rpc/fiber-rpc-client.ts`         | `FiberRpcClient`: the request, the status, the three errors, the methods                                                                                              |
+| `src/rpc/channels.ts`                 | The codecs of the four channel methods, the channel and its state                                                                                                     |
+| `src/rpc/invoices.ts`                 | The codecs of the four invoice methods                                                                                                                                |
+| `src/rpc/payments.ts`                 | The codecs of the two payment methods                                                                                                                                 |
+| `src/rpc/json-rpc.ts`                 | The pure envelope codec: the request text, the response read against its id                                                                                           |
+| `src/rpc/rpc.error.ts`                | `RpcTransportError`, `RpcError`, `RpcResponseError`                                                                                                                   |
+| `src/rpc/rpc.constants.ts`            | The ten methods, the version, the Bearer prefix, fiber's two error codes, the channel states and their flags, the listing's filters, the invoice and payment statuses |
+| `src/rpc/interfaces/i-fetch.ts`       | `IFetchLike`                                                                                                                                                          |
+| `src/rpc/utils/amount.utils.ts`       | Decimal shannons to and from `U128Hex`                                                                                                                                |
+| `src/rpc/utils/payment-hash.utils.ts` | The params of the three methods that take a payment hash and nothing else                                                                                             |
+| `src/wire/flags.ts`                   | Fiber's flag sets                                                                                                                                                     |
+| `src/wire/transaction.ts`             | CKB's transaction JSON, read and written                                                                                                                              |
+| `test/mocks/rpc/fetch.mock.ts`        | `FetchMock`: records every request and its receiver, answers from a script                                                                                            |
+| `test/utils/rpc-typed.ts`             | The vectors' values projected into the client's typed params and results                                                                                              |
+| `test/utils/rpc-answers.ts`           | The result field and the scripted answers the method specs share                                                                                                      |
 
 ## What the tests guarantee
 

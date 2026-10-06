@@ -1,5 +1,6 @@
 import { hexToBytes } from "@noble/hashes/utils.js";
 import type { DepType, TlcHashAlgorithm, Transaction } from "../../src/common";
+import type { InvoiceCurrency } from "../../src/invoice";
 import type {
     AbandonChannelParams,
     ListChannelsParams,
@@ -10,7 +11,6 @@ import type {
     RpcChannel,
     RpcChannelState,
     RpcInvoice,
-    RpcInvoiceCurrency,
     RpcInvoiceStatus,
     RpcMethod,
     RpcParamsWire,
@@ -133,7 +133,7 @@ export function toNewInvoiceParams(vector: NewInvoiceParamsVector): NewInvoicePa
     if (hashAlgorithm === undefined) throw new Error(`the vectors carry an unknown hash algorithm: ${vector.hash_algorithm}`);
     const params: NewInvoiceParams = {
         amountShannons: vector.amount,
-        currency: vector.currency as RpcInvoiceCurrency,
+        currency: vector.currency as InvoiceCurrency,
         paymentHash: hexToBytes(vector.payment_hash),
         hashAlgorithm,
         expirySeconds: BigInt(vector.expiry),

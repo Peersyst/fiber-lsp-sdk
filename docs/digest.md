@@ -58,9 +58,11 @@ hash could redirect the commitment output and still pass the digest check. Dev c
 ## Molecule, from scratch
 
 The reconstruction needs CKB's molecule serialization (tables, fixed and dynamic vectors, options) for exactly seven
-blockchain types plus the gossip announcement table. The SDK implements that subset in `utils/molecule.utils.ts` rather than
-adding a dependency: the runtime dependency set is a hard constraint, and the full molecule machinery is far larger than the
-fragment needed. The layout is pinned by unit fixtures and, end to end, by the interop vectors.
+blockchain types plus the gossip announcement table. The SDK implements that subset rather than adding a dependency: the
+runtime dependency set is a hard constraint, and the full molecule machinery is far larger than the fragment needed. The
+writers of the primitives (integers, tables, vectors, `Bytes`, `Script`) live in `common`, since the invoice module writes
+the same ones ([invoice.md](./invoice.md)); the transaction serializers stay in `utils/molecule.utils.ts`. The layout is pinned
+by unit fixtures and, end to end, by the interop vectors.
 
 ## What the vectors guarantee
 

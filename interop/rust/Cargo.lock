@@ -573,6 +573,8 @@ dependencies = [
 name = "fiber-lsp-sdk-interop"
 version = "0.1.0"
 dependencies = [
+ "arcode",
+ "bech32",
  "ckb-hash 0.115.0",
  "ckb-jsonrpc-types",
  "ckb-types",
@@ -581,6 +583,7 @@ dependencies = [
  "hex",
  "hmac",
  "jsonrpsee-types",
+ "molecule",
  "musig2",
  "secp256k1 0.29.1",
  "secp256k1 0.30.0",

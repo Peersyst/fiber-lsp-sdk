@@ -2,6 +2,12 @@ export const UINT32_MAX = 2 ** 32 - 1;
 export const UINT64_MAX = (1n << 64n) - 1n;
 export const UINT128_MAX = (1n << 128n) - 1n;
 
+export const UINT32_LENGTH = 4;
+
+export const UINT64_LENGTH = 8;
+
+export const UINT128_LENGTH = 16;
+
 /**
  * Fiber amounts are u128 shannons.
  */
@@ -42,13 +48,31 @@ export const PAYMENT_HASH_LENGTH = 32;
 
 export const PREIMAGE_LENGTH = 32;
 
-/**
- * The four values of the molecule `hash_type` byte, encoded as `data 0, type 1, data1 2, data2 4`.
- */
 export const SCRIPT_HASH_TYPES = ["data", "type", "data1", "data2"] as const;
+
+/**
+ * The molecule `hash_type` byte: `DataN` encodes as `N << 1`, `type` as 1.
+ */
+export const SCRIPT_HASH_TYPE_BYTES = { data: 0, type: 1, data1: 2, data2: 4 } as const satisfies Record<
+    (typeof SCRIPT_HASH_TYPES)[number],
+    number
+>;
 
 export const DEP_TYPES = ["code", "dep_group"] as const;
 
 export const TLC_DIRECTIONS = ["offered", "received"] as const;
+
+/**
+ * The two hash locks fiber's TLCs support.
+ */
+export const TLC_HASH_ALGORITHMS = ["ckb-hash", "sha256"] as const;
+
+/**
+ * Fiber's `HashAlgorithm` byte, the same in a TLC's witness flag and in an invoice's attribute.
+ */
+export const TLC_HASH_ALGORITHM_BYTES = { "ckb-hash": 0, sha256: 1 } as const satisfies Record<
+    (typeof TLC_HASH_ALGORITHMS)[number],
+    number
+>;
 
 export const SIGNER_ERROR_CODES = ["unknown_channel", "malformed", "stale_state", "policy_refusal"] as const;
