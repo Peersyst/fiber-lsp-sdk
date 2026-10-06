@@ -1,5 +1,11 @@
 import { AsyncInMemorySignerStorage, InMemorySignerStorage } from "../../mocks/policy";
-import type { ChannelPolicyRecord, IAsyncSignerStorage, ISignerStorage } from "../../../src/policy";
+import type {
+    ChannelPolicyRecord,
+    DebitIntentRecord,
+    HoldInvoicePolicyRecord,
+    IAsyncSignerStorage,
+    ISignerStorage,
+} from "../../../src/policy";
 import { SignerStore } from "../../../src/policy";
 
 const CHANNEL_ID = "0x1f".padEnd(66, "a");
@@ -17,8 +23,23 @@ function record(overrides: Partial<ChannelPolicyRecord> = {}): ChannelPolicyReco
         lastSignedCommitmentNumbers: { COMMITMENT: 5, REVOKE: 4 },
         signedSessions: { "COMMITMENT:5": "ab".repeat(32) },
         lastStateVersion: 7,
-        localExposureShannons: "5000000000",
-        pendingDebitsShannons: ["100"],
+        views: {
+            remote: {
+                exposureShannons: "5000000000",
+                tlcs: [
+                    {
+                        direction: "offered",
+                        hashAlgorithm: "ckb-hash",
+                        boundPaymentHash: "33".repeat(20),
+                        amountShannons: "100",
+                        expirySeconds: "1700000000",
+                    },
+                ],
+                chargedShannons: {},
+                creditedShannons: {},
+            },
+            local: { exposureShannons: "5000000100", tlcs: [], chargedShannons: { ["44".repeat(20)]: "7" }, creditedShannons: {} },
+        },
         ...overrides,
     };
 }
@@ -216,7 +237,7 @@ describe("channel records", () => {
 
     it("refuses to write a record with the wrong shape", async () => {
         const store = new SignerStore(new InMemorySignerStorage());
-        const corrupt = record({ localExposureShannons: "-1" });
+        const corrupt = record({ lastStateVersion: -1 });
         await expect(store.setChannelRecord(CHANNEL_INDEX, corrupt)).rejects.toThrow(
             new TypeError("record is not a valid channel policy record"),
         );
@@ -252,11 +273,17 @@ describe("channel records", () => {
     });
 
     // Hand-written v1 payload: must parse forever. Never update it to pass; a failure means the format needs a new version.
-    // It was rewritten twice while the version was still unpublished, and no device had written a record either time: the
-    // rename of two fields, and the move of the record key from the channel id to the channel index. There is no third.
+    // Rewritten while unpublished, with no device holding a record; once released, a change is a new version.
     it("reads a v1 record written by any past version of the SDK", async () => {
         const v1Json =
-            '{"pendingDebitsShannons":["250000000"],"localExposureShannons":"123456789","lastStateVersion":42,' +
+            '{"views":{"local":{"creditedShannons":{"' +
+            "66".repeat(20) +
+            '":"2250000000"},"chargedShannons":{},"tlcs":[],"exposureShannons":"123456789"},' +
+            '"remote":{"creditedShannons":{},"chargedShannons":{"' +
+            "77".repeat(20) +
+            '":"1500000000"},"tlcs":[{"expirySeconds":"1723257890","amountShannons":"750000000","boundPaymentHash":"' +
+            "88".repeat(20) +
+            '","hashAlgorithm":"sha256","direction":"offered"}],"exposureShannons":"122706789"}},"lastStateVersion":42,' +
             '"signedSessions":{"REVOKE:9":"' +
             "cd".repeat(32) +
             '","COMMITMENT:10":"' +
@@ -272,8 +299,28 @@ describe("channel records", () => {
             lastSignedCommitmentNumbers: { COMMITMENT: 10, REVOKE: 9 },
             signedSessions: { "COMMITMENT:10": "ef".repeat(32), "REVOKE:9": "cd".repeat(32) },
             lastStateVersion: 42,
-            localExposureShannons: "123456789",
-            pendingDebitsShannons: ["250000000"],
+            views: {
+                remote: {
+                    exposureShannons: "122706789",
+                    tlcs: [
+                        {
+                            direction: "offered",
+                            hashAlgorithm: "sha256",
+                            boundPaymentHash: "88".repeat(20),
+                            amountShannons: "750000000",
+                            expirySeconds: "1723257890",
+                        },
+                    ],
+                    chargedShannons: { ["77".repeat(20)]: "1500000000" },
+                    creditedShannons: {},
+                },
+                local: {
+                    exposureShannons: "123456789",
+                    tlcs: [],
+                    chargedShannons: {},
+                    creditedShannons: { ["66".repeat(20)]: "2250000000" },
+                },
+            },
         });
     });
 
@@ -287,8 +334,30 @@ describe("channel records", () => {
                 "ANNOUNCEMENT:0": "f0".repeat(32),
             },
             lastStateVersion: Number.MAX_SAFE_INTEGER,
-            localExposureShannons: "340282366920938463463374607431768211455",
-            pendingDebitsShannons: ["0", "340282366920938463463374607431768211455"],
+            views: {
+                remote: {
+                    exposureShannons: "340282366920938463463374607431768211455",
+                    tlcs: [
+                        {
+                            direction: "received",
+                            hashAlgorithm: "ckb-hash",
+                            boundPaymentHash: "ff".repeat(20),
+                            amountShannons: "340282366920938463463374607431768211455",
+                            expirySeconds: "18446744073709551615",
+                        },
+                        {
+                            direction: "offered",
+                            hashAlgorithm: "ckb-hash",
+                            boundPaymentHash: "00".repeat(20),
+                            amountShannons: "0",
+                            expirySeconds: "0",
+                        },
+                    ],
+                    chargedShannons: { ["ff".repeat(20)]: "340282366920938463463374607431768211455" },
+                    creditedShannons: { ["00".repeat(20)]: "0" },
+                },
+                local: { exposureShannons: "0", tlcs: [], chargedShannons: {}, creditedShannons: {} },
+            },
         });
         const store = new SignerStore(new InMemorySignerStorage());
         await store.setChannelRecord(Number.MAX_SAFE_INTEGER, boundary);
@@ -299,7 +368,7 @@ describe("channel records", () => {
         const storage = new InMemorySignerStorage();
         const store = new SignerStore(storage);
         await store.setChannelRecord(CHANNEL_INDEX, record());
-        await expect(store.setChannelRecord(CHANNEL_INDEX, record({ localExposureShannons: "-1" }))).rejects.toThrow(TypeError);
+        await expect(store.setChannelRecord(CHANNEL_INDEX, record({ lastStateVersion: -1 }))).rejects.toThrow(TypeError);
         expect(storage.map.get(CHANNEL_KEY)).toBe(JSON.stringify(record()));
     });
 
@@ -398,7 +467,7 @@ describe("updateChannelRecord", () => {
         await store.setChannelRecord(CHANNEL_INDEX, record());
         storage.ops.length = 0;
         await expect(
-            store.updateChannelRecord(CHANNEL_INDEX, (current) => ({ ...requireRecord(current), localExposureShannons: "-1" })),
+            store.updateChannelRecord(CHANNEL_INDEX, (current) => ({ ...requireRecord(current), lastStateVersion: -1 })),
         ).rejects.toThrow(new TypeError("updated record is not a valid channel policy record"));
         expect(storage.ops).toEqual([`get ${CHANNEL_KEY}`]);
         expect(storage.map.get(CHANNEL_KEY)).toBe(JSON.stringify(record()));
@@ -623,6 +692,154 @@ describe("concurrency", () => {
 
         await Promise.all(pending);
         expect(lanes.size).toBe(0);
+    });
+});
+
+describe("payment records", () => {
+    const TRUNCATED_HASH = PAYMENT_HASH.slice(0, 40);
+    const INTENT: DebitIntentRecord = {
+        version: 1,
+        paymentHash: PAYMENT_HASH,
+        maxShannons: "1500000000",
+        open: true,
+        channelIndexes: [3, 0],
+    };
+    const INVOICE: HoldInvoicePolicyRecord = {
+        version: 1,
+        paymentHash: PAYMENT_HASH,
+        amountShannons: "2250000000",
+        hashAlgorithm: "ckb-hash",
+        released: false,
+        channelIndexes: [],
+    };
+
+    const KINDS = [
+        {
+            kind: "debit intent record",
+            key: `fiber-lsp-sdk:intent:${TRUNCATED_HASH}`,
+            record: INTENT as DebitIntentRecord | HoldInvoicePolicyRecord,
+            corrupt: { ...INTENT, open: "yes" },
+            get: (store: SignerStore, hash: string) => store.getDebitIntent(hash),
+            update: (store: SignerStore, hash: string, next: unknown) => store.updateDebitIntent(hash, () => next as DebitIntentRecord),
+        },
+        {
+            kind: "hold invoice record",
+            key: `fiber-lsp-sdk:invoice:${TRUNCATED_HASH}`,
+            record: INVOICE as DebitIntentRecord | HoldInvoicePolicyRecord,
+            corrupt: { ...INVOICE, released: 1 },
+            get: (store: SignerStore, hash: string) => store.getHoldInvoiceRecord(hash),
+            update: (store: SignerStore, hash: string, next: unknown) =>
+                store.updateHoldInvoiceRecord(hash, () => next as HoldInvoicePolicyRecord),
+        },
+    ] as const;
+
+    describe.each(KINDS)("$kind", ({ kind, key, record: stored, corrupt, get, update }) => {
+        it("round-trips through a synchronous storage, under the bound 20 bytes of the hash", async () => {
+            const storage = new InMemorySignerStorage();
+            const store = new SignerStore(storage);
+            await update(store, TRUNCATED_HASH, stored);
+            await expect(get(store, TRUNCATED_HASH)).resolves.toEqual(stored);
+            expect([...storage.map.keys()]).toEqual([key]);
+        });
+
+        it("round-trips through an asynchronous storage", async () => {
+            const store = new SignerStore(new AsyncInMemorySignerStorage());
+            await update(store, TRUNCATED_HASH, stored);
+            await expect(get(store, TRUNCATED_HASH)).resolves.toEqual(stored);
+        });
+
+        it("returns null when none was written", async () => {
+            await expect(get(new SignerStore(new InMemorySignerStorage()), TRUNCATED_HASH)).resolves.toBeNull();
+        });
+
+        it("writes nothing when the updater hands back the record it was given", async () => {
+            const storage = new InMemorySignerStorage();
+            const store = new SignerStore(storage);
+            await update(store, TRUNCATED_HASH, stored);
+            storage.ops.length = 0;
+            const unchanged = await get(store, TRUNCATED_HASH);
+            const updater =
+                kind === "debit intent record" ? store.updateDebitIntent.bind(store) : store.updateHoldInvoiceRecord.bind(store);
+            await (updater as (hash: string, update: (current: unknown) => unknown) => Promise<unknown>)(
+                TRUNCATED_HASH,
+                (current) => current,
+            );
+            expect(storage.ops).toEqual([`get ${key}`, `get ${key}`]);
+            expect(unchanged).toEqual(stored);
+        });
+
+        it("refuses to write a record with the wrong shape", async () => {
+            const storage = new InMemorySignerStorage();
+            await expect(update(new SignerStore(storage), TRUNCATED_HASH, corrupt)).rejects.toThrow(
+                new TypeError(`updated record is not a valid ${kind}`),
+            );
+            expect(storage.map.size).toBe(0);
+        });
+
+        // A record under another key would answer for a payment it is not.
+        it("refuses to write a record under the bound bytes of another hash", async () => {
+            const storage = new InMemorySignerStorage();
+            await expect(update(new SignerStore(storage), "22".repeat(20), stored)).rejects.toThrow(
+                new TypeError(`updated record does not belong at ${key.replace(TRUNCATED_HASH, "22".repeat(20))}`),
+            );
+            expect(storage.map.size).toBe(0);
+        });
+
+        it.each([
+            ["not valid JSON", () => "{not json", "is not valid JSON"],
+            ["of the wrong shape", () => JSON.stringify(corrupt), `is not a ${kind}`],
+            ["filed under another hash", () => JSON.stringify({ ...stored, paymentHash: "22".repeat(32) }), `is not a ${kind}`],
+        ])("throws on a stored value %s", async (_, raw, reason) => {
+            const storage = new InMemorySignerStorage();
+            storage.map.set(key, raw());
+            await expect(get(new SignerStore(storage), TRUNCATED_HASH)).rejects.toThrow(new TypeError(`stored value at ${key} ${reason}`));
+        });
+
+        it.each([
+            ["a full 32-byte hash", PAYMENT_HASH],
+            ["an uppercase hash", "AB".repeat(20)],
+            ["a 0x-prefixed hash", "0x" + TRUNCATED_HASH.slice(2)],
+        ])("rejects %s as the key", async (_, hash) => {
+            const store = new SignerStore(new InMemorySignerStorage());
+            const error = new TypeError("boundPaymentHashHex must be 20 bytes of lowercase hex");
+            await expect(get(store, hash)).rejects.toThrow(error);
+            await expect(update(store, hash, stored)).rejects.toThrow(error);
+        });
+    });
+});
+
+describe("the balance lane", () => {
+    it("runs its operations one at a time, in call order", async () => {
+        const store = new SignerStore(new AsyncInMemorySignerStorage());
+        const events: string[] = [];
+        const step = (name: string) => async () => {
+            events.push(`${name} start`);
+            await Promise.resolve();
+            await Promise.resolve();
+            events.push(`${name} end`);
+            return name;
+        };
+        await expect(Promise.all([store.withBalanceLock(step("first")), store.withBalanceLock(step("second"))])).resolves.toEqual([
+            "first",
+            "second",
+        ]);
+        expect(events).toEqual(["first start", "first end", "second start", "second end"]);
+    });
+
+    it("stays usable after an operation in it fails", async () => {
+        const store = new SignerStore(new InMemorySignerStorage());
+        await expect(
+            store.withBalanceLock(() => {
+                throw new Error("refused");
+            }),
+        ).rejects.toThrow(new Error("refused"));
+        await expect(store.withBalanceLock(() => Promise.resolve("next"))).resolves.toBe("next");
+    });
+
+    it("is a lane, never a stored key", async () => {
+        const storage = new InMemorySignerStorage();
+        await new SignerStore(storage).withBalanceLock(() => Promise.resolve());
+        expect(storage.ops).toEqual([]);
     });
 });
 

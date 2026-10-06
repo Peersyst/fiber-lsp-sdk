@@ -14,10 +14,32 @@ export const CHANNEL_RECORD_KEY_PREFIX = `${STORAGE_KEY_NAMESPACE}:channel:`;
 export const CHANNEL_ALIAS_KEY_PREFIX = `${STORAGE_KEY_NAMESPACE}:alias:`;
 export const HOLD_INVOICE_PREIMAGE_KEY_PREFIX = `${STORAGE_KEY_NAMESPACE}:preimage:`;
 
+export const DEBIT_INTENT_KEY_PREFIX = `${STORAGE_KEY_NAMESPACE}:intent:`;
+
+export const HOLD_INVOICE_RECORD_KEY_PREFIX = `${STORAGE_KEY_NAMESPACE}:invoice:`;
+
+/**
+ * A serialization lane, never a stored key.
+ */
+export const BALANCE_LANE_KEY = `${STORAGE_KEY_NAMESPACE}:balance`;
+
+export const POLICY_VIEWS = ["remote", "local"] as const;
+
+export const DEBIT_INTENT_ERROR_CODES = ["intent_open", "intent_charged", "own_invoice"] as const;
+
+export const HOLD_INVOICE_ERROR_CODES = ["offered_in_flight", "algorithm_mismatch"] as const;
+
+/**
+ * Past this many offered TLCs leaving at once, all are charged: the exact search is exponential.
+ */
+export const MAX_EXACT_CHARGE_TLCS = 12;
+
 /**
  * Bumped on format changes so old records migrate instead of being rejected: a rejected record loses its sign-once registry.
  */
 export const CHANNEL_POLICY_RECORD_VERSION = 1;
+
+export const PAYMENT_RECORD_VERSION = 1;
 
 /**
  * The announcement nonce never rotates, so its slot is fixed and latched on first use.

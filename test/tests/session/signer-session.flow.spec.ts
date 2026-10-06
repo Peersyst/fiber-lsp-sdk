@@ -3,7 +3,7 @@ import { bytesToHex, hexToBytes } from "@noble/hashes/utils.js";
 import { keyAggExport, keyAggregate } from "@scure/btc-signer/musig2.js";
 import { compareBytes } from "../../../src/common";
 import { deriveChannelKeys, deriveChannelSeed, deriveWalletIdentityKey, pubkeyOf } from "../../../src/derivation";
-import { COMMITMENT_LOCK_TESTNET } from "../../../src/digest";
+import { COMMITMENT_LOCK_TESTNET, computeCommitmentTxDigest } from "../../../src/digest";
 import type { ISignerStorage } from "../../../src/policy";
 import { ANNOUNCEMENT_SLOT_NUMBER, CHANNEL_POLICY_RECORD_VERSION, PolicyEngine, SignerStore } from "../../../src/policy";
 import type { SignMethodParamsWire, SignSessionWire } from "../../../src/protocol";
@@ -15,6 +15,8 @@ import { SignerDispatch, WalletIdentity, getBasePublicKeys, getChannelCommitment
 import { InMemorySignerStorage } from "../../mocks/policy";
 import { TimerMock } from "../../mocks/session";
 import { flush } from "../../utils/flush";
+import { toCommitmentTxInput } from "../../utils/digest-inputs";
+import type { CommitmentCaseVector } from "../../utils/interop-vectors";
 import { caseOf, loadInteropVectors } from "../../utils/interop-vectors";
 import { SHUTDOWN_NONCE_NUMBER, revocationNonceNumber } from "../../utils/nonce-numbers";
 import { rejection } from "../../utils/rejection";
@@ -52,7 +54,18 @@ const CLOSE = caseOf(digest.shutdown_cases, "ckb");
 const ANNOUNCEMENT = caseOf(digest.announcement_cases, "ckb");
 
 const OPENING_EXPOSURE = OPEN.settlement_local;
-const SEND_DECREASE = (BigInt(OPEN.settlement_local) - BigInt(SEND.settlement_local)).toString();
+// SEND with every TLC failed back: fiber closes a channel only with none pending.
+const SETTLED_WITHOUT_DIGEST: CommitmentCaseVector = {
+    ...SEND,
+    commitment_number: SEND.commitment_number + 1,
+    settlement_local: OPEN.settlement_local,
+    tlcs: [],
+};
+const SETTLED: CommitmentCaseVector = {
+    ...SETTLED_WITHOUT_DIGEST,
+    digest: bytesToHex(computeCommitmentTxDigest(KEYS, toCommitmentTxInput(SETTLED_WITHOUT_DIGEST, REMOTE))),
+};
+const OPENING_VIEW = { exposureShannons: OPENING_EXPOSURE, tlcs: [], chargedShannons: {}, creditedShannons: {} };
 const REVOCATION_NONCE_NUMBER = revocationNonceNumber(SEND_SIDE_REVOCATION);
 
 const URL = "wss://lsp.example/signer";
@@ -134,6 +147,12 @@ async function connected(bridge: InMemorySignerBridge, options: DeviceOptions = 
 
 function openChannel(d: Device, channelIndex = CHANNEL_INDEX, exposure = OPENING_EXPOSURE): Promise<string> {
     return d.session.registerChannel(d.dispatch.prepareChannelRegistration(channelIndex, exposure));
+}
+
+async function recordSendIntents(policy: PolicyEngine): Promise<void> {
+    for (const tlc of SEND.tlcs) {
+        if (tlc.direction === "offered") await policy.recordDebitIntent(tlc.payment_hash, tlc.amount);
+    }
 }
 
 function signed(outcome: BridgeSignOutcome): Extract<BridgeSignOutcome, { kind: "signed" }> {
@@ -262,8 +281,7 @@ describe("channel open", () => {
             lastSignedCommitmentNumbers: {},
             signedSessions: {},
             lastStateVersion: 0,
-            localExposureShannons: OPENING_EXPOSURE,
-            pendingDebitsShannons: [],
+            views: { remote: OPENING_VIEW, local: OPENING_VIEW },
         });
     });
 
@@ -298,8 +316,7 @@ describe("channel open", () => {
             lastSignedCommitmentNumbers: { COMMITMENT: OPEN.commitment_number },
             signedSessions: { [`COMMITMENT:${OPEN.commitment_number}`]: SESSION_COMMITMENT },
             lastStateVersion: 1,
-            localExposureShannons: OPENING_EXPOSURE,
-            pendingDebitsShannons: [],
+            views: { remote: OPENING_VIEW, local: OPENING_VIEW },
         });
         expect(d.errors()).toEqual([]);
     });
@@ -327,9 +344,10 @@ describe("the life of a channel", () => {
         const channelId = await openChannel(d);
 
         signed(await bridge.signCommitmentTx(channelId, OPEN));
-        await d.policy.recordDebitIntent(channelId, SEND_DECREASE);
+        await recordSendIntents(d.policy);
         signed(await bridge.signCommitmentTx(channelId, SEND));
         signed(await bridge.signRevocation(channelId, SEND_SIDE_REVOCATION));
+        signed(await bridge.signCommitmentTx(channelId, SETTLED));
         signed(await bridge.signClosingTx(channelId, CLOSE));
         signed(await bridge.signChannelAnnouncement(channelId, ANNOUNCEMENT));
 
@@ -344,13 +362,22 @@ describe("the life of a channel", () => {
             signedSessions: {
                 [`COMMITMENT:${OPEN.commitment_number}`]: SESSION_COMMITMENT,
                 [`COMMITMENT:${SEND.commitment_number}`]: SESSION_COMMITMENT,
+                [`COMMITMENT:${SETTLED.commitment_number}`]: SESSION_COMMITMENT,
                 [`COMMITMENT:${SHUTDOWN_NONCE_NUMBER}`]: SESSION_COMMITMENT,
                 [`REVOKE:${REVOCATION_NONCE_NUMBER}`]: SESSION_COMMITMENT,
                 [`ANNOUNCEMENT:${ANNOUNCEMENT_SLOT_NUMBER}`]: SESSION_COMMITMENT,
             },
-            lastStateVersion: 5,
-            localExposureShannons: CLOSE.to_local,
-            pendingDebitsShannons: [],
+            lastStateVersion: 6,
+            views: {
+                // The return also reads as both payments made and the received TLC collected.
+                remote: {
+                    ...OPENING_VIEW,
+                    chargedShannons: Object.fromEntries(
+                        SEND.tlcs.filter((tlc) => tlc.direction === "offered").map((tlc) => [tlc.payment_hash.slice(0, 40), tlc.amount]),
+                    ),
+                },
+                local: OPENING_VIEW,
+            },
         });
         expect(bridge.pendingRequests).toBe(0);
         expect(d.errors()).toEqual([]);
@@ -368,7 +395,7 @@ describe("re-delivery", () => {
         const d = await connected(bridge, { storage });
         const channelId = await openChannel(d);
         signed(await bridge.signCommitmentTx(channelId, OPEN));
-        await d.policy.recordDebitIntent(channelId, SEND_DECREASE);
+        await recordSendIntents(d.policy);
         bridge.dropAfter = isCommitmentSignRequest;
 
         const round = bridge.signCommitmentTx(channelId, SEND);
@@ -378,8 +405,7 @@ describe("re-delivery", () => {
         expect(dropped?.kind).toBe("result");
         expect(d.session.state).toBe("reconnecting");
         expect(bridge.pendingRequests).toBe(1);
-        await expect(d.store.getChannelRecord(CHANNEL_INDEX)).resolves.toMatchObject({ pendingDebitsShannons: [] });
-        await d.policy.recordDebitIntent(channelId, SEND_DECREASE);
+        const claimed = await d.store.getChannelRecord(CHANNEL_INDEX);
         storage.ops.length = 0;
 
         d.timer.advance(RECONNECT_DELAY_MS);
@@ -391,10 +417,8 @@ describe("re-delivery", () => {
         expect(deliveries).toHaveLength(3);
         expect(deliveries[2]).toEqual(deliveries[1]);
         expect(bridge.factory.sockets).toHaveLength(2);
-        await expect(d.store.getChannelRecord(CHANNEL_INDEX)).resolves.toMatchObject({
-            pendingDebitsShannons: [SEND_DECREASE],
-            localExposureShannons: SEND.settlement_local,
-        });
+        await expect(d.store.getChannelRecord(CHANNEL_INDEX)).resolves.toEqual(claimed);
+        expect(claimed?.views.remote.exposureShannons).toBe(SEND.settlement_local);
         expect(bridge.pendingRequests).toBe(0);
     });
 

@@ -1,6 +1,7 @@
 import {
     PAYMENT_HASH_LENGTH,
     PREIMAGE_LENGTH,
+    TRUNCATED_PAYMENT_HASH_LENGTH,
     assertHexBytes,
     assertNonEmptyString,
     assertUnsignedInteger,
@@ -10,9 +11,55 @@ import {
 } from "../common";
 import { MAX_CHANNEL_INDEX } from "../derivation";
 import type { IAsyncSignerStorage, ISignerStorage } from "./interfaces";
-import { CHANNEL_ALIAS_KEY_PREFIX, CHANNEL_RECORD_KEY_PREFIX, HOLD_INVOICE_PREIMAGE_KEY_PREFIX } from "./policy.constants";
-import type { ChannelPolicyRecord } from "./policy.types";
-import { assertChannelPolicyRecord, isChannelPolicyRecord } from "./utils";
+import {
+    BALANCE_LANE_KEY,
+    CHANNEL_ALIAS_KEY_PREFIX,
+    CHANNEL_RECORD_KEY_PREFIX,
+    DEBIT_INTENT_KEY_PREFIX,
+    HOLD_INVOICE_PREIMAGE_KEY_PREFIX,
+    HOLD_INVOICE_RECORD_KEY_PREFIX,
+} from "./policy.constants";
+import type { ChannelPolicyRecord, DebitIntentRecord, HoldInvoicePolicyRecord } from "./policy.types";
+import {
+    assertChannelPolicyRecord,
+    assertDebitIntentRecord,
+    assertHoldInvoicePolicyRecord,
+    boundPaymentHashOf,
+    isChannelPolicyRecord,
+    isDebitIntentRecord,
+    isHoldInvoicePolicyRecord,
+} from "./utils";
+
+type RecordFormat<T> = {
+    name: string;
+    is: (value: unknown) => value is T;
+    assert: (name: string, value: unknown) => asserts value is T;
+    /**
+     * Whether the record agrees with the key it is stored under.
+     */
+    belongsAt: (key: string, record: T) => boolean;
+};
+
+const CHANNEL_RECORD_FORMAT: RecordFormat<ChannelPolicyRecord> = {
+    name: "channel policy record",
+    is: isChannelPolicyRecord,
+    assert: assertChannelPolicyRecord,
+    belongsAt: () => true,
+};
+
+const DEBIT_INTENT_FORMAT: RecordFormat<DebitIntentRecord> = {
+    name: "debit intent record",
+    is: isDebitIntentRecord,
+    assert: assertDebitIntentRecord,
+    belongsAt: (key, record) => key === DEBIT_INTENT_KEY_PREFIX + boundPaymentHashOf(record.paymentHash),
+};
+
+const HOLD_INVOICE_FORMAT: RecordFormat<HoldInvoicePolicyRecord> = {
+    name: "hold invoice record",
+    is: isHoldInvoicePolicyRecord,
+    assert: assertHoldInvoicePolicyRecord,
+    belongsAt: (key, record) => key === HOLD_INVOICE_RECORD_KEY_PREFIX + boundPaymentHashOf(record.paymentHash),
+};
 
 export class SignerStore {
     private readonly storage: ISignerStorage | IAsyncSignerStorage;
@@ -65,7 +112,7 @@ export class SignerStore {
     async getChannelRecord(channelIndex: number): Promise<ChannelPolicyRecord | null> {
         assertUnsignedInteger("channelIndex", channelIndex, MAX_CHANNEL_INDEX);
         const key = CHANNEL_RECORD_KEY_PREFIX + channelIndex;
-        return this.serialize(key, () => this.readChannelRecord(key));
+        return this.serialize(key, () => this.readRecord(key, CHANNEL_RECORD_FORMAT));
     }
 
     /**
@@ -77,7 +124,7 @@ export class SignerStore {
         assertUnsignedInteger("channelIndex", channelIndex, MAX_CHANNEL_INDEX);
         assertChannelPolicyRecord("record", record);
         const key = CHANNEL_RECORD_KEY_PREFIX + channelIndex;
-        await this.serialize(key, () => this.writeChannelRecord(key, record));
+        await this.serialize(key, () => this.writeRecord(key, record));
     }
 
     /**
@@ -91,15 +138,66 @@ export class SignerStore {
         update: (current: ChannelPolicyRecord | null) => ChannelPolicyRecord,
     ): Promise<ChannelPolicyRecord> {
         assertUnsignedInteger("channelIndex", channelIndex, MAX_CHANNEL_INDEX);
-        const key = CHANNEL_RECORD_KEY_PREFIX + channelIndex;
-        return this.serialize(key, async () => {
-            const current = await this.readChannelRecord(key);
-            const next = update(current);
-            if (next === current) return current;
-            assertChannelPolicyRecord("updated record", next);
-            await this.writeChannelRecord(key, next);
-            return next;
-        });
+        return this.updateRecord(CHANNEL_RECORD_KEY_PREFIX + channelIndex, CHANNEL_RECORD_FORMAT, update);
+    }
+
+    /**
+     * Reads the debit intent filed under a payment hash.
+     * @param boundPaymentHashHex The first 20 bytes of the payment hash, lowercase hex.
+     * @returns The intent, or `null` if none was ever recorded.
+     */
+    async getDebitIntent(boundPaymentHashHex: string): Promise<DebitIntentRecord | null> {
+        assertHexBytes("boundPaymentHashHex", boundPaymentHashHex, TRUNCATED_PAYMENT_HASH_LENGTH);
+        const key = DEBIT_INTENT_KEY_PREFIX + boundPaymentHashHex;
+        return this.serialize(key, () => this.readRecord(key, DEBIT_INTENT_FORMAT));
+    }
+
+    /**
+     * Reads, updates and writes the debit intent filed under a payment hash as one step.
+     * @param boundPaymentHashHex The first 20 bytes of the payment hash, lowercase hex.
+     * @param update Synchronous updater; handing back the record it was given skips the write.
+     * @returns The intent the key now holds.
+     */
+    async updateDebitIntent(
+        boundPaymentHashHex: string,
+        update: (current: DebitIntentRecord | null) => DebitIntentRecord,
+    ): Promise<DebitIntentRecord> {
+        assertHexBytes("boundPaymentHashHex", boundPaymentHashHex, TRUNCATED_PAYMENT_HASH_LENGTH);
+        return this.updateRecord(DEBIT_INTENT_KEY_PREFIX + boundPaymentHashHex, DEBIT_INTENT_FORMAT, update);
+    }
+
+    /**
+     * Reads the hold invoice record filed under a payment hash.
+     * @param boundPaymentHashHex The first 20 bytes of the payment hash, lowercase hex.
+     * @returns The record, or `null` if none was ever written.
+     */
+    async getHoldInvoiceRecord(boundPaymentHashHex: string): Promise<HoldInvoicePolicyRecord | null> {
+        assertHexBytes("boundPaymentHashHex", boundPaymentHashHex, TRUNCATED_PAYMENT_HASH_LENGTH);
+        const key = HOLD_INVOICE_RECORD_KEY_PREFIX + boundPaymentHashHex;
+        return this.serialize(key, () => this.readRecord(key, HOLD_INVOICE_FORMAT));
+    }
+
+    /**
+     * Reads, updates and writes the hold invoice record filed under a payment hash as one step.
+     * @param boundPaymentHashHex The first 20 bytes of the payment hash, lowercase hex.
+     * @param update Synchronous updater; handing back the record it was given skips the write.
+     * @returns The record the key now holds.
+     */
+    async updateHoldInvoiceRecord(
+        boundPaymentHashHex: string,
+        update: (current: HoldInvoicePolicyRecord | null) => HoldInvoicePolicyRecord,
+    ): Promise<HoldInvoicePolicyRecord> {
+        assertHexBytes("boundPaymentHashHex", boundPaymentHashHex, TRUNCATED_PAYMENT_HASH_LENGTH);
+        return this.updateRecord(HOLD_INVOICE_RECORD_KEY_PREFIX + boundPaymentHashHex, HOLD_INVOICE_FORMAT, update);
+    }
+
+    /**
+     * Runs an operation alone in the balance lane.
+     * @param operation Operation to run once the lane is free.
+     * @returns Whatever the operation returned.
+     */
+    async withBalanceLock<T>(operation: () => Promise<T>): Promise<T> {
+        return this.serialize(BALANCE_LANE_KEY, operation);
     }
 
     /**
@@ -152,13 +250,33 @@ export class SignerStore {
     /**
      * Reads and parses the record at a storage key.
      * @param key Storage key to read.
+     * @param format The kind of record the key holds.
      * @returns The record, or `null` if the key was never written.
      */
-    private async readChannelRecord(key: string): Promise<ChannelPolicyRecord | null> {
+    private async readRecord<T>(key: string, format: RecordFormat<T>): Promise<T | null> {
         const raw = (await this.storage.get(key)) ?? null;
         if (raw === null) return null;
-        // Corruption must throw: a record read as absent would re-open its sign-once slots.
-        return parseChannelRecord(key, raw);
+        // Corruption must throw: a record read as absent would re-open sign-once slots or forget charges.
+        return parseRecord(key, raw, format);
+    }
+
+    /**
+     * Reads, updates and writes the record at a storage key as one step.
+     * @param key Storage key of the record.
+     * @param format The kind of record the key holds.
+     * @param update Synchronous updater; handing back the record it was given skips the write.
+     * @returns The record the key now holds.
+     */
+    private async updateRecord<T>(key: string, format: RecordFormat<T>, update: (current: T | null) => T): Promise<T> {
+        return this.serialize(key, async () => {
+            const current = await this.readRecord(key, format);
+            const next = update(current);
+            if (next === current) return next;
+            format.assert("updated record", next);
+            if (!format.belongsAt(key, next)) throw new TypeError(`updated record does not belong at ${key}`);
+            await this.writeRecord(key, next);
+            return next;
+        });
     }
 
     /**
@@ -166,7 +284,7 @@ export class SignerStore {
      * @param key Storage key to write.
      * @param record Record to persist.
      */
-    private async writeChannelRecord(key: string, record: ChannelPolicyRecord): Promise<void> {
+    private async writeRecord(key: string, record: unknown): Promise<void> {
         await this.storage.set(key, JSON.stringify(record));
     }
 
@@ -191,20 +309,21 @@ export class SignerStore {
 }
 
 /**
- * Parses a stored channel record, refusing anything the storage returns that is not one.
+ * Parses a stored record, refusing anything the storage returns that is not one, or not the one its key names.
  * @param key Storage key the value came from, used in the error message.
  * @param raw Raw string read from storage.
+ * @param format The kind of record the key holds.
  * @returns The parsed record.
  */
-function parseChannelRecord(key: string, raw: string): ChannelPolicyRecord {
+function parseRecord<T>(key: string, raw: string, format: RecordFormat<T>): T {
     let parsed: unknown;
     try {
         parsed = JSON.parse(raw);
     } catch {
         throw new TypeError(`stored value at ${key} is not valid JSON`);
     }
-    if (!isChannelPolicyRecord(parsed)) {
-        throw new TypeError(`stored value at ${key} is not a channel policy record`);
+    if (!format.is(parsed) || !format.belongsAt(key, parsed)) {
+        throw new TypeError(`stored value at ${key} is not a ${format.name}`);
     }
     return parsed;
 }

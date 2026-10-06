@@ -67,7 +67,6 @@ const CKB_ANNOUNCEMENT = caseOf(digest.announcement_cases, "ckb");
 const REVOCATION_NONCE_NUMBER = revocationNonceNumber(SEND_SIDE_REVOCATION);
 
 const OPENING_EXPOSURE = "62000000000";
-const TLC_DECREASE = "2250000000";
 
 // Fiber sorts the keys of a funding spend and the announcement (local first here), and a send-side revocation puts remote first.
 const ORDERED_PUBLIC_KEYS: Record<SignatureMethod, [Uint8Array, Uint8Array]> = {
@@ -180,10 +179,18 @@ function newDispatch(commitmentLock = COMMITMENT_LOCK_TESTNET, storage = new InM
     return { dispatch: new SignerDispatch({ masterSeed: MASTER_SEED, commitmentLock, policy }), policy, store, storage };
 }
 
+// Approves the payments of the vectors' offered TLCs, without which none of their commitments signs.
 async function registered(localExposureShannons = "0", commitmentLock = COMMITMENT_LOCK_TESTNET): Promise<Harness> {
     const harness = newDispatch(commitmentLock);
     await harness.dispatch.channelRegistered(CHANNEL_ID, harness.dispatch.prepareChannelRegistration(CHANNEL_INDEX, localExposureShannons));
+    await recordOfferedIntents(harness.policy);
     return harness;
+}
+
+async function recordOfferedIntents(policy: PolicyEngine): Promise<void> {
+    for (const tlc of THREE_TLCS.tlcs) {
+        if (tlc.direction === "offered") await policy.recordDebitIntent(tlc.payment_hash, tlc.amount);
+    }
 }
 
 function resultOf(outcome: DispatchOutcome): SignResult {
@@ -291,7 +298,10 @@ describe("channelRegistered", () => {
 
         await expect(store.getChannelRecord(CHANNEL_INDEX)).resolves.toMatchObject({
             channelId: CHANNEL_ID,
-            localExposureShannons: OPENING_EXPOSURE,
+            views: {
+                remote: { exposureShannons: OPENING_EXPOSURE, tlcs: [], chargedShannons: {}, creditedShannons: {} },
+                local: { exposureShannons: OPENING_EXPOSURE, tlcs: [], chargedShannons: {}, creditedShannons: {} },
+            },
             signedSessions: {},
         });
         await expect(dispatch.handle(request("get_base_public_keys", {}))).resolves.toEqual({
@@ -458,33 +468,30 @@ describe("the signing methods", () => {
         expect(schnorr.verify(signature, message, keyAggExport(keyAggregate(orderedPublicKeys)))).toBe(true);
     });
 
-    it("consumes the debit intent that covers a decrease of the exposure", async () => {
-        const { dispatch, policy, store } = await registered(OPENING_EXPOSURE);
-        await policy.recordDebitIntent(CHANNEL_ID, TLC_DECREASE);
+    it("signs the offered TLCs the user's intents cover, and records what the view now shows", async () => {
+        const { dispatch, store } = await registered(OPENING_EXPOSURE);
 
         partialSignatureOf(await dispatch.handle(request("partial_sign_commitment_tx", paramsFor("partial_sign_commitment_tx"))));
 
         await expect(store.getChannelRecord(CHANNEL_INDEX)).resolves.toMatchObject({
-            localExposureShannons: THREE_TLCS.settlement_local,
-            pendingDebitsShannons: [],
+            views: { remote: { exposureShannons: THREE_TLCS.settlement_local } },
         });
     });
 });
 
 describe("re-delivery", () => {
-    it("answers a re-delivered request with the identical partial signature, writing nothing and consuming no intent", async () => {
-        const { dispatch, policy, store, storage } = await registered(OPENING_EXPOSURE);
-        await policy.recordDebitIntent(CHANNEL_ID, TLC_DECREASE);
+    it("answers a re-delivered request with the identical partial signature, writing nothing", async () => {
+        const { dispatch, store, storage } = await registered(OPENING_EXPOSURE);
         const envelope = request("partial_sign_commitment_tx", paramsFor("partial_sign_commitment_tx"));
         const first = partialSignatureOf(await dispatch.handle(envelope));
-        await policy.recordDebitIntent(CHANNEL_ID, TLC_DECREASE);
+        const afterFirst = await store.getChannelRecord(CHANNEL_INDEX);
         storage.ops.length = 0;
 
         const second = partialSignatureOf(await dispatch.handle(envelope));
 
         expect(bytesToHex(second)).toBe(bytesToHex(first));
         expect(writes(storage)).toEqual([]);
-        await expect(store.getChannelRecord(CHANNEL_INDEX)).resolves.toMatchObject({ pendingDebitsShannons: [TLC_DECREASE] });
+        await expect(store.getChannelRecord(CHANNEL_INDEX)).resolves.toEqual(afterFirst);
     });
 });
 
@@ -564,8 +571,9 @@ describe("refusals", () => {
         expect(refusalOf(outcome).code).toBe("policy_refusal");
     });
 
-    it("refuses a decrease of the exposure with no debit intent as policy_refusal, claiming nothing", async () => {
-        const { dispatch, storage } = await registered(OPENING_EXPOSURE);
+    it("refuses an offered TLC no debit intent covers as policy_refusal, claiming nothing", async () => {
+        const { dispatch, storage } = newDispatch();
+        await dispatch.channelRegistered(CHANNEL_ID, dispatch.prepareChannelRegistration(CHANNEL_INDEX, OPENING_EXPOSURE));
         storage.ops.length = 0;
 
         const outcome = await dispatch.handle(request("partial_sign_commitment_tx", paramsFor("partial_sign_commitment_tx")));
@@ -671,7 +679,9 @@ describe("faults", () => {
     });
 
     it("reports a name that resolves to an index holding no record as a fault that claims nothing, until it is registered", async () => {
-        const { dispatch, storage } = newDispatch();
+        const { dispatch, policy, storage } = newDispatch();
+        await recordOfferedIntents(policy);
+        storage.ops.length = 0;
         storage.map.set(`${CHANNEL_ALIAS_KEY_PREFIX}${CHANNEL_ID}`, String(CHANNEL_INDEX));
         const envelope = request("partial_sign_commitment_tx", paramsFor("partial_sign_commitment_tx"));
 
@@ -729,7 +739,8 @@ describe("secret hygiene", () => {
         const unregistered = newDispatch().dispatch;
         const served = await registered();
         partialSignatureOf(await served.dispatch.handle(request("partial_sign_commitment_tx", paramsFor("partial_sign_commitment_tx"))));
-        const exposed = await registered(OPENING_EXPOSURE);
+        const exposed = newDispatch();
+        await exposed.dispatch.channelRegistered(CHANNEL_ID, exposed.dispatch.prepareChannelRegistration(CHANNEL_INDEX, OPENING_EXPOSURE));
         const outcomes = await Promise.all([
             unregistered.handle(request("get_base_public_keys", {})),
             served.dispatch.handle(
