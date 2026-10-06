@@ -1,10 +1,12 @@
 import { hexToBytes } from "@noble/hashes/utils.js";
+import type { FiberChannelKeys } from "../../../src/derivation";
 import { deriveChannelKeys, pubkeyOf } from "../../../src/derivation";
-import type { ChannelPolicyRecord, PolicySignRequest, SignSession } from "../../../src/policy";
-import { PolicyEngine, PolicyRefusalError, SignerStore } from "../../../src/policy";
+import { computeCommitmentTxDigest } from "../../../src/digest";
+import type { ChannelPolicyRecord, DebitIntentRecord, HoldInvoicePolicyRecord, PolicySignRequest, SignSession } from "../../../src/policy";
+import { DebitIntentError, HoldInvoiceError, PolicyEngine, PolicyRefusalError, SignerStore } from "../../../src/policy";
 import { buildSessionCommitment } from "../../../src/policy/utils";
 import { AsyncInMemorySignerStorage, InMemorySignerStorage } from "../../mocks/policy";
-import { toChannelAnnouncementInput, toCommitmentTxInput, toRevocationInput, toShutdownTxInput } from "../../utils/digest-inputs";
+import { toChannelAnnouncementInput, toCommitmentTxInput, toRevocationInput, toShutdownTxInput, toTlc } from "../../utils/digest-inputs";
 import { caseOf, loadInteropVectors } from "../../utils/interop-vectors";
 import { SHUTDOWN_NONCE_NUMBER, revocationNonceNumber } from "../../utils/nonce-numbers";
 
@@ -29,9 +31,23 @@ const OTHER_AGGREGATED_NONCE = hexToBytes(
         "02f9308a019258c31049344f85f89d5229b531c845836f99b08601f113bce036f9",
 );
 
+const OTHER_CHANNEL_ID = "0x2e".padEnd(66, "b");
+const OTHER_CHANNEL_INDEX = CHANNEL_INDEX + 1;
+
 const OPENING_EXPOSURE = "62000000000";
 const THREE_TLC_EXPOSURE = "59750000000";
-const TLC_DECREASE = "2250000000";
+
+const OFFERED_HASH = "6844f645bb03ff9d1c9c48ee5e9e971be09bf34a3612c81b20c2a5a1bff2a6b6";
+const OFFERED_AMOUNT = "1500000000";
+const OTHER_OFFERED_HASH = "c5403872f3e0258e74e8b2ae5aa77e4d8b8dc93c799288270fef73997f8d93f5";
+const OTHER_OFFERED_AMOUNT = "750000000";
+const RECEIVED_HASH = "5b36757f3945408453a6282c4aba2c78bfaba94219e459932924b01f7fc09d1e";
+const RECEIVED_AMOUNT = "2250000000";
+const OFFERED_TLC_ID = 7;
+const OTHER_OFFERED_TLC_ID = 5;
+const RECEIVED_TLC_ID = 2;
+
+const OPENING_VIEW = { exposureShannons: OPENING_EXPOSURE, tlcs: [], chargedShannons: {}, creditedShannons: {} };
 
 function session(message: Uint8Array, overrides: Partial<SignSession> = {}): SignSession {
     return {
@@ -64,6 +80,42 @@ function shutdownRequest(name: string, overrides: Partial<PolicySignRequest> = {
         operation: { kind: "shutdown_tx", input: toShutdownTxInput(kase, digest.remote) },
         ...overrides,
     };
+}
+
+type CustomCommitment = {
+    forRemote: boolean;
+    commitmentNumber: number;
+    settlementLocalShannons: string;
+    tlcIds: number[];
+};
+
+// Varies a vector case's balance-rule fields; the digest is the SDK's own, pinned elsewhere.
+function customCommitmentRequest(
+    custom: CustomCommitment,
+    channel: { keys: FiberChannelKeys; channelId: string } = { keys: KEYS, channelId: CHANNEL_ID },
+): PolicySignRequest {
+    const kase = caseOf(digest.commitment_cases, "ckb, three tlcs, for remote");
+    const input = {
+        ...toCommitmentTxInput(kase, digest.remote),
+        forRemote: custom.forRemote,
+        commitmentNumber: custom.commitmentNumber,
+        settlementLocalShannons: BigInt(custom.settlementLocalShannons),
+        tlcs: kase.tlcs.filter((tlc) => custom.tlcIds.includes(tlc.id)).map(toTlc),
+    };
+    return {
+        channelId: channel.channelId,
+        stateVersion: 1,
+        nonceCommitmentNumber: custom.commitmentNumber,
+        session: session(computeCommitmentTxDigest(channel.keys, input), {
+            orderedPublicKeys: [pubkeyOf(channel.keys.fundingKey), REMOTE_FUNDING_PUBKEY],
+        }),
+        operation: { kind: "commitment_tx", input },
+    };
+}
+
+async function recordThreeTlcIntents(engine: PolicyEngine): Promise<void> {
+    await engine.recordDebitIntent(OFFERED_HASH, OFFERED_AMOUNT);
+    await engine.recordDebitIntent(OTHER_OFFERED_HASH, OTHER_OFFERED_AMOUNT);
 }
 
 function revocationRequest(name: string, overrides: Partial<PolicySignRequest> = {}): PolicySignRequest {
@@ -100,6 +152,14 @@ function newEngine(storage: InMemorySignerStorage | AsyncInMemorySignerStorage =
     return { engine: new PolicyEngine(store), store, storage };
 }
 
+async function registeredEngine(
+    storage: InMemorySignerStorage | AsyncInMemorySignerStorage = new InMemorySignerStorage(),
+): Promise<ReturnType<typeof newEngine>> {
+    const context = newEngine(storage);
+    await context.engine.registerChannel(CHANNEL_ID, CHANNEL_INDEX, OPENING_EXPOSURE);
+    return context;
+}
+
 function tamper(message: Uint8Array): Uint8Array {
     const copy = Uint8Array.from(message);
     copy.set([(copy.at(0) ?? 0) ^ 0x01], 0);
@@ -126,22 +186,19 @@ describe("registerChannel", () => {
             lastSignedCommitmentNumbers: {},
             signedSessions: {},
             lastStateVersion: 0,
-            localExposureShannons: OPENING_EXPOSURE,
-            pendingDebitsShannons: [],
+            views: { remote: OPENING_VIEW, local: OPENING_VIEW },
         });
     });
 
     it("keeps the existing record when the same channel is registered again", async () => {
         const { engine, store, storage } = newEngine();
         await engine.registerChannel(CHANNEL_ID, CHANNEL_INDEX, OPENING_EXPOSURE);
-        await engine.recordDebitIntent(CHANNEL_ID, "1000");
         storage.ops.length = 0;
 
         await engine.registerChannel(CHANNEL_ID, CHANNEL_INDEX, "1");
 
         await expect(store.getChannelRecord(CHANNEL_INDEX)).resolves.toMatchObject({
-            localExposureShannons: OPENING_EXPOSURE,
-            pendingDebitsShannons: ["1000"],
+            views: { remote: OPENING_VIEW, local: OPENING_VIEW },
         });
         expect(storage.ops.filter((operation) => operation.startsWith("set"))).toEqual([]);
     });
@@ -172,15 +229,13 @@ describe("registerChannel", () => {
     it("points a second name at the record the first one created", async () => {
         const { engine, store, storage } = newEngine();
         await engine.registerChannel("temporary-id", CHANNEL_INDEX, OPENING_EXPOSURE);
-        await engine.recordDebitIntent("temporary-id", "1000");
         await engine.registerChannel(CHANNEL_ID, CHANNEL_INDEX, "1");
 
         await expect(engine.requireChannelIndex("temporary-id")).resolves.toBe(CHANNEL_INDEX);
         await expect(engine.requireChannelIndex(CHANNEL_ID)).resolves.toBe(CHANNEL_INDEX);
         await expect(store.getChannelRecord(CHANNEL_INDEX)).resolves.toMatchObject({
             channelId: CHANNEL_ID,
-            localExposureShannons: OPENING_EXPOSURE,
-            pendingDebitsShannons: ["1000"],
+            views: { remote: OPENING_VIEW, local: OPENING_VIEW },
         });
         expect([...storage.map.keys()].filter((key) => key.startsWith("fiber-lsp-sdk:channel:"))).toHaveLength(1);
     });
@@ -205,8 +260,7 @@ describe("registerChannel", () => {
             lastSignedCommitmentNumbers: { COMMITMENT: 0 },
             signedSessions: {},
             lastStateVersion: 1,
-            localExposureShannons: OPENING_EXPOSURE,
-            pendingDebitsShannons: [],
+            views: { remote: OPENING_VIEW, local: OPENING_VIEW },
         });
         await expect(engine.registerChannel(CHANNEL_ID, CHANNEL_INDEX, OPENING_EXPOSURE)).rejects.toThrow(TypeError);
     });
@@ -237,31 +291,264 @@ describe("requireChannelIndex", () => {
     });
 });
 
-describe("recordDebitIntent", () => {
-    it("appends intents in the order the user authorised them", async () => {
-        const { engine, store } = newEngine();
-        await engine.registerChannel(CHANNEL_ID, CHANNEL_INDEX, OPENING_EXPOSURE);
-        await engine.recordDebitIntent(CHANNEL_ID, "1000");
-        await engine.recordDebitIntent(CHANNEL_ID, "250");
-        await expect(store.getChannelRecord(CHANNEL_INDEX)).resolves.toMatchObject({ pendingDebitsShannons: ["1000", "250"] });
+describe("debit intents", () => {
+    it("records an open intent under the bound 20 bytes of its hash", async () => {
+        const { engine, store, storage } = newEngine();
+        await engine.recordDebitIntent(OFFERED_HASH, OFFERED_AMOUNT);
+        await expect(store.getDebitIntent(OFFERED_HASH.slice(0, 40))).resolves.toEqual<DebitIntentRecord>({
+            version: 1,
+            paymentHash: OFFERED_HASH,
+            maxShannons: OFFERED_AMOUNT,
+            open: true,
+            channelIndexes: [],
+        });
+        expect([...storage.map.keys()]).toEqual([`fiber-lsp-sdk:intent:${OFFERED_HASH.slice(0, 40)}`]);
     });
 
-    it("refuses an intent on an unregistered channel", async () => {
+    // A host unsure whether the first call landed repeats it.
+    it("writes nothing when the same open intent is recorded again", async () => {
+        const { engine, store, storage } = newEngine();
+        await engine.recordDebitIntent(OFFERED_HASH, OFFERED_AMOUNT);
+        storage.ops.length = 0;
+        await engine.recordDebitIntent(OFFERED_HASH, OFFERED_AMOUNT);
+        expect(storage.ops.filter((operation) => operation.startsWith("set"))).toEqual([]);
+        await expect(store.getDebitIntent(OFFERED_HASH.slice(0, 40))).resolves.toMatchObject({ maxShannons: OFFERED_AMOUNT, open: true });
+    });
+
+    it("refuses a second intent with another maximum while the first is open", async () => {
+        const { engine, store } = newEngine();
+        await engine.recordDebitIntent(OFFERED_HASH, OFFERED_AMOUNT);
+        const error = await engine.recordDebitIntent(OFFERED_HASH, "9000000000").catch((cause: unknown) => cause);
+        expect(error).toBeInstanceOf(DebitIntentError);
+        expect(error).toMatchObject({
+            code: "intent_open",
+            message: `a debit intent for ${OFFERED_HASH} is already open with another maximum`,
+        });
+        await expect(store.getDebitIntent(OFFERED_HASH.slice(0, 40))).resolves.toMatchObject({ maxShannons: OFFERED_AMOUNT });
+    });
+
+    it("closes an intent, and closing it again writes nothing", async () => {
+        const { engine, store, storage } = newEngine();
+        await engine.recordDebitIntent(OFFERED_HASH, OFFERED_AMOUNT);
+        await engine.closeDebitIntent(OFFERED_HASH);
+        await expect(store.getDebitIntent(OFFERED_HASH.slice(0, 40))).resolves.toMatchObject({ open: false });
+        storage.ops.length = 0;
+        await engine.closeDebitIntent(OFFERED_HASH);
+        expect(storage.ops.filter((operation) => operation.startsWith("set"))).toEqual([]);
+    });
+
+    // Fiber lets a failed hash be sent again.
+    it("opens a closed intent again with a new budget when nothing was charged to it", async () => {
+        const { engine, store } = await registeredEngine();
+        await recordThreeTlcIntents(engine);
+        await engine.checkAndClaim(KEYS, commitmentRequest("ckb, three tlcs, for remote"));
+        await engine.closeDebitIntent(OFFERED_HASH);
+        await engine.recordDebitIntent(OFFERED_HASH, "1600000000");
+        await expect(store.getDebitIntent(OFFERED_HASH.slice(0, 40))).resolves.toEqual<DebitIntentRecord>({
+            version: 1,
+            paymentHash: OFFERED_HASH,
+            maxShannons: "1600000000",
+            open: true,
+            channelIndexes: [CHANNEL_INDEX],
+        });
+    });
+
+    // A crossing removal may charge the local view alone.
+    it("never opens again an intent charged in the local view alone", async () => {
+        const { engine } = await registeredEngine();
+        await engine.recordDebitIntent(OFFERED_HASH, OFFERED_AMOUNT);
+        await engine.checkAndClaim(
+            KEYS,
+            customCommitmentRequest({
+                forRemote: false,
+                commitmentNumber: 11,
+                settlementLocalShannons: "60500000000",
+                tlcIds: [OFFERED_TLC_ID],
+            }),
+        );
+        await engine.checkAndClaim(
+            KEYS,
+            customCommitmentRequest({ forRemote: false, commitmentNumber: 12, settlementLocalShannons: "60500000000", tlcIds: [] }),
+        );
+        await engine.closeDebitIntent(OFFERED_HASH);
+        await expect(engine.recordDebitIntent(OFFERED_HASH, OFFERED_AMOUNT)).rejects.toMatchObject({ code: "intent_charged" });
+    });
+
+    it("never opens again an intent something was charged to", async () => {
+        const { engine } = await registeredEngine();
+        await recordThreeTlcIntents(engine);
+        await engine.checkAndClaim(KEYS, commitmentRequest("ckb, three tlcs, for remote"));
+        // The first offered TLC leaves with its amount.
+        await engine.checkAndClaim(
+            KEYS,
+            customCommitmentRequest({
+                forRemote: true,
+                commitmentNumber: 12,
+                settlementLocalShannons: THREE_TLC_EXPOSURE,
+                tlcIds: [OTHER_OFFERED_TLC_ID, RECEIVED_TLC_ID],
+            }),
+        );
+        await engine.closeDebitIntent(OFFERED_HASH);
+        const error = await engine.recordDebitIntent(OFFERED_HASH, OFFERED_AMOUNT).catch((cause: unknown) => cause);
+        expect(error).toBeInstanceOf(DebitIntentError);
+        expect(error).toMatchObject({
+            code: "intent_charged",
+            message: `a payment under ${OFFERED_HASH} has already been charged, it cannot be authorised again`,
+        });
+    });
+
+    it("refuses a hash that shares its bound 20 bytes with a recorded one", async () => {
+        const { engine } = newEngine();
+        const twin = OFFERED_HASH.slice(0, 40) + "00".repeat(12);
+        await engine.recordDebitIntent(OFFERED_HASH, OFFERED_AMOUNT);
+        await engine.closeDebitIntent(OFFERED_HASH);
+        await expect(engine.recordDebitIntent(twin, OFFERED_AMOUNT)).rejects.toThrow(
+            new TypeError(`${twin} shares its bound 20 bytes with a recorded payment, ${OFFERED_HASH}`),
+        );
+        await expect(engine.closeDebitIntent(twin)).rejects.toThrow(TypeError);
+    });
+
+    it("refuses an intent under the hash of one of this device's hold invoices", async () => {
+        const { engine, store } = newEngine();
+        await engine.recordHoldInvoice(RECEIVED_HASH, RECEIVED_AMOUNT, "sha256");
+        const error = await engine.recordDebitIntent(RECEIVED_HASH, RECEIVED_AMOUNT).catch((cause: unknown) => cause);
+        expect(error).toBeInstanceOf(DebitIntentError);
+        expect(error).toMatchObject({ code: "own_invoice", message: `${RECEIVED_HASH} is the hash of a hold invoice of this device` });
+        await expect(store.getDebitIntent(RECEIVED_HASH.slice(0, 40))).resolves.toBeNull();
+    });
+
+    it("refuses to close an intent that was never recorded", async () => {
+        const { engine } = newEngine();
+        await expect(engine.closeDebitIntent(OFFERED_HASH)).rejects.toThrow(
+            new TypeError(`no debit intent was recorded for ${OFFERED_HASH}`),
+        );
+    });
+
+    it("throws when an intent lists a channel that holds no record", async () => {
+        const { engine, store } = newEngine();
+        await store.updateDebitIntent(OFFERED_HASH.slice(0, 40), () => ({
+            version: 1,
+            paymentHash: OFFERED_HASH,
+            maxShannons: OFFERED_AMOUNT,
+            open: false,
+            channelIndexes: [CHANNEL_INDEX],
+        }));
+        await expect(engine.recordDebitIntent(OFFERED_HASH, OFFERED_AMOUNT)).rejects.toThrow(
+            new TypeError(`a payment record lists channel index ${CHANNEL_INDEX}, which holds no record`),
+        );
+    });
+
+    it.each([
+        ["a hash of 31 bytes", OFFERED_HASH.slice(2), OFFERED_AMOUNT],
+        ["an uppercase hash", OFFERED_HASH.toUpperCase(), OFFERED_AMOUNT],
+        ["a maximum in hex", OFFERED_HASH, "0x10"],
+        ["a negative maximum", OFFERED_HASH, "-1"],
+    ])("rejects %s", async (_, hash, max) => {
         const { engine, storage } = newEngine();
-        expect((await refusalOf(engine.recordDebitIntent(CHANNEL_ID, "1000"))).code).toBe("unknown_channel");
+        await expect(engine.recordDebitIntent(hash, max)).rejects.toThrow(TypeError);
         expect(storage.map.size).toBe(0);
     });
 
-    it("rejects an amount that is not decimal shannons", async () => {
+    it("keeps a malformed argument a TypeError, never a DebitIntentError", async () => {
         const { engine } = newEngine();
-        await engine.registerChannel(CHANNEL_ID, CHANNEL_INDEX, OPENING_EXPOSURE);
-        await expect(engine.recordDebitIntent(CHANNEL_ID, "0x10")).rejects.toThrow(TypeError);
+        const error = await engine.recordDebitIntent(OFFERED_HASH, "-1").catch((cause: unknown) => cause);
+        expect(error).toBeInstanceOf(TypeError);
+        expect(error).not.toBeInstanceOf(DebitIntentError);
     });
 
-    it("throws when a name resolves to an index holding no record", async () => {
+    it("rejects closing under a hash of the wrong shape", async () => {
+        const { engine } = newEngine();
+        await expect(engine.closeDebitIntent(OFFERED_HASH.slice(2))).rejects.toThrow(TypeError);
+    });
+});
+
+describe("hold invoices", () => {
+    it("records an unreleased invoice under the bound 20 bytes of its hash", async () => {
+        const { engine, store, storage } = newEngine();
+        await engine.recordHoldInvoice(RECEIVED_HASH, RECEIVED_AMOUNT, "sha256");
+        await expect(store.getHoldInvoiceRecord(RECEIVED_HASH.slice(0, 40))).resolves.toEqual<HoldInvoicePolicyRecord>({
+            version: 1,
+            paymentHash: RECEIVED_HASH,
+            amountShannons: RECEIVED_AMOUNT,
+            hashAlgorithm: "sha256",
+            released: false,
+            channelIndexes: [],
+        });
+        expect([...storage.map.keys()]).toEqual([`fiber-lsp-sdk:invoice:${RECEIVED_HASH.slice(0, 40)}`]);
+    });
+
+    it("refuses an invoice under the hash of a payment this device authorised", async () => {
         const { engine, store } = newEngine();
-        await store.claimChannelAlias(CHANNEL_ID, CHANNEL_INDEX);
-        await expect(engine.recordDebitIntent(CHANNEL_ID, "1000")).rejects.toThrow(TypeError);
+        await engine.recordDebitIntent(OFFERED_HASH, OFFERED_AMOUNT);
+        await expect(engine.recordHoldInvoice(OFFERED_HASH, OFFERED_AMOUNT, "ckb-hash")).rejects.toThrow(
+            new TypeError(`${OFFERED_HASH} is the hash of a payment this device has authorised`),
+        );
+        await expect(store.getHoldInvoiceRecord(OFFERED_HASH.slice(0, 40))).resolves.toBeNull();
+    });
+
+    it("writes nothing when the same invoice is recorded again", async () => {
+        const { engine, storage } = newEngine();
+        await engine.recordHoldInvoice(RECEIVED_HASH, RECEIVED_AMOUNT, "sha256");
+        storage.ops.length = 0;
+        await engine.recordHoldInvoice(RECEIVED_HASH, RECEIVED_AMOUNT, "sha256");
+        expect(storage.ops.filter((operation) => operation.startsWith("set"))).toEqual([]);
+    });
+
+    it("refuses the same hash with another algorithm", async () => {
+        const { engine } = newEngine();
+        await engine.recordHoldInvoice(RECEIVED_HASH, RECEIVED_AMOUNT, "sha256");
+        await expect(engine.recordHoldInvoice(RECEIVED_HASH, RECEIVED_AMOUNT, "ckb-hash")).rejects.toThrow(
+            new TypeError(`a hold invoice for ${RECEIVED_HASH} is already recorded with another amount or algorithm`),
+        );
+    });
+
+    it("rejects an algorithm fiber does not define", async () => {
+        const { engine, storage } = newEngine();
+        await expect(engine.recordHoldInvoice(RECEIVED_HASH, RECEIVED_AMOUNT, "ckb_hash" as never)).rejects.toThrow(TypeError);
+        expect(storage.map.size).toBe(0);
+    });
+
+    it("refuses the same hash with another amount", async () => {
+        const { engine } = newEngine();
+        await engine.recordHoldInvoice(RECEIVED_HASH, RECEIVED_AMOUNT, "sha256");
+        await expect(engine.recordHoldInvoice(RECEIVED_HASH, "1", "sha256")).rejects.toThrow(
+            new TypeError(`a hold invoice for ${RECEIVED_HASH} is already recorded with another amount or algorithm`),
+        );
+    });
+
+    it("refuses a hash that shares its bound 20 bytes with a recorded one", async () => {
+        const { engine } = newEngine();
+        const twin = RECEIVED_HASH.slice(0, 40) + "00".repeat(12);
+        await engine.recordHoldInvoice(RECEIVED_HASH, RECEIVED_AMOUNT, "sha256");
+        await expect(engine.recordHoldInvoice(twin, RECEIVED_AMOUNT, "ckb-hash")).rejects.toThrow(TypeError);
+        await expect(engine.markHoldInvoiceReleased(twin)).rejects.toThrow(TypeError);
+    });
+
+    it("marks an invoice released, and marking it again writes nothing", async () => {
+        const { engine, store, storage } = newEngine();
+        await engine.recordHoldInvoice(RECEIVED_HASH, RECEIVED_AMOUNT, "sha256");
+        await engine.markHoldInvoiceReleased(RECEIVED_HASH);
+        await expect(store.getHoldInvoiceRecord(RECEIVED_HASH.slice(0, 40))).resolves.toMatchObject({ released: true });
+        storage.ops.length = 0;
+        await engine.markHoldInvoiceReleased(RECEIVED_HASH);
+        expect(storage.ops.filter((operation) => operation.startsWith("set"))).toEqual([]);
+    });
+
+    it("refuses to release an invoice that was never recorded", async () => {
+        const { engine } = newEngine();
+        await expect(engine.markHoldInvoiceReleased(RECEIVED_HASH)).rejects.toThrow(
+            new TypeError(`no hold invoice was recorded for ${RECEIVED_HASH}`),
+        );
+    });
+
+    it.each([
+        ["a hash of 31 bytes", RECEIVED_HASH.slice(2), RECEIVED_AMOUNT],
+        ["an amount in hex", RECEIVED_HASH, "0x10"],
+    ])("rejects %s", async (_, hash, amount) => {
+        const { engine, storage } = newEngine();
+        await expect(engine.recordHoldInvoice(hash, amount, "ckb-hash")).rejects.toThrow(TypeError);
+        await expect(engine.markHoldInvoiceReleased(hash.slice(2))).rejects.toThrow(TypeError);
+        expect(storage.map.size).toBe(0);
     });
 });
 
@@ -291,8 +578,7 @@ describe("checkAndClaim", () => {
                 lastSignedCommitmentNumbers: { COMMITMENT: 0 },
                 signedSessions: { "COMMITMENT:0": buildSessionCommitment(request.session) },
                 lastStateVersion: 1,
-                localExposureShannons: OPENING_EXPOSURE,
-                pendingDebitsShannons: [],
+                views: { remote: OPENING_VIEW, local: OPENING_VIEW },
             });
         });
 
@@ -334,7 +620,7 @@ describe("checkAndClaim", () => {
 
         it("keeps counters per context", async () => {
             const { engine, store } = await registered();
-            await engine.recordDebitIntent(CHANNEL_ID, TLC_DECREASE);
+            await recordThreeTlcIntents(engine);
             await engine.checkAndClaim(KEYS, commitmentRequest("ckb, three tlcs, for remote", { stateVersion: 3 }));
             await engine.checkAndClaim(KEYS, revocationRequest("ckb, send side", { stateVersion: 3 }));
 
@@ -355,7 +641,7 @@ describe("checkAndClaim", () => {
     describe("the already-signed path", () => {
         it("answers a byte-identical repeat without moving the record", async () => {
             const { engine, store, storage } = await registered();
-            await engine.recordDebitIntent(CHANNEL_ID, TLC_DECREASE);
+            await recordThreeTlcIntents(engine);
             const request = commitmentRequest("ckb, three tlcs, for remote");
             await engine.checkAndClaim(KEYS, request);
             const afterFirst = await store.getChannelRecord(CHANNEL_INDEX);
@@ -487,10 +773,15 @@ describe("checkAndClaim", () => {
         });
 
         // Storage that lost a record but kept the name pointing at it is broken, not a channel we never knew.
-        it("throws when a name resolves to an index holding no record", async () => {
+        it.each([
+            ["a commitment", commitmentRequest("ckb, no tlcs, for remote")],
+            ["a revocation", revocationRequest("ckb, send side")],
+        ])("throws when a name resolves to an index holding no record, for %s", async (_, request) => {
             const { engine, store } = newEngine();
             await store.claimChannelAlias(CHANNEL_ID, CHANNEL_INDEX);
-            await expect(engine.checkAndClaim(KEYS, commitmentRequest("ckb, no tlcs, for remote"))).rejects.toThrow(TypeError);
+            await expect(engine.checkAndClaim(KEYS, request)).rejects.toThrow(
+                new TypeError(`channel ${CHANNEL_ID} resolves to channel index ${CHANNEL_INDEX}, which holds no record`),
+            );
         });
     });
 
@@ -549,7 +840,7 @@ describe("checkAndClaim", () => {
     describe("check 3: sign-once", () => {
         it("refuses a different message on a served slot", async () => {
             const { engine } = await registered();
-            await engine.recordDebitIntent(CHANNEL_ID, TLC_DECREASE);
+            await recordThreeTlcIntents(engine);
             await engine.checkAndClaim(KEYS, commitmentRequest("ckb, three tlcs, for remote", { stateVersion: 1 }));
             const other = commitmentRequest("udt, two tlcs, for remote", { stateVersion: 1 });
             expect((await refusalOf(engine.checkAndClaim(KEYS, other))).code).toBe("policy_refusal");
@@ -578,7 +869,7 @@ describe("checkAndClaim", () => {
 
         it("refuses a cooperative close on a slot a commitment already served", async () => {
             const { engine } = await registered();
-            await engine.recordDebitIntent(CHANNEL_ID, TLC_DECREASE);
+            await recordThreeTlcIntents(engine);
             await engine.checkAndClaim(KEYS, commitmentRequest("ckb, three tlcs, for remote"));
             const close = shutdownRequest("ckb", { nonceCommitmentNumber: 11 });
             expect((await refusalOf(engine.checkAndClaim(KEYS, close))).code).toBe("policy_refusal");
@@ -626,7 +917,7 @@ describe("checkAndClaim", () => {
     describe("check 4: monotonicity", () => {
         it("refuses a commitment number below the last signed for its context", async () => {
             const { engine } = await registered();
-            await engine.recordDebitIntent(CHANNEL_ID, TLC_DECREASE);
+            await recordThreeTlcIntents(engine);
             await engine.checkAndClaim(KEYS, commitmentRequest("ckb, three tlcs, for remote"));
             const older = commitmentRequest("ckb, no tlcs, for remote");
             expect((await refusalOf(engine.checkAndClaim(KEYS, older))).code).toBe("stale_state");
@@ -640,8 +931,7 @@ describe("checkAndClaim", () => {
                 lastSignedCommitmentNumbers: { COMMITMENT: 0 },
                 signedSessions: {},
                 lastStateVersion: 1,
-                localExposureShannons: OPENING_EXPOSURE,
-                pendingDebitsShannons: [],
+                views: { remote: OPENING_VIEW, local: OPENING_VIEW },
             });
             expect((await refusalOf(engine.checkAndClaim(KEYS, commitmentRequest("ckb, no tlcs, for remote")))).code).toBe("stale_state");
         });
@@ -655,72 +945,637 @@ describe("checkAndClaim", () => {
     });
 
     describe("check 5: the balance rule", () => {
-        it("records an exposure that grows without asking for an intent", async () => {
-            const { engine, store } = await registered(new InMemorySignerStorage(), "1000");
-            await engine.checkAndClaim(KEYS, commitmentRequest("ckb, no tlcs, for remote"));
-            await expect(store.getChannelRecord(CHANNEL_INDEX)).resolves.toMatchObject({
-                localExposureShannons: OPENING_EXPOSURE,
-                pendingDebitsShannons: [],
+        it("signs the first commitment of a view against the opening state, and files the channel on its intents", async () => {
+            const { engine, store } = await registered();
+            await recordThreeTlcIntents(engine);
+            await engine.checkAndClaim(KEYS, commitmentRequest("ckb, three tlcs, for remote"));
+
+            const record = await store.getChannelRecord(CHANNEL_INDEX);
+            expect(record?.views).toEqual({
+                remote: {
+                    exposureShannons: THREE_TLC_EXPOSURE,
+                    tlcs: [
+                        {
+                            direction: "offered",
+                            hashAlgorithm: "ckb-hash",
+                            boundPaymentHash: OFFERED_HASH.slice(0, 40),
+                            amountShannons: OFFERED_AMOUNT,
+                            expirySeconds: "1723257890",
+                        },
+                        {
+                            direction: "offered",
+                            hashAlgorithm: "sha256",
+                            boundPaymentHash: OTHER_OFFERED_HASH.slice(0, 40),
+                            amountShannons: OTHER_OFFERED_AMOUNT,
+                            expirySeconds: "1699999999",
+                        },
+                        {
+                            direction: "received",
+                            hashAlgorithm: "sha256",
+                            boundPaymentHash: RECEIVED_HASH.slice(0, 40),
+                            amountShannons: RECEIVED_AMOUNT,
+                            expirySeconds: "1750000000",
+                        },
+                    ],
+                    chargedShannons: {},
+                    creditedShannons: {},
+                },
+                local: OPENING_VIEW,
             });
+            await expect(store.getDebitIntent(OFFERED_HASH.slice(0, 40))).resolves.toMatchObject({ channelIndexes: [CHANNEL_INDEX] });
+            await expect(store.getDebitIntent(OTHER_OFFERED_HASH.slice(0, 40))).resolves.toMatchObject({ channelIndexes: [CHANNEL_INDEX] });
         });
 
-        it("refuses a decrease no debit intent explains", async () => {
+        it("refuses an offered TLC under a hash the user never approved", async () => {
             const { engine, store } = await registered();
+            await engine.recordDebitIntent(OFFERED_HASH, OFFERED_AMOUNT);
             const refusal = await refusalOf(engine.checkAndClaim(KEYS, commitmentRequest("ckb, three tlcs, for remote")));
             expect(refusal.code).toBe("policy_refusal");
-            expect(refusal.message).toContain(TLC_DECREASE);
+            expect(refusal.message).toBe(
+                `the remote commitment offers a TLC under ${OTHER_OFFERED_HASH.slice(0, 40)}, which no debit intent covers`,
+            );
             await expect(store.getChannelRecord(CHANNEL_INDEX)).resolves.toMatchObject({
-                lastSignedCommitmentNumbers: {},
                 signedSessions: {},
+                views: { remote: OPENING_VIEW },
+            });
+            await expect(store.getDebitIntent(OFFERED_HASH.slice(0, 40))).resolves.toMatchObject({ channelIndexes: [] });
+        });
+
+        it("refuses an offered TLC above what its intent approved", async () => {
+            const { engine } = await registered();
+            await engine.recordDebitIntent(OFFERED_HASH, OFFERED_AMOUNT);
+            await engine.recordDebitIntent(OTHER_OFFERED_HASH, "749999999");
+            const refusal = await refusalOf(engine.checkAndClaim(KEYS, commitmentRequest("ckb, three tlcs, for remote")));
+            expect(refusal.message).toContain("above its debit intent of 749999999");
+        });
+
+        // The local commitment may list the device's latest add one round later.
+        it("judges each view against its own previous message, so the views may cross", async () => {
+            const { engine, store } = await registered();
+            await recordThreeTlcIntents(engine);
+            await engine.checkAndClaim(KEYS, commitmentRequest("ckb, three tlcs, for remote"));
+            await engine.checkAndClaim(
+                KEYS,
+                customCommitmentRequest({ forRemote: false, commitmentNumber: 12, settlementLocalShannons: OPENING_EXPOSURE, tlcIds: [] }),
+            );
+            await engine.checkAndClaim(
+                KEYS,
+                customCommitmentRequest({
+                    forRemote: true,
+                    commitmentNumber: 13,
+                    settlementLocalShannons: THREE_TLC_EXPOSURE,
+                    tlcIds: [OFFERED_TLC_ID, OTHER_OFFERED_TLC_ID, RECEIVED_TLC_ID],
+                }),
+            );
+            await engine.checkAndClaim(
+                KEYS,
+                customCommitmentRequest({
+                    forRemote: false,
+                    commitmentNumber: 14,
+                    settlementLocalShannons: THREE_TLC_EXPOSURE,
+                    tlcIds: [OFFERED_TLC_ID, OTHER_OFFERED_TLC_ID, RECEIVED_TLC_ID],
+                }),
+            );
+            const record = await store.getChannelRecord(CHANNEL_INDEX);
+            expect(record?.views.local).toEqual(record?.views.remote);
+        });
+
+        it("signs the device's own commitment catching up with an add after the payment's intent closed", async () => {
+            const { engine } = await registered();
+            await engine.recordDebitIntent(OFFERED_HASH, OFFERED_AMOUNT);
+            await engine.checkAndClaim(
+                KEYS,
+                customCommitmentRequest({
+                    forRemote: true,
+                    commitmentNumber: 11,
+                    settlementLocalShannons: "60500000000",
+                    tlcIds: [OFFERED_TLC_ID],
+                }),
+            );
+            await engine.closeDebitIntent(OFFERED_HASH);
+            await expect(
+                engine.checkAndClaim(
+                    KEYS,
+                    customCommitmentRequest({
+                        forRemote: false,
+                        commitmentNumber: 12,
+                        settlementLocalShannons: "60500000000",
+                        tlcIds: [OFFERED_TLC_ID],
+                    }),
+                ),
+            ).resolves.toMatchObject({ status: "fresh" });
+        });
+
+        it("charges a fulfilled TLC in the view it left", async () => {
+            const { engine, store } = await registered();
+            await recordThreeTlcIntents(engine);
+            await engine.checkAndClaim(KEYS, commitmentRequest("ckb, three tlcs, for remote"));
+            await engine.checkAndClaim(
+                KEYS,
+                customCommitmentRequest({
+                    forRemote: true,
+                    commitmentNumber: 12,
+                    settlementLocalShannons: THREE_TLC_EXPOSURE,
+                    tlcIds: [OTHER_OFFERED_TLC_ID, RECEIVED_TLC_ID],
+                }),
+            );
+            const record = await store.getChannelRecord(CHANNEL_INDEX);
+            expect(record?.views.remote.chargedShannons).toEqual({ [OFFERED_HASH.slice(0, 40)]: OFFERED_AMOUNT });
+            expect(record?.views.local.chargedShannons).toEqual({});
+        });
+
+        it("refuses a fall no departed offered TLC accounts for", async () => {
+            const { engine } = await registered();
+            const refusal = await refusalOf(
+                engine.checkAndClaim(
+                    KEYS,
+                    customCommitmentRequest({ forRemote: true, commitmentNumber: 11, settlementLocalShannons: "61999999999", tlcIds: [] }),
+                ),
+            );
+            expect(refusal.message).toBe("the remote commitment lowers the holdings by 1 shannons, which no offered TLC took");
+        });
+
+        it("draws one budget across every channel the payment shows on", async () => {
+            const { engine, store } = await registered(new AsyncInMemorySignerStorage());
+            await engine.registerChannel(OTHER_CHANNEL_ID, OTHER_CHANNEL_INDEX, OPENING_EXPOSURE);
+            await engine.recordDebitIntent(OFFERED_HASH, "2999999999");
+            const part = { forRemote: true, commitmentNumber: 11, settlementLocalShannons: "60500000000", tlcIds: [OFFERED_TLC_ID] };
+
+            await engine.checkAndClaim(KEYS, customCommitmentRequest(part));
+            const refusal = await refusalOf(
+                engine.checkAndClaim(OTHER_KEYS, customCommitmentRequest(part, { keys: OTHER_KEYS, channelId: OTHER_CHANNEL_ID })),
+            );
+            expect(refusal.message).toBe(
+                `the remote view draws 3000000000 shannons under ${OFFERED_HASH.slice(0, 40)}, above its debit intent of 2999999999`,
+            );
+
+            await engine.closeDebitIntent(OFFERED_HASH);
+            await engine.recordDebitIntent(OFFERED_HASH, "3000000000");
+            await engine.checkAndClaim(OTHER_KEYS, customCommitmentRequest(part, { keys: OTHER_KEYS, channelId: OTHER_CHANNEL_ID }));
+            await expect(store.getDebitIntent(OFFERED_HASH.slice(0, 40))).resolves.toMatchObject({
+                channelIndexes: [CHANNEL_INDEX, OTHER_CHANNEL_INDEX],
             });
         });
 
-        it("refuses a decrease no recorded intent covers", async () => {
+        // The node may broadcast either commitment of each channel.
+        it("refuses a second channel's view drawing a budget another channel's other view already draws", async () => {
             const { engine } = await registered();
-            await engine.recordDebitIntent(CHANNEL_ID, "2249999999");
-            expect((await refusalOf(engine.checkAndClaim(KEYS, commitmentRequest("ckb, three tlcs, for remote")))).code).toBe(
-                "policy_refusal",
+            await engine.registerChannel(OTHER_CHANNEL_ID, OTHER_CHANNEL_INDEX, OPENING_EXPOSURE);
+            await engine.recordDebitIntent(OFFERED_HASH, OFFERED_AMOUNT);
+            await engine.checkAndClaim(
+                KEYS,
+                customCommitmentRequest({
+                    forRemote: true,
+                    commitmentNumber: 11,
+                    settlementLocalShannons: "60500000000",
+                    tlcIds: [OFFERED_TLC_ID],
+                }),
+            );
+            const crossed = customCommitmentRequest(
+                { forRemote: false, commitmentNumber: 11, settlementLocalShannons: "60500000000", tlcIds: [OFFERED_TLC_ID] },
+                { keys: OTHER_KEYS, channelId: OTHER_CHANNEL_ID },
+            );
+            const refusal = await refusalOf(engine.checkAndClaim(OTHER_KEYS, crossed));
+            expect(refusal.message).toBe(
+                `the local view draws 3000000000 shannons under ${OFFERED_HASH.slice(0, 40)}, above its debit intent of ${OFFERED_AMOUNT}`,
             );
         });
 
-        it.each([
-            ["after a larger one", ["9000000000", TLC_DECREASE, "100"]],
-            ["before a larger one", [TLC_DECREASE, "9000000000", "100"]],
-        ])("consumes the smallest intent that covers the decrease, recorded %s", async (_, intents) => {
-            const { engine, store } = await registered();
-            for (const intent of intents) await engine.recordDebitIntent(CHANNEL_ID, intent);
-            await engine.checkAndClaim(KEYS, commitmentRequest("ckb, three tlcs, for remote"));
-            await expect(store.getChannelRecord(CHANNEL_INDEX)).resolves.toMatchObject({
-                localExposureShannons: THREE_TLC_EXPOSURE,
-                pendingDebitsShannons: ["9000000000", "100"],
+        // Otherwise the channel would stay filed for a claim that fails.
+        it("keeps a revocation from landing between a commitment's decision and its claim", async () => {
+            const inner = new InMemorySignerStorage();
+            const intentKey = `fiber-lsp-sdk:intent:${OFFERED_HASH.slice(0, 40)}`;
+            let armed = false;
+            let revocation: Promise<unknown> | null = null;
+            const engine: PolicyEngine = new PolicyEngine(
+                new SignerStore({
+                    get: (key: string) => Promise.resolve(inner.get(key)),
+                    async set(key: string, value: string): Promise<void> {
+                        // Between the commitment's decision and its claim.
+                        if (armed && key === intentKey && revocation === null) {
+                            revocation = engine.checkAndClaim(KEYS, revocationRequest("ckb, send side", { stateVersion: 2 }));
+                            await new Promise((resolve) => setTimeout(resolve, 0));
+                        }
+                        inner.set(key, value);
+                    },
+                }),
+            );
+            await engine.registerChannel(CHANNEL_ID, CHANNEL_INDEX, OPENING_EXPOSURE);
+            await engine.recordDebitIntent(OFFERED_HASH, OFFERED_AMOUNT);
+            const part = { forRemote: true, commitmentNumber: 11, settlementLocalShannons: "60500000000", tlcIds: [OFFERED_TLC_ID] };
+            armed = true;
+
+            await expect(engine.checkAndClaim(KEYS, customCommitmentRequest(part))).resolves.toMatchObject({ status: "fresh" });
+            expect(revocation).not.toBeNull();
+            await expect(revocation).resolves.toMatchObject({ status: "fresh", context: "REVOKE" });
+            await expect(new SignerStore(inner).getChannelRecord(CHANNEL_INDEX)).resolves.toMatchObject({
+                lastSignedCommitmentNumbers: { COMMITMENT: 11, REVOKE: 5 },
+                lastStateVersion: 2,
             });
         });
 
-        it("refuses a cooperative close that pays the device less than its exposure", async () => {
-            const { engine } = await registered(new InMemorySignerStorage(), "70000000000");
-            expect((await refusalOf(engine.checkAndClaim(KEYS, shutdownRequest("ckb")))).code).toBe("policy_refusal");
+        it("lets only one of two channels racing for one budget take it", async () => {
+            const { engine } = await registered(new AsyncInMemorySignerStorage());
+            await engine.registerChannel(OTHER_CHANNEL_ID, OTHER_CHANNEL_INDEX, OPENING_EXPOSURE);
+            await engine.recordDebitIntent(OFFERED_HASH, OFFERED_AMOUNT);
+            const part = { forRemote: true, commitmentNumber: 11, settlementLocalShannons: "60500000000", tlcIds: [OFFERED_TLC_ID] };
+
+            const outcomes = await Promise.allSettled([
+                engine.checkAndClaim(KEYS, customCommitmentRequest(part)),
+                engine.checkAndClaim(OTHER_KEYS, customCommitmentRequest(part, { keys: OTHER_KEYS, channelId: OTHER_CHANNEL_ID })),
+            ]);
+            expect(outcomes.map((outcome) => outcome.status)).toEqual(["fulfilled", "rejected"]);
         });
 
-        it("signs a cooperative close covered by an intent, and records the payout", async () => {
-            const { engine, store } = await registered(new InMemorySignerStorage(), "70000000000");
-            await engine.recordDebitIntent(CHANNEL_ID, "8000000000");
+        it("throws when a payment record disappears between the read and the write", async () => {
+            const inner = new InMemorySignerStorage();
+            const intentKey = `fiber-lsp-sdk:intent:${OFFERED_HASH.slice(0, 40)}`;
+            let intentReads = 0;
+            const storage = {
+                get(key: string): string | null {
+                    if (key === intentKey && ++intentReads > 1) return null;
+                    return inner.get(key);
+                },
+                set(key: string, value: string): void {
+                    inner.set(key, value);
+                },
+            };
+            const engine = new PolicyEngine(new SignerStore(storage));
+            await engine.registerChannel(CHANNEL_ID, CHANNEL_INDEX, OPENING_EXPOSURE);
+            await engine.recordDebitIntent(OFFERED_HASH, OFFERED_AMOUNT);
+            intentReads = 0;
+            const part = { forRemote: true, commitmentNumber: 11, settlementLocalShannons: "60500000000", tlcIds: [OFFERED_TLC_ID] };
+            await expect(engine.checkAndClaim(KEYS, customCommitmentRequest(part))).rejects.toThrow(
+                new TypeError("a payment record disappeared inside the balance lane"),
+            );
+        });
+
+        it("throws when the channel's record disappears between the decision and the claim", async () => {
+            const inner = new InMemorySignerStorage();
+            const recordKey = `fiber-lsp-sdk:channel:${CHANNEL_INDEX}`;
+            let armed = false;
+            let recordReads = 0;
+            const engine = new PolicyEngine(
+                new SignerStore({
+                    get: (key: string) => (armed && key === recordKey && ++recordReads > 1 ? null : inner.get(key)),
+                    set: (key: string, value: string) => inner.set(key, value),
+                }),
+            );
+            await engine.registerChannel(CHANNEL_ID, CHANNEL_INDEX, OPENING_EXPOSURE);
+            armed = true;
+            await expect(engine.checkAndClaim(KEYS, revocationRequest("ckb, send side"))).rejects.toThrow(
+                new TypeError(`channel ${CHANNEL_ID} resolves to channel index ${CHANNEL_INDEX}, which holds no record`),
+            );
+            expect(recordReads).toBe(2);
+        });
+
+        it("throws when a payment record lists a channel that holds no record", async () => {
+            const { engine, store } = await registered();
+            await store.updateDebitIntent(OFFERED_HASH.slice(0, 40), () => ({
+                version: 1,
+                paymentHash: OFFERED_HASH,
+                maxShannons: OFFERED_AMOUNT,
+                open: true,
+                channelIndexes: [OTHER_CHANNEL_INDEX],
+            }));
+            const part = { forRemote: true, commitmentNumber: 11, settlementLocalShannons: "60500000000", tlcIds: [OFFERED_TLC_ID] };
+            await expect(engine.checkAndClaim(KEYS, customCommitmentRequest(part))).rejects.toThrow(
+                new TypeError(`a payment record lists channel index ${OTHER_CHANNEL_INDEX}, which holds no record`),
+            );
+        });
+
+        describe("a released preimage", () => {
+            // A channel listing the received TLC alone.
+            async function holding() {
+                const context = await registered();
+                await recordThreeTlcIntents(context.engine);
+                await context.engine.recordHoldInvoice(RECEIVED_HASH, RECEIVED_AMOUNT, "sha256");
+                await context.engine.checkAndClaim(
+                    KEYS,
+                    customCommitmentRequest({
+                        forRemote: true,
+                        commitmentNumber: 11,
+                        settlementLocalShannons: OPENING_EXPOSURE,
+                        tlcIds: [RECEIVED_TLC_ID],
+                    }),
+                );
+                await context.engine.markHoldInvoiceReleased(RECEIVED_HASH);
+                return context;
+            }
+
+            // A part that failed on a channel busy with outgoing payments must not hold the release back.
+            it("releases while a channel the invoice was shown on no longer lists it, whatever else it lists", async () => {
+                const { engine, store } = await registered();
+                await engine.recordDebitIntent(OFFERED_HASH, OFFERED_AMOUNT);
+                await engine.recordHoldInvoice(RECEIVED_HASH, RECEIVED_AMOUNT, "sha256");
+                await engine.checkAndClaim(
+                    KEYS,
+                    customCommitmentRequest({
+                        forRemote: true,
+                        commitmentNumber: 11,
+                        settlementLocalShannons: OPENING_EXPOSURE,
+                        tlcIds: [RECEIVED_TLC_ID],
+                    }),
+                );
+                await engine.checkAndClaim(
+                    KEYS,
+                    customCommitmentRequest({
+                        forRemote: true,
+                        commitmentNumber: 12,
+                        settlementLocalShannons: OPENING_EXPOSURE,
+                        tlcIds: [],
+                    }),
+                );
+                await engine.checkAndClaim(
+                    KEYS,
+                    customCommitmentRequest({
+                        forRemote: true,
+                        commitmentNumber: 13,
+                        settlementLocalShannons: "60500000000",
+                        tlcIds: [OFFERED_TLC_ID],
+                    }),
+                );
+                await engine.markHoldInvoiceReleased(RECEIVED_HASH);
+                await expect(store.getHoldInvoiceRecord(RECEIVED_HASH.slice(0, 40))).resolves.toMatchObject({
+                    released: true,
+                    channelIndexes: [CHANNEL_INDEX],
+                });
+                // Safe: a part arriving now is refused beside the offered TLC.
+                const refusal = await refusalOf(
+                    engine.checkAndClaim(
+                        KEYS,
+                        customCommitmentRequest({
+                            forRemote: true,
+                            commitmentNumber: 14,
+                            settlementLocalShannons: "60500000000",
+                            tlcIds: [OFFERED_TLC_ID, RECEIVED_TLC_ID],
+                        }),
+                    ),
+                );
+                expect(refusal.message).toBe(
+                    "the remote commitment would show an offered TLC beside a held TLC whose preimage was released",
+                );
+            });
+
+            it("refuses the release while a TLC of the invoice is locked with another algorithm", async () => {
+                const { engine, store } = await registered();
+                await engine.recordHoldInvoice(RECEIVED_HASH, RECEIVED_AMOUNT, "ckb-hash");
+                await engine.checkAndClaim(
+                    KEYS,
+                    customCommitmentRequest({
+                        forRemote: true,
+                        commitmentNumber: 11,
+                        settlementLocalShannons: OPENING_EXPOSURE,
+                        tlcIds: [RECEIVED_TLC_ID],
+                    }),
+                );
+                const error = await engine.markHoldInvoiceReleased(RECEIVED_HASH).catch((cause: unknown) => cause);
+                expect(error).toBeInstanceOf(HoldInvoiceError);
+                expect(error).toMatchObject({
+                    code: "algorithm_mismatch",
+                    message: `channel index ${CHANNEL_INDEX} lists a TLC under ${RECEIVED_HASH} locked with another algorithm than the invoice's`,
+                });
+                await expect(store.getHoldInvoiceRecord(RECEIVED_HASH.slice(0, 40))).resolves.toMatchObject({ released: false });
+            });
+
+            it("refuses the release while the offered TLC is listed in the local view alone", async () => {
+                const { engine } = await registered();
+                await engine.recordDebitIntent(OFFERED_HASH, OFFERED_AMOUNT);
+                await engine.recordHoldInvoice(RECEIVED_HASH, RECEIVED_AMOUNT, "sha256");
+                await engine.checkAndClaim(
+                    KEYS,
+                    customCommitmentRequest({
+                        forRemote: true,
+                        commitmentNumber: 11,
+                        settlementLocalShannons: OPENING_EXPOSURE,
+                        tlcIds: [RECEIVED_TLC_ID],
+                    }),
+                );
+                await engine.checkAndClaim(
+                    KEYS,
+                    customCommitmentRequest({
+                        forRemote: false,
+                        commitmentNumber: 12,
+                        settlementLocalShannons: "60500000000",
+                        tlcIds: [OFFERED_TLC_ID],
+                    }),
+                );
+                await expect(engine.markHoldInvoiceReleased(RECEIVED_HASH)).rejects.toMatchObject({ code: "offered_in_flight" });
+            });
+
+            it("refuses an offered TLC in one view while the other lists a released held TLC", async () => {
+                const { engine } = await holding();
+                const refusal = await refusalOf(
+                    engine.checkAndClaim(
+                        KEYS,
+                        customCommitmentRequest({
+                            forRemote: false,
+                            commitmentNumber: 12,
+                            settlementLocalShannons: "60500000000",
+                            tlcIds: [OFFERED_TLC_ID],
+                        }),
+                    ),
+                );
+                expect(refusal.message).toBe(
+                    "the local commitment would show an offered TLC beside a held TLC whose preimage was released",
+                );
+            });
+
+            it("refuses to release the preimage while a channel of the invoice lists an offered TLC", async () => {
+                const { engine, store } = await registered();
+                await recordThreeTlcIntents(engine);
+                await engine.recordHoldInvoice(RECEIVED_HASH, RECEIVED_AMOUNT, "sha256");
+                await engine.checkAndClaim(KEYS, commitmentRequest("ckb, three tlcs, for remote"));
+                const error = await engine.markHoldInvoiceReleased(RECEIVED_HASH).catch((cause: unknown) => cause);
+                expect(error).toBeInstanceOf(HoldInvoiceError);
+                expect(error).toMatchObject({
+                    code: "offered_in_flight",
+                    message: `channel index ${CHANNEL_INDEX} lists an offered TLC, so the preimage of ${RECEIVED_HASH} is not released yet`,
+                });
+                await expect(store.getHoldInvoiceRecord(RECEIVED_HASH.slice(0, 40))).resolves.toMatchObject({ released: false });
+            });
+
+            it("refuses an offered TLC on a channel holding a released TLC", async () => {
+                const { engine } = await holding();
+                const refusal = await refusalOf(
+                    engine.checkAndClaim(
+                        KEYS,
+                        customCommitmentRequest({
+                            forRemote: true,
+                            commitmentNumber: 12,
+                            settlementLocalShannons: "60500000000",
+                            tlcIds: [OFFERED_TLC_ID, RECEIVED_TLC_ID],
+                        }),
+                    ),
+                );
+                expect(refusal.message).toBe(
+                    "the remote commitment would show an offered TLC beside a held TLC whose preimage was released",
+                );
+            });
+
+            it("throws when the invoice disappears between the check and the release", async () => {
+                const inner = new InMemorySignerStorage();
+                const invoiceKey = `fiber-lsp-sdk:invoice:${RECEIVED_HASH.slice(0, 40)}`;
+                let armed = false;
+                let invoiceReads = 0;
+                const engine = new PolicyEngine(
+                    new SignerStore({
+                        get: (key: string) => (armed && key === invoiceKey && ++invoiceReads > 1 ? null : inner.get(key)),
+                        set: (key: string, value: string) => inner.set(key, value),
+                    }),
+                );
+                await engine.recordHoldInvoice(RECEIVED_HASH, RECEIVED_AMOUNT, "sha256");
+                armed = true;
+                await expect(engine.markHoldInvoiceReleased(RECEIVED_HASH)).rejects.toThrow(
+                    new TypeError("a payment record disappeared inside the balance lane"),
+                );
+                expect(invoiceReads).toBe(2);
+            });
+
+            it("throws when the invoice lists a channel that holds no record", async () => {
+                const { engine, store } = await registered();
+                await engine.recordHoldInvoice(RECEIVED_HASH, RECEIVED_AMOUNT, "sha256");
+                await store.updateHoldInvoiceRecord(RECEIVED_HASH.slice(0, 40), (current) => ({
+                    ...(current as HoldInvoicePolicyRecord),
+                    channelIndexes: [OTHER_CHANNEL_INDEX],
+                }));
+                await expect(engine.markHoldInvoiceReleased(RECEIVED_HASH)).rejects.toThrow(
+                    new TypeError(`a payment record lists channel index ${OTHER_CHANNEL_INDEX}, which holds no record`),
+                );
+            });
+
+            it("files the channel on the invoice its commitment shows a TLC of", async () => {
+                const { store } = await holding();
+                await expect(store.getHoldInvoiceRecord(RECEIVED_HASH.slice(0, 40))).resolves.toMatchObject({
+                    channelIndexes: [CHANNEL_INDEX],
+                });
+            });
+
+            it("refuses a commitment that drops the released TLC as failed", async () => {
+                const { engine } = await holding();
+                const refusal = await refusalOf(
+                    engine.checkAndClaim(
+                        KEYS,
+                        customCommitmentRequest({
+                            forRemote: true,
+                            commitmentNumber: 12,
+                            settlementLocalShannons: OPENING_EXPOSURE,
+                            tlcIds: [],
+                        }),
+                    ),
+                );
+                expect(refusal.message).toBe(
+                    `the remote commitment lowers the holdings by ${RECEIVED_AMOUNT} shannons, which no offered TLC took`,
+                );
+            });
+
+            // Otherwise the node could broadcast the two commitments that did not pay.
+            it("asks a channel for the invoice unless every commitment another channel holds has already paid it", async () => {
+                const { engine } = await registered();
+                await engine.registerChannel(OTHER_CHANNEL_ID, OTHER_CHANNEL_INDEX, OPENING_EXPOSURE);
+                await engine.recordHoldInvoice(RECEIVED_HASH, RECEIVED_AMOUNT, "sha256");
+                const other = { keys: OTHER_KEYS, channelId: OTHER_CHANNEL_ID };
+                const holding = (forRemote: boolean, commitmentNumber: number) => ({
+                    forRemote,
+                    commitmentNumber,
+                    settlementLocalShannons: OPENING_EXPOSURE,
+                    tlcIds: [RECEIVED_TLC_ID],
+                });
+                await engine.checkAndClaim(KEYS, customCommitmentRequest(holding(true, 11)));
+                await engine.checkAndClaim(KEYS, customCommitmentRequest(holding(false, 12)));
+                await engine.checkAndClaim(OTHER_KEYS, customCommitmentRequest(holding(true, 11), other));
+                await engine.checkAndClaim(OTHER_KEYS, customCommitmentRequest(holding(false, 12), other));
+                await engine.markHoldInvoiceReleased(RECEIVED_HASH);
+                // The first channel's remote commitment pays the invoice; its local one does not yet.
+                await engine.checkAndClaim(
+                    KEYS,
+                    customCommitmentRequest({ forRemote: true, commitmentNumber: 13, settlementLocalShannons: "64250000000", tlcIds: [] }),
+                );
+
+                const dropped = customCommitmentRequest(
+                    { forRemote: true, commitmentNumber: 13, settlementLocalShannons: OPENING_EXPOSURE, tlcIds: [] },
+                    other,
+                );
+                const refusal = await refusalOf(engine.checkAndClaim(OTHER_KEYS, dropped));
+                expect(refusal.message).toBe(
+                    `the remote commitment lowers the holdings by ${RECEIVED_AMOUNT} shannons, which no offered TLC took`,
+                );
+            });
+
+            it("signs one that pays for it, and records the credit", async () => {
+                const { engine, store } = await holding();
+                await engine.checkAndClaim(
+                    KEYS,
+                    customCommitmentRequest({
+                        forRemote: true,
+                        commitmentNumber: 12,
+                        settlementLocalShannons: "64250000000",
+                        tlcIds: [],
+                    }),
+                );
+                const record = await store.getChannelRecord(CHANNEL_INDEX);
+                expect(record?.views.remote.creditedShannons).toEqual({ [RECEIVED_HASH.slice(0, 40)]: RECEIVED_AMOUNT });
+            });
+        });
+
+        it("reads the two views alone on a record that carries an unknown key beside them", async () => {
+            const { engine, store } = await registered();
+            await engine.recordDebitIntent(OFFERED_HASH, OFFERED_AMOUNT);
+            await engine.recordHoldInvoice(RECEIVED_HASH, RECEIVED_AMOUNT, "sha256");
+            await engine.checkAndClaim(
+                KEYS,
+                customCommitmentRequest({
+                    forRemote: true,
+                    commitmentNumber: 11,
+                    settlementLocalShannons: OPENING_EXPOSURE,
+                    tlcIds: [RECEIVED_TLC_ID],
+                }),
+            );
+            const record = await store.getChannelRecord(CHANNEL_INDEX);
+            const views = { ...(record as ChannelPolicyRecord).views, futureView: "x" } as unknown as ChannelPolicyRecord["views"];
+            await store.setChannelRecord(CHANNEL_INDEX, { ...(record as ChannelPolicyRecord), views });
+
+            await engine.markHoldInvoiceReleased(RECEIVED_HASH);
+            await engine.closeDebitIntent(OFFERED_HASH);
+            await engine.recordDebitIntent(OFFERED_HASH, OFFERED_AMOUNT);
+            await expect(
+                engine.checkAndClaim(
+                    KEYS,
+                    customCommitmentRequest({ forRemote: true, commitmentNumber: 12, settlementLocalShannons: "64250000000", tlcIds: [] }),
+                ),
+            ).resolves.toMatchObject({ status: "fresh" });
+        });
+
+        it("refuses a cooperative close that pays the device less than a view showed", async () => {
+            const { engine } = await registered(new InMemorySignerStorage(), "70000000000");
+            const refusal = await refusalOf(engine.checkAndClaim(KEYS, shutdownRequest("ckb")));
+            expect(refusal.message).toBe("the close pays the device 62000000000 shannons, below the 70000000000 of the remote commitment");
+        });
+
+        it("refuses a cooperative close while a view still lists TLCs", async () => {
+            const { engine } = await registered();
+            await recordThreeTlcIntents(engine);
+            await engine.checkAndClaim(KEYS, commitmentRequest("ckb, three tlcs, for remote"));
+            const refusal = await refusalOf(engine.checkAndClaim(KEYS, shutdownRequest("ckb", { nonceCommitmentNumber: 12 })));
+            expect(refusal.message).toBe("a cooperative close while the remote commitment still lists TLCs");
+        });
+
+        it("signs a cooperative close that pays what both views showed, and moves no snapshot", async () => {
+            const { engine, store } = await registered();
             await engine.checkAndClaim(KEYS, shutdownRequest("ckb"));
             await expect(store.getChannelRecord(CHANNEL_INDEX)).resolves.toMatchObject({
-                localExposureShannons: OPENING_EXPOSURE,
-                pendingDebitsShannons: [],
+                views: { remote: OPENING_VIEW, local: OPENING_VIEW },
             });
         });
 
         it.each([
             ["a revocation", revocationRequest("ckb, send side")],
             ["an announcement", announcementRequest("ckb")],
-        ])("leaves the exposure and the intents untouched for %s", async (_, request) => {
+        ])("leaves the views untouched for %s", async (_, request) => {
             const { engine, store } = await registered();
-            await engine.recordDebitIntent(CHANNEL_ID, "1000");
             await engine.checkAndClaim(KEYS, request);
             await expect(store.getChannelRecord(CHANNEL_INDEX)).resolves.toMatchObject({
-                localExposureShannons: OPENING_EXPOSURE,
-                pendingDebitsShannons: ["1000"],
+                views: { remote: OPENING_VIEW, local: OPENING_VIEW },
             });
         });
     });
@@ -761,8 +1616,9 @@ describe("checkAndClaim", () => {
             });
         });
 
-        it("writes nothing when a check refuses", async () => {
+        it("writes nothing when a check refuses, not even on the intents it read", async () => {
             const { engine, storage } = await registered();
+            await engine.recordDebitIntent(OFFERED_HASH, OFFERED_AMOUNT);
             const stored = new Map(storage.map);
             storage.ops.length = 0;
             await refusalOf(engine.checkAndClaim(KEYS, commitmentRequest("ckb, three tlcs, for remote")));

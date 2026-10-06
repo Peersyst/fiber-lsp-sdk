@@ -304,8 +304,8 @@ flows:
 - **Channel open**: registration under the name the bridge gives it, the TLC base key delegated and the funding key never,
   the public data `OpenChannel` needs fetched by number, the first commitment aggregated into a signature the 2-of-2 key
   accepts, and a registration the bridge refuses rejecting with the bridge's code and filing nothing.
-- **The life of a channel**: the four signing methods over the wire, the send covered by a debit intent, each verified and
-  aggregated by the node, with the whole record pinned at the end.
+- **The life of a channel**: the four signing methods over the wire, the send covered by the debit intents of its payments
+  and settled back before the close, each verified and aggregated by the node, with the whole record pinned at the end.
 - **Re-delivery**: a socket lost right after a sign request is delivered, whose re-delivered request, same id and same
   envelope, answers the same bytes and writes nothing; and a device fault left unanswered, the next request answered, the
   faulted one answered on re-delivery once the cause is gone.

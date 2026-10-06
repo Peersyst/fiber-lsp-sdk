@@ -48,6 +48,13 @@ export const PAYMENT_HASH_LENGTH = 32;
 
 export const PREIMAGE_LENGTH = 32;
 
+/**
+ * The prefix of a payment hash a TLC's settlement witness binds.
+ */
+export const TRUNCATED_PAYMENT_HASH_LENGTH = 20;
+
+export const MILLISECONDS_PER_SECOND = 1000n;
+
 export const SCRIPT_HASH_TYPES = ["data", "type", "data1", "data2"] as const;
 
 /**

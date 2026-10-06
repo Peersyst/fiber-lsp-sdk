@@ -3,6 +3,7 @@ import type { TlcDirection } from "../common";
 import {
     COMPRESSED_POINT_LENGTH,
     MAX_AMOUNT_SHANNONS,
+    MILLISECONDS_PER_SECOND,
     PAYMENT_HASH_LENGTH,
     TLC_HASH_ALGORITHMS,
     TLC_HASH_ALGORITHM_BYTES,
@@ -11,6 +12,7 @@ import {
     assertUnsignedBigInt,
     assertUnsignedInteger,
     blake160,
+    truncatePaymentHash,
     uint128Le,
     uint64Le,
 } from "../common";
@@ -18,10 +20,6 @@ import type { FiberChannelKeys } from "../derivation";
 import { MAX_COMMITMENT_NUMBER, derivePublicKey, deriveTlcKey, pubkeyOf } from "../derivation";
 import { MAX_SETTLEMENT_TLCS, MAX_SINCE_PAYLOAD, SINCE_ABSOLUTE_TIMESTAMP_FLAG } from "./digest.constants";
 import type { SettlementTlc } from "./digest.types";
-
-const TRUNCATED_PAYMENT_HASH_LENGTH = 20;
-
-const MILLISECONDS_PER_SECOND = 1000n;
 
 export type SettlementWitnessInput = {
     /**
@@ -111,7 +109,7 @@ function buildTlcRecord(keys: FiberChannelKeys, tlc: SettlementTlc, forRemote: b
     return concatBytes(
         Uint8Array.of(flag),
         uint128Le(tlc.amountShannons),
-        tlc.paymentHash.slice(0, TRUNCATED_PAYMENT_HASH_LENGTH),
+        truncatePaymentHash(tlc.paymentHash),
         ...keyHashes,
         uint64Le(since),
     );

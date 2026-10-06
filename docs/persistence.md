@@ -7,13 +7,18 @@ What the device persists, and the guarantees `SignerStore` gives the policy engi
 The host injects an `ISignerStorage` (or its async form): a string-keyed, string-valued store the SDK never introspects. All
 keys carry the `fiber-lsp-sdk:` namespace, because the host may back that storage with a store it also uses for its own keys.
 
-| Key                             | Value                                                                |
-| ------------------------------- | -------------------------------------------------------------------- |
-| `fiber-lsp-sdk:channel:<index>` | The channel's policy record, JSON                                    |
-| `fiber-lsp-sdk:alias:<id>`      | The channel index that channel id resolves to, an integer in base 10 |
-| `fiber-lsp-sdk:preimage:<hash>` | The device-held preimage of a hold invoice, 32 bytes hex             |
+| Key                                 | Value                                                                |
+| ----------------------------------- | -------------------------------------------------------------------- |
+| `fiber-lsp-sdk:channel:<index>`     | The channel's policy record, JSON                                    |
+| `fiber-lsp-sdk:alias:<id>`          | The channel index that channel id resolves to, an integer in base 10 |
+| `fiber-lsp-sdk:intent:<boundHash>`  | The debit intent of a payment, JSON                                  |
+| `fiber-lsp-sdk:invoice:<boundHash>` | A hold invoice whose preimage the device holds, JSON                 |
+| `fiber-lsp-sdk:preimage:<hash>`     | The device-held preimage of a hold invoice, 32 bytes hex             |
 
-The three prefixes are fixed and disjoint, so a channel id and a payment hash can be the same string without colliding.
+The prefixes are fixed and disjoint, so a channel id and a payment hash can be the same string without colliding.
+`<boundHash>` is the bound payment hash: the first 20 bytes of the payment hash, the part a commitment binds. A record
+keyed by all 32 would let a node that changes the other 12 find no invoice to pay for ([policy.md](./policy.md)). The
+record holds the whole hash, and a record whose hash does not start with its key's reads as corruption.
 
 ## Identity: the index, not the name
 
@@ -40,23 +45,32 @@ index and its name at another.
 One record per channel, holding what the policy checks need. Everything else about a channel lives on the node, which stays
 the durable store for channel state.
 
-| Field                         | What it holds                                                                              |
-| ----------------------------- | ------------------------------------------------------------------------------------------ |
-| `version`                     | Format version of the record itself                                                        |
-| `channelId`                   | The channel's current name, which the open handshake may still change                      |
-| `lastSignedCommitmentNumbers` | Last commitment number signed per context, strictly increasing                             |
-| `signedSessions`              | Sign-once registry: the session served in each `<context>:<number>` slot                   |
-| `lastStateVersion`            | Last state version seen from the node, non-decreasing                                      |
-| `localExposureShannons`       | The device's TLC-adjusted share after the last signed message, integer shannons in base 10 |
-| `pendingDebitsShannons`       | User-initiated debits not yet consumed by an exposure-lowering message                     |
+| Field                         | What it holds                                                                             |
+| ----------------------------- | ----------------------------------------------------------------------------------------- |
+| `version`                     | Format version of the record itself                                                       |
+| `channelId`                   | The channel's current name, which the open handshake may still change                     |
+| `lastSignedCommitmentNumbers` | Last commitment number signed per context, strictly increasing                            |
+| `signedSessions`              | Sign-once registry: the session served in each `<context>:<number>` slot                  |
+| `lastStateVersion`            | Last state version seen from the node, non-decreasing                                     |
+| `views`                       | One snapshot per commitment the device signs, `remote` (the peer's) and `local` (its own) |
+
+A view's snapshot holds:
+
+| Field              | What it holds                                                                                                 |
+| ------------------ | ------------------------------------------------------------------------------------------------------------- |
+| `exposureShannons` | The device's TLC-adjusted share after the last message signed in the view, integer shannons in base 10        |
+| `tlcs`             | The TLCs that message listed: direction, hash algorithm, `boundPaymentHash`, amount, expiry in seconds; no id |
+| `chargedShannons`  | Per `<boundHash>`, what offered TLCs that left the view took with them                                        |
+| `creditedShannons` | Per `<boundHash>`, what received TLCs of a released invoice had to pay the view                               |
 
 Two fields carry more than their name suggests, and [policy.md](./policy.md) is where the reasoning lives:
 
 - `signedSessions` stores a commitment to the whole triple a signature answers (the ordered key list, the aggregated nonce
   and the message), not to the message alone. Storing only the message would let a node re-ask one slot under three
   aggregated nonces of its choosing and recover the funding key.
-- `localExposureShannons` is fiber's settlement amount, not the raw balance: it drops the moment an offered TLC is
-  committed, which is while the device can still refuse, rather than later when the TLC settles.
+- `exposureShannons` is fiber's settlement amount, not the raw balance: it drops the moment an offered TLC is committed,
+  which is while the device can still refuse, rather than later when the TLC settles. It is kept per view because the two
+  commitments do not list the same TLCs at the same time.
 
 Two rules keep the sign-once registry trustworthy:
 
@@ -66,6 +80,22 @@ Two rules keep the sign-once registry trustworthy:
   holds no record throws for the same reason, rather than reading as a channel the device never knew.
 - **The record carries a format version.** A future format change migrates old records rather than rejecting them, for the same
   reason: a rejected record is a lost registry. Unknown extra fields are tolerated on read; a version from the future is not.
+
+## The payment records
+
+A debit intent holds the full payment hash, `maxShannons` (amount plus fee budget), `open`, and `channelIndexes`; a hold
+invoice holds the full payment hash, `amountShannons`, `hashAlgorithm`, `released`, and `channelIndexes`. Both are device-wide because
+the node, not the device, picks the channel a payment uses, and both carry `version` (`PAYMENT_RECORD_VERSION`), as the
+channel record does. Until the SDK's first release every format changes in place without bumping its version; from then
+on a change is a new version and a migration.
+
+`channelIndexes` lists every channel that has shown a TLC under the hash, so a claim can find the other channels drawing on
+one budget or crediting one invoice, since the storage cannot be enumerated. It is written before the claim that shows the
+TLC, and only once that claim has been decided: a crash in between leaves a channel listed that shows nothing, which costs
+a read, while the reverse order could leave a charge nobody finds. What a view has charged and credited lives in the channel
+record, written in the same step as the claim, so no amount is kept twice.
+
+Neither kind is ever deleted. A closed intent stays, since what was charged to it is what keeps it from opening again.
 
 ## What growth this costs
 
@@ -77,6 +107,11 @@ The registry inside the record is the half that grows without a bound, at about 
 re-serialized on every claim. A channel a thousand commitments deep therefore rewrites an 85 KB record on each signature, and
 that write amplification, not the alias map, is the cost to watch on a device.
 
+The views grow the same way, more slowly: each keeps one entry of about 60 bytes per payment hash it has ever charged or
+credited, so the record also carries every payment that ever crossed the channel. A payment record is about 200 bytes and
+one exists per payment and per invoice the device ever made, so ten thousand of them is about 2 MB, read only when a
+commitment names their hash.
+
 Neither is pruned, and the reason is the same for both: the device never learns from a source it trusts that a channel is
 finished, since closure is node-supplied state, and deleting on it would hand the node a way to clear the names and slots that
 refuse it. Pruning the registry is additionally bounded by what would still be safe without it, the monotonic counter, and it
@@ -86,8 +121,14 @@ would cost the idempotent replay of an old request ([policy.md](./policy.md)).
 
 `SignerStore` serializes every operation per storage key. Operations on one key run in call order, one at a time, and each
 `updateChannelRecord` holds its key for the whole read-modify-write, which is the record's key and therefore the channel
-index: two names of one channel share the lane. Different keys never wait on each other, so a slow channel does not stall
-the rest.
+index: two names of one channel share the lane. Different keys never wait on each other. Claims are the exception: they
+all run in the balance lane below, one at a time across every channel, so a slow claim does stall the next one.
+
+One lane is no key at all: `withBalanceLock` runs an operation after every earlier one in a lane named
+`fiber-lsp-sdk:balance`, which nothing is ever stored under. The policy engine runs every claim in it, and every write of
+an intent or an invoice, because the balance rule reads records several channels share: the per-key lanes alone would let
+two channels draw on one budget at once, and a revocation landing between a commitment's decision and its claim could fail
+the claim after its channel was filed on a payment record.
 
 This is what makes the sign-once registry hold under concurrent sign requests. Without it, two requests for the same slot both
 read the record before either writes, and the second write drops the first one's claim on the slot: exactly the double signature
@@ -107,9 +148,10 @@ host must give the SDK a single instance, or keep its storage private to one.
 ## Recovery
 
 From the mnemonic alone the host re-derives the master seed, and the SDK re-derives every channel key (see
-[derivation.md](./derivation.md)). What does not come back is the record: counters, the sign-once registry and the exposure
-snapshot all start empty. Losing the storage is therefore not losing funds, with one exception: hold-invoice preimages exist
-only on the device, so unclaimed held payments need the storage intact. They are refundable to the payer otherwise.
+[derivation.md](./derivation.md)). What does not come back is the record: counters, the sign-once registry and the view
+snapshots all start empty, and so do the intents and the invoices. Losing the storage is therefore not losing funds, with
+one exception: hold-invoice preimages exist only on the device, so unclaimed held payments need the storage intact. They
+are refundable to the payer otherwise.
 
 **Rebuilding that state is not something the SDK does today.** What a restore would have to rebuild before anything else is
 the alias map: which channel index each of the node's channels belongs to. `ISignerStorage` is `get` and `set` with no

@@ -243,6 +243,13 @@ describe("decodeSignParams", () => {
         it.each(SIGNING_CASES)("hands %s to the policy gate as a fresh, digest-matching request", async (method, params, expected) => {
             const engine = new PolicyEngine(new SignerStore(new InMemorySignerStorage()));
             await engine.registerChannel(CHANNEL_ID, CHANNEL_INDEX, "0");
+            // The gate signs an offered TLC only for a payment the user approved.
+            if (expected.operation.kind === "commitment_tx") {
+                for (const tlc of expected.operation.input.tlcs) {
+                    if (tlc.direction === "offered")
+                        await engine.recordDebitIntent(bytesToHex(tlc.paymentHash), tlc.amountShannons.toString());
+                }
+            }
             const decoded = signingRequest(decodeSignParams(request(method, params), COMMITMENT_LOCK_TESTNET));
             const contexts = {
                 commitment_tx: "COMMITMENT",
