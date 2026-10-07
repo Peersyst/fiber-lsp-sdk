@@ -13,6 +13,8 @@ export const UINT128_LENGTH = 16;
  */
 export const MAX_AMOUNT_SHANNONS = UINT128_MAX;
 
+export const SHANNONS_PER_CKB = 100_000_000n;
+
 export const HASH256_LENGTH = 32;
 
 /**

@@ -9,6 +9,7 @@ import {
     MAX_CAPACITY_SHANNONS,
     MAX_CELL_DEPS_COUNT,
 } from "./digest.constants";
+import type { CommitmentTxInput, ShutdownTxInput } from "./digest.types";
 import { moleculeCellOutput, moleculeRawTransaction, moleculeTransaction } from "./utils";
 
 const UDT_AMOUNT_DATA_LENGTH = 16;
@@ -57,6 +58,33 @@ export function calculateTxFee(feeRate: bigint, txSize: number): bigint {
     const fee = (feeRate * BigInt(txSize)) / FEE_RATE_WEIGHT_SCALE;
     assertUnsignedBigInt("fee", fee, MAX_CAPACITY_SHANNONS);
     return fee;
+}
+
+/**
+ * Port of fiber's `checked_calculate_commitment_tx_fee`: the fee a commitment tx and a revocation take out of the funding.
+ * @param input The rate and what sizes the mock commitment tx.
+ * @returns The fee in shannons.
+ */
+export function calculateCommitmentTxFee(
+    input: Pick<CommitmentTxInput, "commitmentFeeRate" | "cellDepsCount" | "udtTypeScript" | "commitmentLock">,
+): bigint {
+    return calculateTxFee(input.commitmentFeeRate, commitmentTxSize(input.cellDepsCount, input.udtTypeScript, input.commitmentLock));
+}
+
+/**
+ * Port of fiber's `checked_calculate_shutdown_tx_fee`: one side's fee on a cooperative close.
+ * @param feeRate That side's rate, in shannons per 1000 bytes.
+ * @param input What sizes the mock shutdown tx.
+ * @returns The fee in shannons.
+ */
+export function calculateShutdownTxFee(
+    feeRate: bigint,
+    input: Pick<ShutdownTxInput, "cellDepsCount" | "udtTypeScript" | "localCloseScript" | "remoteCloseScript">,
+): bigint {
+    return calculateTxFee(
+        feeRate,
+        shutdownTxSize(input.cellDepsCount, input.udtTypeScript, [input.localCloseScript, input.remoteCloseScript]),
+    );
 }
 
 /**

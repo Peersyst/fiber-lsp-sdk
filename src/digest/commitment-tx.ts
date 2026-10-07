@@ -15,7 +15,7 @@ import type { FiberChannelKeys } from "../derivation";
 import { MAX_COMMITMENT_NUMBER, pubkeyOf } from "../derivation";
 import { MAX_CAPACITY_SHANNONS, MAX_SINCE_PAYLOAD, SINCE_RELATIVE_EPOCH_FLAGS } from "./digest.constants";
 import type { CommitmentTxInput } from "./digest.types";
-import { calculateTxFee, commitmentTxSize } from "./fee";
+import { calculateCommitmentTxFee } from "./fee";
 import { buildSettlementWitness } from "./settlement-witness";
 import { aggregateXOnlyPubkey, moleculeCellInput, moleculeCellOutput, moleculeRawTransaction, subtractTxFee, uint64Be } from "./utils";
 
@@ -80,7 +80,7 @@ export function computeCommitmentTxDigest(keys: FiberChannelKeys, input: Commitm
     );
     const lock: Script = { ...input.commitmentLock, args: lockArgs };
 
-    const fee = calculateTxFee(input.commitmentFeeRate, commitmentTxSize(input.cellDepsCount, input.udtTypeScript, input.commitmentLock));
+    const fee = calculateCommitmentTxFee(input);
     const liquidCapacity = input.toLocalShannons + input.toRemoteShannons;
     assertUnsignedBigInt("liquid capacity", liquidCapacity, MAX_AMOUNT_SHANNONS);
     const totalReserved = input.localReservedCkbShannons + input.remoteReservedCkbShannons;

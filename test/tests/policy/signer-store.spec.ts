@@ -23,6 +23,13 @@ function record(overrides: Partial<ChannelPolicyRecord> = {}): ChannelPolicyReco
         lastSignedCommitmentNumbers: { COMMITMENT: 5, REVOKE: 4 },
         signedSessions: { "COMMITMENT:5": "ab".repeat(32) },
         lastStateVersion: 7,
+        pins: {
+            fundedShannons: "5000000100",
+            localCloseScript: "ab".repeat(53),
+            localReservedCkbShannons: "9900000000",
+            udtTypeScript: null,
+            commitmentFeeRate: "1000",
+        },
         views: {
             remote: {
                 exposureShannons: "5000000000",
@@ -288,7 +295,17 @@ describe("channel records", () => {
             "cd".repeat(32) +
             '","COMMITMENT:10":"' +
             "ef".repeat(32) +
-            '"},"lastSignedCommitmentNumbers":{"REVOKE":9,"COMMITMENT":10},"channelId":"' +
+            '"},"lastSignedCommitmentNumbers":{"REVOKE":9,"COMMITMENT":10},' +
+            '"pins":{"remoteReservedCkbShannons":"6300000000","localReservedCkbShannons":"9900000000",' +
+            '"commitmentFeeRate":"1000","commitmentDelayEpoch":"1099511627777","remoteTlcBasePubkey":"03' +
+            "25".repeat(32) +
+            '","remoteFundingPubkey":"02' +
+            "63".repeat(32) +
+            '","liquidCapacityShannons":"245706789","fundingCapacityShannons":"256206789","fundingOutPoint":"' +
+            "6f".repeat(32) +
+            ':0","udtTypeScript":null,"localCloseScript":"' +
+            "ab".repeat(53) +
+            '","fundedShannons":"128456789"},"channelId":"' +
             CHANNEL_ID +
             '","version":1}';
         const storage = new InMemorySignerStorage();
@@ -299,6 +316,20 @@ describe("channel records", () => {
             lastSignedCommitmentNumbers: { COMMITMENT: 10, REVOKE: 9 },
             signedSessions: { "COMMITMENT:10": "ef".repeat(32), "REVOKE:9": "cd".repeat(32) },
             lastStateVersion: 42,
+            pins: {
+                fundedShannons: "128456789",
+                localCloseScript: "ab".repeat(53),
+                udtTypeScript: null,
+                fundingOutPoint: `${"6f".repeat(32)}:0`,
+                fundingCapacityShannons: "256206789",
+                liquidCapacityShannons: "245706789",
+                remoteFundingPubkey: "02" + "63".repeat(32),
+                remoteTlcBasePubkey: "03" + "25".repeat(32),
+                commitmentDelayEpoch: "1099511627777",
+                commitmentFeeRate: "1000",
+                localReservedCkbShannons: "9900000000",
+                remoteReservedCkbShannons: "6300000000",
+            },
             views: {
                 remote: {
                     exposureShannons: "122706789",
@@ -334,6 +365,20 @@ describe("channel records", () => {
                 "ANNOUNCEMENT:0": "f0".repeat(32),
             },
             lastStateVersion: Number.MAX_SAFE_INTEGER,
+            pins: {
+                fundedShannons: "18446744073709551615",
+                localCloseScript: "00",
+                udtTypeScript: null,
+                fundingOutPoint: `${"ff".repeat(32)}:4294967295`,
+                fundingCapacityShannons: "18446744073709551615",
+                liquidCapacityShannons: "0",
+                remoteFundingPubkey: "ff".repeat(33),
+                remoteTlcBasePubkey: "00".repeat(33),
+                commitmentDelayEpoch: "18446744073709551615",
+                commitmentFeeRate: "0",
+                localReservedCkbShannons: "18446744073709551615",
+                remoteReservedCkbShannons: "0",
+            },
             views: {
                 remote: {
                     exposureShannons: "340282366920938463463374607431768211455",

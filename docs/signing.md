@@ -89,7 +89,9 @@ with, and never the funding key.
 
 Registration is two halves, because the name a channel is filed under comes from the node. `prepareChannelRegistration`
 derives the keys of a channel index the caller allocated and returns the payload of `register_channel`, the base public
-keys and the delegated settlement key, together with the exposure the record will open at. `channelRegistered` files the
+keys and the delegated settlement key, together with what the record will open with and the wire does not carry: the amount
+the user funds and a copy of the script the device's side of a close pays to, both checked first against what fiber opens
+with ([policy.md](./policy.md)). `channelRegistered` files the
 channel under the name the acknowledgement carried, through `PolicyEngine.registerChannel`; the session calls it while it
 processes the acknowledgement, so a request the node sends right after finds the record in place. A registration that is
 refused or interrupted leaves no record.

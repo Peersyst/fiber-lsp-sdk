@@ -296,7 +296,7 @@ describe("decodeRevocation", () => {
         ["udt_type_script", undefined],
         ["to_local", ABOVE_U128],
         ["to_remote", "0x00"],
-        ["local_reserved", "4200000000"],
+        ["local_reserved", "9900000000"],
         ["local_reserved", ABOVE_U64],
         ["remote_reserved", ABOVE_U64],
     ])("refuses %s = %p", (path, value) => {

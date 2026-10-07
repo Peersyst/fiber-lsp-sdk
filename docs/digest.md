@@ -48,6 +48,10 @@ serialized size plus 4. The mock's cell-dep count is an input (it depends on the
 truncates, and one shannon of divergence changes the digest, so the mock is rebuilt byte for byte with the same molecule
 serializer rather than approximated.
 
+The two fees are exported on their own, `calculateCommitmentTxFee` (a commitment and a revocation take the same one) and
+`calculateShutdownTxFee` (one side's), because the policy bounds them: the digest binds the signature to whatever fee the
+node's rate produces, and judging how large it may be is the gate's ([policy.md](./policy.md)).
+
 ## Network pinning
 
 The commitment lock's code hash decides which script guards the funds after a force close, and on mainnet and testnet it

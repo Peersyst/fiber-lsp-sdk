@@ -39,7 +39,8 @@ const SIGNED_CHALLENGE_FRAME = {
 const CHANNEL_ID = `0x${"1f".repeat(32)}`;
 const PENDING: PendingChannelRegistration = {
     channelIndex: 3,
-    localExposureShannons: "62000000000",
+    fundedShannons: "71900000000",
+    localCloseScript: { codeHash: new Uint8Array(32).fill(0x74), hashType: "type", args: new Uint8Array(20).fill(0xda) },
     registration: {
         fundingPubkey: pubkeyOf(KEYS.fundingKey),
         tlcBasePubkey: pubkeyOf(KEYS.tlcBaseKey),

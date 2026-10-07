@@ -12,6 +12,12 @@ function record(): ChannelPolicyRecord {
         lastSignedCommitmentNumbers: { COMMITMENT: 5, REVOKE: 4 },
         signedSessions: { "COMMITMENT:5": "ab".repeat(32) },
         lastStateVersion: 7,
+        pins: {
+            fundedShannons: "5000000000",
+            localCloseScript: "ab".repeat(53),
+            localReservedCkbShannons: "9900000000",
+            udtTypeScript: null,
+        },
         views: {
             remote: { exposureShannons: "5000000000", tlcs: [], chargedShannons: {}, creditedShannons: {} },
             local: { exposureShannons: "5000000000", tlcs: [], chargedShannons: {}, creditedShannons: {} },

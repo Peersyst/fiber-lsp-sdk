@@ -53,6 +53,15 @@ export function isHexBytes(value: unknown, byteLength: number): value is string 
 }
 
 /**
+ * Checks that a value is lowercase hex encoding one or more whole bytes, of any length.
+ * @param value Value to check.
+ * @returns Whether the value is a non-empty lowercase hex string of whole bytes.
+ */
+export function isNonEmptyHexBytes(value: unknown): value is string {
+    return typeof value === "string" && value.length > 0 && value.length % 2 === 0 && LOWERCASE_HEX_PATTERN.test(value);
+}
+
+/**
  * Checks that a value is an amount in decimal shannons: canonical digits within fiber's u128 range, no sign, no leading zeros.
  * @param value Value to check.
  * @returns Whether the value is a decimal shannons string.

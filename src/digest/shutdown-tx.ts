@@ -11,7 +11,7 @@ import type { FiberChannelKeys } from "../derivation";
 import { pubkeyOf } from "../derivation";
 import { MAX_CAPACITY_SHANNONS } from "./digest.constants";
 import type { ShutdownTxInput } from "./digest.types";
-import { calculateTxFee, shutdownTxSize } from "./fee";
+import { calculateShutdownTxFee } from "./fee";
 import { moleculeCellInput, moleculeCellOutput, moleculeRawTransaction, subtractTxFee } from "./utils";
 
 /**
@@ -27,19 +27,16 @@ export function computeShutdownTxDigest(keys: FiberChannelKeys, input: ShutdownT
     assertUnsignedBigInt("localReservedCkbShannons", input.localReservedCkbShannons, MAX_CAPACITY_SHANNONS);
     assertUnsignedBigInt("remoteReservedCkbShannons", input.remoteReservedCkbShannons, MAX_CAPACITY_SHANNONS);
 
-    const txSize = shutdownTxSize(input.cellDepsCount, input.udtTypeScript, [input.localCloseScript, input.remoteCloseScript]);
-    const localFee = calculateTxFee(input.localFeeRate, txSize);
-    const remoteFee = calculateTxFee(input.remoteFeeRate, txSize);
+    const localFee = calculateShutdownTxFee(input.localFeeRate, input);
+    const remoteFee = calculateShutdownTxFee(input.remoteFeeRate, input);
     const isUdt = input.udtTypeScript !== null;
 
-    const localCapacity = subtractTxFee(
-        isUdt ? input.localReservedCkbShannons : input.toLocalShannons + input.localReservedCkbShannons,
-        localFee,
-    );
-    const remoteCapacity = subtractTxFee(
-        isUdt ? input.remoteReservedCkbShannons : input.toRemoteShannons + input.remoteReservedCkbShannons,
-        remoteFee,
-    );
+    const localTotal = isUdt ? input.localReservedCkbShannons : input.toLocalShannons + input.localReservedCkbShannons;
+    const remoteTotal = isUdt ? input.remoteReservedCkbShannons : input.toRemoteShannons + input.remoteReservedCkbShannons;
+    // Fiber reads the funding cell's capacity as a u64.
+    assertUnsignedBigInt("funding capacity", localTotal + remoteTotal, MAX_CAPACITY_SHANNONS);
+    const localCapacity = subtractTxFee(localTotal, localFee);
+    const remoteCapacity = subtractTxFee(remoteTotal, remoteFee);
     const localOutput = moleculeCellOutput(localCapacity, input.localCloseScript, input.udtTypeScript);
     const remoteOutput = moleculeCellOutput(remoteCapacity, input.remoteCloseScript, input.udtTypeScript);
     const localData = isUdt ? uint128Le(input.toLocalShannons) : new Uint8Array(0);

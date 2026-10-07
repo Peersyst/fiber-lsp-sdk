@@ -1,9 +1,23 @@
-import { hexToBytes } from "@noble/hashes/utils.js";
+import { bytesToHex, hexToBytes } from "@noble/hashes/utils.js";
+import type { OutPoint } from "../../../src/common";
 import type { FiberChannelKeys } from "../../../src/derivation";
 import { deriveChannelKeys, pubkeyOf } from "../../../src/derivation";
-import { computeCommitmentTxDigest } from "../../../src/digest";
-import type { ChannelPolicyRecord, DebitIntentRecord, HoldInvoicePolicyRecord, PolicySignRequest, SignSession } from "../../../src/policy";
-import { DebitIntentError, HoldInvoiceError, PolicyEngine, PolicyRefusalError, SignerStore } from "../../../src/policy";
+import {
+    computeChannelAnnouncementDigest,
+    computeCommitmentTxDigest,
+    computeRevocationDigest,
+    computeShutdownTxDigest,
+} from "../../../src/digest";
+import type {
+    ChannelPins,
+    ChannelPolicyRecord,
+    DebitIntentRecord,
+    HoldInvoicePolicyRecord,
+    PolicySignRequest,
+    SignOperation,
+    SignSession,
+} from "../../../src/policy";
+import { DebitIntentError, FundingCellError, HoldInvoiceError, PolicyEngine, PolicyRefusalError, SignerStore } from "../../../src/policy";
 import { buildSessionCommitment } from "../../../src/policy/utils";
 import { AsyncInMemorySignerStorage, InMemorySignerStorage } from "../../mocks/policy";
 import { toChannelAnnouncementInput, toCommitmentTxInput, toRevocationInput, toShutdownTxInput, toTlc } from "../../utils/digest-inputs";
@@ -34,8 +48,11 @@ const OTHER_AGGREGATED_NONCE = hexToBytes(
 const OTHER_CHANNEL_ID = "0x2e".padEnd(66, "b");
 const OTHER_CHANNEL_INDEX = CHANNEL_INDEX + 1;
 
-const OPENING_EXPOSURE = "62000000000";
-const THREE_TLC_EXPOSURE = "59750000000";
+const OPENING_SETTLEMENT = "62000000000";
+const THREE_TLC_SETTLEMENT = "59750000000";
+// The "ckb" cases' opening settlement plus their local reserve.
+const FUNDED = "71900000000";
+const CLOSE_SCRIPT = toShutdownTxInput(caseOf(digest.shutdown_cases, "ckb"), digest.remote).localCloseScript;
 
 const OFFERED_HASH = "6844f645bb03ff9d1c9c48ee5e9e971be09bf34a3612c81b20c2a5a1bff2a6b6";
 const OFFERED_AMOUNT = "1500000000";
@@ -47,7 +64,36 @@ const OFFERED_TLC_ID = 7;
 const OTHER_OFFERED_TLC_ID = 5;
 const RECEIVED_TLC_ID = 2;
 
-const OPENING_VIEW = { exposureShannons: OPENING_EXPOSURE, tlcs: [], chargedShannons: {}, creditedShannons: {} };
+const REGISTERED_PINS: ChannelPins = {
+    fundedShannons: FUNDED,
+    localCloseScript:
+        "4900000010000000300000003100000074d3f63a22681bdb6ff6512866db95264338cfaee12f71e28b9f23c414990c9c0114000000da694932ba803b4c07f6e3a9b6b2ea3f9c6c66c7",
+    // Args under 57 bytes: 98 CKB occupied plus the 1 CKB close fee.
+    localReservedCkbShannons: "9900000000",
+    udtTypeScript: null,
+};
+
+// What the "ckb" cases state.
+const OPENED_PINS: ChannelPins = {
+    ...REGISTERED_PINS,
+    fundingOutPoint: "6f4ea49726c322dbedceb12a09d013a0256ea697dc362cc8865f8bbcdd17684e:0",
+    fundingCapacityShannons: "96700000000",
+    liquidCapacityShannons: "80500000000",
+    remoteFundingPubkey: "026372d1f1bf5f44d3bf185fe8f69502f36c9a01760029db0a15f6c7dedb4f5638",
+    remoteTlcBasePubkey: "032559e1b167552782cab5be4294260d51edfc36aef4ca7cc165b3b21b15e98e21",
+    commitmentDelayEpoch: "1099511627777",
+    commitmentFeeRate: "1000",
+    remoteReservedCkbShannons: "6300000000",
+};
+
+const FUNDING_TX_HASH = "6f4ea49726c322dbedceb12a09d013a0256ea697dc362cc8865f8bbcdd17684e";
+const UDT_SCRIPT_PIN =
+    "5500000010000000300000003100000091" +
+    "2f64f976947ed5467ff5e7ba4c87bd37f240cdbdba0b38da619372056ef82701200000008612706980baca14e3d03ea4d77d185e6f7338cd6e98a0ea0cd17a69918f2578";
+const REMOTE_CLOSE_SCRIPT_PIN =
+    "55000000100000003000000031000000014f879c667f549df6067c1797534f2b2de2312feff188d100669d4b8ad6f04502200000000682a2f376b830a421ddc7d3b8cf4bffb31bfdf2942f46780359b1ef4f107f36";
+
+const OPENING_VIEW = { exposureShannons: FUNDED, tlcs: [], chargedShannons: {}, creditedShannons: {} };
 
 function session(message: Uint8Array, overrides: Partial<SignSession> = {}): SignSession {
     return {
@@ -89,28 +135,95 @@ type CustomCommitment = {
     tlcIds: number[];
 };
 
-// Varies a vector case's balance-rule fields; the digest is the SDK's own, pinned elsewhere.
-function customCommitmentRequest(
-    custom: CustomCommitment,
-    channel: { keys: FiberChannelKeys; channelId: string } = { keys: KEYS, channelId: CHANNEL_ID },
-): PolicySignRequest {
-    const kase = caseOf(digest.commitment_cases, "ckb, three tlcs, for remote");
+type Channel = { keys: FiberChannelKeys; channelId: string };
+
+const OTHER_CHANNEL: Channel = { keys: OTHER_KEYS, channelId: OTHER_CHANNEL_ID };
+
+// The "ckb" channel with the three-TLC case's TLCs; the peer's settlement takes the rest. The digest is the SDK's.
+function customCommitmentRequest(custom: CustomCommitment, channel: Channel = { keys: KEYS, channelId: CHANNEL_ID }): PolicySignRequest {
+    const base = toCommitmentTxInput(caseOf(digest.commitment_cases, "ckb, no tlcs, for remote"), digest.remote);
+    const tlcs = caseOf(digest.commitment_cases, "ckb, three tlcs, for remote")
+        .tlcs.filter((tlc) => custom.tlcIds.includes(tlc.id))
+        .map(toTlc);
+    const settlementLocalShannons = BigInt(custom.settlementLocalShannons);
     const input = {
-        ...toCommitmentTxInput(kase, digest.remote),
+        ...base,
         forRemote: custom.forRemote,
         commitmentNumber: custom.commitmentNumber,
-        settlementLocalShannons: BigInt(custom.settlementLocalShannons),
-        tlcs: kase.tlcs.filter((tlc) => custom.tlcIds.includes(tlc.id)).map(toTlc),
+        settlementLocalShannons,
+        settlementRemoteShannons:
+            base.toLocalShannons +
+            base.toRemoteShannons -
+            settlementLocalShannons -
+            tlcs.reduce((sum, tlc) => sum + tlc.amountShannons, 0n),
+        tlcs,
     };
+    return signedRequest({ kind: "commitment_tx", input }, custom.commitmentNumber, channel);
+}
+
+function ckbCommitment(): Extract<SignOperation, { kind: "commitment_tx" }>["input"] {
+    return { ...toCommitmentTxInput(caseOf(digest.commitment_cases, "ckb, no tlcs, for remote"), digest.remote), commitmentNumber: 11 };
+}
+
+function ckbShutdown(): Extract<SignOperation, { kind: "shutdown_tx" }>["input"] {
+    return toShutdownTxInput(caseOf(digest.shutdown_cases, "ckb"), digest.remote);
+}
+
+function ckbRevocation(): Extract<SignOperation, { kind: "revocation" }>["input"] {
+    return toRevocationInput(caseOf(digest.revocation_cases, "ckb, send side"), digest.remote);
+}
+
+function ckbAnnouncement(): Extract<SignOperation, { kind: "channel_announcement" }>["input"] {
+    return toChannelAnnouncementInput(caseOf(digest.announcement_cases, "ckb"), digest.remote);
+}
+
+function signedRequest(
+    operation: SignOperation,
+    nonceCommitmentNumber: number,
+    channel: Channel = { keys: KEYS, channelId: CHANNEL_ID },
+): PolicySignRequest {
     return {
         channelId: channel.channelId,
         stateVersion: 1,
-        nonceCommitmentNumber: custom.commitmentNumber,
-        session: session(computeCommitmentTxDigest(channel.keys, input), {
+        nonceCommitmentNumber,
+        session: session(digestOf(channel.keys, operation), {
             orderedPublicKeys: [pubkeyOf(channel.keys.fundingKey), REMOTE_FUNDING_PUBKEY],
         }),
-        operation: { kind: "commitment_tx", input },
+        operation,
     };
+}
+
+function digestOf(keys: FiberChannelKeys, operation: SignOperation): Uint8Array {
+    switch (operation.kind) {
+        case "commitment_tx":
+            return computeCommitmentTxDigest(keys, operation.input);
+        case "shutdown_tx":
+            return computeShutdownTxDigest(keys, operation.input);
+        case "revocation":
+            return computeRevocationDigest(keys, operation.input);
+        case "channel_announcement":
+            return computeChannelAnnouncementDigest(keys, operation.input);
+    }
+}
+
+// The three-TLC case on the "ckb" channel.
+function threeTlcRequest(overrides: Partial<PolicySignRequest> = {}): PolicySignRequest {
+    return {
+        ...customCommitmentRequest({
+            forRemote: true,
+            commitmentNumber: 11,
+            settlementLocalShannons: THREE_TLC_SETTLEMENT,
+            tlcIds: [OFFERED_TLC_ID, RECEIVED_TLC_ID, OTHER_OFFERED_TLC_ID],
+        }),
+        ...overrides,
+    };
+}
+
+async function openChannel(engine: PolicyEngine, channel: Channel = { keys: KEYS, channelId: CHANNEL_ID }): Promise<void> {
+    await engine.checkAndClaim(
+        channel.keys,
+        customCommitmentRequest({ forRemote: true, commitmentNumber: 0, settlementLocalShannons: OPENING_SETTLEMENT, tlcIds: [] }, channel),
+    );
 }
 
 async function recordThreeTlcIntents(engine: PolicyEngine): Promise<void> {
@@ -156,7 +269,13 @@ async function registeredEngine(
     storage: InMemorySignerStorage | AsyncInMemorySignerStorage = new InMemorySignerStorage(),
 ): Promise<ReturnType<typeof newEngine>> {
     const context = newEngine(storage);
-    await context.engine.registerChannel(CHANNEL_ID, CHANNEL_INDEX, OPENING_EXPOSURE);
+    await context.engine.registerChannel(CHANNEL_ID, CHANNEL_INDEX, FUNDED, CLOSE_SCRIPT);
+    return context;
+}
+
+async function openedEngine(): Promise<ReturnType<typeof newEngine>> {
+    const context = await registeredEngine();
+    await openChannel(context.engine);
     return context;
 }
 
@@ -179,23 +298,24 @@ async function refusalOf(promise: Promise<unknown>): Promise<PolicyRefusalError>
 describe("registerChannel", () => {
     it("creates a record with empty registries", async () => {
         const { engine, store } = newEngine();
-        await engine.registerChannel(CHANNEL_ID, CHANNEL_INDEX, OPENING_EXPOSURE);
+        await engine.registerChannel(CHANNEL_ID, CHANNEL_INDEX, FUNDED, CLOSE_SCRIPT);
         await expect(store.getChannelRecord(CHANNEL_INDEX)).resolves.toEqual<ChannelPolicyRecord>({
             version: 1,
             channelId: CHANNEL_ID,
             lastSignedCommitmentNumbers: {},
             signedSessions: {},
             lastStateVersion: 0,
+            pins: REGISTERED_PINS,
             views: { remote: OPENING_VIEW, local: OPENING_VIEW },
         });
     });
 
     it("keeps the existing record when the same channel is registered again", async () => {
         const { engine, store, storage } = newEngine();
-        await engine.registerChannel(CHANNEL_ID, CHANNEL_INDEX, OPENING_EXPOSURE);
+        await engine.registerChannel(CHANNEL_ID, CHANNEL_INDEX, FUNDED, CLOSE_SCRIPT);
         storage.ops.length = 0;
 
-        await engine.registerChannel(CHANNEL_ID, CHANNEL_INDEX, "1");
+        await engine.registerChannel(CHANNEL_ID, CHANNEL_INDEX, FUNDED, CLOSE_SCRIPT);
 
         await expect(store.getChannelRecord(CHANNEL_INDEX)).resolves.toMatchObject({
             views: { remote: OPENING_VIEW, local: OPENING_VIEW },
@@ -203,10 +323,27 @@ describe("registerChannel", () => {
         expect(storage.ops.filter((operation) => operation.startsWith("set"))).toEqual([]);
     });
 
+    // Both values are the facade's own, so a mismatch is a host bug.
+    it.each([
+        ["another funded amount", "71900000001", CLOSE_SCRIPT],
+        ["another close script", FUNDED, { ...CLOSE_SCRIPT, args: new Uint8Array(20) }],
+    ])("rejects a re-registration with %s, under either name", async (_, funded, closeScript) => {
+        const { engine, store, storage } = newEngine();
+        await engine.registerChannel("temporary-id", CHANNEL_INDEX, FUNDED, CLOSE_SCRIPT);
+        const stored = new Map(storage.map);
+        for (const channelId of ["temporary-id", CHANNEL_ID]) {
+            await expect(engine.registerChannel(channelId, CHANNEL_INDEX, funded, closeScript)).rejects.toThrow(
+                new TypeError(`channel index ${CHANNEL_INDEX} is already registered with another funded amount or close script`),
+            );
+        }
+        expect(storage.map).toEqual(stored);
+        await expect(store.getChannelRecord(CHANNEL_INDEX)).resolves.toMatchObject({ channelId: "temporary-id" });
+    });
+
     it("rejects a re-registration under a different channel index", async () => {
         const { engine, storage } = newEngine();
-        await engine.registerChannel(CHANNEL_ID, CHANNEL_INDEX, OPENING_EXPOSURE);
-        await expect(engine.registerChannel(CHANNEL_ID, CHANNEL_INDEX + 1, OPENING_EXPOSURE)).rejects.toThrow(TypeError);
+        await engine.registerChannel(CHANNEL_ID, CHANNEL_INDEX, FUNDED, CLOSE_SCRIPT);
+        await expect(engine.registerChannel(CHANNEL_ID, CHANNEL_INDEX + 1, FUNDED, CLOSE_SCRIPT)).rejects.toThrow(TypeError);
         expect([...storage.map.keys()].filter((key) => key.startsWith("fiber-lsp-sdk:channel:"))).toEqual([
             `fiber-lsp-sdk:channel:${CHANNEL_INDEX}`,
         ]);
@@ -216,8 +353,8 @@ describe("registerChannel", () => {
         const { engine, storage } = newEngine(new AsyncInMemorySignerStorage());
 
         const outcomes = await Promise.allSettled([
-            engine.registerChannel(CHANNEL_ID, CHANNEL_INDEX, OPENING_EXPOSURE),
-            engine.registerChannel(CHANNEL_ID, CHANNEL_INDEX + 1, OPENING_EXPOSURE),
+            engine.registerChannel(CHANNEL_ID, CHANNEL_INDEX, FUNDED, CLOSE_SCRIPT),
+            engine.registerChannel(CHANNEL_ID, CHANNEL_INDEX + 1, FUNDED, CLOSE_SCRIPT),
         ]);
 
         expect(outcomes.map((outcome) => outcome.status)).toEqual(["fulfilled", "rejected"]);
@@ -228,8 +365,8 @@ describe("registerChannel", () => {
     // Fiber names a channel twice: a temporary id at open, then the id its tlc base keys derive, at AcceptChannel.
     it("points a second name at the record the first one created", async () => {
         const { engine, store, storage } = newEngine();
-        await engine.registerChannel("temporary-id", CHANNEL_INDEX, OPENING_EXPOSURE);
-        await engine.registerChannel(CHANNEL_ID, CHANNEL_INDEX, "1");
+        await engine.registerChannel("temporary-id", CHANNEL_INDEX, FUNDED, CLOSE_SCRIPT);
+        await engine.registerChannel(CHANNEL_ID, CHANNEL_INDEX, FUNDED, CLOSE_SCRIPT);
 
         await expect(engine.requireChannelIndex("temporary-id")).resolves.toBe(CHANNEL_INDEX);
         await expect(engine.requireChannelIndex(CHANNEL_ID)).resolves.toBe(CHANNEL_INDEX);
@@ -243,45 +380,251 @@ describe("registerChannel", () => {
     // A record that has served holds a live channel's nonce space, and handing it to another name re-opens its slots.
     it("rejects a new name on an index whose record has served a slot", async () => {
         const { engine, store } = newEngine();
-        await engine.registerChannel("temporary-id", CHANNEL_INDEX, OPENING_EXPOSURE);
+        await engine.registerChannel("temporary-id", CHANNEL_INDEX, FUNDED, CLOSE_SCRIPT);
         await engine.checkAndClaim(KEYS, commitmentRequest("ckb, no tlcs, for remote", { channelId: "temporary-id" }));
 
-        await expect(engine.registerChannel(CHANNEL_ID, CHANNEL_INDEX, OPENING_EXPOSURE)).rejects.toThrow(TypeError);
+        await expect(engine.registerChannel(CHANNEL_ID, CHANNEL_INDEX, FUNDED, CLOSE_SCRIPT)).rejects.toThrow(TypeError);
         await expect(store.getChannelRecord(CHANNEL_INDEX)).resolves.toMatchObject({ channelId: "temporary-id" });
         expect((await refusalOf(engine.requireChannelIndex(CHANNEL_ID))).code).toBe("unknown_channel");
     });
 
     it("rejects a new name on an index whose record only moved a counter", async () => {
         const { engine, store } = newEngine();
-        await engine.registerChannel("temporary-id", CHANNEL_INDEX, OPENING_EXPOSURE);
+        await engine.registerChannel("temporary-id", CHANNEL_INDEX, FUNDED, CLOSE_SCRIPT);
         await store.setChannelRecord(CHANNEL_INDEX, {
             version: 1,
             channelId: "temporary-id",
             lastSignedCommitmentNumbers: { COMMITMENT: 0 },
             signedSessions: {},
             lastStateVersion: 1,
+            pins: REGISTERED_PINS,
             views: { remote: OPENING_VIEW, local: OPENING_VIEW },
         });
-        await expect(engine.registerChannel(CHANNEL_ID, CHANNEL_INDEX, OPENING_EXPOSURE)).rejects.toThrow(TypeError);
+        await expect(engine.registerChannel(CHANNEL_ID, CHANNEL_INDEX, FUNDED, CLOSE_SCRIPT)).rejects.toThrow(TypeError);
     });
 
     it.each([
-        ["an empty channelId", "", CHANNEL_INDEX, OPENING_EXPOSURE],
-        ["a negative channel index", CHANNEL_ID, -1, OPENING_EXPOSURE],
-        ["a fractional channel index", CHANNEL_ID, 1.5, OPENING_EXPOSURE],
-        ["a signed exposure", CHANNEL_ID, CHANNEL_INDEX, "-1"],
-        ["an exposure with leading zeros", CHANNEL_ID, CHANNEL_INDEX, "0100"],
-        ["an exposure above u128", CHANNEL_ID, CHANNEL_INDEX, "340282366920938463463374607431768211456"],
-    ])("rejects %s", async (_, channelId, channelIndex, exposure) => {
+        ["an empty channelId", "", CHANNEL_INDEX, FUNDED, CLOSE_SCRIPT],
+        ["a negative channel index", CHANNEL_ID, -1, FUNDED, CLOSE_SCRIPT],
+        ["a fractional channel index", CHANNEL_ID, 1.5, FUNDED, CLOSE_SCRIPT],
+        ["a close script with a short code hash", CHANNEL_ID, CHANNEL_INDEX, FUNDED, { ...CLOSE_SCRIPT, codeHash: new Uint8Array(31) }],
+        ["a close script of an unknown hash type", CHANNEL_ID, CHANNEL_INDEX, FUNDED, { ...CLOSE_SCRIPT, hashType: "data3" as never }],
+        ["a close script that is no object", CHANNEL_ID, CHANNEL_INDEX, FUNDED, null as never],
+    ])("rejects %s, writing nothing", async (_, channelId, channelIndex, funded, closeScript) => {
+        const { engine, storage } = newEngine();
+        await expect(engine.registerChannel(channelId, channelIndex, funded, closeScript)).rejects.toThrow(Error);
+        expect(storage.map.size).toBe(0);
+    });
+
+    // Caught at the argument, not later as a corrupt record.
+    it.each([
+        ["a signed funded amount", "-1"],
+        ["a funded amount with leading zeros", "0100"],
+        ["a funded amount above u128", "340282366920938463463374607431768211456"],
+    ])("rejects %s, writing nothing", async (_, funded) => {
+        const { engine, storage } = newEngine();
+        await expect(engine.registerChannel(CHANNEL_ID, CHANNEL_INDEX, funded, CLOSE_SCRIPT)).rejects.toThrow(
+            new TypeError("fundedShannons must be an amount in decimal shannons"),
+        );
+        expect(storage.map.size).toBe(0);
+    });
+
+    it.each([
+        [
+            "one shannon below the reserve",
+            "9899999999",
+            new RangeError("fundedShannons 9899999999 is below the 9900000000 the device's reserve takes over that close script"),
+        ],
+        [
+            "u64's maximum",
+            "18446744073709551615",
+            new RangeError("fundedShannons must be below 18446744073709551615, the most a CKB channel's capacity holds"),
+        ],
+    ])("rejects a funded amount %s, writing nothing", async (_, funded, error) => {
+        const { engine, storage } = newEngine();
+        await expect(engine.registerChannel(CHANNEL_ID, CHANNEL_INDEX, funded, CLOSE_SCRIPT)).rejects.toThrow(error);
+        expect(storage.map.size).toBe(0);
+    });
+});
+
+describe("pinFundingCell", () => {
+    const FUNDING_OUT_POINT = { txHash: hexToBytes(FUNDING_TX_HASH), index: 0 };
+
+    it("pins the funding cell the host signed, which the opening commitment then has to state", async () => {
+        const { engine, store } = await registeredEngine();
+        await engine.pinFundingCell(CHANNEL_ID, FUNDING_OUT_POINT, "96700000000");
+        await expect(store.getChannelRecord(CHANNEL_INDEX)).resolves.toMatchObject({
+            pins: { ...REGISTERED_PINS, fundingOutPoint: `${FUNDING_TX_HASH}:0`, fundingCapacityShannons: "96700000000" },
+        });
+        await openChannel(engine);
+        await expect(store.getChannelRecord(CHANNEL_INDEX)).resolves.toMatchObject({ pins: OPENED_PINS });
+    });
+
+    it.each([
+        [
+            "another out point",
+            { txHash: FUNDING_OUT_POINT.txHash, index: 1 },
+            "96700000000",
+            "fundingOutPoint",
+            `${FUNDING_TX_HASH}:0`,
+            `${FUNDING_TX_HASH}:1`,
+        ],
+        ["another capacity", FUNDING_OUT_POINT, "96700000001", "fundingCapacityShannons", "96700000000", "96700000001"],
+    ])("refuses an opening commitment on %s than the host signed", async (_, outPoint, capacity, field, stated, pinned) => {
+        const { engine, store } = await registeredEngine();
+        await engine.pinFundingCell(CHANNEL_ID, outPoint, capacity);
+        const refusal = await refusalOf(openChannel(engine));
+        expect(refusal.code).toBe("policy_refusal");
+        expect(refusal.message).toBe(`the request states ${field} ${stated}, but the channel pinned ${pinned}`);
+        await expect(store.getChannelRecord(CHANNEL_INDEX)).resolves.toMatchObject({ signedSessions: {} });
+    });
+
+    it("pins a capacity of u64's maximum, the most a cell holds", async () => {
+        const { engine, store } = await registeredEngine();
+        await engine.pinFundingCell(CHANNEL_ID, FUNDING_OUT_POINT, "18446744073709551615");
+        await expect(store.getChannelRecord(CHANNEL_INDEX)).resolves.toMatchObject({
+            pins: { fundingCapacityShannons: "18446744073709551615" },
+        });
+    });
+
+    it("writes nothing when the same cell is pinned again, under either name", async () => {
+        const { engine, storage } = await registeredEngine();
+        await engine.registerChannel("temporary-id", CHANNEL_INDEX, FUNDED, CLOSE_SCRIPT);
+        await engine.pinFundingCell("temporary-id", FUNDING_OUT_POINT, "96700000000");
+        storage.ops.length = 0;
+        await engine.pinFundingCell(CHANNEL_ID, FUNDING_OUT_POINT, "96700000000");
+        await openChannel(engine);
+        storage.ops.length = 0;
+        await engine.pinFundingCell(CHANNEL_ID, FUNDING_OUT_POINT, "96700000000");
+        expect(storage.ops.filter((operation) => operation.startsWith("set"))).toEqual([]);
+    });
+
+    it.each([
+        [
+            "another out point",
+            { ...FUNDING_OUT_POINT, index: 1 },
+            "96700000000",
+            { field: "fundingOutPoint", pinned: `${FUNDING_TX_HASH}:0`, stated: `${FUNDING_TX_HASH}:1` },
+        ],
+        ["another capacity", FUNDING_OUT_POINT, "1", { field: "fundingCapacityShannons", pinned: "96700000000", stated: "1" }],
+    ])("throws a FundingCellError on %s once the node pinned the cell, naming both values", async (_, outPoint, capacity, conflict) => {
+        const { engine, storage } = await openedEngine();
+        const stored = new Map(storage.map);
+        const error: unknown = await engine.pinFundingCell(CHANNEL_ID, outPoint, capacity).catch((caught: unknown) => caught);
+        expect(error).toBeInstanceOf(FundingCellError);
+        expect(error).toMatchObject({
+            name: "FundingCellError",
+            message: `channel ${CHANNEL_ID} already pins ${conflict.field} to ${conflict.pinned}, not ${conflict.stated}`,
+            conflict,
+        });
+        expect(storage.map).toEqual(stored);
+    });
+
+    it("throws a FundingCellError on another cell than an earlier host pin", async () => {
+        const { engine, storage } = await registeredEngine();
+        await engine.pinFundingCell(CHANNEL_ID, FUNDING_OUT_POINT, "96700000000");
+        const stored = new Map(storage.map);
+        await expect(engine.pinFundingCell(CHANNEL_ID, FUNDING_OUT_POINT, "96700000001")).rejects.toThrow(FundingCellError);
+        expect(storage.map).toEqual(stored);
+    });
+
+    it("throws when the channel's name resolves to an index holding no record", async () => {
+        const { engine, store } = newEngine();
+        await store.claimChannelAlias(CHANNEL_ID, CHANNEL_INDEX);
+        await expect(engine.pinFundingCell(CHANNEL_ID, FUNDING_OUT_POINT, "96700000000")).rejects.toThrow(
+            new TypeError(`channel ${CHANNEL_ID} resolves to channel index ${CHANNEL_INDEX}, which holds no record`),
+        );
+    });
+
+    // Hosts register before pinning, so this is a host bug.
+    it("throws on a channel this device never registered", async () => {
         const { engine } = newEngine();
-        await expect(engine.registerChannel(channelId, channelIndex, exposure)).rejects.toThrow(Error);
+        await expect(engine.pinFundingCell(CHANNEL_ID, FUNDING_OUT_POINT, "96700000000")).rejects.toThrow(
+            new TypeError(`channel ${CHANNEL_ID} is not registered on this device`),
+        );
+    });
+
+    it("rejects an empty channel id", async () => {
+        const { engine } = newEngine();
+        await expect(engine.pinFundingCell("", FUNDING_OUT_POINT, "96700000000")).rejects.toThrow(
+            new TypeError("channelId must be a non-empty string"),
+        );
+    });
+
+    // Caught at the argument, not later as a corrupt record.
+    it.each([
+        [
+            "a tx hash of 31 bytes",
+            { txHash: new Uint8Array(31), index: 0 },
+            "96700000000",
+            new TypeError("fundingOutPoint.txHash must be 32 bytes, got 31"),
+        ],
+        [
+            "a negative index",
+            { txHash: FUNDING_OUT_POINT.txHash, index: -1 },
+            "96700000000",
+            new RangeError("fundingOutPoint.index must be an integer between 0 and 4294967295, got -1"),
+        ],
+        [
+            "an index above u32",
+            { txHash: FUNDING_OUT_POINT.txHash, index: 2 ** 32 },
+            "96700000000",
+            new RangeError("fundingOutPoint.index must be an integer between 0 and 4294967295, got 4294967296"),
+        ],
+        ["a capacity in hex", FUNDING_OUT_POINT, "0x1", new TypeError("capacityShannons must be an amount in decimal shannons")],
+        [
+            "a capacity above u64",
+            FUNDING_OUT_POINT,
+            "18446744073709551616",
+            new RangeError("capacityShannons must be at most 18446744073709551615, the most a CKB cell's capacity holds"),
+        ],
+        ["a null out point", null as unknown as OutPoint, "96700000000", new TypeError("fundingOutPoint must be an object")],
+    ])("rejects %s, writing nothing", async (_, outPoint, capacity, error) => {
+        const { engine, storage } = await registeredEngine();
+        const stored = new Map(storage.map);
+        await expect(engine.pinFundingCell(CHANNEL_ID, outPoint, capacity)).rejects.toThrow(error);
+        expect(storage.map).toEqual(stored);
+    });
+
+    it("holds the host's pin until a commitment that is being decided has claimed", async () => {
+        const inner = new InMemorySignerStorage();
+        const recordKey = `fiber-lsp-sdk:channel:${CHANNEL_INDEX}`;
+        let armed = false;
+        let pin: Promise<void> | null = null;
+        const engine: PolicyEngine = new PolicyEngine(
+            new SignerStore({
+                async get(key: string): Promise<string | null> {
+                    // While the commitment reads the record it decides on.
+                    if (armed && key === recordKey && pin === null) {
+                        pin = engine.pinFundingCell(CHANNEL_ID, { ...FUNDING_OUT_POINT, index: 1 }, "96700000000");
+                        pin.catch(() => undefined);
+                        await new Promise((resolve) => setTimeout(resolve, 0));
+                    }
+                    return inner.get(key);
+                },
+                set(key: string, value: string): Promise<void> {
+                    inner.set(key, value);
+                    return Promise.resolve();
+                },
+            }),
+        );
+        await engine.registerChannel(CHANNEL_ID, CHANNEL_INDEX, FUNDED, CLOSE_SCRIPT);
+        armed = true;
+
+        await openChannel(engine);
+        expect(pin).not.toBeNull();
+        await expect(pin).rejects.toBeInstanceOf(FundingCellError);
+        await expect(pin).rejects.toThrow(
+            `channel ${CHANNEL_ID} already pins fundingOutPoint to ${FUNDING_TX_HASH}:0, not ${FUNDING_TX_HASH}:1`,
+        );
+        await expect(new SignerStore(inner).getChannelRecord(CHANNEL_INDEX)).resolves.toMatchObject({ pins: OPENED_PINS });
     });
 });
 
 describe("requireChannelIndex", () => {
     it("returns the index a channel's keys re-derive from", async () => {
         const { engine } = newEngine();
-        await engine.registerChannel(CHANNEL_ID, CHANNEL_INDEX, OPENING_EXPOSURE);
+        await engine.registerChannel(CHANNEL_ID, CHANNEL_INDEX, FUNDED, CLOSE_SCRIPT);
         await expect(engine.requireChannelIndex(CHANNEL_ID)).resolves.toBe(CHANNEL_INDEX);
     });
 
@@ -339,9 +682,9 @@ describe("debit intents", () => {
 
     // Fiber lets a failed hash be sent again.
     it("opens a closed intent again with a new budget when nothing was charged to it", async () => {
-        const { engine, store } = await registeredEngine();
+        const { engine, store } = await openedEngine();
         await recordThreeTlcIntents(engine);
-        await engine.checkAndClaim(KEYS, commitmentRequest("ckb, three tlcs, for remote"));
+        await engine.checkAndClaim(KEYS, threeTlcRequest());
         await engine.closeDebitIntent(OFFERED_HASH);
         await engine.recordDebitIntent(OFFERED_HASH, "1600000000");
         await expect(store.getDebitIntent(OFFERED_HASH.slice(0, 40))).resolves.toEqual<DebitIntentRecord>({
@@ -355,7 +698,7 @@ describe("debit intents", () => {
 
     // A crossing removal may charge the local view alone.
     it("never opens again an intent charged in the local view alone", async () => {
-        const { engine } = await registeredEngine();
+        const { engine } = await openedEngine();
         await engine.recordDebitIntent(OFFERED_HASH, OFFERED_AMOUNT);
         await engine.checkAndClaim(
             KEYS,
@@ -375,16 +718,16 @@ describe("debit intents", () => {
     });
 
     it("never opens again an intent something was charged to", async () => {
-        const { engine } = await registeredEngine();
+        const { engine } = await openedEngine();
         await recordThreeTlcIntents(engine);
-        await engine.checkAndClaim(KEYS, commitmentRequest("ckb, three tlcs, for remote"));
+        await engine.checkAndClaim(KEYS, threeTlcRequest());
         // The first offered TLC leaves with its amount.
         await engine.checkAndClaim(
             KEYS,
             customCommitmentRequest({
                 forRemote: true,
                 commitmentNumber: 12,
-                settlementLocalShannons: THREE_TLC_EXPOSURE,
+                settlementLocalShannons: THREE_TLC_SETTLEMENT,
                 tlcIds: [OTHER_OFFERED_TLC_ID, RECEIVED_TLC_ID],
             }),
         );
@@ -553,12 +896,15 @@ describe("hold invoices", () => {
 });
 
 describe("checkAndClaim", () => {
-    async function registered(
-        storage: InMemorySignerStorage | AsyncInMemorySignerStorage = new InMemorySignerStorage(),
-        exposure = OPENING_EXPOSURE,
-    ) {
+    async function registered(storage: InMemorySignerStorage | AsyncInMemorySignerStorage = new InMemorySignerStorage(), funded = FUNDED) {
         const context = newEngine(storage);
-        await context.engine.registerChannel(CHANNEL_ID, CHANNEL_INDEX, exposure);
+        await context.engine.registerChannel(CHANNEL_ID, CHANNEL_INDEX, funded, CLOSE_SCRIPT);
+        return context;
+    }
+
+    async function opened(storage: InMemorySignerStorage | AsyncInMemorySignerStorage = new InMemorySignerStorage()) {
+        const context = await registered(storage);
+        await openChannel(context.engine);
         return context;
     }
 
@@ -578,6 +924,7 @@ describe("checkAndClaim", () => {
                 lastSignedCommitmentNumbers: { COMMITMENT: 0 },
                 signedSessions: { "COMMITMENT:0": buildSessionCommitment(request.session) },
                 lastStateVersion: 1,
+                pins: OPENED_PINS,
                 views: { remote: OPENING_VIEW, local: OPENING_VIEW },
             });
         });
@@ -619,9 +966,9 @@ describe("checkAndClaim", () => {
         });
 
         it("keeps counters per context", async () => {
-            const { engine, store } = await registered();
+            const { engine, store } = await opened();
             await recordThreeTlcIntents(engine);
-            await engine.checkAndClaim(KEYS, commitmentRequest("ckb, three tlcs, for remote", { stateVersion: 3 }));
+            await engine.checkAndClaim(KEYS, threeTlcRequest({ stateVersion: 3 }));
             await engine.checkAndClaim(KEYS, revocationRequest("ckb, send side", { stateVersion: 3 }));
 
             await expect(store.getChannelRecord(CHANNEL_INDEX)).resolves.toMatchObject({
@@ -640,14 +987,14 @@ describe("checkAndClaim", () => {
 
     describe("the already-signed path", () => {
         it("answers a byte-identical repeat without moving the record", async () => {
-            const { engine, store, storage } = await registered();
+            const { engine, store, storage } = await opened();
             await recordThreeTlcIntents(engine);
-            const request = commitmentRequest("ckb, three tlcs, for remote");
+            const request = threeTlcRequest();
             await engine.checkAndClaim(KEYS, request);
             const afterFirst = await store.getChannelRecord(CHANNEL_INDEX);
             storage.ops.length = 0;
 
-            await expect(engine.checkAndClaim(KEYS, commitmentRequest("ckb, three tlcs, for remote"))).resolves.toEqual({
+            await expect(engine.checkAndClaim(KEYS, threeTlcRequest())).resolves.toEqual({
                 status: "already-signed",
                 context: "COMMITMENT",
                 commitmentNumber: 11,
@@ -765,8 +1112,8 @@ describe("checkAndClaim", () => {
 
         it("serves a request under either name of a renamed channel", async () => {
             const { engine } = newEngine();
-            await engine.registerChannel("temporary-id", CHANNEL_INDEX, OPENING_EXPOSURE);
-            await engine.registerChannel(CHANNEL_ID, CHANNEL_INDEX, OPENING_EXPOSURE);
+            await engine.registerChannel("temporary-id", CHANNEL_INDEX, FUNDED, CLOSE_SCRIPT);
+            await engine.registerChannel(CHANNEL_ID, CHANNEL_INDEX, FUNDED, CLOSE_SCRIPT);
             await expect(
                 engine.checkAndClaim(KEYS, commitmentRequest("ckb, no tlcs, for remote", { channelId: "temporary-id" })),
             ).resolves.toMatchObject({ status: "fresh" });
@@ -806,6 +1153,20 @@ describe("checkAndClaim", () => {
             expect((await refusalOf(engine.checkAndClaim(KEYS, request))).code).toBe("malformed");
         });
 
+        // A close can precede any pin; the record guard would otherwise throw on the capacity.
+        it("refuses a close whose sides together exceed a u64, writing nothing", async () => {
+            const { engine, storage } = await registered();
+            const request = shutdownRequest("ckb");
+            const operation = request.operation;
+            if (operation.kind !== "shutdown_tx") throw new Error("expected a shutdown request");
+            operation.input.toRemoteShannons = (1n << 64n) - 1n - operation.input.remoteReservedCkbShannons;
+            const stored = new Map(storage.map);
+            const refusal = await refusalOf(engine.checkAndClaim(KEYS, request));
+            expect(refusal.code).toBe("malformed");
+            expect(refusal.message).toContain("funding capacity must be a bigint between 0 and 18446744073709551615");
+            expect(storage.map).toEqual(stored);
+        });
+
         it("refuses a request rebuilt with another channel's keys", async () => {
             const { engine } = await registered();
             const kase = caseOf(digest.commitment_cases, "ckb, no tlcs, for remote");
@@ -839,9 +1200,9 @@ describe("checkAndClaim", () => {
 
     describe("check 3: sign-once", () => {
         it("refuses a different message on a served slot", async () => {
-            const { engine } = await registered();
+            const { engine } = await opened();
             await recordThreeTlcIntents(engine);
-            await engine.checkAndClaim(KEYS, commitmentRequest("ckb, three tlcs, for remote", { stateVersion: 1 }));
+            await engine.checkAndClaim(KEYS, threeTlcRequest({ stateVersion: 1 }));
             const other = commitmentRequest("udt, two tlcs, for remote", { stateVersion: 1 });
             expect((await refusalOf(engine.checkAndClaim(KEYS, other))).code).toBe("policy_refusal");
         });
@@ -868,9 +1229,9 @@ describe("checkAndClaim", () => {
         });
 
         it("refuses a cooperative close on a slot a commitment already served", async () => {
-            const { engine } = await registered();
+            const { engine } = await opened();
             await recordThreeTlcIntents(engine);
-            await engine.checkAndClaim(KEYS, commitmentRequest("ckb, three tlcs, for remote"));
+            await engine.checkAndClaim(KEYS, threeTlcRequest());
             const close = shutdownRequest("ckb", { nonceCommitmentNumber: 11 });
             expect((await refusalOf(engine.checkAndClaim(KEYS, close))).code).toBe("policy_refusal");
         });
@@ -878,15 +1239,15 @@ describe("checkAndClaim", () => {
         it("refuses a commitment on a slot a cooperative close already served", async () => {
             const { engine } = await registered();
             await engine.checkAndClaim(KEYS, shutdownRequest("ckb", { nonceCommitmentNumber: 11 }));
-            const commitment = commitmentRequest("ckb, three tlcs, for remote");
+            const commitment = threeTlcRequest();
             expect((await refusalOf(engine.checkAndClaim(KEYS, commitment))).code).toBe("policy_refusal");
         });
 
         // The reason the record is keyed by the channel index: two names must never mean two slot registries.
         it("refuses a slot the channel's other name already served", async () => {
             const { engine } = newEngine();
-            await engine.registerChannel("temporary-id", CHANNEL_INDEX, OPENING_EXPOSURE);
-            await engine.registerChannel(CHANNEL_ID, CHANNEL_INDEX, OPENING_EXPOSURE);
+            await engine.registerChannel("temporary-id", CHANNEL_INDEX, FUNDED, CLOSE_SCRIPT);
+            await engine.registerChannel(CHANNEL_ID, CHANNEL_INDEX, FUNDED, CLOSE_SCRIPT);
             const kase = caseOf(digest.commitment_cases, "ckb, no tlcs, for remote");
             await engine.checkAndClaim(KEYS, commitmentRequest("ckb, no tlcs, for remote", { channelId: "temporary-id" }));
 
@@ -898,8 +1259,8 @@ describe("checkAndClaim", () => {
 
         it("answers a byte-identical repeat arriving under the channel's other name", async () => {
             const { engine } = newEngine();
-            await engine.registerChannel("temporary-id", CHANNEL_INDEX, OPENING_EXPOSURE);
-            await engine.registerChannel(CHANNEL_ID, CHANNEL_INDEX, OPENING_EXPOSURE);
+            await engine.registerChannel("temporary-id", CHANNEL_INDEX, FUNDED, CLOSE_SCRIPT);
+            await engine.registerChannel(CHANNEL_ID, CHANNEL_INDEX, FUNDED, CLOSE_SCRIPT);
             await engine.checkAndClaim(KEYS, commitmentRequest("ckb, no tlcs, for remote", { channelId: "temporary-id" }));
 
             await expect(engine.checkAndClaim(KEYS, commitmentRequest("ckb, no tlcs, for remote"))).resolves.toMatchObject({
@@ -916,10 +1277,15 @@ describe("checkAndClaim", () => {
 
     describe("check 4: monotonicity", () => {
         it("refuses a commitment number below the last signed for its context", async () => {
-            const { engine } = await registered();
+            const { engine } = await opened();
             await recordThreeTlcIntents(engine);
-            await engine.checkAndClaim(KEYS, commitmentRequest("ckb, three tlcs, for remote"));
-            const older = commitmentRequest("ckb, no tlcs, for remote");
+            await engine.checkAndClaim(KEYS, threeTlcRequest());
+            const older = customCommitmentRequest({
+                forRemote: true,
+                commitmentNumber: 10,
+                settlementLocalShannons: OPENING_SETTLEMENT,
+                tlcIds: [],
+            });
             expect((await refusalOf(engine.checkAndClaim(KEYS, older))).code).toBe("stale_state");
         });
 
@@ -931,6 +1297,7 @@ describe("checkAndClaim", () => {
                 lastSignedCommitmentNumbers: { COMMITMENT: 0 },
                 signedSessions: {},
                 lastStateVersion: 1,
+                pins: OPENED_PINS,
                 views: { remote: OPENING_VIEW, local: OPENING_VIEW },
             });
             expect((await refusalOf(engine.checkAndClaim(KEYS, commitmentRequest("ckb, no tlcs, for remote")))).code).toBe("stale_state");
@@ -944,16 +1311,563 @@ describe("checkAndClaim", () => {
         });
     });
 
-    describe("check 5: the balance rule", () => {
-        it("signs the first commitment of a view against the opening state, and files the channel on its intents", async () => {
+    describe("check 5: the channel's pins and bounds", () => {
+        it.each<[string, () => PolicySignRequest, string, string, string]>([
+            [
+                "a commitment on another funding output",
+                () =>
+                    signedRequest(
+                        {
+                            kind: "commitment_tx",
+                            input: { ...ckbCommitment(), fundingOutPoint: { txHash: hexToBytes(FUNDING_TX_HASH), index: 1 } },
+                        },
+                        11,
+                    ),
+                "fundingOutPoint",
+                `${FUNDING_TX_HASH}:1`,
+                `${FUNDING_TX_HASH}:0`,
+            ],
+            [
+                "a commitment on another funding tx",
+                () =>
+                    signedRequest(
+                        {
+                            kind: "commitment_tx",
+                            input: { ...ckbCommitment(), fundingOutPoint: { txHash: hexToBytes("11".repeat(32)), index: 0 } },
+                        },
+                        11,
+                    ),
+                "fundingOutPoint",
+                `${"11".repeat(32)}:0`,
+                `${FUNDING_TX_HASH}:0`,
+            ],
+            [
+                "a commitment over more liquid capacity",
+                () => signedRequest({ kind: "commitment_tx", input: { ...ckbCommitment(), toRemoteShannons: 18_500_000_001n } }, 11),
+                "liquidCapacityShannons",
+                "80500000001",
+                "80500000000",
+            ],
+            [
+                "a commitment over a larger reserve",
+                () => signedRequest({ kind: "commitment_tx", input: { ...ckbCommitment(), localReservedCkbShannons: 9_900_000_001n } }, 11),
+                "fundingCapacityShannons",
+                "96700000001",
+                "96700000000",
+            ],
+            [
+                "a commitment moving reserve from one side to the other",
+                () =>
+                    signedRequest(
+                        {
+                            kind: "commitment_tx",
+                            input: {
+                                ...ckbCommitment(),
+                                localReservedCkbShannons: 9_900_000_001n,
+                                remoteReservedCkbShannons: 6_299_999_999n,
+                            },
+                        },
+                        11,
+                    ),
+                "localReservedCkbShannons",
+                "9900000001",
+                "9900000000",
+            ],
+            [
+                "a commitment under another peer funding key",
+                () =>
+                    signedRequest({ kind: "commitment_tx", input: { ...ckbCommitment(), remoteFundingPubkey: OTHER_FUNDING_PUBKEY } }, 11),
+                "remoteFundingPubkey",
+                bytesToHex(OTHER_FUNDING_PUBKEY),
+                digest.remote.funding_pubkey,
+            ],
+            [
+                "a commitment under another peer TLC base key",
+                () =>
+                    signedRequest({ kind: "commitment_tx", input: { ...ckbCommitment(), remoteTlcBasePubkey: OTHER_FUNDING_PUBKEY } }, 11),
+                "remoteTlcBasePubkey",
+                bytesToHex(OTHER_FUNDING_PUBKEY),
+                digest.remote.tlc_base_pubkey,
+            ],
+            [
+                "a commitment with another delay",
+                () =>
+                    signedRequest({ kind: "commitment_tx", input: { ...ckbCommitment(), commitmentDelayEpoch: 13_194_189_864_967n } }, 11),
+                "commitmentDelayEpoch",
+                "13194189864967",
+                "1099511627777",
+            ],
+            [
+                "a commitment at another fee rate",
+                () => signedRequest({ kind: "commitment_tx", input: { ...ckbCommitment(), commitmentFeeRate: 1001n } }, 11),
+                "commitmentFeeRate",
+                "1001",
+                "1000",
+            ],
+            [
+                "a commitment of a UDT channel",
+                () =>
+                    signedRequest(
+                        {
+                            kind: "commitment_tx",
+                            input: {
+                                ...ckbCommitment(),
+                                udtTypeScript: toCommitmentTxInput(
+                                    caseOf(digest.commitment_cases, "udt, two tlcs, for remote"),
+                                    digest.remote,
+                                ).udtTypeScript,
+                            },
+                        },
+                        11,
+                    ),
+                "udtTypeScript",
+                UDT_SCRIPT_PIN,
+                "null",
+            ],
+            [
+                "a close on another funding output",
+                () =>
+                    signedRequest(
+                        {
+                            kind: "shutdown_tx",
+                            input: { ...ckbShutdown(), fundingOutPoint: { txHash: hexToBytes(FUNDING_TX_HASH), index: 1 } },
+                        },
+                        11,
+                    ),
+                "fundingOutPoint",
+                `${FUNDING_TX_HASH}:1`,
+                `${FUNDING_TX_HASH}:0`,
+            ],
+            [
+                "a close over more liquid capacity",
+                () => signedRequest({ kind: "shutdown_tx", input: { ...ckbShutdown(), toLocalShannons: 62_000_000_001n } }, 11),
+                "liquidCapacityShannons",
+                "80500000001",
+                "80500000000",
+            ],
+            [
+                "a close under another peer funding key",
+                () => signedRequest({ kind: "shutdown_tx", input: { ...ckbShutdown(), remoteFundingPubkey: OTHER_FUNDING_PUBKEY } }, 11),
+                "remoteFundingPubkey",
+                bytesToHex(OTHER_FUNDING_PUBKEY),
+                digest.remote.funding_pubkey,
+            ],
+            [
+                "a close paying the device to another script",
+                () =>
+                    signedRequest(
+                        {
+                            kind: "shutdown_tx",
+                            input: { ...ckbShutdown(), localCloseScript: { ...CLOSE_SCRIPT, args: new Uint8Array(20) } },
+                        },
+                        11,
+                    ),
+                "localCloseScript",
+                "4900000010000000300000003100000074d3f63a22681bdb6ff6512866db95264338cfaee12f71e28b9f23c414990c9c0114000000" +
+                    "00".repeat(20),
+                REGISTERED_PINS.localCloseScript,
+            ],
+            [
+                "a close of a UDT channel",
+                () =>
+                    signedRequest(
+                        {
+                            kind: "shutdown_tx",
+                            input: {
+                                ...ckbShutdown(),
+                                udtTypeScript: toShutdownTxInput(caseOf(digest.shutdown_cases, "udt"), digest.remote).udtTypeScript,
+                            },
+                        },
+                        11,
+                    ),
+                "udtTypeScript",
+                UDT_SCRIPT_PIN,
+                "null",
+            ],
+            [
+                "a revocation of a UDT channel",
+                () =>
+                    signedRequest(
+                        {
+                            kind: "revocation",
+                            input: {
+                                ...ckbRevocation(),
+                                udtTypeScript: toRevocationInput(caseOf(digest.revocation_cases, "udt, receive side"), digest.remote)
+                                    .udtTypeScript,
+                            },
+                        },
+                        5,
+                    ),
+                "udtTypeScript",
+                UDT_SCRIPT_PIN,
+                "null",
+            ],
+            [
+                "a received revocation sweeping to another script than the device's",
+                () => signedRequest({ kind: "revocation", input: { ...ckbRevocation(), forRemote: true } }, 5),
+                "localCloseScript",
+                REMOTE_CLOSE_SCRIPT_PIN,
+                REGISTERED_PINS.localCloseScript,
+            ],
+            [
+                "a revocation over more liquid capacity",
+                () => signedRequest({ kind: "revocation", input: { ...ckbRevocation(), toLocalShannons: 62_000_000_001n } }, 5),
+                "liquidCapacityShannons",
+                "80500000001",
+                "80500000000",
+            ],
+            [
+                "a revocation with another delay",
+                () => signedRequest({ kind: "revocation", input: { ...ckbRevocation(), commitmentDelayEpoch: 13_194_189_864_967n } }, 5),
+                "commitmentDelayEpoch",
+                "13194189864967",
+                "1099511627777",
+            ],
+            [
+                "a revocation at another fee rate",
+                () => signedRequest({ kind: "revocation", input: { ...ckbRevocation(), commitmentFeeRate: 1001n } }, 5),
+                "commitmentFeeRate",
+                "1001",
+                "1000",
+            ],
+            [
+                "an announcement of another funding output",
+                () =>
+                    signedRequest(
+                        {
+                            kind: "channel_announcement",
+                            input: { ...ckbAnnouncement(), fundingOutPoint: { txHash: hexToBytes(FUNDING_TX_HASH), index: 1 } },
+                        },
+                        0,
+                    ),
+                "fundingOutPoint",
+                `${FUNDING_TX_HASH}:1`,
+                `${FUNDING_TX_HASH}:0`,
+            ],
+            [
+                "an announcement of another capacity",
+                () =>
+                    signedRequest({ kind: "channel_announcement", input: { ...ckbAnnouncement(), capacityShannons: 80_500_000_001n } }, 0),
+                "liquidCapacityShannons",
+                "80500000001",
+                "80500000000",
+            ],
+            [
+                "an announcement under another peer funding key",
+                () =>
+                    signedRequest(
+                        { kind: "channel_announcement", input: { ...ckbAnnouncement(), remoteFundingPubkey: OTHER_FUNDING_PUBKEY } },
+                        0,
+                    ),
+                "remoteFundingPubkey",
+                bytesToHex(OTHER_FUNDING_PUBKEY),
+                digest.remote.funding_pubkey,
+            ],
+        ])("refuses %s than the channel pinned, and moves nothing", async (_, request, field, stated, pinned) => {
+            const { engine, storage } = await opened();
+            const stored = new Map(storage.map);
+            const refusal = await refusalOf(engine.checkAndClaim(KEYS, request()));
+            expect(refusal.code).toBe("policy_refusal");
+            expect(refusal.message).toBe(`the request states ${field} ${stated}, but the channel pinned ${pinned}`);
+            expect(storage.map).toEqual(stored);
+        });
+
+        it("refuses an opening that turns the whole funding into the device's reserve, which pays the funded amount but locks it", async () => {
+            const { engine, storage } = await registered();
+            const stored = new Map(storage.map);
+            const input = {
+                ...ckbCommitment(),
+                commitmentNumber: 0,
+                toLocalShannons: 0n,
+                settlementLocalShannons: 0n,
+                localReservedCkbShannons: 71_900_000_000n,
+            };
+            const refusal = await refusalOf(engine.checkAndClaim(KEYS, signedRequest({ kind: "commitment_tx", input }, 0)));
+            expect(refusal.code).toBe("policy_refusal");
+            expect(refusal.message).toBe("the request states localReservedCkbShannons 71900000000, but the channel pinned 9900000000");
+            expect(storage.map).toEqual(stored);
+        });
+
+        it.each([
+            ["a revocation it sends, whose payout is the peer's", () => signedRequest({ kind: "revocation", input: ckbRevocation() }, 5)],
+            [
+                "a revocation it receives, sweeping to its own script",
+                () => signedRequest({ kind: "revocation", input: { ...ckbRevocation(), forRemote: true, payoutScript: CLOSE_SCRIPT } }, 5),
+            ],
+            ["a close to its own script", () => signedRequest({ kind: "shutdown_tx", input: ckbShutdown() }, 11)],
+            ["an announcement", () => signedRequest({ kind: "channel_announcement", input: ckbAnnouncement() }, 0)],
+        ])("signs %s that states every pinned value as pinned", async (_, request) => {
+            const { engine, store } = await opened();
+            await expect(engine.checkAndClaim(KEYS, request())).resolves.toMatchObject({ status: "fresh" });
+            await expect(store.getChannelRecord(CHANNEL_INDEX)).resolves.toMatchObject({ pins: OPENED_PINS });
+        });
+
+        it.each<[string, () => PolicySignRequest, Partial<ChannelPins>]>([
+            [
+                "a close",
+                () => shutdownRequest("ckb"),
+                {
+                    fundingOutPoint: OPENED_PINS.fundingOutPoint,
+                    fundingCapacityShannons: OPENED_PINS.fundingCapacityShannons,
+                    liquidCapacityShannons: OPENED_PINS.liquidCapacityShannons,
+                    remoteFundingPubkey: OPENED_PINS.remoteFundingPubkey,
+                    localReservedCkbShannons: OPENED_PINS.localReservedCkbShannons,
+                    remoteReservedCkbShannons: OPENED_PINS.remoteReservedCkbShannons,
+                },
+            ],
+            [
+                "a revocation",
+                () => revocationRequest("ckb, send side"),
+                {
+                    fundingCapacityShannons: OPENED_PINS.fundingCapacityShannons,
+                    liquidCapacityShannons: OPENED_PINS.liquidCapacityShannons,
+                    remoteFundingPubkey: OPENED_PINS.remoteFundingPubkey,
+                    commitmentDelayEpoch: OPENED_PINS.commitmentDelayEpoch,
+                    commitmentFeeRate: OPENED_PINS.commitmentFeeRate,
+                    localReservedCkbShannons: OPENED_PINS.localReservedCkbShannons,
+                    remoteReservedCkbShannons: OPENED_PINS.remoteReservedCkbShannons,
+                },
+            ],
+            [
+                "an announcement",
+                () => announcementRequest("ckb"),
+                {
+                    fundingOutPoint: OPENED_PINS.fundingOutPoint,
+                    liquidCapacityShannons: OPENED_PINS.liquidCapacityShannons,
+                    remoteFundingPubkey: OPENED_PINS.remoteFundingPubkey,
+                },
+            ],
+        ])("pins what %s states, when it is the channel's first message", async (_, request, pinned) => {
             const { engine, store } = await registered();
+            await engine.checkAndClaim(KEYS, request());
+            const record = await store.getChannelRecord(CHANNEL_INDEX);
+            expect(record?.pins).toEqual({ ...REGISTERED_PINS, ...pinned });
+        });
+
+        it.each([
+            ["a commitment", () => commitmentRequest("udt, two tlcs, for remote")],
+            ["a close", () => shutdownRequest("udt")],
+            ["a revocation", () => revocationRequest("udt, receive side")],
+            ["an announcement", () => announcementRequest("udt")],
+        ])("refuses %s of a UDT channel, the asset being fixed at registration", async (_, request) => {
+            const { engine, storage } = await registered();
+            const stored = new Map(storage.map);
+            const refusal = await refusalOf(engine.checkAndClaim(KEYS, request()));
+            expect(refusal.message).toBe(`the request states udtTypeScript ${UDT_SCRIPT_PIN}, but the channel pinned null`);
+            expect(storage.map).toEqual(stored);
+        });
+
+        it("signs a commitment fee of exactly half the reserve's margin", async () => {
+            const { engine, store } = await registered();
+            const input = { ...ckbCommitment(), commitmentNumber: 0, commitmentFeeRate: 109_649_124n };
+            await expect(engine.checkAndClaim(KEYS, signedRequest({ kind: "commitment_tx", input }, 0))).resolves.toMatchObject({
+                status: "fresh",
+            });
+            await expect(store.getChannelRecord(CHANNEL_INDEX)).resolves.toMatchObject({ pins: { commitmentFeeRate: "109649124" } });
+        });
+
+        it("refuses a commitment fee one shannon past it, pinning nothing", async () => {
+            const { engine, storage } = await registered();
+            const stored = new Map(storage.map);
+            const input = { ...ckbCommitment(), commitmentNumber: 0, commitmentFeeRate: 109_649_125n };
+            const refusal = await refusalOf(engine.checkAndClaim(KEYS, signedRequest({ kind: "commitment_tx", input }, 0)));
+            expect(refusal.code).toBe("policy_refusal");
+            expect(refusal.message).toBe("the commitment fee is 50000001 shannons, above the 50000000 the reserve keeps for it");
+            expect(storage.map).toEqual(stored);
+        });
+
+        // Cell deps are not pinned, so the bound is on the fee, not the rate.
+        it.each([
+            [
+                "a commitment",
+                () =>
+                    signedRequest(
+                        { kind: "commitment_tx", input: { ...ckbCommitment(), commitmentFeeRate: 109_649_124n, cellDepsCount: 3 } },
+                        11,
+                    ),
+            ],
+            [
+                "a revocation",
+                () =>
+                    signedRequest(
+                        { kind: "revocation", input: { ...ckbRevocation(), commitmentFeeRate: 109_649_124n, cellDepsCount: 3 } },
+                        5,
+                    ),
+            ],
+        ])("refuses %s whose cell deps alone push the pinned rate's fee past the bound", async (_, request) => {
+            const { engine } = await registered();
+            const opening = { ...ckbCommitment(), commitmentNumber: 0, commitmentFeeRate: 109_649_124n };
+            await engine.checkAndClaim(KEYS, signedRequest({ kind: "commitment_tx", input: opening }, 0));
+            const refusal = await refusalOf(engine.checkAndClaim(KEYS, request()));
+            expect(refusal.message).toBe("the commitment fee is 54057018 shannons, above the 50000000 the reserve keeps for it");
+        });
+
+        it("signs a close whose local fee is the 1 CKB the reserve keeps for it", async () => {
+            const { engine } = await opened();
+            const request = signedRequest({ kind: "shutdown_tx", input: { ...ckbShutdown(), localFeeRate: 185_185_187n } }, 11);
+            await expect(engine.checkAndClaim(KEYS, request)).resolves.toMatchObject({ status: "fresh" });
+        });
+
+        it("refuses a close whose local fee is one shannon more, whatever the peer pays", async () => {
+            const { engine } = await opened();
+            const request = signedRequest({ kind: "shutdown_tx", input: { ...ckbShutdown(), localFeeRate: 185_185_188n } }, 11);
+            const refusal = await refusalOf(engine.checkAndClaim(KEYS, request));
+            expect(refusal.message).toBe("the close takes a local fee of 100000001 shannons, above the 100000000 the reserve keeps for it");
+            const peerPays = signedRequest({ kind: "shutdown_tx", input: { ...ckbShutdown(), remoteFeeRate: 185_185_188n } }, 11);
+            await expect(engine.checkAndClaim(KEYS, peerPays)).resolves.toMatchObject({ status: "fresh" });
+        });
+
+        it("refuses a commitment whose settlement and TLCs pay more than the liquid capacity", async () => {
+            const { engine } = await opened();
+            await engine.recordDebitIntent(OFFERED_HASH, OFFERED_AMOUNT);
+            const { input } = customCommitmentRequest({
+                forRemote: true,
+                commitmentNumber: 11,
+                settlementLocalShannons: "60500000000",
+                tlcIds: [OFFERED_TLC_ID],
+            }).operation as Extract<SignOperation, { kind: "commitment_tx" }>;
+            const inflated = { ...input, settlementRemoteShannons: input.settlementRemoteShannons + 1n };
+            const refusal = await refusalOf(engine.checkAndClaim(KEYS, signedRequest({ kind: "commitment_tx", input: inflated }, 11)));
+            expect(refusal.message).toBe(
+                "the commitment's settlement pays 80500000001 shannons with its TLCs, above the channel's liquid capacity of 80500000000",
+            );
+        });
+
+        // Fiber's own view while a removal awaits its ack: the TLC is unlisted but still deducted.
+        it("signs a commitment that pays out less than the liquid capacity", async () => {
+            const { engine } = await opened();
+            const input = { ...ckbCommitment(), settlementRemoteShannons: 18_499_999_999n };
+            await expect(engine.checkAndClaim(KEYS, signedRequest({ kind: "commitment_tx", input }, 11))).resolves.toMatchObject({
+                status: "fresh",
+            });
+        });
+
+        // Only the raw balances size the commitment cell; the balance rule never reads them.
+        it("refuses a commitment whose raw balances no longer hold the channel's capacity", async () => {
+            const { engine } = await opened();
+            const input = {
+                ...ckbCommitment(),
+                toLocalShannons: 0n,
+                toRemoteShannons: 0n,
+                settlementLocalShannons: 0n,
+                settlementRemoteShannons: 0n,
+            };
+            const refusal = await refusalOf(engine.checkAndClaim(KEYS, signedRequest({ kind: "commitment_tx", input }, 11)));
+            expect(refusal.message).toBe("the request states liquidCapacityShannons 0, but the channel pinned 80500000000");
+        });
+    });
+
+    describe("check 6: the balance rule", () => {
+        // Fiber may ask for the device's own commitment first.
+        it.each([true, false])(
+            "refuses a first commitment that lists TLCs, signing and pinning nothing (for remote: %s)",
+            async (forRemote) => {
+                const { engine, storage } = await registered();
+                await engine.recordDebitIntent(OFFERED_HASH, OFFERED_AMOUNT);
+                const stored = new Map(storage.map);
+                const refusal = await refusalOf(
+                    engine.checkAndClaim(
+                        KEYS,
+                        customCommitmentRequest({
+                            forRemote,
+                            commitmentNumber: 0,
+                            settlementLocalShannons: "60500000000",
+                            tlcIds: [OFFERED_TLC_ID],
+                        }),
+                    ),
+                );
+                expect(refusal.code).toBe("policy_refusal");
+                expect(refusal.message).toBe("the channel's first commitment lists TLCs");
+                expect(storage.map).toEqual(stored);
+            },
+        );
+
+        it.each([
+            ["one shannon more", true, "62000000001", "71900000001"],
+            ["one shannon less", true, "61999999999", "71899999999"],
+            ["one shannon more", false, "62000000001", "71900000001"],
+            ["one shannon less", false, "61999999999", "71899999999"],
+        ])("refuses a first commitment paying the device %s than it funded (for remote: %s)", async (_, forRemote, settlement, paid) => {
+            const { engine, storage } = await registered();
+            const stored = new Map(storage.map);
+            const refusal = await refusalOf(
+                engine.checkAndClaim(
+                    KEYS,
+                    customCommitmentRequest({ forRemote, commitmentNumber: 0, settlementLocalShannons: settlement, tlcIds: [] }),
+                ),
+            );
+            expect(refusal.message).toBe(`the channel's first commitment pays the device ${paid} shannons, not the ${FUNDED} it funded`);
+            expect(storage.map).toEqual(stored);
+        });
+
+        it("refuses the opening the node states when the device funded another amount", async () => {
+            const { engine } = await registered(new InMemorySignerStorage(), "71900000001");
+            const refusal = await refusalOf(engine.checkAndClaim(KEYS, commitmentRequest("ckb, no tlcs, for remote")));
+            expect(refusal.message).toBe(
+                "the channel's first commitment pays the device 71900000000 shannons, not the 71900000001 it funded",
+            );
+        });
+
+        it("opens on the device's own commitment too, and judges the peer's first one against the opening state", async () => {
+            const { engine } = await registered();
+            await engine.checkAndClaim(
+                KEYS,
+                customCommitmentRequest({ forRemote: false, commitmentNumber: 0, settlementLocalShannons: OPENING_SETTLEMENT, tlcIds: [] }),
+            );
+            const refusal = await refusalOf(
+                engine.checkAndClaim(
+                    KEYS,
+                    customCommitmentRequest({ forRemote: true, commitmentNumber: 1, settlementLocalShannons: "61999999999", tlcIds: [] }),
+                ),
+            );
+            expect(refusal.message).toBe("the remote commitment lowers the holdings by 1 shannons, which no offered TLC took");
+        });
+
+        // Only the commitment slot opens a channel.
+        it.each([
+            ["an announcement", () => announcementRequest("ckb")],
+            ["a revocation", () => revocationRequest("ckb, send side")],
+        ])("judges the first commitment after %s as the opening", async (_, first) => {
+            const { engine } = await registered();
+            await engine.checkAndClaim(KEYS, first());
+            const refusal = await refusalOf(
+                engine.checkAndClaim(
+                    KEYS,
+                    customCommitmentRequest({ forRemote: true, commitmentNumber: 0, settlementLocalShannons: "62000000001", tlcIds: [] }),
+                ),
+            );
+            expect(refusal.message).toBe(
+                `the channel's first commitment pays the device 71900000001 shannons, not the ${FUNDED} it funded`,
+            );
+        });
+
+        // A close claims the commitment slot too, leaving the views at the opening state.
+        it("judges a commitment after a close by its view alone", async () => {
+            const { engine } = await registered();
+            await engine.recordDebitIntent(OFFERED_HASH, OFFERED_AMOUNT);
+            await engine.checkAndClaim(KEYS, shutdownRequest("ckb", { nonceCommitmentNumber: 10 }));
+            await expect(
+                engine.checkAndClaim(
+                    KEYS,
+                    customCommitmentRequest({
+                        forRemote: true,
+                        commitmentNumber: 11,
+                        settlementLocalShannons: "60500000000",
+                        tlcIds: [OFFERED_TLC_ID],
+                    }),
+                ),
+            ).resolves.toMatchObject({ status: "fresh" });
+        });
+
+        it("signs a commitment against its view's previous message, and files the channel on its intents", async () => {
+            const { engine, store } = await opened();
             await recordThreeTlcIntents(engine);
-            await engine.checkAndClaim(KEYS, commitmentRequest("ckb, three tlcs, for remote"));
+            await engine.checkAndClaim(KEYS, threeTlcRequest());
 
             const record = await store.getChannelRecord(CHANNEL_INDEX);
             expect(record?.views).toEqual({
                 remote: {
-                    exposureShannons: THREE_TLC_EXPOSURE,
+                    exposureShannons: "69650000000",
                     tlcs: [
                         {
                             direction: "offered",
@@ -987,9 +1901,9 @@ describe("checkAndClaim", () => {
         });
 
         it("refuses an offered TLC under a hash the user never approved", async () => {
-            const { engine, store } = await registered();
+            const { engine, store } = await opened();
             await engine.recordDebitIntent(OFFERED_HASH, OFFERED_AMOUNT);
-            const refusal = await refusalOf(engine.checkAndClaim(KEYS, commitmentRequest("ckb, three tlcs, for remote")));
+            const refusal = await refusalOf(engine.checkAndClaim(KEYS, threeTlcRequest()));
             expect(refusal.code).toBe("policy_refusal");
             expect(refusal.message).toBe(
                 `the remote commitment offers a TLC under ${OTHER_OFFERED_HASH.slice(0, 40)}, which no debit intent covers`,
@@ -1002,28 +1916,33 @@ describe("checkAndClaim", () => {
         });
 
         it("refuses an offered TLC above what its intent approved", async () => {
-            const { engine } = await registered();
+            const { engine } = await opened();
             await engine.recordDebitIntent(OFFERED_HASH, OFFERED_AMOUNT);
             await engine.recordDebitIntent(OTHER_OFFERED_HASH, "749999999");
-            const refusal = await refusalOf(engine.checkAndClaim(KEYS, commitmentRequest("ckb, three tlcs, for remote")));
+            const refusal = await refusalOf(engine.checkAndClaim(KEYS, threeTlcRequest()));
             expect(refusal.message).toContain("above its debit intent of 749999999");
         });
 
         // The local commitment may list the device's latest add one round later.
         it("judges each view against its own previous message, so the views may cross", async () => {
-            const { engine, store } = await registered();
+            const { engine, store } = await opened();
             await recordThreeTlcIntents(engine);
-            await engine.checkAndClaim(KEYS, commitmentRequest("ckb, three tlcs, for remote"));
+            await engine.checkAndClaim(KEYS, threeTlcRequest());
             await engine.checkAndClaim(
                 KEYS,
-                customCommitmentRequest({ forRemote: false, commitmentNumber: 12, settlementLocalShannons: OPENING_EXPOSURE, tlcIds: [] }),
+                customCommitmentRequest({
+                    forRemote: false,
+                    commitmentNumber: 12,
+                    settlementLocalShannons: OPENING_SETTLEMENT,
+                    tlcIds: [],
+                }),
             );
             await engine.checkAndClaim(
                 KEYS,
                 customCommitmentRequest({
                     forRemote: true,
                     commitmentNumber: 13,
-                    settlementLocalShannons: THREE_TLC_EXPOSURE,
+                    settlementLocalShannons: THREE_TLC_SETTLEMENT,
                     tlcIds: [OFFERED_TLC_ID, OTHER_OFFERED_TLC_ID, RECEIVED_TLC_ID],
                 }),
             );
@@ -1032,7 +1951,7 @@ describe("checkAndClaim", () => {
                 customCommitmentRequest({
                     forRemote: false,
                     commitmentNumber: 14,
-                    settlementLocalShannons: THREE_TLC_EXPOSURE,
+                    settlementLocalShannons: THREE_TLC_SETTLEMENT,
                     tlcIds: [OFFERED_TLC_ID, OTHER_OFFERED_TLC_ID, RECEIVED_TLC_ID],
                 }),
             );
@@ -1041,7 +1960,7 @@ describe("checkAndClaim", () => {
         });
 
         it("signs the device's own commitment catching up with an add after the payment's intent closed", async () => {
-            const { engine } = await registered();
+            const { engine } = await opened();
             await engine.recordDebitIntent(OFFERED_HASH, OFFERED_AMOUNT);
             await engine.checkAndClaim(
                 KEYS,
@@ -1067,15 +1986,15 @@ describe("checkAndClaim", () => {
         });
 
         it("charges a fulfilled TLC in the view it left", async () => {
-            const { engine, store } = await registered();
+            const { engine, store } = await opened();
             await recordThreeTlcIntents(engine);
-            await engine.checkAndClaim(KEYS, commitmentRequest("ckb, three tlcs, for remote"));
+            await engine.checkAndClaim(KEYS, threeTlcRequest());
             await engine.checkAndClaim(
                 KEYS,
                 customCommitmentRequest({
                     forRemote: true,
                     commitmentNumber: 12,
-                    settlementLocalShannons: THREE_TLC_EXPOSURE,
+                    settlementLocalShannons: THREE_TLC_SETTLEMENT,
                     tlcIds: [OTHER_OFFERED_TLC_ID, RECEIVED_TLC_ID],
                 }),
             );
@@ -1085,7 +2004,7 @@ describe("checkAndClaim", () => {
         });
 
         it("refuses a fall no departed offered TLC accounts for", async () => {
-            const { engine } = await registered();
+            const { engine } = await opened();
             const refusal = await refusalOf(
                 engine.checkAndClaim(
                     KEYS,
@@ -1096,8 +2015,9 @@ describe("checkAndClaim", () => {
         });
 
         it("draws one budget across every channel the payment shows on", async () => {
-            const { engine, store } = await registered(new AsyncInMemorySignerStorage());
-            await engine.registerChannel(OTHER_CHANNEL_ID, OTHER_CHANNEL_INDEX, OPENING_EXPOSURE);
+            const { engine, store } = await opened(new AsyncInMemorySignerStorage());
+            await engine.registerChannel(OTHER_CHANNEL_ID, OTHER_CHANNEL_INDEX, FUNDED, CLOSE_SCRIPT);
+            await openChannel(engine, OTHER_CHANNEL);
             await engine.recordDebitIntent(OFFERED_HASH, "2999999999");
             const part = { forRemote: true, commitmentNumber: 11, settlementLocalShannons: "60500000000", tlcIds: [OFFERED_TLC_ID] };
 
@@ -1119,8 +2039,9 @@ describe("checkAndClaim", () => {
 
         // The node may broadcast either commitment of each channel.
         it("refuses a second channel's view drawing a budget another channel's other view already draws", async () => {
-            const { engine } = await registered();
-            await engine.registerChannel(OTHER_CHANNEL_ID, OTHER_CHANNEL_INDEX, OPENING_EXPOSURE);
+            const { engine } = await opened();
+            await engine.registerChannel(OTHER_CHANNEL_ID, OTHER_CHANNEL_INDEX, FUNDED, CLOSE_SCRIPT);
+            await openChannel(engine, OTHER_CHANNEL);
             await engine.recordDebitIntent(OFFERED_HASH, OFFERED_AMOUNT);
             await engine.checkAndClaim(
                 KEYS,
@@ -1160,7 +2081,8 @@ describe("checkAndClaim", () => {
                     },
                 }),
             );
-            await engine.registerChannel(CHANNEL_ID, CHANNEL_INDEX, OPENING_EXPOSURE);
+            await engine.registerChannel(CHANNEL_ID, CHANNEL_INDEX, FUNDED, CLOSE_SCRIPT);
+            await openChannel(engine);
             await engine.recordDebitIntent(OFFERED_HASH, OFFERED_AMOUNT);
             const part = { forRemote: true, commitmentNumber: 11, settlementLocalShannons: "60500000000", tlcIds: [OFFERED_TLC_ID] };
             armed = true;
@@ -1175,8 +2097,9 @@ describe("checkAndClaim", () => {
         });
 
         it("lets only one of two channels racing for one budget take it", async () => {
-            const { engine } = await registered(new AsyncInMemorySignerStorage());
-            await engine.registerChannel(OTHER_CHANNEL_ID, OTHER_CHANNEL_INDEX, OPENING_EXPOSURE);
+            const { engine } = await opened(new AsyncInMemorySignerStorage());
+            await engine.registerChannel(OTHER_CHANNEL_ID, OTHER_CHANNEL_INDEX, FUNDED, CLOSE_SCRIPT);
+            await openChannel(engine, OTHER_CHANNEL);
             await engine.recordDebitIntent(OFFERED_HASH, OFFERED_AMOUNT);
             const part = { forRemote: true, commitmentNumber: 11, settlementLocalShannons: "60500000000", tlcIds: [OFFERED_TLC_ID] };
 
@@ -1201,7 +2124,8 @@ describe("checkAndClaim", () => {
                 },
             };
             const engine = new PolicyEngine(new SignerStore(storage));
-            await engine.registerChannel(CHANNEL_ID, CHANNEL_INDEX, OPENING_EXPOSURE);
+            await engine.registerChannel(CHANNEL_ID, CHANNEL_INDEX, FUNDED, CLOSE_SCRIPT);
+            await openChannel(engine);
             await engine.recordDebitIntent(OFFERED_HASH, OFFERED_AMOUNT);
             intentReads = 0;
             const part = { forRemote: true, commitmentNumber: 11, settlementLocalShannons: "60500000000", tlcIds: [OFFERED_TLC_ID] };
@@ -1221,7 +2145,7 @@ describe("checkAndClaim", () => {
                     set: (key: string, value: string) => inner.set(key, value),
                 }),
             );
-            await engine.registerChannel(CHANNEL_ID, CHANNEL_INDEX, OPENING_EXPOSURE);
+            await engine.registerChannel(CHANNEL_ID, CHANNEL_INDEX, FUNDED, CLOSE_SCRIPT);
             armed = true;
             await expect(engine.checkAndClaim(KEYS, revocationRequest("ckb, send side"))).rejects.toThrow(
                 new TypeError(`channel ${CHANNEL_ID} resolves to channel index ${CHANNEL_INDEX}, which holds no record`),
@@ -1230,7 +2154,7 @@ describe("checkAndClaim", () => {
         });
 
         it("throws when a payment record lists a channel that holds no record", async () => {
-            const { engine, store } = await registered();
+            const { engine, store } = await opened();
             await store.updateDebitIntent(OFFERED_HASH.slice(0, 40), () => ({
                 version: 1,
                 paymentHash: OFFERED_HASH,
@@ -1247,7 +2171,7 @@ describe("checkAndClaim", () => {
         describe("a released preimage", () => {
             // A channel listing the received TLC alone.
             async function holding() {
-                const context = await registered();
+                const context = await opened();
                 await recordThreeTlcIntents(context.engine);
                 await context.engine.recordHoldInvoice(RECEIVED_HASH, RECEIVED_AMOUNT, "sha256");
                 await context.engine.checkAndClaim(
@@ -1255,7 +2179,7 @@ describe("checkAndClaim", () => {
                     customCommitmentRequest({
                         forRemote: true,
                         commitmentNumber: 11,
-                        settlementLocalShannons: OPENING_EXPOSURE,
+                        settlementLocalShannons: OPENING_SETTLEMENT,
                         tlcIds: [RECEIVED_TLC_ID],
                     }),
                 );
@@ -1265,7 +2189,7 @@ describe("checkAndClaim", () => {
 
             // A part that failed on a channel busy with outgoing payments must not hold the release back.
             it("releases while a channel the invoice was shown on no longer lists it, whatever else it lists", async () => {
-                const { engine, store } = await registered();
+                const { engine, store } = await opened();
                 await engine.recordDebitIntent(OFFERED_HASH, OFFERED_AMOUNT);
                 await engine.recordHoldInvoice(RECEIVED_HASH, RECEIVED_AMOUNT, "sha256");
                 await engine.checkAndClaim(
@@ -1273,7 +2197,7 @@ describe("checkAndClaim", () => {
                     customCommitmentRequest({
                         forRemote: true,
                         commitmentNumber: 11,
-                        settlementLocalShannons: OPENING_EXPOSURE,
+                        settlementLocalShannons: OPENING_SETTLEMENT,
                         tlcIds: [RECEIVED_TLC_ID],
                     }),
                 );
@@ -1282,7 +2206,7 @@ describe("checkAndClaim", () => {
                     customCommitmentRequest({
                         forRemote: true,
                         commitmentNumber: 12,
-                        settlementLocalShannons: OPENING_EXPOSURE,
+                        settlementLocalShannons: OPENING_SETTLEMENT,
                         tlcIds: [],
                     }),
                 );
@@ -1318,14 +2242,14 @@ describe("checkAndClaim", () => {
             });
 
             it("refuses the release while a TLC of the invoice is locked with another algorithm", async () => {
-                const { engine, store } = await registered();
+                const { engine, store } = await opened();
                 await engine.recordHoldInvoice(RECEIVED_HASH, RECEIVED_AMOUNT, "ckb-hash");
                 await engine.checkAndClaim(
                     KEYS,
                     customCommitmentRequest({
                         forRemote: true,
                         commitmentNumber: 11,
-                        settlementLocalShannons: OPENING_EXPOSURE,
+                        settlementLocalShannons: OPENING_SETTLEMENT,
                         tlcIds: [RECEIVED_TLC_ID],
                     }),
                 );
@@ -1339,7 +2263,7 @@ describe("checkAndClaim", () => {
             });
 
             it("refuses the release while the offered TLC is listed in the local view alone", async () => {
-                const { engine } = await registered();
+                const { engine } = await opened();
                 await engine.recordDebitIntent(OFFERED_HASH, OFFERED_AMOUNT);
                 await engine.recordHoldInvoice(RECEIVED_HASH, RECEIVED_AMOUNT, "sha256");
                 await engine.checkAndClaim(
@@ -1347,7 +2271,7 @@ describe("checkAndClaim", () => {
                     customCommitmentRequest({
                         forRemote: true,
                         commitmentNumber: 11,
-                        settlementLocalShannons: OPENING_EXPOSURE,
+                        settlementLocalShannons: OPENING_SETTLEMENT,
                         tlcIds: [RECEIVED_TLC_ID],
                     }),
                 );
@@ -1382,10 +2306,10 @@ describe("checkAndClaim", () => {
             });
 
             it("refuses to release the preimage while a channel of the invoice lists an offered TLC", async () => {
-                const { engine, store } = await registered();
+                const { engine, store } = await opened();
                 await recordThreeTlcIntents(engine);
                 await engine.recordHoldInvoice(RECEIVED_HASH, RECEIVED_AMOUNT, "sha256");
-                await engine.checkAndClaim(KEYS, commitmentRequest("ckb, three tlcs, for remote"));
+                await engine.checkAndClaim(KEYS, threeTlcRequest());
                 const error = await engine.markHoldInvoiceReleased(RECEIVED_HASH).catch((cause: unknown) => cause);
                 expect(error).toBeInstanceOf(HoldInvoiceError);
                 expect(error).toMatchObject({
@@ -1459,7 +2383,7 @@ describe("checkAndClaim", () => {
                         customCommitmentRequest({
                             forRemote: true,
                             commitmentNumber: 12,
-                            settlementLocalShannons: OPENING_EXPOSURE,
+                            settlementLocalShannons: OPENING_SETTLEMENT,
                             tlcIds: [],
                         }),
                     ),
@@ -1471,14 +2395,15 @@ describe("checkAndClaim", () => {
 
             // Otherwise the node could broadcast the two commitments that did not pay.
             it("asks a channel for the invoice unless every commitment another channel holds has already paid it", async () => {
-                const { engine } = await registered();
-                await engine.registerChannel(OTHER_CHANNEL_ID, OTHER_CHANNEL_INDEX, OPENING_EXPOSURE);
+                const { engine } = await opened();
+                await engine.registerChannel(OTHER_CHANNEL_ID, OTHER_CHANNEL_INDEX, FUNDED, CLOSE_SCRIPT);
+                await openChannel(engine, OTHER_CHANNEL);
                 await engine.recordHoldInvoice(RECEIVED_HASH, RECEIVED_AMOUNT, "sha256");
                 const other = { keys: OTHER_KEYS, channelId: OTHER_CHANNEL_ID };
                 const holding = (forRemote: boolean, commitmentNumber: number) => ({
                     forRemote,
                     commitmentNumber,
-                    settlementLocalShannons: OPENING_EXPOSURE,
+                    settlementLocalShannons: OPENING_SETTLEMENT,
                     tlcIds: [RECEIVED_TLC_ID],
                 });
                 await engine.checkAndClaim(KEYS, customCommitmentRequest(holding(true, 11)));
@@ -1493,7 +2418,7 @@ describe("checkAndClaim", () => {
                 );
 
                 const dropped = customCommitmentRequest(
-                    { forRemote: true, commitmentNumber: 13, settlementLocalShannons: OPENING_EXPOSURE, tlcIds: [] },
+                    { forRemote: true, commitmentNumber: 13, settlementLocalShannons: OPENING_SETTLEMENT, tlcIds: [] },
                     other,
                 );
                 const refusal = await refusalOf(engine.checkAndClaim(OTHER_KEYS, dropped));
@@ -1519,7 +2444,7 @@ describe("checkAndClaim", () => {
         });
 
         it("reads the two views alone on a record that carries an unknown key beside them", async () => {
-            const { engine, store } = await registered();
+            const { engine, store } = await opened();
             await engine.recordDebitIntent(OFFERED_HASH, OFFERED_AMOUNT);
             await engine.recordHoldInvoice(RECEIVED_HASH, RECEIVED_AMOUNT, "sha256");
             await engine.checkAndClaim(
@@ -1527,7 +2452,7 @@ describe("checkAndClaim", () => {
                 customCommitmentRequest({
                     forRemote: true,
                     commitmentNumber: 11,
-                    settlementLocalShannons: OPENING_EXPOSURE,
+                    settlementLocalShannons: OPENING_SETTLEMENT,
                     tlcIds: [RECEIVED_TLC_ID],
                 }),
             );
@@ -1547,15 +2472,15 @@ describe("checkAndClaim", () => {
         });
 
         it("refuses a cooperative close that pays the device less than a view showed", async () => {
-            const { engine } = await registered(new InMemorySignerStorage(), "70000000000");
+            const { engine } = await registered(new InMemorySignerStorage(), "75000000000");
             const refusal = await refusalOf(engine.checkAndClaim(KEYS, shutdownRequest("ckb")));
-            expect(refusal.message).toBe("the close pays the device 62000000000 shannons, below the 70000000000 of the remote commitment");
+            expect(refusal.message).toBe("the close pays the device 71900000000 shannons, below the 75000000000 of the remote commitment");
         });
 
         it("refuses a cooperative close while a view still lists TLCs", async () => {
-            const { engine } = await registered();
+            const { engine } = await opened();
             await recordThreeTlcIntents(engine);
-            await engine.checkAndClaim(KEYS, commitmentRequest("ckb, three tlcs, for remote"));
+            await engine.checkAndClaim(KEYS, threeTlcRequest());
             const refusal = await refusalOf(engine.checkAndClaim(KEYS, shutdownRequest("ckb", { nonceCommitmentNumber: 12 })));
             expect(refusal.message).toBe("a cooperative close while the remote commitment still lists TLCs");
         });
@@ -1601,7 +2526,7 @@ describe("checkAndClaim", () => {
         // Two names, one lane: the record's key is the index, so the alias they arrive under cannot split the claim.
         it("lets only one of two concurrent sessions take a slot through different names", async () => {
             const { engine, store } = await registered(new AsyncInMemorySignerStorage());
-            await engine.registerChannel("temporary-id", CHANNEL_INDEX, OPENING_EXPOSURE);
+            await engine.registerChannel("temporary-id", CHANNEL_INDEX, FUNDED, CLOSE_SCRIPT);
             const kase = caseOf(digest.commitment_cases, "ckb, no tlcs, for remote");
             const first = commitmentRequest("ckb, no tlcs, for remote", { channelId: "temporary-id" });
             const second = commitmentRequest("ckb, no tlcs, for remote", {
@@ -1617,11 +2542,11 @@ describe("checkAndClaim", () => {
         });
 
         it("writes nothing when a check refuses, not even on the intents it read", async () => {
-            const { engine, storage } = await registered();
+            const { engine, storage } = await opened();
             await engine.recordDebitIntent(OFFERED_HASH, OFFERED_AMOUNT);
             const stored = new Map(storage.map);
             storage.ops.length = 0;
-            await refusalOf(engine.checkAndClaim(KEYS, commitmentRequest("ckb, three tlcs, for remote")));
+            await refusalOf(engine.checkAndClaim(KEYS, threeTlcRequest()));
             expect(storage.ops.filter((operation) => operation.startsWith("set"))).toEqual([]);
             expect(storage.map).toEqual(stored);
         });
