@@ -1,23 +1,29 @@
 import { equalBytes } from "@noble/curves/utils.js";
-import type { SignerErrorCode, TlcHashAlgorithm } from "../common";
+import type { OutPoint, Script, SignerErrorCode, TlcHashAlgorithm } from "../common";
 import {
     PAYMENT_HASH_LENGTH,
     TLC_HASH_ALGORITHMS,
     TRUNCATED_PAYMENT_HASH_LENGTH,
+    UINT64_MAX,
     assertDecimalShannons,
     assertHexBytes,
     assertNonEmptyString,
     assertOneOf,
+    assertOutPoint,
     assertUnsignedInteger,
 } from "../common";
 import type { FiberChannelKeys } from "../derivation";
 import { MAX_CHANNEL_INDEX } from "../derivation";
 import { computeChannelAnnouncementDigest, computeCommitmentTxDigest, computeRevocationDigest, computeShutdownTxDigest } from "../digest";
-import { judgeCommitment, judgeShutdown, toPolicyViewTlcs } from "./balance-rule";
+import { judgeCommitment, judgeOpeningCommitment, judgeShutdown, toPolicyViewTlcs } from "./balance-rule";
+import { judgeCapacityBounds } from "./capacity-bounds";
+import { openingChannelPins } from "./channel-opening";
+import { findChannelPinConflict, fundingCellPins, statedChannelPins, withChannelPins } from "./channel-pins";
 import { CHANNEL_POLICY_RECORD_VERSION, PAYMENT_RECORD_VERSION, POLICY_VIEWS } from "./policy.constants";
-import { DebitIntentError, HoldInvoiceError, refusePolicyRequest } from "./policy.error";
+import { DebitIntentError, FundingCellError, HoldInvoiceError, refusePolicyRequest } from "./policy.error";
 import type {
     BalanceRuleContext,
+    ChannelPins,
     ChannelPolicyRecord,
     DebitIntentRecord,
     HoldInvoicePolicyRecord,
@@ -47,13 +53,19 @@ export class PolicyEngine {
      * Registers a channel whose keys this device holds, creating the record every later check reads.
      * @param channelId Channel identifier the node uses on the wire, which the open handshake may still change.
      * @param channelIndex Index the channel seed derives from, the one piece recovery cannot re-seed from the node.
-     * @param localExposureShannons The device's share at open, in decimal shannons.
+     * @param fundedShannons What the user paid into the channel, reserve included, in decimal shannons.
+     * @param localCloseScript The script the device's side of a close pays to, the one the open passed as shutdown script.
      * @returns The stored record, the existing one when the channel was already registered.
      */
-    async registerChannel(channelId: string, channelIndex: number, localExposureShannons: string): Promise<ChannelPolicyRecord> {
+    async registerChannel(
+        channelId: string,
+        channelIndex: number,
+        fundedShannons: string,
+        localCloseScript: Script,
+    ): Promise<ChannelPolicyRecord> {
         assertNonEmptyString("channelId", channelId);
         assertUnsignedInteger("channelIndex", channelIndex, MAX_CHANNEL_INDEX);
-        assertDecimalShannons("localExposureShannons", localExposureShannons);
+        const pins = openingChannelPins(fundedShannons, localCloseScript);
         const aliased = await this.store.resolveChannelIndex(channelId);
         if (aliased !== null && aliased !== channelIndex) {
             throw new TypeError(`channel ${channelId} is already registered under a different channel index`);
@@ -66,8 +78,12 @@ export class PolicyEngine {
                     lastSignedCommitmentNumbers: {},
                     signedSessions: {},
                     lastStateVersion: 0,
-                    views: { remote: openingSnapshot(localExposureShannons), local: openingSnapshot(localExposureShannons) },
+                    pins,
+                    views: { remote: openingSnapshot(fundedShannons), local: openingSnapshot(fundedShannons) },
                 };
+            }
+            if (current.pins.fundedShannons !== pins.fundedShannons || current.pins.localCloseScript !== pins.localCloseScript) {
+                throw new TypeError(`channel index ${channelIndex} is already registered with another funded amount or close script`);
             }
             if (current.channelId !== channelId) {
                 assertUnservedRecord(channelIndex, current);
@@ -78,6 +94,32 @@ export class PolicyEngine {
         // Written after the record: the reverse order could leave a name resolving to an index that holds nothing.
         await this.store.claimChannelAlias(channelId, channelIndex);
         return record;
+    }
+
+    /**
+     * Pins the funding cell the host signs, throwing a {@link FundingCellError} when the channel pinned another.
+     * @param channelId Channel identifier, any name the channel was registered under.
+     * @param fundingOutPoint The funding output.
+     * @param capacityShannons That output's capacity, in decimal shannons.
+     */
+    async pinFundingCell(channelId: string, fundingOutPoint: OutPoint, capacityShannons: string): Promise<void> {
+        assertOutPoint("fundingOutPoint", fundingOutPoint);
+        assertDecimalShannons("capacityShannons", capacityShannons);
+        if (BigInt(capacityShannons) > UINT64_MAX) {
+            throw new RangeError(`capacityShannons must be at most ${UINT64_MAX}, the most a CKB cell's capacity holds`);
+        }
+        const channelIndex = await this.store.resolveChannelIndex(channelId);
+        if (channelIndex === null) throw new TypeError(`channel ${channelId} is not registered on this device`);
+        const stated = fundingCellPins(fundingOutPoint, capacityShannons);
+        await this.store.withBalanceLock(async () => {
+            await this.store.updateChannelRecord(channelIndex, (current) => {
+                if (current === null) throw missingRecord(channelId, channelIndex);
+                const conflict = findChannelPinConflict(current.pins, stated);
+                if (conflict !== null) throw new FundingCellError(channelId, conflict);
+                const pins = withChannelPins(current.pins, stated);
+                return pins === current.pins ? current : { ...current, pins };
+            });
+        });
     }
 
     /**
@@ -224,7 +266,7 @@ export class PolicyEngine {
     }
 
     /**
-     * Runs the five checks and claims the request's slot for its session, so the engine may sign it exactly once.
+     * Runs the six checks and claims the request's slot for its session, so the engine may sign it exactly once.
      * @param keys The channel's four secrets, which the digest recomputation needs.
      * @param request The signing request as the node sent it.
      * @returns The claimed slot, and whether this exact session had already been served.
@@ -420,7 +462,7 @@ type Claim = {
 };
 
 /**
- * Runs sign-once, monotonicity and the balance rule over a record, without writing anything.
+ * Runs sign-once, monotonicity, the pins and bounds, and the balance rule over a record, without writing anything.
  * @param claim The checked request.
  * @param current The channel's record.
  * @param context What the balance rule reads beyond the record, empty for an operation that reads nothing.
@@ -452,6 +494,8 @@ function decideClaim(
         refusePolicyRequest("stale_state", `state version ${stateVersion} is below the last seen, ${current.lastStateVersion}`);
     }
 
+    const pins = pinClaim(current.pins, claim.operation);
+
     return {
         verdict: { ...slot, status: "fresh" },
         record: {
@@ -459,32 +503,53 @@ function decideClaim(
             lastSignedCommitmentNumbers: { ...current.lastSignedCommitmentNumbers, [slot.context]: slot.commitmentNumber },
             signedSessions: { ...current.signedSessions, [slotKey]: sessionCommitment },
             lastStateVersion: stateVersion,
-            views: applyBalanceRule(current.views, claim, context),
+            pins,
+            views: applyBalanceRule(current, claim, context),
         },
     };
 }
 
 /**
+ * Holds an operation to the channel's pinned values and to the bounds on what it takes from the funding cell.
+ * @param pins The channel's pins.
+ * @param operation The operation, whose digest already matched.
+ * @returns The pins once the operation is signed, with every value it states for the first time.
+ */
+function pinClaim(pins: ChannelPins, operation: SignOperation): ChannelPins {
+    const stated = statedChannelPins(operation);
+    const conflict = findChannelPinConflict(pins, stated);
+    if (conflict !== null) {
+        refusePolicyRequest(
+            "policy_refusal",
+            `the request states ${conflict.field} ${conflict.stated}, but the channel pinned ${conflict.pinned}`,
+        );
+    }
+    judgeCapacityBounds(operation);
+    return withChannelPins(pins, stated);
+}
+
+/**
  * Applies the balance rule to the operations that move funds.
- * @param views The channel's two snapshots.
+ * @param record The channel's record before the operation.
  * @param claim The checked request, carrying the operation and the TLCs it lists.
  * @param context What the rule reads beyond the record.
  * @returns The snapshots once the operation is signed.
  */
-function applyBalanceRule(
-    views: Record<PolicyView, PolicyViewSnapshot>,
-    claim: Claim,
-    context: BalanceRuleContext,
-): Record<PolicyView, PolicyViewSnapshot> {
+function applyBalanceRule(record: ChannelPolicyRecord, claim: Claim, context: BalanceRuleContext): Record<PolicyView, PolicyViewSnapshot> {
     const { operation } = claim;
+    const { views } = record;
     switch (operation.kind) {
         case "commitment_tx": {
-            const view = viewOf(operation.input.forRemote);
-            const next = { exposureShannons: operation.input.settlementLocalShannons, tlcs: claim.tlcs };
+            const { input } = operation;
+            const view = viewOf(input.forRemote);
+            // What the witness pays the device, reserve included.
+            const next = { exposureShannons: input.settlementLocalShannons + input.localReservedCkbShannons, tlcs: claim.tlcs };
+            // A close claims the same slot: after one, the views alone judge.
+            if (record.lastSignedCommitmentNumbers.COMMITMENT === undefined) judgeOpeningCommitment(record.pins.fundedShannons, next);
             return { ...views, [view]: judgeCommitment(view, views, next, context) };
         }
         case "shutdown_tx":
-            judgeShutdown(views, operation.input.toLocalShannons);
+            judgeShutdown(views, operation.input.toLocalShannons + operation.input.localReservedCkbShannons);
             return views;
         case "revocation":
         case "channel_announcement":
@@ -503,7 +568,7 @@ function viewOf(forRemote: boolean): PolicyView {
 
 /**
  * Builds a view's state before its first message: no TLCs, nothing charged or credited.
- * @param exposureShannons The device's share at open, in decimal shannons.
+ * @param exposureShannons What the user funded, in decimal shannons.
  * @returns The opening snapshot.
  */
 function openingSnapshot(exposureShannons: string): PolicyViewSnapshot {

@@ -2,12 +2,11 @@ import { concatBytes } from "@noble/hashes/utils.js";
 import type { OutPoint, Script } from "../../common";
 import {
     HASH256_LENGTH,
-    UINT32_MAX,
     UINT64_LENGTH,
     UINT64_MAX,
     assertBytes,
+    assertOutPoint,
     assertUnsignedBigInt,
-    assertUnsignedInteger,
     moleculeBytes,
     moleculeDynvec,
     moleculeFixvec,
@@ -37,8 +36,7 @@ export function uint64Be(value: bigint): Uint8Array {
  * @returns The 36 bytes.
  */
 export function moleculeOutPoint(outPoint: OutPoint): Uint8Array {
-    assertBytes("outPoint.txHash", outPoint.txHash, HASH256_LENGTH);
-    assertUnsignedInteger("outPoint.index", outPoint.index, UINT32_MAX);
+    assertOutPoint("outPoint", outPoint);
     return concatBytes(outPoint.txHash, uint32Le(outPoint.index));
 }
 

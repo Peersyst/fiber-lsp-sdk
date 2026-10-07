@@ -10,7 +10,7 @@ import {
     deriveWalletIdentityKey,
     pubkeyOf,
 } from "../../../src/derivation";
-import { COMMITMENT_LOCK_MAINNET, COMMITMENT_LOCK_TESTNET } from "../../../src/digest";
+import { COMMITMENT_LOCK_MAINNET, COMMITMENT_LOCK_TESTNET, computeCommitmentTxDigest } from "../../../src/digest";
 import type { ISignerStorage } from "../../../src/policy";
 import {
     ANNOUNCEMENT_SLOT_NUMBER,
@@ -25,6 +25,8 @@ import { ProtocolError, SIGNER_METHODS, decodeSignParams } from "../../../src/pr
 import type { DispatchOutcome, PendingChannelRegistration } from "../../../src/signer";
 import { SignerDispatch, getBasePublicKeys, getChannelCommitmentPoint, getPublicNonce } from "../../../src/signer";
 import { InMemorySignerStorage } from "../../mocks/policy";
+import { fundedShannonsOf } from "../../utils/channel-opening";
+import { toCommitmentTxInput, toScript } from "../../utils/digest-inputs";
 import type { CommitmentCaseVector } from "../../utils/interop-vectors";
 import { caseOf, loadInteropVectors } from "../../utils/interop-vectors";
 import { SHUTDOWN_NONCE_NUMBER, revocationNonceNumber } from "../../utils/nonce-numbers";
@@ -57,7 +59,6 @@ const OTHER_CHANNEL_ID = `0x${"2e".repeat(32)}`;
 const REQUEST_ID = "0x2a";
 const STATE_VERSION = 7;
 
-const NO_TLCS = caseOf(digest.commitment_cases, "ckb, no tlcs, for remote");
 const THREE_TLCS = caseOf(digest.commitment_cases, "ckb, three tlcs, for remote");
 const THREE_TLCS_FOR_LOCAL = caseOf(digest.commitment_cases, "ckb, three tlcs, for local");
 const CKB_SHUTDOWN = caseOf(digest.shutdown_cases, "ckb");
@@ -66,7 +67,10 @@ const CKB_ANNOUNCEMENT = caseOf(digest.announcement_cases, "ckb");
 
 const REVOCATION_NONCE_NUMBER = revocationNonceNumber(SEND_SIDE_REVOCATION);
 
-const OPENING_EXPOSURE = "62000000000";
+// Opens the three-TLC case's channel, which the commitment requests sign on.
+const OPENING = caseOf(digest.commitment_cases, "ckb, three tlcs channel, opening, for remote");
+const FUNDED = fundedShannonsOf(THREE_TLCS);
+const CLOSE_SCRIPT = toScript(CKB_SHUTDOWN.local_close_script);
 
 // Fiber sorts the keys of a funding spend and the announcement (local first here), and a send-side revocation puts remote first.
 const ORDERED_PUBLIC_KEYS: Record<SignatureMethod, [Uint8Array, Uint8Array]> = {
@@ -180,11 +184,27 @@ function newDispatch(commitmentLock = COMMITMENT_LOCK_TESTNET, storage = new InM
 }
 
 // Approves the payments of the vectors' offered TLCs, without which none of their commitments signs.
-async function registered(localExposureShannons = "0", commitmentLock = COMMITMENT_LOCK_TESTNET): Promise<Harness> {
+async function registered(commitmentLock = COMMITMENT_LOCK_TESTNET): Promise<Harness> {
     const harness = newDispatch(commitmentLock);
-    await harness.dispatch.channelRegistered(CHANNEL_ID, harness.dispatch.prepareChannelRegistration(CHANNEL_INDEX, localExposureShannons));
+    await harness.dispatch.channelRegistered(CHANNEL_ID, harness.dispatch.prepareChannelRegistration(CHANNEL_INDEX, FUNDED, CLOSE_SCRIPT));
     await recordOfferedIntents(harness.policy);
     return harness;
+}
+
+async function opened(): Promise<Harness> {
+    const harness = await registered();
+    await openChannel(harness.dispatch);
+    return harness;
+}
+
+async function openChannel(dispatch: SignerDispatch): Promise<void> {
+    partialSignatureOf(await dispatch.handle(request("partial_sign_commitment_tx", commitmentParams(OPENING, AGGREGATED_NONCE))));
+}
+
+// OPENING at another number: a state fiber's vectors do not hold.
+function renumbered(commitmentNumber: number): CommitmentCaseVector {
+    const kase = { ...OPENING, commitment_number: commitmentNumber };
+    return { ...kase, digest: bytesToHex(computeCommitmentTxDigest(KEYS, toCommitmentTxInput(kase, REMOTE))) };
 }
 
 async function recordOfferedIntents(policy: PolicyEngine): Promise<void> {
@@ -237,7 +257,9 @@ describe("constructor", () => {
         const seed = Uint8Array.from(MASTER_SEED);
         const dispatch = new SignerDispatch({ masterSeed: seed, commitmentLock: COMMITMENT_LOCK_TESTNET, policy });
         seed.fill(0);
-        expect(dispatch.prepareChannelRegistration(CHANNEL_INDEX, "0").registration.fundingPubkey).toEqual(LOCAL_FUNDING_PUBKEY);
+        expect(dispatch.prepareChannelRegistration(CHANNEL_INDEX, FUNDED, CLOSE_SCRIPT).registration.fundingPubkey).toEqual(
+            LOCAL_FUNDING_PUBKEY,
+        );
     });
 
     it("re-derives the same channel on a fresh instance over the same storage", async () => {
@@ -255,9 +277,10 @@ describe("constructor", () => {
 describe("prepareChannelRegistration", () => {
     it("derives the base public keys and the delegated settlement key of the index", () => {
         const { dispatch } = newDispatch();
-        expect(dispatch.prepareChannelRegistration(CHANNEL_INDEX, OPENING_EXPOSURE)).toEqual<PendingChannelRegistration>({
+        expect(dispatch.prepareChannelRegistration(CHANNEL_INDEX, FUNDED, CLOSE_SCRIPT)).toEqual<PendingChannelRegistration>({
             channelIndex: CHANNEL_INDEX,
-            localExposureShannons: OPENING_EXPOSURE,
+            fundedShannons: FUNDED,
+            localCloseScript: CLOSE_SCRIPT,
             registration: {
                 fundingPubkey: LOCAL_FUNDING_PUBKEY,
                 tlcBasePubkey: pubkeyOf(KEYS.tlcBaseKey),
@@ -267,40 +290,89 @@ describe("prepareChannelRegistration", () => {
     });
 
     it("never hands out the funding key", () => {
-        const { registration } = newDispatch().dispatch.prepareChannelRegistration(CHANNEL_INDEX, OPENING_EXPOSURE);
+        const { registration } = newDispatch().dispatch.prepareChannelRegistration(CHANNEL_INDEX, FUNDED, CLOSE_SCRIPT);
         for (const value of Object.values(registration)) expect(bytesToHex(value)).not.toBe(bytesToHex(KEYS.fundingKey));
     });
 
     it("derives the channel of any index, and keeps that index", () => {
         const { dispatch } = newDispatch();
-        expect(dispatch.prepareChannelRegistration(OTHER_CHANNEL_INDEX, "0")).toEqual<PendingChannelRegistration>({
+        expect(dispatch.prepareChannelRegistration(OTHER_CHANNEL_INDEX, "9900000000", CLOSE_SCRIPT)).toEqual<PendingChannelRegistration>({
             channelIndex: OTHER_CHANNEL_INDEX,
-            localExposureShannons: "0",
+            fundedShannons: "9900000000",
+            localCloseScript: CLOSE_SCRIPT,
             registration: { ...getBasePublicKeys(OTHER_KEYS), localSettlementKey: OTHER_KEYS.tlcBaseKey },
         });
     });
 
-    it.each(["", "01", "1.5", "-1", "1e3", "abc"])("rejects the exposure %p at preparation, ahead of any round trip", (exposure) => {
-        expect(() => newDispatch().dispatch.prepareChannelRegistration(CHANNEL_INDEX, exposure)).toThrow(TypeError);
+    it.each(["", "01", "1.5", "-1", "1e3", "abc"])("rejects the funded amount %p at preparation, ahead of any round trip", (funded) => {
+        expect(() => newDispatch().dispatch.prepareChannelRegistration(CHANNEL_INDEX, funded, CLOSE_SCRIPT)).toThrow(TypeError);
+    });
+
+    it.each([
+        ["a short code hash", { ...CLOSE_SCRIPT, codeHash: new Uint8Array(31) }],
+        ["an unknown hash type", { ...CLOSE_SCRIPT, hashType: "data3" as never }],
+        ["args that are not bytes", { ...CLOSE_SCRIPT, args: "00" as never }],
+    ])("rejects a close script with %s at preparation, naming it", (_, closeScript) => {
+        expect(() => newDispatch().dispatch.prepareChannelRegistration(CHANNEL_INDEX, FUNDED, closeScript)).toThrow(/^localCloseScript\./);
+    });
+
+    // Otherwise the node would open a channel the registration then refuses.
+    it("rejects a funded amount below the reserve over the close script at preparation", () => {
+        expect(() => newDispatch().dispatch.prepareChannelRegistration(CHANNEL_INDEX, "9899999999", CLOSE_SCRIPT)).toThrow(
+            new RangeError("fundedShannons 9899999999 is below the 9900000000 the device's reserve takes over that close script"),
+        );
+    });
+
+    it("files a copy of the close script, which the caller's later writes do not reach", async () => {
+        const { dispatch, store } = newDispatch();
+        const closeScript = { ...CLOSE_SCRIPT, codeHash: CLOSE_SCRIPT.codeHash.slice(), args: CLOSE_SCRIPT.args.slice() };
+        const pending = dispatch.prepareChannelRegistration(CHANNEL_INDEX, FUNDED, closeScript);
+        closeScript.codeHash.fill(0xff);
+        closeScript.args.fill(0xff);
+        expect(pending.localCloseScript).toEqual(CLOSE_SCRIPT);
+
+        await dispatch.channelRegistered(CHANNEL_ID, pending);
+        const registered = newDispatch();
+        await registered.dispatch.channelRegistered(
+            CHANNEL_ID,
+            registered.dispatch.prepareChannelRegistration(CHANNEL_INDEX, FUNDED, CLOSE_SCRIPT),
+        );
+        await expect(store.getChannelRecord(CHANNEL_INDEX)).resolves.toEqual(await registered.store.getChannelRecord(CHANNEL_INDEX));
+    });
+
+    // Buffer's slice shares memory, so the copy must not use it.
+    it("files a copy of a close script held in Buffers", () => {
+        const closeScript = { ...CLOSE_SCRIPT, codeHash: Buffer.from(CLOSE_SCRIPT.codeHash), args: Buffer.from(CLOSE_SCRIPT.args) };
+        const pending = newDispatch().dispatch.prepareChannelRegistration(CHANNEL_INDEX, FUNDED, closeScript);
+        closeScript.codeHash.fill(0xff);
+        closeScript.args.fill(0xff);
+        expect(pending.localCloseScript).toEqual(CLOSE_SCRIPT);
     });
 
     it.each([-1, 1.5, Number.MAX_SAFE_INTEGER + 1])("rejects the channel index %p", (channelIndex) => {
-        expect(() => newDispatch().dispatch.prepareChannelRegistration(channelIndex, "0")).toThrow(RangeError);
+        expect(() => newDispatch().dispatch.prepareChannelRegistration(channelIndex, FUNDED, CLOSE_SCRIPT)).toThrow(RangeError);
     });
 });
 
 describe("channelRegistered", () => {
-    it("files the channel under the node's name with the exposure prepared, after which its requests resolve", async () => {
+    it("files the channel under the node's name with the funded amount and close script prepared, after which its requests resolve", async () => {
         const { dispatch, store } = newDispatch();
         await expect(dispatch.handle(request("get_base_public_keys", {}))).resolves.toMatchObject({ kind: "refusal" });
 
-        await dispatch.channelRegistered(CHANNEL_ID, dispatch.prepareChannelRegistration(CHANNEL_INDEX, OPENING_EXPOSURE));
+        await dispatch.channelRegistered(CHANNEL_ID, dispatch.prepareChannelRegistration(CHANNEL_INDEX, FUNDED, CLOSE_SCRIPT));
 
         await expect(store.getChannelRecord(CHANNEL_INDEX)).resolves.toMatchObject({
             channelId: CHANNEL_ID,
+            pins: {
+                fundedShannons: "71900000000",
+                localCloseScript:
+                    "4900000010000000300000003100000074d3f63a22681bdb6ff6512866db95264338cfaee12f71e28b9f23c414990c9c0114000000da694932ba803b4c07f6e3a9b6b2ea3f9c6c66c7",
+                localReservedCkbShannons: "9900000000",
+                udtTypeScript: null,
+            },
             views: {
-                remote: { exposureShannons: OPENING_EXPOSURE, tlcs: [], chargedShannons: {}, creditedShannons: {} },
-                local: { exposureShannons: OPENING_EXPOSURE, tlcs: [], chargedShannons: {}, creditedShannons: {} },
+                remote: { exposureShannons: "71900000000", tlcs: [], chargedShannons: {}, creditedShannons: {} },
+                local: { exposureShannons: "71900000000", tlcs: [], chargedShannons: {}, creditedShannons: {} },
             },
             signedSessions: {},
         });
@@ -311,12 +383,12 @@ describe("channelRegistered", () => {
     });
 
     it("propagates a host error, such as naming a record that has already served", async () => {
-        const { dispatch } = await registered();
+        const { dispatch } = await opened();
         partialSignatureOf(await dispatch.handle(request("partial_sign_commitment_tx", paramsFor("partial_sign_commitment_tx"))));
 
-        await expect(dispatch.channelRegistered(OTHER_CHANNEL_ID, dispatch.prepareChannelRegistration(CHANNEL_INDEX, "0"))).rejects.toThrow(
-            TypeError,
-        );
+        await expect(
+            dispatch.channelRegistered(OTHER_CHANNEL_ID, dispatch.prepareChannelRegistration(CHANNEL_INDEX, FUNDED, CLOSE_SCRIPT)),
+        ).rejects.toThrow(TypeError);
     });
 });
 
@@ -324,8 +396,14 @@ describe("two channels on one dispatch", () => {
     // The other channel goes first, so neither a fixed index nor keys kept from the first derivation can pass.
     async function twoChannels(): Promise<Harness> {
         const harness = newDispatch();
-        await harness.dispatch.channelRegistered(OTHER_CHANNEL_ID, harness.dispatch.prepareChannelRegistration(OTHER_CHANNEL_INDEX, "0"));
-        await harness.dispatch.channelRegistered(CHANNEL_ID, harness.dispatch.prepareChannelRegistration(CHANNEL_INDEX, "0"));
+        await harness.dispatch.channelRegistered(
+            OTHER_CHANNEL_ID,
+            harness.dispatch.prepareChannelRegistration(OTHER_CHANNEL_INDEX, FUNDED, CLOSE_SCRIPT),
+        );
+        await harness.dispatch.channelRegistered(
+            CHANNEL_ID,
+            harness.dispatch.prepareChannelRegistration(CHANNEL_INDEX, FUNDED, CLOSE_SCRIPT),
+        );
         return harness;
     }
 
@@ -413,7 +491,7 @@ describe("the public data methods", () => {
     });
 
     it("answers whatever the state version, since nothing is claimed", async () => {
-        const { dispatch, storage } = await registered();
+        const { dispatch, storage } = await opened();
         partialSignatureOf(await dispatch.handle(request("partial_sign_commitment_tx", paramsFor("partial_sign_commitment_tx"))));
         storage.ops.length = 0;
 
@@ -425,8 +503,13 @@ describe("the public data methods", () => {
 });
 
 describe("the signing methods", () => {
+    // The other methods' cases pin other constants than the opened channel's.
+    async function openedFor(method: SignatureMethod): Promise<Harness> {
+        return method === "partial_sign_commitment_tx" ? opened() : registered();
+    }
+
     it.each(SIGNING_CASES)("signs $method under the nonce $published published, verifiable by the node", async (kase) => {
-        const { dispatch } = await registered();
+        const { dispatch } = await openedFor(kase.method);
         const publishedParams = kase.nonceNumber === undefined ? {} : toCommitmentNumberParamsWire(kase.nonceNumber);
         const pubNonce = pubNonceOf(await dispatch.handle(request(kase.published, publishedParams)));
         const orderedPublicKeys = ORDERED_PUBLIC_KEYS[kase.method];
@@ -443,14 +526,17 @@ describe("the signing methods", () => {
     });
 
     it.each(SIGNING_CASES)("claims the slot $context:$nonceNumber it signs $method with", async (kase) => {
-        const { dispatch, store } = await registered();
+        const { dispatch, store } = await openedFor(kase.method);
+        const before = Object.keys((await store.getChannelRecord(CHANNEL_INDEX))?.signedSessions ?? {});
         partialSignatureOf(await dispatch.handle(request(kase.method, signingParams(kase.method, AGGREGATED_NONCE))));
         const record = await store.getChannelRecord(CHANNEL_INDEX);
-        expect(Object.keys(record?.signedSessions ?? {})).toEqual([`${kase.context}:${kase.nonceNumber ?? ANNOUNCEMENT_SLOT_NUMBER}`]);
+        expect(Object.keys(record?.signedSessions ?? {}).filter((slot) => !before.includes(slot))).toEqual([
+            `${kase.context}:${kase.nonceNumber ?? ANNOUNCEMENT_SLOT_NUMBER}`,
+        ]);
     });
 
     it("aggregates with the peer's half into a valid schnorr signature under the 2-of-2 key", async () => {
-        const { dispatch } = await registered();
+        const { dispatch } = await opened();
         const pubNonce = pubNonceOf(
             await dispatch.handle(request("get_commitment_pub_nonce", toCommitmentNumberParamsWire(THREE_TLCS.commitment_number))),
         );
@@ -469,19 +555,19 @@ describe("the signing methods", () => {
     });
 
     it("signs the offered TLCs the user's intents cover, and records what the view now shows", async () => {
-        const { dispatch, store } = await registered(OPENING_EXPOSURE);
+        const { dispatch, store } = await opened();
 
         partialSignatureOf(await dispatch.handle(request("partial_sign_commitment_tx", paramsFor("partial_sign_commitment_tx"))));
 
         await expect(store.getChannelRecord(CHANNEL_INDEX)).resolves.toMatchObject({
-            views: { remote: { exposureShannons: THREE_TLCS.settlement_local } },
+            views: { remote: { exposureShannons: "69650000000" } },
         });
     });
 });
 
 describe("re-delivery", () => {
     it("answers a re-delivered request with the identical partial signature, writing nothing", async () => {
-        const { dispatch, store, storage } = await registered(OPENING_EXPOSURE);
+        const { dispatch, store, storage } = await opened();
         const envelope = request("partial_sign_commitment_tx", paramsFor("partial_sign_commitment_tx"));
         const first = partialSignatureOf(await dispatch.handle(envelope));
         const afterFirst = await store.getChannelRecord(CHANNEL_INDEX);
@@ -550,7 +636,7 @@ describe("refusals", () => {
         ["an aggregated nonce", "session.aggregated_nonce", `0x${"03".repeat(66)}`],
         ["a public key", "session.ordered_pubkeys", [`0x${bytesToHex(LOCAL_FUNDING_PUBKEY)}`, `0x${"03".repeat(33)}`]],
     ])("refuses %s off the curve as malformed before the claim, so the corrected request still signs", async (_, path, value) => {
-        const { dispatch, storage } = await registered();
+        const { dispatch, storage } = await opened();
         storage.ops.length = 0;
 
         const outcome = await dispatch.handle(
@@ -563,7 +649,7 @@ describe("refusals", () => {
     });
 
     it("refuses a second session on a served slot as policy_refusal", async () => {
-        const { dispatch } = await registered();
+        const { dispatch } = await opened();
         partialSignatureOf(await dispatch.handle(request("partial_sign_commitment_tx", paramsFor("partial_sign_commitment_tx"))));
 
         const outcome = await dispatch.handle(request("partial_sign_commitment_tx", commitmentParams(THREE_TLCS, OTHER_AGGREGATED_NONCE)));
@@ -573,7 +659,8 @@ describe("refusals", () => {
 
     it("refuses an offered TLC no debit intent covers as policy_refusal, claiming nothing", async () => {
         const { dispatch, storage } = newDispatch();
-        await dispatch.channelRegistered(CHANNEL_ID, dispatch.prepareChannelRegistration(CHANNEL_INDEX, OPENING_EXPOSURE));
+        await dispatch.channelRegistered(CHANNEL_ID, dispatch.prepareChannelRegistration(CHANNEL_INDEX, FUNDED, CLOSE_SCRIPT));
+        await openChannel(dispatch);
         storage.ops.length = 0;
 
         const outcome = await dispatch.handle(request("partial_sign_commitment_tx", paramsFor("partial_sign_commitment_tx")));
@@ -583,16 +670,16 @@ describe("refusals", () => {
     });
 
     it("refuses a commitment number that does not advance its context as stale_state", async () => {
-        const { dispatch } = await registered();
+        const { dispatch } = await opened();
         partialSignatureOf(await dispatch.handle(request("partial_sign_commitment_tx", paramsFor("partial_sign_commitment_tx"))));
 
-        const outcome = await dispatch.handle(request("partial_sign_commitment_tx", commitmentParams(NO_TLCS, AGGREGATED_NONCE)));
+        const outcome = await dispatch.handle(request("partial_sign_commitment_tx", commitmentParams(renumbered(5), AGGREGATED_NONCE)));
 
         expect(refusalOf(outcome).code).toBe("stale_state");
     });
 
     it("refuses a state version below the last one seen as stale_state", async () => {
-        const { dispatch } = await registered();
+        const { dispatch } = await opened();
         partialSignatureOf(await dispatch.handle(request("partial_sign_commitment_tx", paramsFor("partial_sign_commitment_tx"))));
 
         const outcome = await dispatch.handle(
@@ -634,8 +721,9 @@ describe("refusals", () => {
 describe("the commitment lock", () => {
     // Only the commitment tx tells the two locks apart: the revocation digest sizes a fee over the lock, not its bytes.
     it("rebuilds the commitment tx under the lock the dispatch holds, so the mainnet lock refuses the testnet vectors", async () => {
-        const testnet = await registered("0", COMMITMENT_LOCK_TESTNET);
-        const mainnet = await registered("0", COMMITMENT_LOCK_MAINNET);
+        const testnet = await opened();
+        // Unopened: the vectors' opening digest is the testnet lock's, and the digest check runs first.
+        const mainnet = await registered(COMMITMENT_LOCK_MAINNET);
         const params = paramsFor("partial_sign_commitment_tx");
 
         expect((await testnet.dispatch.handle(request("partial_sign_commitment_tx", params))).kind).toBe("result");
@@ -664,7 +752,7 @@ describe("faults", () => {
     });
 
     it("reports a corrupt record as a fault that claims nothing, and answers once the record is back", async () => {
-        const { dispatch, storage } = await registered();
+        const { dispatch, storage } = await opened();
         const key = `${CHANNEL_RECORD_KEY_PREFIX}${CHANNEL_INDEX}`;
         const record = storage.map.get(key) ?? "";
         storage.map.set(key, "garbage");
@@ -688,12 +776,13 @@ describe("faults", () => {
         expect(faultOf(await dispatch.handle(envelope))).toBeInstanceOf(TypeError);
         expect(writes(storage)).toEqual([]);
 
-        await dispatch.channelRegistered(CHANNEL_ID, dispatch.prepareChannelRegistration(CHANNEL_INDEX, "0"));
+        await dispatch.channelRegistered(CHANNEL_ID, dispatch.prepareChannelRegistration(CHANNEL_INDEX, FUNDED, CLOSE_SCRIPT));
+        await openChannel(dispatch);
         partialSignatureOf(await dispatch.handle(envelope));
     });
 
     it("answers once the storage is back, since a fault claims nothing", async () => {
-        const inner = await registered();
+        const inner = await opened();
         inner.storage.ops.length = 0;
         let failures = 1;
         const storage: ISignerStorage = {
@@ -737,10 +826,13 @@ describe("secret hygiene", () => {
             deriveTlcKey(KEYS, THREE_TLCS.commitment_number),
         ].map(bytesToHex);
         const unregistered = newDispatch().dispatch;
-        const served = await registered();
+        const served = await opened();
         partialSignatureOf(await served.dispatch.handle(request("partial_sign_commitment_tx", paramsFor("partial_sign_commitment_tx"))));
         const exposed = newDispatch();
-        await exposed.dispatch.channelRegistered(CHANNEL_ID, exposed.dispatch.prepareChannelRegistration(CHANNEL_INDEX, OPENING_EXPOSURE));
+        await exposed.dispatch.channelRegistered(
+            CHANNEL_ID,
+            exposed.dispatch.prepareChannelRegistration(CHANNEL_INDEX, FUNDED, CLOSE_SCRIPT),
+        );
         const outcomes = await Promise.all([
             unregistered.handle(request("get_base_public_keys", {})),
             served.dispatch.handle(
@@ -753,7 +845,7 @@ describe("secret hygiene", () => {
                 ),
             ),
             served.dispatch.handle(request("partial_sign_commitment_tx", commitmentParams(THREE_TLCS, OTHER_AGGREGATED_NONCE))),
-            served.dispatch.handle(request("partial_sign_commitment_tx", commitmentParams(NO_TLCS, AGGREGATED_NONCE))),
+            served.dispatch.handle(request("partial_sign_commitment_tx", commitmentParams(renumbered(5), AGGREGATED_NONCE))),
             served.dispatch.handle(
                 request("partial_sign_commitment_tx", commitmentParams(THREE_TLCS_FOR_LOCAL, AGGREGATED_NONCE), { stateVersion: 1 }),
             ),

@@ -1,4 +1,6 @@
-import { isDecimalShannons, isHexBytes, isNonEmptyString, isUnsignedInteger } from "./validate.utils";
+import { HASH256_LENGTH, SCRIPT_HASH_TYPES, UINT32_MAX } from "../common.constants";
+import type { OutPoint, Script } from "../common.types";
+import { isDecimalShannons, isHexBytes, isNonEmptyString, isPlainObject, isUnsignedInteger } from "./validate.utils";
 
 /**
  * Asserts that a value is a byte array, of any length.
@@ -120,4 +122,27 @@ export function assertOneOf<Values extends readonly string[]>(
     if (typeof value !== "string" || !accepted.includes(value)) {
         throw new TypeError(`${name} must be one of ${values.join(", ")}`);
     }
+}
+
+/**
+ * Asserts that a value is a script: a 32-byte code hash, a hash type CKB defines, and args of any length.
+ * @param name Name of the value, used in the error messages.
+ * @param value Value to check.
+ */
+export function assertScript(name: string, value: unknown): asserts value is Script {
+    if (!isPlainObject(value)) throw new TypeError(`${name} must be an object`);
+    assertBytes(`${name}.codeHash`, value.codeHash, HASH256_LENGTH);
+    assertOneOf(`${name}.hashType`, value.hashType, SCRIPT_HASH_TYPES);
+    assertAnyBytes(`${name}.args`, value.args);
+}
+
+/**
+ * Asserts that a value is an out point: a 32-byte tx hash and an index that fits in a u32.
+ * @param name Name of the value, used in the error messages.
+ * @param value Value to check.
+ */
+export function assertOutPoint(name: string, value: unknown): asserts value is OutPoint {
+    if (!isPlainObject(value)) throw new TypeError(`${name} must be an object`);
+    assertBytes(`${name}.txHash`, value.txHash, HASH256_LENGTH);
+    assertUnsignedInteger(`${name}.index`, value.index, UINT32_MAX);
 }

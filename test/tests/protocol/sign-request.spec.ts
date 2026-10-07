@@ -8,7 +8,8 @@ import { ProtocolError, SIGNER_METHODS, decodeSignParams } from "../../../src/pr
 import type { SignParams, SignRequest, SignResult, SignatureMethod } from "../../../src/protocol";
 import { decodeSignRequest, encodeSignResponse } from "../../../src/protocol/sign-request";
 import { InMemorySignerStorage } from "../../mocks/policy";
-import { toChannelAnnouncementInput, toCommitmentTxInput, toRevocationInput, toShutdownTxInput } from "../../utils/digest-inputs";
+import { fundedShannonsOf } from "../../utils/channel-opening";
+import { toChannelAnnouncementInput, toCommitmentTxInput, toRevocationInput, toScript, toShutdownTxInput } from "../../utils/digest-inputs";
 import { caseOf, loadInteropVectors } from "../../utils/interop-vectors";
 import { SHUTDOWN_NONCE_NUMBER, revocationNonceNumber } from "../../utils/nonce-numbers";
 import { answerableRefusal, refusal } from "../../utils/refusal";
@@ -43,6 +44,8 @@ const SEND_SIDE_REVOCATION = caseOf(digest.revocation_cases, "ckb, send side");
 const CKB_ANNOUNCEMENT = caseOf(digest.announcement_cases, "ckb");
 
 const REVOCATION_NONCE_NUMBER = revocationNonceNumber(SEND_SIDE_REVOCATION);
+
+const OPENING = caseOf(digest.commitment_cases, "ckb, three tlcs channel, opening, for remote");
 
 function envelope(overrides: Record<string, unknown> = {}): Record<string, unknown> {
     return {
@@ -242,9 +245,25 @@ describe("decodeSignParams", () => {
 
         it.each(SIGNING_CASES)("hands %s to the policy gate as a fresh, digest-matching request", async (method, params, expected) => {
             const engine = new PolicyEngine(new SignerStore(new InMemorySignerStorage()));
-            await engine.registerChannel(CHANNEL_ID, CHANNEL_INDEX, "0");
-            // The gate signs an offered TLC only for a payment the user approved.
+            await engine.registerChannel(
+                CHANNEL_ID,
+                CHANNEL_INDEX,
+                fundedShannonsOf(THREE_TLCS),
+                toScript(CKB_SHUTDOWN.local_close_script),
+            );
+            // Commitments need the opening signed; offered TLCs need an approved payment.
             if (expected.operation.kind === "commitment_tx") {
+                await engine.checkAndClaim(KEYS, {
+                    channelId: CHANNEL_ID,
+                    stateVersion: STATE_VERSION,
+                    nonceCommitmentNumber: 0,
+                    session: {
+                        orderedPublicKeys: [LOCAL_FUNDING_PUBKEY, REMOTE_FUNDING_PUBKEY],
+                        aggregatedNonce: hexToBytes(AGGREGATED_NONCE_HEX),
+                        message: hexToBytes(OPENING.digest),
+                    },
+                    operation: { kind: "commitment_tx", input: toCommitmentTxInput(OPENING, REMOTE) },
+                });
                 for (const tlc of expected.operation.input.tlcs) {
                     if (tlc.direction === "offered")
                         await engine.recordDebitIntent(bytesToHex(tlc.paymentHash), tlc.amountShannons.toString());

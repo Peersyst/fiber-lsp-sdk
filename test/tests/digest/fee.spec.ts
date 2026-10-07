@@ -1,7 +1,17 @@
 import { hexToBytes } from "@noble/hashes/utils.js";
 import { COMMITMENT_LOCK_TESTNET } from "../../../src/digest/digest.constants";
 import type { Script } from "../../../src/common";
-import { calculateTxFee, commitmentTxSize, shutdownTxSize } from "../../../src/digest/fee";
+import {
+    calculateCommitmentTxFee,
+    calculateShutdownTxFee,
+    calculateTxFee,
+    commitmentTxSize,
+    shutdownTxSize,
+} from "../../../src/digest/fee";
+import { toCommitmentTxInput, toRevocationInput, toShutdownTxInput } from "../../utils/digest-inputs";
+import { loadInteropVectors } from "../../utils/interop-vectors";
+
+const digest = loadInteropVectors().digest;
 
 const UDT_SCRIPT: Script = {
     codeHash: hexToBytes("aa".repeat(32)),
@@ -63,4 +73,28 @@ describe("calculateTxFee", () => {
         expect(() => calculateTxFee(-1n, 456)).toThrow(RangeError);
         expect(() => calculateTxFee((1n << 64n) - 1n, 1001)).toThrow(RangeError);
     });
+});
+
+describe("calculateCommitmentTxFee", () => {
+    it.each(digest.commitment_cases.map((kase) => [kase.name, kase] as const))("takes fiber's fee for the commitment %s", (_, kase) => {
+        expect(calculateCommitmentTxFee(toCommitmentTxInput(kase, digest.remote))).toBe(BigInt(kase.fee));
+    });
+
+    it.each(digest.revocation_cases.map((kase) => [kase.name, kase] as const))(
+        "takes fiber's commitment fee for the revocation %s",
+        (_, kase) => {
+            expect(calculateCommitmentTxFee(toRevocationInput(kase, digest.remote))).toBe(BigInt(kase.fee));
+        },
+    );
+});
+
+describe("calculateShutdownTxFee", () => {
+    it.each(digest.shutdown_cases.map((kase) => [kase.name, kase] as const))(
+        "takes fiber's fee for each side of the close %s",
+        (_, kase) => {
+            const input = toShutdownTxInput(kase, digest.remote);
+            expect(calculateShutdownTxFee(input.localFeeRate, input)).toBe(BigInt(kase.local_fee));
+            expect(calculateShutdownTxFee(input.remoteFeeRate, input)).toBe(BigInt(kase.remote_fee));
+        },
+    );
 });

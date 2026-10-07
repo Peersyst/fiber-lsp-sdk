@@ -6,6 +6,8 @@ import {
     assertHexBytes,
     assertNonEmptyString,
     assertOneOf,
+    assertOutPoint,
+    assertScript,
     assertString,
     assertUnsignedBigInt,
     assertUnsignedInteger,
@@ -157,5 +159,59 @@ describe("assertOneOf", () => {
 
     it("accepts nothing when the set is empty", () => {
         expect(() => assertOneOf("filter", "include_closed", [])).toThrow(new TypeError("filter must be one of "));
+    });
+});
+
+describe("assertScript", () => {
+    const SCRIPT = { codeHash: new Uint8Array(32), hashType: "data2", args: new Uint8Array(0) };
+
+    it("accepts a script with empty args, and with any length of them", () => {
+        expect(() => assertScript("lock", SCRIPT)).not.toThrow();
+        expect(() => assertScript("lock", { ...SCRIPT, args: new Uint8Array(1000) })).not.toThrow();
+    });
+
+    it.each([
+        ["null", null, "lock must be an object"],
+        ["an array", [], "lock must be an object"],
+        ["a code hash of 31 bytes", { ...SCRIPT, codeHash: new Uint8Array(31) }, "lock.codeHash must be 32 bytes, got 31"],
+        ["a code hash in hex", { ...SCRIPT, codeHash: "00".repeat(32) }, "lock.codeHash must be a Uint8Array"],
+        ["an unknown hash type", { ...SCRIPT, hashType: "data3" }, "lock.hashType must be one of data, type, data1, data2"],
+        ["no hash type", { codeHash: SCRIPT.codeHash, args: SCRIPT.args }, "lock.hashType must be one of data, type, data1, data2"],
+        ["args in hex", { ...SCRIPT, args: "00" }, "lock.args must be a Uint8Array"],
+    ])("rejects %s, naming the field", (_, value, message) => {
+        expect(() => assertScript("lock", value)).toThrow(new TypeError(message));
+    });
+});
+
+describe("assertOutPoint", () => {
+    const OUT_POINT = { txHash: new Uint8Array(32), index: 0 };
+
+    it("accepts an out point at either end of the index's range", () => {
+        expect(() => assertOutPoint("funding", OUT_POINT)).not.toThrow();
+        expect(() => assertOutPoint("funding", { ...OUT_POINT, index: 2 ** 32 - 1 })).not.toThrow();
+    });
+
+    it.each([
+        ["null", null, new TypeError("funding must be an object")],
+        ["an array", [], new TypeError("funding must be an object")],
+        ["a tx hash of 31 bytes", { ...OUT_POINT, txHash: new Uint8Array(31) }, new TypeError("funding.txHash must be 32 bytes, got 31")],
+        ["a tx hash in hex", { ...OUT_POINT, txHash: "00".repeat(32) }, new TypeError("funding.txHash must be a Uint8Array")],
+        [
+            "a negative index",
+            { ...OUT_POINT, index: -1 },
+            new RangeError("funding.index must be an integer between 0 and 4294967295, got -1"),
+        ],
+        [
+            "an index above u32",
+            { ...OUT_POINT, index: 2 ** 32 },
+            new RangeError("funding.index must be an integer between 0 and 4294967295, got 4294967296"),
+        ],
+        [
+            "no index",
+            { txHash: OUT_POINT.txHash },
+            new RangeError("funding.index must be an integer between 0 and 4294967295, got undefined"),
+        ],
+    ])("rejects %s, naming the field", (_, value, error) => {
+        expect(() => assertOutPoint("funding", value)).toThrow(error);
     });
 });

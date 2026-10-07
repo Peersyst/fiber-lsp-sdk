@@ -1,4 +1,5 @@
 export * from "./interfaces";
+export * from "./channel-opening";
 export * from "./policy-engine";
 export * from "./policy.constants";
 export * from "./policy.error";

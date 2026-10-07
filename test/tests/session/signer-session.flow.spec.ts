@@ -15,7 +15,8 @@ import { SignerDispatch, WalletIdentity, getBasePublicKeys, getChannelCommitment
 import { InMemorySignerStorage } from "../../mocks/policy";
 import { TimerMock } from "../../mocks/session";
 import { flush } from "../../utils/flush";
-import { toCommitmentTxInput } from "../../utils/digest-inputs";
+import { fundedShannonsOf } from "../../utils/channel-opening";
+import { toCommitmentTxInput, toScript } from "../../utils/digest-inputs";
 import type { CommitmentCaseVector } from "../../utils/interop-vectors";
 import { caseOf, loadInteropVectors } from "../../utils/interop-vectors";
 import { SHUTDOWN_NONCE_NUMBER, revocationNonceNumber } from "../../utils/nonce-numbers";
@@ -47,25 +48,48 @@ const LOCAL_FUNDING_PUBKEY = pubkeyOf(KEYS.fundingKey);
 const PEER_FUNDING_PUBKEY = pubkeyOf(PEER_KEYS.fundingKey);
 
 // The digests bind the vectors' channel keys, so only the channel at the vectors' index can sign them.
+// The "ckb" cases share one channel, opened by OPEN.
 const OPEN = caseOf(digest.commitment_cases, "ckb, no tlcs, for remote");
-const SEND = caseOf(digest.commitment_cases, "ckb, three tlcs, for remote");
 const SEND_SIDE_REVOCATION = caseOf(digest.revocation_cases, "ckb, send side");
 const CLOSE = caseOf(digest.shutdown_cases, "ckb");
 const ANNOUNCEMENT = caseOf(digest.announcement_cases, "ckb");
 
-const OPENING_EXPOSURE = OPEN.settlement_local;
+const FUNDED = fundedShannonsOf(OPEN);
+const CLOSE_SCRIPT = toScript(CLOSE.local_close_script);
+
+// Moves a case onto OPEN's channel, with the SDK's digest.
+function onOpenChannel(kase: CommitmentCaseVector): CommitmentCaseVector {
+    const moved = { ...kase, funding_out_point: OPEN.funding_out_point, fee_rate: OPEN.fee_rate };
+    return { ...moved, digest: bytesToHex(computeCommitmentTxDigest(KEYS, toCommitmentTxInput(moved, REMOTE))) };
+}
+
+const SEND = onOpenChannel(caseOf(digest.commitment_cases, "ckb, three tlcs, for remote"));
 // SEND with every TLC failed back: fiber closes a channel only with none pending.
-const SETTLED_WITHOUT_DIGEST: CommitmentCaseVector = {
+const SETTLED = onOpenChannel({
     ...SEND,
     commitment_number: SEND.commitment_number + 1,
     settlement_local: OPEN.settlement_local,
     tlcs: [],
+});
+const OPENING_VIEW = { exposureShannons: FUNDED, tlcs: [], chargedShannons: {}, creditedShannons: {} };
+const REGISTERED_PINS = {
+    fundedShannons: "71900000000",
+    localCloseScript:
+        "4900000010000000300000003100000074d3f63a22681bdb6ff6512866db95264338cfaee12f71e28b9f23c414990c9c0114000000da694932ba803b4c07f6e3a9b6b2ea3f9c6c66c7",
+    localReservedCkbShannons: "9900000000",
+    udtTypeScript: null,
 };
-const SETTLED: CommitmentCaseVector = {
-    ...SETTLED_WITHOUT_DIGEST,
-    digest: bytesToHex(computeCommitmentTxDigest(KEYS, toCommitmentTxInput(SETTLED_WITHOUT_DIGEST, REMOTE))),
+const OPENED_PINS = {
+    ...REGISTERED_PINS,
+    fundingOutPoint: "6f4ea49726c322dbedceb12a09d013a0256ea697dc362cc8865f8bbcdd17684e:0",
+    fundingCapacityShannons: "96700000000",
+    liquidCapacityShannons: "80500000000",
+    remoteFundingPubkey: "026372d1f1bf5f44d3bf185fe8f69502f36c9a01760029db0a15f6c7dedb4f5638",
+    remoteTlcBasePubkey: "032559e1b167552782cab5be4294260d51edfc36aef4ca7cc165b3b21b15e98e21",
+    commitmentDelayEpoch: "1099511627777",
+    commitmentFeeRate: "1000",
+    remoteReservedCkbShannons: "6300000000",
 };
-const OPENING_VIEW = { exposureShannons: OPENING_EXPOSURE, tlcs: [], chargedShannons: {}, creditedShannons: {} };
 const REVOCATION_NONCE_NUMBER = revocationNonceNumber(SEND_SIDE_REVOCATION);
 
 const URL = "wss://lsp.example/signer";
@@ -145,8 +169,8 @@ async function connected(bridge: InMemorySignerBridge, options: DeviceOptions = 
     return d;
 }
 
-function openChannel(d: Device, channelIndex = CHANNEL_INDEX, exposure = OPENING_EXPOSURE): Promise<string> {
-    return d.session.registerChannel(d.dispatch.prepareChannelRegistration(channelIndex, exposure));
+function openChannel(d: Device, channelIndex = CHANNEL_INDEX): Promise<string> {
+    return d.session.registerChannel(d.dispatch.prepareChannelRegistration(channelIndex, FUNDED, CLOSE_SCRIPT));
 }
 
 async function recordSendIntents(policy: PolicyEngine): Promise<void> {
@@ -281,6 +305,7 @@ describe("channel open", () => {
             lastSignedCommitmentNumbers: {},
             signedSessions: {},
             lastStateVersion: 0,
+            pins: REGISTERED_PINS,
             views: { remote: OPENING_VIEW, local: OPENING_VIEW },
         });
     });
@@ -316,6 +341,7 @@ describe("channel open", () => {
             lastSignedCommitmentNumbers: { COMMITMENT: OPEN.commitment_number },
             signedSessions: { [`COMMITMENT:${OPEN.commitment_number}`]: SESSION_COMMITMENT },
             lastStateVersion: 1,
+            pins: OPENED_PINS,
             views: { remote: OPENING_VIEW, local: OPENING_VIEW },
         });
         expect(d.errors()).toEqual([]);
@@ -368,6 +394,7 @@ describe("the life of a channel", () => {
                 [`ANNOUNCEMENT:${ANNOUNCEMENT_SLOT_NUMBER}`]: SESSION_COMMITMENT,
             },
             lastStateVersion: 6,
+            pins: OPENED_PINS,
             views: {
                 // The return also reads as both payments made and the received TLC collected.
                 remote: {
@@ -418,7 +445,7 @@ describe("re-delivery", () => {
         expect(deliveries[2]).toEqual(deliveries[1]);
         expect(bridge.factory.sockets).toHaveLength(2);
         await expect(d.store.getChannelRecord(CHANNEL_INDEX)).resolves.toEqual(claimed);
-        expect(claimed?.views.remote.exposureShannons).toBe(SEND.settlement_local);
+        expect(claimed?.views.remote.exposureShannons).toBe("69650000000");
         expect(bridge.pendingRequests).toBe(0);
     });
 
@@ -482,7 +509,7 @@ describe("refusals", () => {
         const round = bridge.signCommitmentTx(channelId, OPEN);
 
         await expect(refused).resolves.toEqual({
-            error: { code: "policy_refusal", message: expect.stringContaining("no debit intent") },
+            error: { code: "policy_refusal", message: "the channel's first commitment lists TLCs" },
         });
         await expect(otherNonce).resolves.toEqual(getPublicNonce(OTHER_KEYS, 0, "COMMITMENT"));
         signed(await round);
@@ -612,7 +639,7 @@ describe("the bridge's own checks", () => {
         const bridge = newBridge();
         const storage = new InMemorySignerStorage();
         const d = await connected(bridge, { storage });
-        const pending = d.dispatch.prepareChannelRegistration(CHANNEL_INDEX, OPENING_EXPOSURE);
+        const pending = d.dispatch.prepareChannelRegistration(CHANNEL_INDEX, FUNDED, CLOSE_SCRIPT);
         const misdelegated = { ...pending, registration: { ...pending.registration, localSettlementKey: OTHER_KEYS.tlcBaseKey } };
 
         const error = sessionError(await rejection(d.session.registerChannel(misdelegated)), "connection_lost");
