@@ -64,6 +64,30 @@ describe("TimerSlot", () => {
         expect(runs).toEqual(["fourth"]);
     });
 
+    it("swallows a host cancel that throws, calling it once and never again on a later clear or arming", () => {
+        const timer = new TimerMock();
+        let calls = 0;
+        const throwing = {
+            schedule: (callback: () => void, delayMs: number) => {
+                const cancel = timer.schedule(callback, delayMs);
+                return () => {
+                    calls += 1;
+                    cancel();
+                    throw new Error("cancel broke");
+                };
+            },
+        };
+        const slot = new TimerSlot(throwing);
+        slot.arm(() => undefined, 100);
+        expect(() => slot.clear()).not.toThrow();
+        expect(() => slot.clear()).not.toThrow();
+        const runs: number[] = [];
+        expect(() => slot.arm(() => runs.push(1), 100)).not.toThrow();
+        timer.advance(100);
+        expect(runs).toEqual([1]);
+        expect(calls).toBe(1);
+    });
+
     it("can be re-armed from inside its own callback", () => {
         const timer = new TimerMock();
         const slot = new TimerSlot(timer);

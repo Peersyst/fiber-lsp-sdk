@@ -10,7 +10,7 @@ blind-signs.
 - **Runs anywhere**: framework-agnostic TypeScript, shipped as both ESM and CommonJS. The same code runs unmodified in Node,
   browsers, and React Native (Hermes).
 - **No I/O of its own**: the SDK performs no platform calls. The host injects every external effect: an `ISignerStorage` (key-value
-  persistence), a WebSocket factory, and `fetch`, which defaults to the runtime's own.
+  persistence), a WebSocket factory, `fetch` and a timer, the last two defaulting to the runtime's own; the clock defaults to `Date.now`.
 - **Minimal, audited dependency surface**: the only runtime dependencies are `@noble/curves`, `@noble/hashes`, `@scure/bip32`, and
   `@scure/btc-signer`, accepted as `^2.2.0` so a host app on the same major converges on a single copy of each.
 - **Recoverable by design**: every derivation is a deterministic function of the master seed, so channel keys are recoverable from
@@ -33,10 +33,11 @@ These properties reflect the current specification and may evolve with it while 
 | [`wire`](./src/wire)             | How fiber writes values in JSON, the readers that refuse anything else, and the writers that produce it      |
 | [`protocol`](./src/protocol)     | Frames, methods and results of the remote signing protocol                                                   |
 | [`rpc`](./src/rpc)               | Typed fiber JSON-RPC client (Biscuit-authed)                                                                 |
-| `sdk`                            | Public facade wiring the above                                                                               |
+| [`sdk`](./src/sdk)               | Public facade wiring the above: `FiberLspSdk`, its lifecycle, events and errors, the time index, the poller  |
 
-`derivation`, `digest`, `invoice`, `signer`, `policy`, `wire`, `protocol`, `session` and `rpc` are implemented; `sdk` is still a
-placeholder, so the public entrypoint stays small while the API settles.
+`derivation`, `digest`, `invoice`, `signer`, `policy`, `wire`, `protocol`, `session` and `rpc` are implemented; `sdk` has its
+core, construction, `connect`/`disconnect` and the events, while the operations a wallet calls (open a channel, create an
+invoice, pay one) land next, so the public API is not settled yet.
 
 ## Repository layout
 
@@ -69,6 +70,8 @@ Full index in [docs/README.md](./docs/README.md). The load-bearing ones:
   invoice, and where the reader is stricter than fiber's.
 - [How the node is called](./docs/rpc.md): one POST per call over the host's fetch, the three errors a call fails
   with, split by what the caller can conclude, and the channel, invoice and payment methods on top.
+- [What a wallet talks to](./docs/sdk.md): the facade, the effects it is given and their defaults, `connect` and
+  `disconnect`, the events and the errors, the time index a wipe cannot reset, and the poller.
 - [Cross-implementation harness](./interop/README.md): how the vectors are generated and re-validated against a new fiber
   release.
 
@@ -105,6 +108,31 @@ CommonJS entry loads them through `require(esm)` — this is why the package req
 import { PROTOCOL_VERSION } from "@peersyst/fiber-lsp-sdk";
 const { PROTOCOL_VERSION } = require("@peersyst/fiber-lsp-sdk");
 ```
+
+### Constructing the SDK
+
+```js
+import { FiberLspSdk } from "@peersyst/fiber-lsp-sdk";
+
+const sdk = new FiberLspSdk(masterSeed, {
+  network: "testnet",
+  storage, // ISignerStorage or IAsyncSignerStorage: the host's key-value persistence
+  webSocketFactory: (url) => new WebSocket(url),
+  rpcUrl: "https://lsp.example/rpc",
+  signerSessionUrl: "wss://lsp.example/signer",
+  biscuitToken,
+  lspPubkey, // the LSP node's key, 33 bytes
+});
+
+const unsubscribe = sdk.onEvent((event) => {
+  if (event.type === "SESSION") render(event.state);
+  if (event.type === "ERROR") log(event.error.code, event.error.cause);
+});
+await sdk.connect(); // on foreground: the signer session and the polling of the node
+sdk.disconnect(); // on background
+```
+
+Every event and error a wallet sees is in [`docs/sdk.md`](./docs/sdk.md).
 
 ### Deriving the master seed
 

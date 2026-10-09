@@ -14,11 +14,20 @@ keys carry the `fiber-lsp-sdk:` namespace, because the host may back that storag
 | `fiber-lsp-sdk:intent:<boundHash>`  | The debit intent of a payment, JSON                                  |
 | `fiber-lsp-sdk:invoice:<boundHash>` | A hold invoice whose preimage the device holds, JSON                 |
 | `fiber-lsp-sdk:preimage:<hash>`     | The device-held preimage of a hold invoice, 32 bytes hex             |
+| `fiber-lsp-sdk:allocator:<kind>`    | The last channel or invoice index handed out, a JSON integer         |
+| `fiber-lsp-sdk:activity`            | What the facade's poller still asks the node about, JSON             |
 
 The prefixes are fixed and disjoint, so a channel id and a payment hash can be the same string without colliding.
 `<boundHash>` is the bound payment hash: the first 20 bytes of the payment hash, the part a commitment binds. A record
 keyed by all 32 would let a node that changes the other 12 find no invoice to pay for ([policy.md](./policy.md)). The
 record holds the whole hash, and a record whose hash does not start with its key's reads as corruption.
+
+The last two are the facade's ([sdk.md](./sdk.md)): the allocator keeps, per kind, the last index it handed out, and the
+activity record lists the channels, payments and invoices the poller watches with the last status an event was emitted
+for. They are kept through the same store, by `getRecord` and `updateRecord` over a format the facade supplies, so they
+get the same parsing, the same corruption rule and the same per-key lanes as the policy's records without the policy
+module knowing what they hold. Those two methods refuse every key outside the namespace and every key the policy keeps
+its own records under, so no format of another module can read or write past the policy's guards.
 
 ## Identity: the index, not the name
 
@@ -126,6 +135,15 @@ Neither is pruned, and the reason is the same for both: the device never learns 
 finished, since closure is node-supplied state, and deleting on it would hand the node a way to clear the names and slots that
 refuse it. Pruning the registry is additionally bounded by what would still be safe without it, the monotonic counter, and it
 would cost the idempotent replay of an old request ([policy.md](./policy.md)).
+
+## The facade's records
+
+The allocator's value is a bare JSON integer, the last index of its kind: a corrupt one throws rather than reading as
+"none", which would hand the clock's index out again after a wipe that was not one. The activity record holds `version`
+and three maps, `channels`, `payments` and `invoices`, each from the id the node knows the thing by (the channel id; the
+payment hash in hex) to `{ status }`, the last status an event was emitted for or `null`. A status is checked against
+fiber's list for its kind at every write, unknown extra fields are tolerated, and a version from the future is refused,
+as for every other record. Entries are dropped once final, so unlike the records above this one does not grow for good.
 
 ## Concurrency
 

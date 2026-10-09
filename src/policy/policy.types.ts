@@ -151,6 +151,16 @@ export type HoldInvoicePolicyRecord = {
     channelIndexes: number[];
 };
 
+export type SignerRecordFormat<T> = {
+    name: string;
+    is: (value: unknown) => value is T;
+    assert: (name: string, value: unknown) => asserts value is T;
+    /**
+     * Whether the record agrees with the key it is stored under.
+     */
+    belongsAt: (key: string, record: T) => boolean;
+};
+
 export type SignSession = {
     /**
      * The 2-of-2 key list exactly as the node sent it; the SDK never sorts or reorders it.

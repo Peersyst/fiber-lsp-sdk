@@ -57,6 +57,11 @@ export const TRUNCATED_PAYMENT_HASH_LENGTH = 20;
 
 export const MILLISECONDS_PER_SECOND = 1000n;
 
+/**
+ * Past a signed 32-bit delay, `setTimeout` fires immediately.
+ */
+export const MAX_TIMER_DELAY_MS = 2 ** 31 - 1;
+
 export const SCRIPT_HASH_TYPES = ["data", "type", "data1", "data2"] as const;
 
 /**

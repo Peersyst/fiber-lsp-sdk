@@ -1,5 +1,8 @@
+import { secp256k1 } from "@noble/curves/secp256k1.js";
+import { hexToBytes } from "@noble/hashes/utils.js";
 import {
     isCanonicalDecimal,
+    isCompressedPoint,
     isDecimalShannons,
     isHexBytes,
     isNonEmptyHexBytes,
@@ -115,5 +118,25 @@ describe("isDecimalShannons", () => {
 
     it.each([5, 5n, null, undefined])("rejects the non-string %p", (value) => {
         expect(isDecimalShannons(value)).toBe(false);
+    });
+});
+
+describe("isCompressedPoint", () => {
+    const GENERATOR = hexToBytes("0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798");
+
+    it("accepts a point on the curve", () => {
+        expect(isCompressedPoint(GENERATOR)).toBe(true);
+    });
+
+    it.each([
+        ["the point in hex", "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798"],
+        ["the x alone", GENERATOR.subarray(1)],
+        ["the point with a byte appended", Uint8Array.of(...GENERATOR, 0)],
+        ["an uncompressed prefix", Uint8Array.of(0x04, ...GENERATOR.subarray(1))],
+        ["the point uncompressed, 65 bytes that decode", secp256k1.Point.fromBytes(GENERATOR).toBytes(false)],
+        ["an x off the curve", Uint8Array.of(0x02, ...new Uint8Array(32))],
+        ["null", null],
+    ])("refuses %s", (_, value) => {
+        expect(isCompressedPoint(value)).toBe(false);
     });
 });

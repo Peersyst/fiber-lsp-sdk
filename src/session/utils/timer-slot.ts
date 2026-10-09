@@ -31,11 +31,16 @@ export class TimerSlot {
     }
 
     /**
-     * Drops whatever the slot held.
+     * Drops whatever the slot held; a host cancel that throws is called once and swallowed.
      */
     clear(): void {
         this.arming += 1;
-        this.cancel?.();
+        const cancel = this.cancel;
         this.cancel = undefined;
+        try {
+            cancel?.();
+        } catch {
+            // The arming number already keeps what it held from running.
+        }
     }
 }

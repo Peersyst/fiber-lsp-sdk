@@ -1,6 +1,6 @@
-import { HASH256_LENGTH, SCRIPT_HASH_TYPES, UINT32_MAX } from "../common.constants";
-import type { OutPoint, Script } from "../common.types";
-import { isDecimalShannons, isHexBytes, isNonEmptyString, isPlainObject, isUnsignedInteger } from "./validate.utils";
+import { COMPRESSED_POINT_LENGTH, HASH256_LENGTH, MAX_TIMER_DELAY_MS, SCRIPT_HASH_TYPES, UINT32_MAX } from "../common.constants";
+import type { OutPoint, Script, ScriptTemplate } from "../common.types";
+import { isCompressedPoint, isDecimalShannons, isHexBytes, isNonEmptyString, isPlainObject, isUnsignedInteger } from "./validate.utils";
 
 /**
  * Asserts that a value is a byte array, of any length.
@@ -24,6 +24,16 @@ export function assertBytes(name: string, value: unknown, length: number): asser
     if (value.length !== length) {
         throw new TypeError(`${name} must be ${length} bytes, got ${value.length}`);
     }
+}
+
+/**
+ * Asserts that a value is a compressed secp256k1 point.
+ * @param name Name of the value, used in the error message.
+ * @param value Value to check.
+ */
+export function assertCompressedPoint(name: string, value: unknown): asserts value is Uint8Array {
+    assertBytes(name, value, COMPRESSED_POINT_LENGTH);
+    if (!isCompressedPoint(value)) throw new TypeError(`${name} must be a compressed point on secp256k1`);
 }
 
 /**
@@ -61,6 +71,15 @@ export function assertHexBytes(name: string, value: string, byteLength: number):
         // Never echo the value: it may be a secret.
         throw new TypeError(`${name} must be ${byteLength} bytes of lowercase hex`);
     }
+}
+
+/**
+ * Asserts that a value is a function.
+ * @param name Name of the value, used in the error message.
+ * @param value Value to check.
+ */
+export function assertFunction(name: string, value: unknown): asserts value is (...args: never[]) => unknown {
+    if (typeof value !== "function") throw new TypeError(`${name} must be a function`);
 }
 
 /**
@@ -130,10 +149,31 @@ export function assertOneOf<Values extends readonly string[]>(
  * @param value Value to check.
  */
 export function assertScript(name: string, value: unknown): asserts value is Script {
+    assertScriptTemplate(name, value);
+    assertAnyBytes(`${name}.args`, (value as Partial<Script>).args);
+}
+
+/**
+ * Asserts that a value is a script template: a code hash and a hash type, no args.
+ * @param name Name of the value, used in the error messages.
+ * @param value Value to check.
+ */
+export function assertScriptTemplate(name: string, value: unknown): asserts value is ScriptTemplate {
     if (!isPlainObject(value)) throw new TypeError(`${name} must be an object`);
     assertBytes(`${name}.codeHash`, value.codeHash, HASH256_LENGTH);
     assertOneOf(`${name}.hashType`, value.hashType, SCRIPT_HASH_TYPES);
-    assertAnyBytes(`${name}.args`, value.args);
+}
+
+/**
+ * Asserts that a timing option is a whole number of milliseconds a timer can take.
+ * @param name Name of the option, used in the error message.
+ * @param value Value to check.
+ * @param min Lowest accepted value, inclusive.
+ */
+export function assertTimerDelayMs(name: string, value: number, min: number): void {
+    if (!isUnsignedInteger(value, MAX_TIMER_DELAY_MS) || value < min) {
+        throw new RangeError(`${name} must be an integer between ${min} and ${MAX_TIMER_DELAY_MS}, got ${value}`);
+    }
 }
 
 /**
