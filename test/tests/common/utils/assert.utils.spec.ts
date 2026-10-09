@@ -1,14 +1,19 @@
+import { hexToBytes } from "@noble/hashes/utils.js";
 import {
     assertAnyBytes,
     assertBoolean,
     assertBytes,
+    assertCompressedPoint,
     assertDecimalShannons,
+    assertFunction,
     assertHexBytes,
     assertNonEmptyString,
     assertOneOf,
     assertOutPoint,
     assertScript,
+    assertScriptTemplate,
     assertString,
+    assertTimerDelayMs,
     assertUnsignedBigInt,
     assertUnsignedInteger,
 } from "../../../../src/common/utils/assert.utils";
@@ -162,6 +167,41 @@ describe("assertOneOf", () => {
     });
 });
 
+describe("assertFunction", () => {
+    it("accepts a function, an arrow or a class alike", () => {
+        expect(() => assertFunction("now", () => 0)).not.toThrow();
+        expect(() => assertFunction("now", Date.now)).not.toThrow();
+        expect(() => assertFunction("now", class {})).not.toThrow();
+    });
+
+    it.each([undefined, null, 0, "Date.now", {}])("rejects %p, naming the field", (value) => {
+        expect(() => assertFunction("now", value)).toThrow(new TypeError("now must be a function"));
+    });
+});
+
+describe("assertCompressedPoint", () => {
+    const GENERATOR = hexToBytes("0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798");
+
+    it("accepts a point on the curve, under either parity", () => {
+        expect(() => assertCompressedPoint("key", GENERATOR)).not.toThrow();
+        expect(() => assertCompressedPoint("key", Uint8Array.of(0x03, ...GENERATOR.subarray(1)))).not.toThrow();
+    });
+
+    it.each([
+        ["a key in hex", "02" + "79".repeat(32), new TypeError("key must be a Uint8Array")],
+        ["a key of 32 bytes", GENERATOR.subarray(1), new TypeError("key must be 33 bytes, got 32")],
+        [
+            "an uncompressed prefix",
+            Uint8Array.of(0x04, ...GENERATOR.subarray(1)),
+            new TypeError("key must be a compressed point on secp256k1"),
+        ],
+        ["33 zero bytes", new Uint8Array(33), new TypeError("key must be a compressed point on secp256k1")],
+        ["an x off the curve", Uint8Array.of(0x02, ...new Uint8Array(32)), new TypeError("key must be a compressed point on secp256k1")],
+    ])("rejects %s, naming the field", (_, value, error) => {
+        expect(() => assertCompressedPoint("key", value)).toThrow(error);
+    });
+});
+
 describe("assertScript", () => {
     const SCRIPT = { codeHash: new Uint8Array(32), hashType: "data2", args: new Uint8Array(0) };
 
@@ -180,6 +220,57 @@ describe("assertScript", () => {
         ["args in hex", { ...SCRIPT, args: "00" }, "lock.args must be a Uint8Array"],
     ])("rejects %s, naming the field", (_, value, message) => {
         expect(() => assertScript("lock", value)).toThrow(new TypeError(message));
+    });
+});
+
+describe("assertScriptTemplate", () => {
+    const TEMPLATE = { codeHash: new Uint8Array(32), hashType: "type" };
+
+    it("accepts a template, with or without args beside it", () => {
+        expect(() => assertScriptTemplate("commitmentLock", TEMPLATE)).not.toThrow();
+        expect(() => assertScriptTemplate("commitmentLock", { ...TEMPLATE, args: new Uint8Array(20) })).not.toThrow();
+    });
+
+    it.each([
+        ["null", null, "commitmentLock must be an object"],
+        ["an array", [], "commitmentLock must be an object"],
+        ["a string", "0x" + "00".repeat(32), "commitmentLock must be an object"],
+        ["a code hash of 33 bytes", { ...TEMPLATE, codeHash: new Uint8Array(33) }, "commitmentLock.codeHash must be 32 bytes, got 33"],
+        ["a code hash in hex", { ...TEMPLATE, codeHash: "00".repeat(32) }, "commitmentLock.codeHash must be a Uint8Array"],
+        ["no code hash", { hashType: "type" }, "commitmentLock.codeHash must be a Uint8Array"],
+        ["an unknown hash type", { ...TEMPLATE, hashType: "data3" }, "commitmentLock.hashType must be one of data, type, data1, data2"],
+        ["no hash type", { codeHash: TEMPLATE.codeHash }, "commitmentLock.hashType must be one of data, type, data1, data2"],
+    ])("rejects %s, naming the field", (_, value, message) => {
+        expect(() => assertScriptTemplate("commitmentLock", value)).toThrow(new TypeError(message));
+    });
+});
+
+describe("assertTimerDelayMs", () => {
+    it.each([
+        [0, 0],
+        [1, 1],
+        [1, 5_000],
+        [1, 2 ** 31 - 1],
+    ])("accepts, with a floor of %i, a delay of %i", (min, value) => {
+        expect(() => assertTimerDelayMs("pollIntervalMs", value, min)).not.toThrow();
+    });
+
+    it.each([
+        [1, 0],
+        [0, -1],
+        [1, 1.5],
+        [1, NaN],
+        [1, Infinity],
+        [1, 2 ** 31],
+        [1_000, 999],
+    ])("rejects, with a floor of %i, a delay of %p", (min, value) => {
+        expect(() => assertTimerDelayMs("pollIntervalMs", value, min)).toThrow(
+            new RangeError(`pollIntervalMs must be an integer between ${min} and 2147483647, got ${value}`),
+        );
+    });
+
+    it("rejects a value that is not a number", () => {
+        expect(() => assertTimerDelayMs("pollIntervalMs", "5000" as unknown as number, 1)).toThrow(RangeError);
     });
 });
 

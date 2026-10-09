@@ -1,6 +1,6 @@
 import type { ITimer } from "../../../src/session";
 
-type Scheduled = { order: number; at: number; callback: () => void };
+type Scheduled = { order: number; at: number; delayMs: number; callback: () => void };
 
 export class TimerMock implements ITimer {
     now = 0;
@@ -15,7 +15,7 @@ export class TimerMock implements ITimer {
 
     schedule(callback: () => void, delayMs: number): () => void {
         this.delays.push(delayMs);
-        const entry: Scheduled = { order: this.nextOrder++, at: this.now + delayMs, callback };
+        const entry: Scheduled = { order: this.nextOrder++, at: this.now + delayMs, delayMs, callback };
         this.scheduled.push(entry);
         return () => {
             if (this.ignoreCancel) return;
@@ -26,6 +26,10 @@ export class TimerMock implements ITimer {
 
     get pending(): number {
         return this.scheduled.length;
+    }
+
+    get pendingDelays(): number[] {
+        return this.scheduled.map((entry) => entry.delayMs);
     }
 
     advance(ms: number): void {

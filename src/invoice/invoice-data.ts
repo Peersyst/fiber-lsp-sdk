@@ -1,6 +1,4 @@
-import { secp256k1 } from "@noble/curves/secp256k1.js";
 import {
-    COMPRESSED_POINT_LENGTH,
     HASH256_LENGTH,
     PAYMENT_HASH_LENGTH,
     TLC_HASH_ALGORITHMS,
@@ -13,6 +11,7 @@ import {
     assertBytes,
     assertOneOf,
     assertUnsignedBigInt,
+    isCompressedPoint,
     isPlainObject,
     moleculeBytes,
     moleculeDynvec,
@@ -45,21 +44,6 @@ export type InvoiceData = Pick<UnsignedInvoice, "timestampMs" | "paymentHash" | 
 const RAW_INVOICE_DATA_FIELDS = 3;
 
 /**
- * Checks that a public key is a compressed secp256k1 point, the only form fiber writes.
- * @param publicKey The key.
- * @returns Whether it is one.
- */
-function isCompressedPoint(publicKey: Uint8Array): boolean {
-    if (publicKey.length !== COMPRESSED_POINT_LENGTH) return false;
-    try {
-        secp256k1.Point.fromBytes(publicKey);
-        return true;
-    } catch {
-        return false;
-    }
-}
-
-/**
  * Serializes one attribute's union item body, the part after its id.
  * @param attribute The attribute.
  * @param name Its path, used in the error message.
@@ -84,7 +68,7 @@ function encodeAttributeItem(attribute: InvoiceAttribute, name: string): Uint8Ar
         case "udtScript":
             return moleculeTable([moleculeScript(attribute.script, `${name}.script`)]);
         case "payeePublicKey":
-            if (!(attribute.publicKey instanceof Uint8Array) || !isCompressedPoint(attribute.publicKey)) {
+            if (!isCompressedPoint(attribute.publicKey)) {
                 throw new TypeError(`${name}.publicKey must be a 33-byte compressed public key`);
             }
             return moleculeTable([moleculeBytes(attribute.publicKey)]);

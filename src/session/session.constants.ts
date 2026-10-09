@@ -9,11 +9,6 @@ export const DEFAULT_HEARTBEAT_TIMEOUT_MS = 10_000;
 export const DEFAULT_RECONNECT_POLICY: ReconnectPolicy = { initialDelayMs: 1_000, factor: 2, maxDelayMs: 30_000 };
 
 /**
- * Past a signed 32-bit delay, `setTimeout` fires immediately.
- */
-export const MAX_SESSION_DELAY_MS = 2 ** 31 - 1;
-
-/**
  * The only code below 3000 that a browser lets a client close with.
  */
 export const SESSION_NORMAL_CLOSE_CODE = 1000;

@@ -364,8 +364,9 @@ be fixed before integration against a real node.
    to know it as surely as it knows the channel index.
 4. **Nonce construction on both sides.** Only public nonces cross the wire, so the internal constructions may differ. Confirm
    during integration that fiber assumes nothing about how our secret nonce was built.
-5. **Channel index after a restore.** Re-deriving requires knowing how many channels existed. The reseeding logic belongs to the
-   persistence layer but depends on this scheme.
+5. **Channel index after a restore.** Re-deriving requires knowing which indexes existed. How an index is handed out is
+   settled, as the time of the open in seconds so that a wiped storage cannot hand one out twice ([sdk.md](./sdk.md));
+   finding the indexes of a restored device's channels again is not, and depends on this scheme.
 6. **Telling two installations apart.** `walletIdentityKey` is a function of the master seed alone, so a wallet installed on two
    devices presents one identity. If the session layer ever needs per-installation identity — revoking one device, warning about
    a second login — it needs a component that is not derived from the seed, and therefore registered with the LSP rather than

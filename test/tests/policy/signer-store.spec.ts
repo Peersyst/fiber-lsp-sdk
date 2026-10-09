@@ -5,6 +5,7 @@ import type {
     HoldInvoicePolicyRecord,
     IAsyncSignerStorage,
     ISignerStorage,
+    SignerRecordFormat,
 } from "../../../src/policy";
 import { SignerStore } from "../../../src/policy";
 
@@ -975,5 +976,165 @@ describe("hold-invoice preimages", () => {
         await store.setHoldInvoicePreimage(PAYMENT_HASH, PREIMAGE);
         expect([...storage.map.keys()].sort()).toEqual([CHANNEL_KEY, `fiber-lsp-sdk:alias:${PAYMENT_HASH}`, PREIMAGE_KEY].sort());
         await expect(store.getHoldInvoicePreimage(PAYMENT_HASH)).resolves.toBe(PREIMAGE);
+    });
+});
+
+describe("records of another module's format", () => {
+    type Counter = { count: number };
+    const KEY = "fiber-lsp-sdk:counter:test";
+    const isCounter = (value: unknown): value is Counter =>
+        typeof value === "object" && value !== null && Number.isSafeInteger((value as { count?: unknown }).count);
+    const COUNTER_FORMAT: SignerRecordFormat<Counter> = {
+        name: "counter",
+        is: isCounter,
+        assert: (name, value) => {
+            if (!isCounter(value)) throw new TypeError(`${name} is not a counter`);
+        },
+        belongsAt: (key) => key === KEY,
+    };
+    const bump = (current: Counter | null): Counter => ({ count: (current?.count ?? 0) + 1 });
+
+    it("round-trips a record through a synchronous storage under the key it was given", async () => {
+        const storage = new InMemorySignerStorage();
+        const store = new SignerStore(storage);
+        await expect(store.updateRecord(KEY, COUNTER_FORMAT, bump)).resolves.toEqual({ count: 1 });
+        await expect(store.getRecord(KEY, COUNTER_FORMAT)).resolves.toEqual({ count: 1 });
+        expect([...storage.map.entries()]).toEqual([[KEY, '{"count":1}']]);
+    });
+
+    it("round-trips a record through an asynchronous storage", async () => {
+        const store = new SignerStore(new AsyncInMemorySignerStorage());
+        await store.updateRecord(KEY, COUNTER_FORMAT, bump);
+        await expect(store.getRecord(KEY, COUNTER_FORMAT)).resolves.toEqual({ count: 1 });
+    });
+
+    it("reads null for a key never written, and passes null to the updater", async () => {
+        const store = new SignerStore(new InMemorySignerStorage());
+        await expect(store.getRecord(KEY, COUNTER_FORMAT)).resolves.toBeNull();
+        const seen: (Counter | null)[] = [];
+        await store.updateRecord(KEY, COUNTER_FORMAT, (current) => {
+            seen.push(current);
+            return bump(current);
+        });
+        expect(seen).toEqual([null]);
+    });
+
+    it("writes nothing when the updater hands back the record it was given", async () => {
+        const storage = new InMemorySignerStorage();
+        const store = new SignerStore(storage);
+        await store.updateRecord(KEY, COUNTER_FORMAT, bump);
+        storage.ops.length = 0;
+        await expect(store.updateRecord(KEY, COUNTER_FORMAT, (current) => current ?? bump(current))).resolves.toEqual({ count: 1 });
+        expect(storage.ops).toEqual([`get ${KEY}`]);
+    });
+
+    it("refuses to write a record the format refuses, or one that does not belong at the key", async () => {
+        const storage = new InMemorySignerStorage();
+        const store = new SignerStore(storage);
+        await expect(store.updateRecord(KEY, COUNTER_FORMAT, () => ({ count: 1.5 }))).rejects.toThrow(
+            new TypeError("updated record is not a counter"),
+        );
+        await expect(store.updateRecord("fiber-lsp-sdk:counter:other", COUNTER_FORMAT, bump)).rejects.toThrow(
+            new TypeError("updated record does not belong at fiber-lsp-sdk:counter:other"),
+        );
+        expect(storage.map.size).toBe(0);
+    });
+
+    it.each([
+        ["not valid JSON", "{count", "is not valid JSON"],
+        ["of the wrong shape", '{"count":"1"}', "is not a counter"],
+        ["empty", "", "is not valid JSON"],
+    ])("throws on a stored value %s, on a read and on an update alike", async (_, raw, reason) => {
+        const storage = new InMemorySignerStorage();
+        storage.map.set(KEY, raw);
+        const store = new SignerStore(storage);
+        await expect(store.getRecord(KEY, COUNTER_FORMAT)).rejects.toThrow(new TypeError(`stored value at ${KEY} ${reason}`));
+        await expect(store.updateRecord(KEY, COUNTER_FORMAT, bump)).rejects.toThrow(new TypeError(`stored value at ${KEY} ${reason}`));
+        expect(storage.map.get(KEY)).toBe(raw);
+    });
+
+    it("throws on a stored value that does not belong at its key", async () => {
+        const storage = new InMemorySignerStorage();
+        storage.map.set("fiber-lsp-sdk:counter:other", '{"count":1}');
+        await expect(new SignerStore(storage).getRecord("fiber-lsp-sdk:counter:other", COUNTER_FORMAT)).rejects.toThrow(
+            new TypeError("stored value at fiber-lsp-sdk:counter:other is not a counter"),
+        );
+    });
+
+    it("writes nothing, and resolves null, when the updater hands back the null it was given", async () => {
+        const storage = new InMemorySignerStorage();
+        const store = new SignerStore(storage);
+        await expect(store.updateRecord(KEY, COUNTER_FORMAT, (current) => current)).resolves.toBeNull();
+        expect(storage.ops).toEqual([`get ${KEY}`]);
+    });
+
+    it("refuses to write null over a record", async () => {
+        const storage = new InMemorySignerStorage();
+        const store = new SignerStore(storage);
+        await store.updateRecord(KEY, COUNTER_FORMAT, bump);
+        await expect(store.updateRecord(KEY, COUNTER_FORMAT, () => null)).rejects.toThrow(new TypeError("updated record is not a counter"));
+        expect(storage.map.get(KEY)).toBe('{"count":1}');
+    });
+
+    it.each([
+        ["a channel record", "fiber-lsp-sdk:channel:7"],
+        ["a channel alias", `fiber-lsp-sdk:alias:0x${"1f".repeat(32)}`],
+        ["a debit intent", `fiber-lsp-sdk:intent:${"ab".repeat(20)}`],
+        ["a hold invoice record", `fiber-lsp-sdk:invoice:${"ab".repeat(20)}`],
+        ["a hold invoice preimage", `fiber-lsp-sdk:preimage:${"ab".repeat(32)}`],
+        ["the balance lane", "fiber-lsp-sdk:balance"],
+    ])("refuses the key of %s, the policy's own, before touching the storage", async (_, key) => {
+        const storage = new InMemorySignerStorage();
+        const store = new SignerStore(storage);
+        const anywhere: SignerRecordFormat<Counter> = { ...COUNTER_FORMAT, belongsAt: () => true };
+        await expect(store.getRecord(key, anywhere)).rejects.toThrow(new TypeError(`key ${key} belongs to the policy`));
+        await expect(store.updateRecord(key, anywhere, bump)).rejects.toThrow(new TypeError(`key ${key} belongs to the policy`));
+        expect(storage.ops).toEqual([]);
+    });
+
+    it.each(["settings", "fiber-lsp-sdk", "fiber-lsp-sdkx:counter", "other:fiber-lsp-sdk:counter"])(
+        "refuses the key %s, outside the namespace, before touching the storage",
+        async (key) => {
+            const storage = new InMemorySignerStorage();
+            const store = new SignerStore(storage);
+            const anywhere: SignerRecordFormat<Counter> = { ...COUNTER_FORMAT, belongsAt: () => true };
+            const error = new TypeError(`key ${key} is outside the fiber-lsp-sdk namespace`);
+            await expect(store.getRecord(key, anywhere)).rejects.toThrow(error);
+            await expect(store.updateRecord(key, anywhere, bump)).rejects.toThrow(error);
+            expect(storage.ops).toEqual([]);
+        },
+    );
+
+    it("rejects an empty key before touching the storage", async () => {
+        const storage = new InMemorySignerStorage();
+        const store = new SignerStore(storage);
+        await expect(store.getRecord("", COUNTER_FORMAT)).rejects.toThrow(new TypeError("key must be a non-empty string"));
+        await expect(store.updateRecord("", COUNTER_FORMAT, bump)).rejects.toThrow(new TypeError("key must be a non-empty string"));
+        expect(storage.ops).toEqual([]);
+    });
+
+    it("serializes concurrent updates on one key instead of losing one", async () => {
+        const storage = new AsyncInMemorySignerStorage();
+        const store = new SignerStore(storage);
+        await Promise.all([
+            store.updateRecord(KEY, COUNTER_FORMAT, bump),
+            store.updateRecord(KEY, COUNTER_FORMAT, bump),
+            store.updateRecord(KEY, COUNTER_FORMAT, bump),
+        ]);
+        expect(storage.ops).toEqual([`get ${KEY}`, `set ${KEY}`, `get ${KEY}`, `set ${KEY}`, `get ${KEY}`, `set ${KEY}`]);
+        await expect(store.getRecord(KEY, COUNTER_FORMAT)).resolves.toEqual({ count: 3 });
+    });
+
+    it("serves a read issued behind a pending update the updated record", async () => {
+        const store = new SignerStore(new AsyncInMemorySignerStorage());
+        const [, read] = await Promise.all([store.updateRecord(KEY, COUNTER_FORMAT, bump), store.getRecord(KEY, COUNTER_FORMAT)]);
+        expect(read).toEqual({ count: 1 });
+    });
+
+    it("keeps its lane apart from the typed records' lanes", async () => {
+        const storage = new AsyncInMemorySignerStorage();
+        const store = new SignerStore(storage);
+        await Promise.all([store.updateRecord(KEY, COUNTER_FORMAT, bump), store.setChannelRecord(CHANNEL_INDEX, record())]);
+        expect(storage.ops).toEqual([`get ${KEY}`, `set ${CHANNEL_KEY}`, `set ${KEY}`]);
     });
 });

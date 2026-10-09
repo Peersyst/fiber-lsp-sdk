@@ -1,4 +1,3 @@
-import { secp256k1 } from "@noble/curves/secp256k1.js";
 import { equalBytes } from "@noble/curves/utils.js";
 import { bytesToHex, utf8ToBytes } from "@noble/hashes/utils.js";
 import {
@@ -8,6 +7,7 @@ import {
     PUBLIC_NONCE_LENGTH,
     assertBytes,
     ckbBlake2b,
+    isCompressedPoint,
 } from "../../common";
 import type { FiberChannelKeys } from "../../derivation";
 import { pubkeyOf } from "../../derivation";
@@ -50,14 +50,14 @@ export function assertSignSession(keys: FiberChannelKeys, session: SignSession):
         throw new TypeError("session.orderedPublicKeys must include the channel funding public key");
     }
     // The engine would refuse these too, but only after the claim, leaving the slot served with nothing signed.
-    if (!publicKeys.every(isCurvePoint)) {
+    if (!publicKeys.every(isCompressedPoint)) {
         throw new TypeError("session.orderedPublicKeys must be points on the curve");
     }
     const nonceHalves = [
         session.aggregatedNonce.subarray(0, COMPRESSED_POINT_LENGTH),
         session.aggregatedNonce.subarray(COMPRESSED_POINT_LENGTH),
     ];
-    if (!nonceHalves.every((half) => equalBytes(half, INFINITY) || isCurvePoint(half))) {
+    if (!nonceHalves.every((half) => equalBytes(half, INFINITY) || isCompressedPoint(half))) {
         throw new TypeError("session.aggregatedNonce must be two points on the curve or at infinity");
     }
 }
@@ -70,18 +70,4 @@ export function assertSignSession(keys: FiberChannelKeys, session: SignSession):
 export function buildSessionCommitment(session: SignSession): string {
     const [firstKey, secondKey] = assertSignSessionShape(session);
     return bytesToHex(ckbBlake2b(LABEL, firstKey, secondKey, session.aggregatedNonce, session.message));
-}
-
-/**
- * Checks that bytes are a compressed point on secp256k1.
- * @param bytes The 33 bytes to check.
- * @returns Whether they decode to a point.
- */
-function isCurvePoint(bytes: Uint8Array): boolean {
-    try {
-        secp256k1.Point.fromBytes(bytes);
-        return true;
-    } catch {
-        return false;
-    }
 }
