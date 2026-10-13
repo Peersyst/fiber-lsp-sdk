@@ -1,9 +1,9 @@
-import type { ScriptTemplate } from "../common";
-import { assertBytes, assertDecimalShannons } from "../common";
+import type { Script, ScriptTemplate } from "../common";
+import { assertBytes } from "../common";
 import type { FiberChannelKeys } from "../derivation";
 import { MASTER_SEED_LENGTH, deriveChannelKeys, deriveChannelSeed, deriveTlcKey } from "../derivation";
 import type { PolicyEngine } from "../policy";
-import { ANNOUNCEMENT_SLOT_NUMBER, PolicyRefusalError } from "../policy";
+import { ANNOUNCEMENT_SLOT_NUMBER, PolicyRefusalError, assertChannelOpening } from "../policy";
 import type { SignRequest, SignResult } from "../protocol";
 import { ProtocolError, decodeSignParams } from "../protocol";
 import { getBasePublicKeys, getChannelCommitmentPoint, getPublicNonce, partialSign } from "./musig2-engine";
@@ -46,15 +46,22 @@ export class SignerDispatch {
     /**
      * Derives a channel's registration: the base public keys and the delegated settlement key, never the funding key.
      * @param channelIndex Index the channel's keys derive from, allocated by the caller.
-     * @param localExposureShannons The device's share at open, in decimal shannons, filed on the acknowledgement.
+     * @param fundedShannons What the user pays into the channel, reserve included, in decimal shannons.
+     * @param localCloseScript The script the device's side of a close pays to.
      * @returns The registration to send, and what to file the channel with once the node names it.
      */
-    prepareChannelRegistration(channelIndex: number, localExposureShannons: string): PendingChannelRegistration {
-        assertDecimalShannons("localExposureShannons", localExposureShannons);
+    prepareChannelRegistration(channelIndex: number, fundedShannons: string, localCloseScript: Script): PendingChannelRegistration {
+        assertChannelOpening(fundedShannons, localCloseScript);
         const keys = this.channelKeys(channelIndex);
         return {
             channelIndex,
-            localExposureShannons,
+            fundedShannons,
+            // Copied: the caller's bytes may change before the node names the channel.
+            localCloseScript: {
+                ...localCloseScript,
+                codeHash: Uint8Array.from(localCloseScript.codeHash),
+                args: Uint8Array.from(localCloseScript.args),
+            },
             registration: { ...getBasePublicKeys(keys), localSettlementKey: keys.tlcBaseKey },
         };
     }
@@ -65,7 +72,7 @@ export class SignerDispatch {
      * @param pending The registration as prepared.
      */
     async channelRegistered(channelId: string, pending: PendingChannelRegistration): Promise<void> {
-        await this.policy.registerChannel(channelId, pending.channelIndex, pending.localExposureShannons);
+        await this.policy.registerChannel(channelId, pending.channelIndex, pending.fundedShannons, pending.localCloseScript);
     }
 
     /**

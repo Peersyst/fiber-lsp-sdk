@@ -15,7 +15,7 @@ import type { FiberChannelKeys } from "../derivation";
 import { MAX_COMMITMENT_NUMBER, pubkeyOf } from "../derivation";
 import { MAX_CAPACITY_SHANNONS, MAX_SINCE_PAYLOAD, SINCE_RELATIVE_EPOCH_FLAGS } from "./digest.constants";
 import type { RevocationInput } from "./digest.types";
-import { calculateTxFee, commitmentTxSize } from "./fee";
+import { calculateCommitmentTxFee } from "./fee";
 import { aggregateXOnlyPubkey, moleculeCellOutput, subtractTxFee, uint64Be } from "./utils";
 
 /**
@@ -39,7 +39,7 @@ export function computeRevocationDigest(keys: FiberChannelKeys, input: Revocatio
         ? [localFundingPubkey, input.remoteFundingPubkey]
         : [input.remoteFundingPubkey, localFundingPubkey];
 
-    const fee = calculateTxFee(input.commitmentFeeRate, commitmentTxSize(input.cellDepsCount, input.udtTypeScript, input.commitmentLock));
+    const fee = calculateCommitmentTxFee(input);
     const isUdt = input.udtTypeScript !== null;
     const liquidCapacity = input.toLocalShannons + input.toRemoteShannons;
     assertUnsignedBigInt("liquid capacity", liquidCapacity, MAX_AMOUNT_SHANNONS);

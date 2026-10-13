@@ -1,7 +1,5 @@
 import { concatBytes } from "@noble/hashes/utils.js";
 import {
-    HASH256_LENGTH,
-    SCRIPT_HASH_TYPES,
     SCRIPT_HASH_TYPE_BYTES,
     UINT128_LENGTH,
     UINT128_MAX,
@@ -11,8 +9,7 @@ import {
     UINT64_MAX,
 } from "../common.constants";
 import type { Script } from "../common.types";
-import { assertAnyBytes, assertBytes, assertOneOf, assertUnsignedBigInt, assertUnsignedInteger } from "./assert.utils";
-import { isPlainObject } from "./validate.utils";
+import { assertScript, assertUnsignedBigInt, assertUnsignedInteger } from "./assert.utils";
 
 /**
  * Serializes a molecule `Uint32`, little-endian.
@@ -103,10 +100,7 @@ export function moleculeBytes(data: Uint8Array): Uint8Array {
  * @returns The Script bytes.
  */
 export function moleculeScript(script: Script, name = "script"): Uint8Array {
-    if (!isPlainObject(script)) throw new TypeError(`${name} must be an object`);
-    assertBytes(`${name}.codeHash`, script.codeHash, HASH256_LENGTH);
-    assertOneOf(`${name}.hashType`, script.hashType, SCRIPT_HASH_TYPES);
-    assertAnyBytes(`${name}.args`, script.args);
+    assertScript(name, script);
     return moleculeTable([script.codeHash, Uint8Array.of(SCRIPT_HASH_TYPE_BYTES[script.hashType]), moleculeBytes(script.args)]);
 }
 

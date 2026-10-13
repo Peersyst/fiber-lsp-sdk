@@ -133,20 +133,37 @@ function mixesReleasedHeld(lists: readonly (readonly PolicyViewTlc[])[], context
 }
 
 /**
+ * Judges the first commitment a channel signs: no TLC yet, and exactly what the user paid in.
+ * @param fundedShannons The funded amount the channel was registered with.
+ * @param next What the commitment states.
+ */
+export function judgeOpeningCommitment(fundedShannons: string, next: BalanceRuleCommitment): void {
+    if (next.tlcs.length > 0) {
+        refusePolicyRequest("policy_refusal", "the channel's first commitment lists TLCs");
+    }
+    if (next.exposureShannons !== BigInt(fundedShannons)) {
+        refusePolicyRequest(
+            "policy_refusal",
+            `the channel's first commitment pays the device ${next.exposureShannons} shannons, not the ${fundedShannons} it funded`,
+        );
+    }
+}
+
+/**
  * Judges a cooperative close: no TLC left, and at least what both views last showed.
  * @param views The channel's two snapshots.
- * @param toLocalShannons What the close pays the device, before the reserve and the fee.
+ * @param payoutShannons What the close pays the device before the fee, reserve included.
  */
-export function judgeShutdown(views: Record<PolicyView, PolicyViewSnapshot>, toLocalShannons: bigint): void {
+export function judgeShutdown(views: Record<PolicyView, PolicyViewSnapshot>, payoutShannons: bigint): void {
     for (const view of POLICY_VIEWS) {
         const snapshot = views[view];
         if (snapshot.tlcs.length > 0) {
             refusePolicyRequest("policy_refusal", `a cooperative close while the ${view} commitment still lists TLCs`);
         }
-        if (toLocalShannons < BigInt(snapshot.exposureShannons)) {
+        if (payoutShannons < BigInt(snapshot.exposureShannons)) {
             refusePolicyRequest(
                 "policy_refusal",
-                `the close pays the device ${toLocalShannons} shannons, below the ${snapshot.exposureShannons} of the ${view} commitment`,
+                `the close pays the device ${payoutShannons} shannons, below the ${snapshot.exposureShannons} of the ${view} commitment`,
             );
         }
     }

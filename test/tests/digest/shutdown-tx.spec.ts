@@ -80,6 +80,15 @@ describe("computeShutdownTxDigest", () => {
         expect(() => digestOf({ remoteFeeRate: (1n << 63n) / 100n })).toThrow(RangeError);
     });
 
+    it("refuses two sides that each fit in a u64 but together exceed the funding cell's", () => {
+        const { toRemoteShannons, localReservedCkbShannons, remoteReservedCkbShannons } = BASE_INPUT;
+        const fullCell = (1n << 64n) - 1n - toRemoteShannons - localReservedCkbShannons - remoteReservedCkbShannons;
+        expect(() => digestOf({ toLocalShannons: fullCell })).not.toThrow();
+        expect(() => digestOf({ toLocalShannons: fullCell + 1n })).toThrow(
+            new RangeError("funding capacity must be a bigint between 0 and 18446744073709551615, got 18446744073709551616"),
+        );
+    });
+
     it("refuses malformed inputs, one field at a time", () => {
         expect(() => digestOf({ remoteFundingPubkey: new Uint8Array(32) })).toThrow(TypeError);
         expect(() => digestOf({ localFeeRate: -1n })).toThrow(RangeError);

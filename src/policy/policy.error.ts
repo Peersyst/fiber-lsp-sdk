@@ -1,5 +1,5 @@
 import type { SignerErrorCode } from "../common";
-import type { DebitIntentErrorCode, HoldInvoiceErrorCode } from "./policy.types";
+import type { ChannelPinConflict, DebitIntentErrorCode, HoldInvoiceErrorCode } from "./policy.types";
 
 export class PolicyRefusalError extends Error {
     readonly code: SignerErrorCode;
@@ -58,5 +58,20 @@ export class HoldInvoiceError extends Error {
         super(message);
         this.name = "HoldInvoiceError";
         this.code = code;
+    }
+}
+
+export class FundingCellError extends Error {
+    readonly conflict: ChannelPinConflict;
+
+    /**
+     * Creates the error.
+     * @param channelId The channel, as the host named it.
+     * @param conflict The pinned value and the one the host stated.
+     */
+    constructor(channelId: string, conflict: ChannelPinConflict) {
+        super(`channel ${channelId} already pins ${conflict.field} to ${conflict.pinned}, not ${conflict.stated}`);
+        this.name = "FundingCellError";
+        this.conflict = conflict;
     }
 }

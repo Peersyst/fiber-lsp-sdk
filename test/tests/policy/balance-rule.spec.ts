@@ -2,7 +2,7 @@ import { hexToBytes } from "@noble/hashes/utils.js";
 import type { TlcHashAlgorithm } from "../../../src/common";
 import type { BalanceRuleContext, PolicyView, PolicyViewSnapshot, PolicyViewTlc } from "../../../src/policy";
 import { PolicyRefusalError } from "../../../src/policy";
-import { judgeCommitment, judgeShutdown, toPolicyViewTlcs } from "../../../src/policy/balance-rule";
+import { judgeCommitment, judgeOpeningCommitment, judgeShutdown, toPolicyViewTlcs } from "../../../src/policy/balance-rule";
 
 const HASH_A = "aa".repeat(20);
 const HASH_B = "bb".repeat(20);
@@ -1499,6 +1499,29 @@ describe("judgeCommitment", () => {
             );
             expect(next.tlcs).toHaveLength(2);
         });
+    });
+});
+
+describe("judgeOpeningCommitment", () => {
+    it("signs a first commitment that lists nothing and pays exactly what was funded", () => {
+        expect(() => judgeOpeningCommitment("1000", { exposureShannons: 1000n, tlcs: [] })).not.toThrow();
+    });
+
+    it.each([
+        ["one shannon more", 1001n],
+        ["one shannon less", 999n],
+    ])("refuses a first commitment paying %s than was funded", (_, exposure) => {
+        const refusal = refusalOf(() => judgeOpeningCommitment("1000", { exposureShannons: exposure, tlcs: [] }));
+        expect(refusal.code).toBe("policy_refusal");
+        expect(refusal.message).toBe(`the channel's first commitment pays the device ${exposure} shannons, not the 1000 it funded`);
+    });
+
+    it.each([
+        ["an offered", off(HASH_A, "1", "1700000000", "ckb-hash")],
+        ["a received", rec(HASH_R, "1", "1700000000", "ckb-hash")],
+    ])("refuses a first commitment that lists %s TLC, whatever it pays", (_, tlc) => {
+        const refusal = refusalOf(() => judgeOpeningCommitment("1000", { exposureShannons: 1000n, tlcs: [tlc] }));
+        expect(refusal.message).toBe("the channel's first commitment lists TLCs");
     });
 });
 

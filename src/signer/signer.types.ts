@@ -1,4 +1,4 @@
-import type { ScriptTemplate } from "../common";
+import type { Script, ScriptTemplate } from "../common";
 import type { NonceContext } from "../derivation";
 import type { PolicyEngine, SignSession } from "../policy";
 import type { ChannelRegistration, SignError, SignResult } from "../protocol";
@@ -25,6 +25,7 @@ export type DispatchOutcome =
 
 export type PendingChannelRegistration = {
     channelIndex: number;
-    localExposureShannons: string;
+    fundedShannons: string;
+    localCloseScript: Script;
     registration: ChannelRegistration;
 };

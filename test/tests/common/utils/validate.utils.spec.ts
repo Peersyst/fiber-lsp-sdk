@@ -2,6 +2,7 @@ import {
     isCanonicalDecimal,
     isDecimalShannons,
     isHexBytes,
+    isNonEmptyHexBytes,
     isNonEmptyString,
     isPlainObject,
     isUnsignedInteger,
@@ -52,6 +53,26 @@ describe("isHexBytes", () => {
 
     it("rejects a non-string", () => {
         expect(isHexBytes(42, 32)).toBe(false);
+    });
+});
+
+describe("isNonEmptyHexBytes", () => {
+    it.each(["00", "ab".repeat(53), "0123456789abcdef"])("accepts %s", (value) => {
+        expect(isNonEmptyHexBytes(value)).toBe(true);
+    });
+
+    it.each([
+        ["the empty string", ""],
+        ["half a byte", "abc"],
+        ["uppercase hex", "AB"],
+        ["a 0x prefix", "0xab"],
+        ["an odd character", "gg"],
+    ])("rejects %s", (_, value) => {
+        expect(isNonEmptyHexBytes(value)).toBe(false);
+    });
+
+    it("rejects a non-string", () => {
+        expect(isNonEmptyHexBytes(42)).toBe(false);
     });
 });
 

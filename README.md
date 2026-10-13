@@ -59,7 +59,7 @@ Full index in [docs/README.md](./docs/README.md). The load-bearing ones:
   the inputs they take.
 - [How signatures are produced](./docs/signing.md): the musig2 engine, its deterministic nonces, the conditions that
   make them safe, and the dispatch that gates every signature at one call site.
-- [What the device refuses](./docs/policy.md): the five checks every request passes, and the sign-once rule those
+- [What the device refuses](./docs/policy.md): the six checks every request passes, and the sign-once rule those
   conditions rest on.
 - [What crosses the wire](./docs/protocol.md): the remote signing protocol as proposed for review, its encodings, and
   what a frame that does not decode is answered with.

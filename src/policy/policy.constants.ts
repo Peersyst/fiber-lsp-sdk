@@ -1,3 +1,5 @@
+import { SHANNONS_PER_CKB } from "../common";
+
 /**
  * Namespaced: the host may back the storage with a store it also uses for its own keys.
  */
@@ -28,6 +30,37 @@ export const POLICY_VIEWS = ["remote", "local"] as const;
 export const DEBIT_INTENT_ERROR_CODES = ["intent_open", "intent_charged", "own_invoice"] as const;
 
 export const HOLD_INVOICE_ERROR_CODES = ["offered_in_flight", "algorithm_mismatch"] as const;
+
+/**
+ * Pinned to the first value stated; the other pins are fixed at registration.
+ */
+export const FIRST_SIGHT_CHANNEL_PINS = [
+    "fundingOutPoint",
+    "fundingCapacityShannons",
+    "liquidCapacityShannons",
+    "remoteFundingPubkey",
+    "remoteTlcBasePubkey",
+    "commitmentDelayEpoch",
+    "commitmentFeeRate",
+    "remoteReservedCkbShannons",
+] as const;
+
+/**
+ * Fiber's `DEFAULT_MIN_SHUTDOWN_FEE`.
+ */
+export const RESERVED_SHUTDOWN_FEE_SHANNONS = SHANNONS_PER_CKB;
+
+/**
+ * Stricter than fiber, which bounds the close fee by the balance.
+ */
+export const MAX_SHUTDOWN_FEE_SHANNONS = RESERVED_SHUTDOWN_FEE_SHANNONS;
+
+/**
+ * Fiber's `check_commitment_reserved_fee`, rechecked because the node supplies the rate.
+ */
+export const MAX_COMMITMENT_FEE_SHANNONS = RESERVED_SHUTDOWN_FEE_SHANNONS / 2n;
+
+export const SHANNONS_PER_OCCUPIED_BYTE = SHANNONS_PER_CKB;
 
 /**
  * Past this many offered TLCs leaving at once, all are charged: the exact search is exponential.

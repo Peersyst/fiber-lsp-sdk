@@ -52,13 +52,22 @@ the durable store for channel state.
 | `lastSignedCommitmentNumbers` | Last commitment number signed per context, strictly increasing                            |
 | `signedSessions`              | Sign-once registry: the session served in each `<context>:<number>` slot                  |
 | `lastStateVersion`            | Last state version seen from the node, non-decreasing                                     |
+| `pins`                        | The channel's constant values, each held to one value for the channel's life              |
 | `views`                       | One snapshot per commitment the device signs, `remote` (the peer's) and `local` (its own) |
+
+`pins` holds four values from the registration, `fundedShannons` and `localReservedCkbShannons` (base 10),
+`localCloseScript` (the script's molecule bytes, hex) and `udtTypeScript` (always `null`), and eight more that are absent
+until the host or the first message stating them sets them: `fundingOutPoint` (`<tx hash hex>:<index>`),
+`fundingCapacityShannons`, `liquidCapacityShannons`, `commitmentDelayEpoch`, `commitmentFeeRate` and
+`remoteReservedCkbShannons` (base 10), and
+`remoteFundingPubkey` and `remoteTlcBasePubkey` (33 bytes, hex). One canonical string per value, so a pin is compared by
+equality ([policy.md](./policy.md)). A pin is never cleared: an absent one reads as not seen yet, never as unknown.
 
 A view's snapshot holds:
 
 | Field              | What it holds                                                                                                 |
 | ------------------ | ------------------------------------------------------------------------------------------------------------- |
-| `exposureShannons` | The device's TLC-adjusted share after the last message signed in the view, integer shannons in base 10        |
+| `exposureShannons` | What that message's witness paid the device, reserve included, integer shannons in base 10                    |
 | `tlcs`             | The TLCs that message listed: direction, hash algorithm, `boundPaymentHash`, amount, expiry in seconds; no id |
 | `chargedShannons`  | Per `<boundHash>`, what offered TLCs that left the view took with them                                        |
 | `creditedShannons` | Per `<boundHash>`, what received TLCs of a released invoice had to pay the view                               |
@@ -68,9 +77,10 @@ Two fields carry more than their name suggests, and [policy.md](./policy.md) is 
 - `signedSessions` stores a commitment to the whole triple a signature answers (the ordered key list, the aggregated nonce
   and the message), not to the message alone. Storing only the message would let a node re-ask one slot under three
   aggregated nonces of its choosing and recover the funding key.
-- `exposureShannons` is fiber's settlement amount, not the raw balance: it drops the moment an offered TLC is committed,
-  which is while the device can still refuse, rather than later when the TLC settles. It is kept per view because the two
-  commitments do not list the same TLCs at the same time.
+- `exposureShannons` is fiber's settlement amount plus the device's reserve, not the raw balance: it drops the moment an
+  offered TLC is committed, which is while the device can still refuse, rather than later when the TLC settles. With the
+  reserve in it, a view opens at the funded amount. It is kept per view because the two commitments do not list the same
+  TLCs at the same time.
 
 Two rules keep the sign-once registry trustworthy:
 

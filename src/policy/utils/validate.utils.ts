@@ -1,25 +1,40 @@
 import {
+    COMPRESSED_POINT_LENGTH,
+    HASH256_LENGTH,
     MESSAGE_DIGEST_LENGTH,
     PAYMENT_HASH_LENGTH,
     TLC_DIRECTIONS,
     TLC_HASH_ALGORITHMS,
     TRUNCATED_PAYMENT_HASH_LENGTH,
+    UINT32_MAX,
     UINT64_MAX,
     isCanonicalDecimal,
     isDecimalShannons,
     isHexBytes,
+    isNonEmptyHexBytes,
     isNonEmptyString,
     isPlainObject,
     isUnsignedInteger,
 } from "../../common";
 import { MAX_CHANNEL_INDEX, MAX_COMMITMENT_NUMBER, NONCE_CONTEXTS } from "../../derivation";
-import { CHANNEL_POLICY_RECORD_VERSION, PAYMENT_RECORD_VERSION, POLICY_VIEWS } from "../policy.constants";
-import type { ChannelPolicyRecord, DebitIntentRecord, HoldInvoicePolicyRecord } from "../policy.types";
+import { CHANNEL_POLICY_RECORD_VERSION, FIRST_SIGHT_CHANNEL_PINS, PAYMENT_RECORD_VERSION, POLICY_VIEWS } from "../policy.constants";
+import type { ChannelPolicyRecord, DebitIntentRecord, FirstSightChannelPin, HoldInvoicePolicyRecord } from "../policy.types";
 
 const CONTEXTS: readonly string[] = NONCE_CONTEXTS;
 const DIRECTIONS: readonly unknown[] = TLC_DIRECTIONS;
 const HASH_ALGORITHMS: readonly unknown[] = TLC_HASH_ALGORITHMS;
-const MAX_EXPIRY_DIGITS = UINT64_MAX.toString().length;
+const MAX_UINT64_DIGITS = UINT64_MAX.toString().length;
+
+const FIRST_SIGHT_PIN_FORMS: Record<FirstSightChannelPin, (value: string) => boolean> = {
+    fundingOutPoint: isOutPointPin,
+    fundingCapacityShannons: isUint64Decimal,
+    liquidCapacityShannons: isDecimalShannons,
+    remoteFundingPubkey: (value) => isHexBytes(value, COMPRESSED_POINT_LENGTH),
+    remoteTlcBasePubkey: (value) => isHexBytes(value, COMPRESSED_POINT_LENGTH),
+    commitmentDelayEpoch: isUint64Decimal,
+    commitmentFeeRate: isUint64Decimal,
+    remoteReservedCkbShannons: isUint64Decimal,
+};
 
 /**
  * Checks that a value has the exact shape of a stored {@link ChannelPolicyRecord}. Unknown extra fields are tolerated.
@@ -34,6 +49,7 @@ export function isChannelPolicyRecord(value: unknown): value is ChannelPolicyRec
         isContextCounterMap(value.lastSignedCommitmentNumbers) &&
         isSignedSessionMap(value.signedSessions) &&
         isUnsignedInteger(value.lastStateVersion, Number.MAX_SAFE_INTEGER) &&
+        isChannelPins(value.pins) &&
         isViewSnapshotPair(value.views)
     );
 }
@@ -69,6 +85,48 @@ export function isHoldInvoicePolicyRecord(value: unknown): value is HoldInvoiceP
         typeof value.released === "boolean" &&
         isChannelIndexSet(value.channelIndexes)
     );
+}
+
+/**
+ * Checks that a value is a channel's pins.
+ * @param value Value to check.
+ * @returns Whether the value holds the pins.
+ */
+function isChannelPins(value: unknown): boolean {
+    if (!isPlainObject(value)) return false;
+    return (
+        typeof value.fundedShannons === "string" &&
+        isUint64Decimal(value.fundedShannons) &&
+        isNonEmptyHexBytes(value.localCloseScript) &&
+        typeof value.localReservedCkbShannons === "string" &&
+        isUint64Decimal(value.localReservedCkbShannons) &&
+        value.udtTypeScript === null &&
+        FIRST_SIGHT_CHANNEL_PINS.every((pin) => {
+            const pinned = value[pin];
+            return pinned === undefined || (typeof pinned === "string" && FIRST_SIGHT_PIN_FORMS[pin](pinned));
+        })
+    );
+}
+
+/**
+ * Checks that a value is an out point in its pin form, `<tx hash hex>:<index>`.
+ * @param value Value to check.
+ * @returns Whether the value is an out point pin.
+ */
+function isOutPointPin(value: string): boolean {
+    const separator = value.indexOf(":");
+    if (separator === -1) return false;
+    const index = value.slice(separator + 1);
+    return isHexBytes(value.slice(0, separator), HASH256_LENGTH) && isCanonicalDecimal(index) && Number(index) <= UINT32_MAX;
+}
+
+/**
+ * Checks that a value is a u64 in canonical decimal.
+ * @param value Value to check.
+ * @returns Whether the value is one.
+ */
+function isUint64Decimal(value: string): boolean {
+    return value.length <= MAX_UINT64_DIGITS && isCanonicalDecimal(value) && BigInt(value) <= UINT64_MAX;
 }
 
 /**
@@ -110,9 +168,7 @@ function isViewTlc(value: unknown): boolean {
         isHexBytes(value.boundPaymentHash, TRUNCATED_PAYMENT_HASH_LENGTH) &&
         isDecimalShannons(value.amountShannons) &&
         typeof value.expirySeconds === "string" &&
-        value.expirySeconds.length <= MAX_EXPIRY_DIGITS &&
-        isCanonicalDecimal(value.expirySeconds) &&
-        BigInt(value.expirySeconds) <= UINT64_MAX
+        isUint64Decimal(value.expirySeconds)
     );
 }
 

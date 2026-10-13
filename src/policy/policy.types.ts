@@ -4,6 +4,7 @@ import type { ChannelAnnouncementInput, CommitmentTxInput, RevocationInput, Shut
 import type {
     CHANNEL_POLICY_RECORD_VERSION,
     DEBIT_INTENT_ERROR_CODES,
+    FIRST_SIGHT_CHANNEL_PINS,
     HOLD_INVOICE_ERROR_CODES,
     PAYMENT_RECORD_VERSION,
     POLICY_VIEWS,
@@ -27,10 +28,45 @@ export type ChannelPolicyRecord = {
      */
     signedSessions: Partial<Record<SignSlot, string>>;
     lastStateVersion: number;
+    pins: ChannelPins;
     /**
      * One per commitment: the two may list different TLCs.
      */
     views: Record<PolicyView, PolicyViewSnapshot>;
+};
+
+export type FirstSightChannelPin = (typeof FIRST_SIGHT_CHANNEL_PINS)[number];
+
+/**
+ * Canonical strings, so pins compare by equality.
+ */
+export type ChannelPins = {
+    /**
+     * Reserve included.
+     */
+    fundedShannons: string;
+    /**
+     * Molecule hex.
+     */
+    localCloseScript: string;
+    /**
+     * Fiber sizes it over `localCloseScript`.
+     */
+    localReservedCkbShannons: string;
+    /**
+     * CKB channels only, until the multi-asset shape is decided.
+     */
+    udtTypeScript: null;
+} & Partial<Record<FirstSightChannelPin, string>>;
+
+export type StatedChannelPins = Partial<Record<FirstSightChannelPin | "localCloseScript" | "localReservedCkbShannons", string>> & {
+    udtTypeScript?: string | null;
+};
+
+export type ChannelPinConflict = {
+    field: keyof StatedChannelPins;
+    pinned: string | null;
+    stated: string | null;
 };
 
 /**
@@ -57,7 +93,7 @@ export type PolicyViewTlc = {
  */
 export type PolicyViewSnapshot = {
     /**
-     * Fiber's TLC-adjusted settlement amount, not the raw balance, in decimal shannons.
+     * Fiber's TLC-adjusted settlement amount plus the reserve, not the raw balance, in decimal shannons.
      */
     exposureShannons: string;
     tlcs: PolicyViewTlc[];

@@ -203,6 +203,7 @@ use ckb_types::packed::{
     Byte, Bytes as PackedBytes, BytesVec, CellDep, CellDepVec, CellInput, CellInputVec, CellOutput, CellOutputVec,
     OutPoint as PackedOutPoint, RawTransaction, Script as PackedScript, ScriptOpt, Transaction,
 };
+use ckb_types::core::Capacity;
 use ckb_types::prelude::*;
 
 const FUNDING_CELL_WITNESS_LEN: usize = 112;
@@ -210,6 +211,8 @@ const COMMITMENT_LOCK_ARGS_PLACEHOLDER_LEN: usize = 57;
 const SINCE_RELATIVE_EPOCH_FLAGS: u64 = 0xA000_0000_0000_0000;
 const SINCE_ABSOLUTE_TIMESTAMP_FLAG: u64 = 0x4000_0000_0000_0000;
 const FEE_RATE_WEIGHT_SCALE: u128 = 1000;
+/// fiber `DEFAULT_MIN_SHUTDOWN_FEE`.
+const DEFAULT_MIN_SHUTDOWN_FEE: u64 = 100_000_000;
 
 fn blake160(data: &[u8]) -> [u8; 20] {
     blake2b_256(data)[0..20].try_into().unwrap()
@@ -400,6 +403,22 @@ fn shutdown_tx_size(cell_deps_count: usize, udt_type_script: &Option<ScriptVecto
     mock_tx_size(cell_deps_count, outputs, vec![data.pack(), data.pack()])
 }
 
+/// fiber `reserved_capacity` on a CKB channel.
+fn reserved_capacity(shutdown_script: &ScriptVector) -> u64 {
+    let script = packed_script(shutdown_script);
+    let min_lock_script = if script.args().raw_data().len() < COMMITMENT_LOCK_ARGS_PLACEHOLDER_LEN {
+        PackedScript::new_builder().args(vec![0u8; COMMITMENT_LOCK_ARGS_PLACEHOLDER_LEN].pack()).build()
+    } else {
+        script
+    };
+    let occupied = CellOutput::new_builder()
+        .lock(min_lock_script)
+        .build()
+        .occupied_capacity(Capacity::bytes(0).unwrap())
+        .unwrap();
+    occupied.as_u64() + DEFAULT_MIN_SHUTDOWN_FEE
+}
+
 /// fiber `checked_fee_from_rate`: truncating division by the 1000-byte weight scale.
 fn fee_from_rate(fee_rate: u64, tx_size: u64) -> u64 {
     u64::try_from(u128::from(fee_rate) * u128::from(tx_size) / FEE_RATE_WEIGHT_SCALE).unwrap()
@@ -443,6 +462,14 @@ struct DigestVectors {
     shutdown_cases: Vec<ShutdownCaseVector>,
     revocation_cases: Vec<RevocationCaseVector>,
     announcement_cases: Vec<AnnouncementCaseVector>,
+    reserve_cases: Vec<ReserveCaseVector>,
+}
+
+#[derive(Serialize, Deserialize)]
+struct ReserveCaseVector {
+    name: String,
+    shutdown_script: ScriptVector,
+    reserved: String,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -1061,6 +1088,9 @@ fn digest_vectors(local: &FiberSigner) -> DigestVectors {
         },
     ];
 
+    // The device computes its own reserve and refuses any other.
+    let local_reserved = reserved_capacity(&local_close).to_string();
+
     let commitment_case =|name: &str, for_remote: bool| CommitmentCaseVector {
         name: name.to_string(),
         for_remote,
@@ -1074,7 +1104,7 @@ fn digest_vectors(local: &FiberSigner) -> DigestVectors {
         to_remote: "18500000000".to_string(),
         settlement_local: "59750000000".to_string(),
         settlement_remote: "16250000000".to_string(),
-        local_reserved: "4200000000".to_string(),
+        local_reserved: local_reserved.clone(),
         remote_reserved: "6300000000".to_string(),
         tlcs: Vec::new(),
         settlement_witness: String::new(),
@@ -1087,6 +1117,16 @@ fn digest_vectors(local: &FiberSigner) -> DigestVectors {
     let commitment_cases = vec![
         build_commitment_case(local, &remote, &commitment_lock, {
             let mut case = commitment_case("ckb, no tlcs, for remote", true);
+            case.commitment_number = 0;
+            case.settlement_local = case.to_local.clone();
+            case.settlement_remote = case.to_remote.clone();
+            case
+        }),
+        // The next case's opening: the device signs no later state before it.
+        build_commitment_case(local, &remote, &commitment_lock, {
+            let mut case = commitment_case("ckb, three tlcs channel, opening, for remote", true);
+            case.funding_out_point = OutPointVector { index: 3, ..funding.clone() };
+            case.fee_rate = "1537".to_string();
             case.commitment_number = 0;
             case.settlement_local = case.to_local.clone();
             case.settlement_remote = case.to_remote.clone();
@@ -1130,7 +1170,7 @@ fn digest_vectors(local: &FiberSigner) -> DigestVectors {
         udt_type_script: None,
         to_local: "62000000000".to_string(),
         to_remote: "18500000000".to_string(),
-        local_reserved: "4200000000".to_string(),
+        local_reserved: local_reserved.clone(),
         remote_reserved: "6300000000".to_string(),
         tx_size: 0,
         local_fee: String::new(),
@@ -1160,7 +1200,7 @@ fn digest_vectors(local: &FiberSigner) -> DigestVectors {
         udt_type_script: None,
         to_local: "62000000000".to_string(),
         to_remote: "18500000000".to_string(),
-        local_reserved: "4200000000".to_string(),
+        local_reserved: local_reserved.clone(),
         remote_reserved: "6300000000".to_string(),
         fee: String::new(),
         digest: String::new(),
@@ -1209,6 +1249,27 @@ fn digest_vectors(local: &FiberSigner) -> DigestVectors {
         }),
     ];
 
+    // Both sides of the 57-byte floor: the reserve reads only the args' length.
+    let reserve_cases = [
+        ("no args", "data", 0),
+        ("20-byte args", "type", 20),
+        ("56-byte args", "data1", 56),
+        ("57-byte args", "data2", 57),
+        ("58-byte args", "type", 58),
+        ("100-byte args", "type", 100),
+    ]
+    .into_iter()
+    .map(|(name, hash_type, args_len)| {
+        let shutdown_script = ScriptVector {
+            code_hash: hex::encode(blake2b_256(name.as_bytes())),
+            hash_type: hash_type.to_string(),
+            args: hex::encode(vec![0x5a; args_len]),
+        };
+        let reserved = reserved_capacity(&shutdown_script).to_string();
+        ReserveCaseVector { name: name.to_string(), shutdown_script, reserved }
+    })
+    .collect();
+
     DigestVectors {
         commitment_lock,
         remote: RemoteSignerVector {
@@ -1220,6 +1281,7 @@ fn digest_vectors(local: &FiberSigner) -> DigestVectors {
         shutdown_cases,
         revocation_cases,
         announcement_cases,
+        reserve_cases,
     }
 }
 

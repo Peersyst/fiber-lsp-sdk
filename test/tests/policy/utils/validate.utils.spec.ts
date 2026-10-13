@@ -1,4 +1,10 @@
-import type { ChannelPolicyRecord, DebitIntentRecord, HoldInvoicePolicyRecord, PolicyViewSnapshot } from "../../../../src/policy";
+import type {
+    ChannelPins,
+    ChannelPolicyRecord,
+    DebitIntentRecord,
+    HoldInvoicePolicyRecord,
+    PolicyViewSnapshot,
+} from "../../../../src/policy";
 import { isChannelPolicyRecord, isDebitIntentRecord, isHoldInvoicePolicyRecord } from "../../../../src/policy/utils/validate.utils";
 
 const MAX_COMMITMENT_NUMBER = 2 ** 48 - 1;
@@ -11,8 +17,30 @@ describe("isChannelPolicyRecord", () => {
             lastSignedCommitmentNumbers: { COMMITMENT: 5, REVOKE: 4 },
             signedSessions: { "COMMITMENT:5": "ab".repeat(32) },
             lastStateVersion: 7,
+            pins: pins(),
             views: { remote: snapshot(), local: snapshot() },
         };
+    }
+
+    function pins(): ChannelPins {
+        return {
+            fundedShannons: "71900000000",
+            localCloseScript: "55000000100000003000000031000000" + "74".repeat(32) + "01" + "0400000000",
+            localReservedCkbShannons: "9900000000",
+            udtTypeScript: null,
+            fundingOutPoint: `${"6f".repeat(32)}:0`,
+            fundingCapacityShannons: "96700000000",
+            liquidCapacityShannons: "80500000000",
+            remoteFundingPubkey: "02" + "63".repeat(32),
+            remoteTlcBasePubkey: "03" + "25".repeat(32),
+            commitmentDelayEpoch: "1099511627777",
+            commitmentFeeRate: "1000",
+            remoteReservedCkbShannons: "6300000000",
+        };
+    }
+
+    function withPins(override: Record<string, unknown>): Record<string, unknown> {
+        return { ...record(), pins: { ...pins(), ...override } };
     }
 
     function snapshot(): PolicyViewSnapshot {
@@ -50,6 +78,12 @@ describe("isChannelPolicyRecord", () => {
                 ...record(),
                 lastSignedCommitmentNumbers: {},
                 signedSessions: {},
+                pins: {
+                    fundedShannons: "0",
+                    localCloseScript: pins().localCloseScript,
+                    localReservedCkbShannons: "0",
+                    udtTypeScript: null,
+                },
                 views: {
                     remote: { exposureShannons: "0", tlcs: [], chargedShannons: {}, creditedShannons: {} },
                     local: { exposureShannons: "0", tlcs: [], chargedShannons: {}, creditedShannons: {} },
@@ -116,6 +150,70 @@ describe("isChannelPolicyRecord", () => {
         ["a view that is not an object", { views: { remote: snapshot(), local: "snapshot" } }],
     ])("rejects a record with %s", (_, override) => {
         expect(isChannelPolicyRecord({ ...record(), ...override })).toBe(false);
+    });
+
+    it.each(["fundedShannons", "localCloseScript", "localReservedCkbShannons", "udtTypeScript"])(
+        "rejects pins missing %s, fixed at registration",
+        (field) => {
+            const value: Record<string, unknown> = pins();
+            delete value[field];
+            expect(isChannelPolicyRecord({ ...record(), pins: value })).toBe(false);
+        },
+    );
+
+    it.each(Object.keys(pins()).slice(4))("accepts pins that have not seen %s yet", (field) => {
+        const value: Record<string, unknown> = pins();
+        delete value[field];
+        expect(isChannelPolicyRecord({ ...record(), pins: value })).toBe(true);
+    });
+
+    it.each([["pins that are not an object", { pins: [] }]])("rejects a record with %s", (_, override) => {
+        expect(isChannelPolicyRecord({ ...record(), ...override })).toBe(false);
+    });
+
+    it.each([
+        ["a funded amount with a leading zero", { fundedShannons: "01" }],
+        ["a numeric funded amount", { fundedShannons: 1 }],
+        ["an empty close script", { localCloseScript: "" }],
+        ["an uppercase close script", { localCloseScript: "AB" }],
+        ["a close script of half a byte", { localCloseScript: "abc" }],
+        ["a close script that is not hex", { localCloseScript: "zz" }],
+        ["a close script that is not a string", { localCloseScript: 5 }],
+        ["a UDT script", { udtTypeScript: "ab".repeat(53) }],
+        ["an absent UDT script", { udtTypeScript: undefined }],
+        ["an out point without an index", { fundingOutPoint: "6f".repeat(32) }],
+        ["an out point under a short hash", { fundingOutPoint: `${"6f".repeat(31)}:0` }],
+        ["an out point with a non-canonical index", { fundingOutPoint: `${"6f".repeat(32)}:01` }],
+        ["an out point index above u32", { fundingOutPoint: `${"6f".repeat(32)}:4294967296` }],
+        ["a numeric funding capacity", { fundingCapacityShannons: 96700000000 }],
+        ["a funding capacity above u64", { fundingCapacityShannons: "18446744073709551616" }],
+        ["a liquid capacity that is not decimal", { liquidCapacityShannons: "0x1" }],
+        ["a peer funding key of 32 bytes", { remoteFundingPubkey: "63".repeat(32) }],
+        ["an uppercase peer TLC base key", { remoteTlcBasePubkey: "03" + "AB".repeat(32) }],
+        ["a delay above u64", { commitmentDelayEpoch: "18446744073709551616" }],
+        ["a fee rate with a leading zero", { commitmentFeeRate: "01000" }],
+        ["a negative local reserve", { localReservedCkbShannons: "-1" }],
+        ["a numeric local reserve", { localReservedCkbShannons: 9900000000 }],
+        ["a remote reserve of more digits than u64 has", { remoteReservedCkbShannons: "1".repeat(21) }],
+        ["a pin set to null", { commitmentFeeRate: null }],
+    ])("rejects pins with %s", (_, override) => {
+        expect(isChannelPolicyRecord(withPins(override))).toBe(false);
+    });
+
+    it("accepts the boundary out point index and u64 values", () => {
+        expect(
+            isChannelPolicyRecord(
+                withPins({
+                    fundingOutPoint: `${"6f".repeat(32)}:4294967295`,
+                    commitmentDelayEpoch: "18446744073709551615",
+                    remoteReservedCkbShannons: "18446744073709551615",
+                }),
+            ),
+        ).toBe(true);
+    });
+
+    it("tolerates an unknown extra pin", () => {
+        expect(isChannelPolicyRecord(withPins({ futurePin: "x" }))).toBe(true);
     });
 
     it("tolerates an unknown extra key beside the two views", () => {

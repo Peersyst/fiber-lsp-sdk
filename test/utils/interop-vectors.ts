@@ -113,6 +113,12 @@ export type AnnouncementCaseVector = {
     digest: string;
 };
 
+export type ReserveCaseVector = {
+    name: string;
+    shutdown_script: ScriptVector;
+    reserved: string;
+};
+
 export type DigestVectors = {
     commitment_lock: ScriptVector;
     remote: { seed: string; funding_pubkey: string; tlc_base_pubkey: string };
@@ -120,6 +126,7 @@ export type DigestVectors = {
     shutdown_cases: ShutdownCaseVector[];
     revocation_cases: RevocationCaseVector[];
     announcement_cases: AnnouncementCaseVector[];
+    reserve_cases: ReserveCaseVector[];
 };
 
 export type Vectors = {
@@ -256,6 +263,14 @@ function asDigestVectors(value: unknown): DigestVectors {
                 node_ids: [nodeIds[0] as string, nodeIds[1] as string],
                 udt_type_script: asNullable(record.udt_type_script, `${path}.udt_type_script`, asScript),
                 ...asStringFields(record, path, ["name", "chain_hash", "capacity", "digest"] as const),
+            };
+        }),
+        reserve_cases: asArray(root.reserve_cases, "digest.reserve_cases").map((entry, index) => {
+            const path = `digest.reserve_cases[${index}]`;
+            const record = asRecord(entry, path);
+            return {
+                shutdown_script: asScript(record.shutdown_script, `${path}.shutdown_script`),
+                ...asStringFields(record, path, ["name", "reserved"] as const),
             };
         }),
     };
