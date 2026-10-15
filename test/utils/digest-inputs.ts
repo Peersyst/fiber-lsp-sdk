@@ -1,6 +1,13 @@
 import { hexToBytes } from "@noble/hashes/utils.js";
 import type { OutPoint, Script, ScriptHashType, TlcDirection, TlcHashAlgorithm } from "../../src/common";
-import type { ChannelAnnouncementInput, CommitmentTxInput, RevocationInput, SettlementTlc, ShutdownTxInput } from "../../src/digest";
+import type {
+    ChannelAnnouncementInput,
+    CommitmentLockLayout,
+    CommitmentTxInput,
+    RevocationInput,
+    SettlementTlc,
+    ShutdownTxInput,
+} from "../../src/digest";
 import { COMMITMENT_LOCK_TESTNET } from "../../src/digest";
 import type {
     AnnouncementCaseVector,
@@ -24,6 +31,12 @@ export function toScriptOrNull(vector: ScriptVector | null): Script | null {
 
 export function toOutPoint(vector: OutPointVector): OutPoint {
     return { txHash: hexToBytes(vector.tx_hash), index: vector.index };
+}
+
+export function toLockLayout(vector: string): CommitmentLockLayout {
+    if (vector === "legacy") return "legacy";
+    if (vector === "full_payment_hash") return "fullPaymentHash";
+    throw new Error(`the vectors carry an unknown lock layout: ${vector}`);
 }
 
 export function toTlc(vector: TlcVector): SettlementTlc {
@@ -58,6 +71,7 @@ export function toCommitmentTxInput(kase: CommitmentCaseVector, remote: RemotePu
         remoteReservedCkbShannons: BigInt(kase.remote_reserved),
         tlcs: kase.tlcs.map(toTlc),
         commitmentLock: COMMITMENT_LOCK_TESTNET,
+        lockLayout: toLockLayout(kase.lock_layout),
     };
 }
 
@@ -93,6 +107,7 @@ export function toRevocationInput(kase: RevocationCaseVector, remote: RemotePubk
         localReservedCkbShannons: BigInt(kase.local_reserved),
         remoteReservedCkbShannons: BigInt(kase.remote_reserved),
         commitmentLock: COMMITMENT_LOCK_TESTNET,
+        lockLayout: toLockLayout(kase.lock_layout),
     };
 }
 

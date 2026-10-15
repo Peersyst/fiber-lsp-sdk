@@ -22,10 +22,18 @@ const CKB_CAPACITY_PINS = {
     remoteReservedCkbShannons: "6300000000",
 };
 
+// The full-hash cases: the device's reserve one byte larger, and the funding cell with it.
+const CKB_FULL_HASH_CAPACITY_PINS = {
+    liquidCapacityShannons: "80500000000",
+    fundingCapacityShannons: "96800000000",
+    localReservedCkbShannons: "10000000000",
+    remoteReservedCkbShannons: "6300000000",
+};
+
 const PINS: ChannelPins = {
     fundedShannons: "71900000000",
     localCloseScript: LOCAL_CLOSE_SCRIPT_PIN,
-    localReservedCkbShannons: "9900000000",
+    localReservedCkbShannons: { legacy: "9900000000", fullPaymentHash: "10000000000" },
     udtTypeScript: null,
     fundingOutPoint: `${FUNDING_TX_HASH}:0`,
     commitmentFeeRate: "1000",
@@ -41,7 +49,7 @@ describe("fundingCellPins", () => {
 });
 
 describe("statedChannelPins", () => {
-    it("reads what a commitment states: the funding cell, the peer's keys, the delay, the rate, the reserves and the asset", () => {
+    it("reads what a commitment states: the funding cell, the peer's keys, the delay, the rate, the reserves, the asset and the layout", () => {
         const input = toCommitmentTxInput(caseOf(digest.commitment_cases, "ckb, no tlcs, for remote"), digest.remote);
         expect(statedChannelPins({ kind: "commitment_tx", input })).toEqual<StatedChannelPins>({
             ...CKB_CAPACITY_PINS,
@@ -51,7 +59,33 @@ describe("statedChannelPins", () => {
             commitmentDelayEpoch: "1099511627777",
             commitmentFeeRate: "1000",
             udtTypeScript: null,
+            lockLayout: "legacy",
         });
+    });
+
+    it("reads the full-hash layout a commitment is written under, with the reserve it states under it", () => {
+        const input = toCommitmentTxInput(caseOf(digest.commitment_cases, "ckb, three tlcs, for remote, full payment hash"), digest.remote);
+        expect(statedChannelPins({ kind: "commitment_tx", input })).toEqual<StatedChannelPins>({
+            ...CKB_FULL_HASH_CAPACITY_PINS,
+            fundingOutPoint: `${FUNDING_TX_HASH}:3`,
+            remoteFundingPubkey: REMOTE_FUNDING_PUBKEY,
+            remoteTlcBasePubkey: REMOTE_TLC_BASE_PUBKEY,
+            commitmentDelayEpoch: "1099511627777",
+            commitmentFeeRate: "1537",
+            udtTypeScript: null,
+            lockLayout: "fullPaymentHash",
+        });
+    });
+
+    // A conflict names the first value that differs: the layout decides the reserve, so it is read right after the asset.
+    it("states the asset first and the layout second", () => {
+        const input = toCommitmentTxInput(caseOf(digest.commitment_cases, "ckb, no tlcs, for remote"), digest.remote);
+        expect(Object.keys(statedChannelPins({ kind: "commitment_tx", input })).slice(0, 2)).toEqual(["udtTypeScript", "lockLayout"]);
+        const revocation = toRevocationInput(caseOf(digest.revocation_cases, "ckb, send side"), digest.remote);
+        expect(Object.keys(statedChannelPins({ kind: "revocation", input: revocation })).slice(0, 2)).toEqual([
+            "udtTypeScript",
+            "lockLayout",
+        ]);
     });
 
     it("reads the UDT script of a UDT commitment, and its funding cell's capacity in CKB beside its liquid amount", () => {
@@ -63,7 +97,7 @@ describe("statedChannelPins", () => {
         });
     });
 
-    it("reads what a close states, the script it pays the device to included", () => {
+    it("reads what a close states, the script it pays the device to included and no layout", () => {
         const input = toShutdownTxInput(caseOf(digest.shutdown_cases, "ckb"), digest.remote);
         expect(statedChannelPins({ kind: "shutdown_tx", input })).toEqual<StatedChannelPins>({
             ...CKB_CAPACITY_PINS,
@@ -74,7 +108,7 @@ describe("statedChannelPins", () => {
         });
     });
 
-    it("reads what a revocation the device sends states, leaving its payout out: it is the peer's script", () => {
+    it("reads what a revocation the device sends states, its layout included, leaving its payout out: it is the peer's script", () => {
         const input = toRevocationInput(caseOf(digest.revocation_cases, "ckb, send side"), digest.remote);
         expect(statedChannelPins({ kind: "revocation", input })).toEqual<StatedChannelPins>({
             ...CKB_CAPACITY_PINS,
@@ -82,6 +116,19 @@ describe("statedChannelPins", () => {
             commitmentDelayEpoch: "1099511627777",
             commitmentFeeRate: "1000",
             udtTypeScript: null,
+            lockLayout: "legacy",
+        });
+    });
+
+    it("reads the full-hash layout a revocation is sized under", () => {
+        const input = toRevocationInput(caseOf(digest.revocation_cases, "ckb, send side, full payment hash"), digest.remote);
+        expect(statedChannelPins({ kind: "revocation", input })).toEqual<StatedChannelPins>({
+            ...CKB_FULL_HASH_CAPACITY_PINS,
+            remoteFundingPubkey: REMOTE_FUNDING_PUBKEY,
+            commitmentDelayEpoch: "1099511627777",
+            commitmentFeeRate: "1000",
+            udtTypeScript: null,
+            lockLayout: "fullPaymentHash",
         });
     });
 
@@ -96,11 +143,12 @@ describe("statedChannelPins", () => {
             commitmentDelayEpoch: "1099511627777",
             commitmentFeeRate: "1000",
             udtTypeScript: UDT_SCRIPT_PIN,
+            lockLayout: "legacy",
             localCloseScript: LOCAL_CLOSE_SCRIPT_PIN,
         });
     });
 
-    it("reads what an announcement states, its capacity being the liquid one", () => {
+    it("reads what an announcement states, its capacity being the liquid one and no layout", () => {
         const input = toChannelAnnouncementInput(caseOf(digest.announcement_cases, "ckb"), digest.remote);
         expect(statedChannelPins({ kind: "channel_announcement", input })).toEqual<StatedChannelPins>({
             fundingOutPoint: `${FUNDING_TX_HASH}:0`,
@@ -140,6 +188,88 @@ describe("findChannelPinConflict", () => {
     it("skips a value a statement leaves undefined", () => {
         expect(findChannelPinConflict(PINS, { commitmentFeeRate: undefined })).toBeNull();
     });
+
+    it("finds another layout than the one pinned", () => {
+        expect(findChannelPinConflict({ ...PINS, lockLayout: "fullPaymentHash" }, { lockLayout: "legacy" })).toEqual({
+            field: "lockLayout",
+            pinned: "fullPaymentHash",
+            stated: "legacy",
+        });
+    });
+
+    describe("the device's reserve", () => {
+        it.each([
+            ["legacy", "9900000000"],
+            ["fullPaymentHash", "10000000000"],
+        ])("holds a statement declaring the %s layout to the reserve computed under it", (layout, reserved) => {
+            expect(findChannelPinConflict(PINS, { lockLayout: layout, localReservedCkbShannons: reserved })).toBeNull();
+        });
+
+        it.each([
+            ["legacy", "10000000000", "9900000000"],
+            ["fullPaymentHash", "9900000000", "10000000000"],
+        ])(
+            "finds the other layout's reserve under a statement declaring %s, naming the value computed under it",
+            (layout, stated, pinned) => {
+                expect(findChannelPinConflict(PINS, { lockLayout: layout, localReservedCkbShannons: stated })).toEqual({
+                    field: "localReservedCkbShannons",
+                    pinned,
+                    stated,
+                });
+            },
+        );
+
+        // The statement's layout decides, even against a pinned one: its own conflict is named first by the statement's order.
+        it("reads the reserve under the layout the statement declares before the one pinned", () => {
+            const pins = { ...PINS, lockLayout: "legacy" };
+            expect(findChannelPinConflict(pins, { localReservedCkbShannons: "10000000000", lockLayout: "fullPaymentHash" })).toEqual({
+                field: "lockLayout",
+                pinned: "legacy",
+                stated: "fullPaymentHash",
+            });
+            expect(findChannelPinConflict(pins, { lockLayout: "fullPaymentHash", localReservedCkbShannons: "9900000000" })).toEqual({
+                field: "lockLayout",
+                pinned: "legacy",
+                stated: "fullPaymentHash",
+            });
+        });
+
+        it.each([
+            ["legacy", "9900000000", "10000000000"],
+            ["fullPaymentHash", "10000000000", "9900000000"],
+        ])("holds a statement declaring no layout to the reserve under the pinned %s one", (layout, reserved, other) => {
+            const pins = { ...PINS, lockLayout: layout };
+            expect(findChannelPinConflict(pins, { localReservedCkbShannons: reserved })).toBeNull();
+            expect(findChannelPinConflict(pins, { localReservedCkbShannons: other })).toEqual({
+                field: "localReservedCkbShannons",
+                pinned: reserved,
+                stated: other,
+            });
+        });
+
+        // A close before any commitment: the node picks between the two values the device computed.
+        it("accepts either reserve from a statement declaring no layout while none is pinned", () => {
+            expect(findChannelPinConflict(PINS, { localReservedCkbShannons: "9900000000" })).toBeNull();
+            expect(findChannelPinConflict(PINS, { localReservedCkbShannons: "10000000000" })).toBeNull();
+        });
+
+        it.each(["9899999999", "9900000001", "9999999999", "10000000001", "0"])(
+            "finds the reserve %s against both values while no layout is known, naming both",
+            (stated) => {
+                expect(findChannelPinConflict(PINS, { localReservedCkbShannons: stated })).toEqual({
+                    field: "localReservedCkbShannons",
+                    pinned: "9900000000 under legacy or 10000000000 under fullPaymentHash",
+                    stated,
+                });
+            },
+        );
+
+        it("names the layout before the reserve when both differ", () => {
+            expect(
+                findChannelPinConflict({ ...PINS, lockLayout: "fullPaymentHash" }, { lockLayout: "legacy", localReservedCkbShannons: "0" }),
+            ).toEqual({ field: "lockLayout", pinned: "fullPaymentHash", stated: "legacy" });
+        });
+    });
 });
 
 describe("withChannelPins", () => {
@@ -150,6 +280,21 @@ describe("withChannelPins", () => {
             ...PINS,
             commitmentDelayEpoch: "1",
             remoteFundingPubkey: "02",
+        });
+    });
+
+    it("pins the layout once, as any first-sight value", () => {
+        const pinned = withChannelPins(PINS, { lockLayout: "fullPaymentHash" });
+        expect(pinned).toEqual<ChannelPins>({ ...PINS, lockLayout: "fullPaymentHash" });
+        expect(withChannelPins(pinned, { lockLayout: "fullPaymentHash" })).toBe(pinned);
+        expect(withChannelPins(pinned, { lockLayout: "legacy" })).toBe(pinned);
+    });
+
+    it("never rewrites the reserves computed at registration, whatever a statement states", () => {
+        expect(withChannelPins(PINS, { localReservedCkbShannons: "10000000000" })).toBe(PINS);
+        expect(withChannelPins(PINS, { localReservedCkbShannons: "1", lockLayout: "legacy" })).toEqual<ChannelPins>({
+            ...PINS,
+            lockLayout: "legacy",
         });
     });
 

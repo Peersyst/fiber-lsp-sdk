@@ -7,19 +7,27 @@ use ckb_jsonrpc_types::{
 use ckb_types::packed::{BytesOpt, WitnessArgs};
 use ckb_types::prelude::*;
 use ckb_types::H256;
-use fiber_types::{FeatureVector, InvoiceSignature};
+use fiber_types::{FeatureVector, InvoiceSignature, TenantId};
 use fiber_json_types::{
-    AbandonChannelParams, Attribute, AwaitingChannelReadyFlags, AwaitingTxSignaturesFlags, Channel, ChannelState,
-    CkbInvoice, CkbInvoiceStatus, CloseFlags, CollaboratingFundingTxFlags, Currency, GetInvoiceResult,
-    GetPaymentCommandParams, GetPaymentCommandResult, Hash256, HashAlgorithm, Htlc, InboundTlcStatus,
-    InvoiceData, InvoiceParams, InvoiceResult, ListChannelsParams, ListChannelsResult, NegotiatingFundingFlags,
-    NewInvoiceParams, OpenChannelWithExternalFundingParams, OpenChannelWithExternalFundingResult,
-    OutboundTlcStatus, PaymentCustomRecords, PaymentStatus, Pubkey, SendPaymentCommandParams,
-    SettleInvoiceParams, SettleInvoiceResult, ShuttingDownFlags, SigningCommitmentFlags,
-    SubmitSignedFundingTxParams, SubmitSignedFundingTxResult, TlcStatus,
+    AbandonChannelParams, Attribute, AwaitingChannelReadyFlags, AwaitingTxSignaturesFlags, Channel,
+    ChannelBasePublicKeys, ChannelOpenSignerMaterial, ChannelSigningStatus, ChannelState, CkbInvoice,
+    CkbInvoiceStatus, CloseFlags, CollaboratingFundingTxFlags, Currency, GetChannelSigningStatusParams,
+    GetChannelSigningStatusResult, GetInvoiceResult, GetLspTenantRegistryNonceParams,
+    GetLspTenantRegistryNonceResult, GetPaymentCommandParams, GetPaymentCommandResult,
+    GetWatchtowerSigningStatusParams, GetWatchtowerSigningStatusResult, Hash256, HashAlgorithm, Htlc,
+    InboundTlcStatus, InvoiceData, InvoiceParams, InvoiceResult, ListChannelsParams, ListChannelsResult,
+    LspTenantRuntimeStatus, LspTenantStatus, NegotiatingFundingFlags, NewInvoiceParams, NextChannelSignerMaterial,
+    OpenChannelWithExternalFundingParams, OpenChannelWithExternalFundingResult, OpenTenantChannelResult,
+    OutboundTlcStatus, PaymentCustomRecords, PaymentStatus, Pubkey, RegisterLspTenantParams,
+    RegisterLspTenantResult, SendPaymentCommandParams, SettleInvoiceParams, SettleInvoiceResult,
+    ShutdownChannelParams, ShuttingDownFlags, SigningCommitmentFlags, SubmitChannelSignatureParams,
+    SubmitChannelSignatureResult, SubmitSignedFundingTxParams, SubmitSignedFundingTxResult,
+    SubmitWatchtowerSignatureParams, SubmitWatchtowerSignatureResult, TenantChannelOpeningContext, TlcStatus,
+    WatchtowerSigningStatus,
 };
 use jsonrpsee_types::error::CALL_EXECUTION_FAILED_CODE;
 use jsonrpsee_types::{ErrorCode, ErrorObject, Id, Params, Request, Response, ResponsePayload};
+use musig2::SecNonceBuilder;
 use secp030::ecdsa::{RecoverableSignature, RecoveryId};
 use secp030::{Message, SECP256K1};
 use secp256k1::SecretKey;
@@ -94,6 +102,14 @@ struct MethodVectors {
     cancel_invoice: MethodCases,
     send_payment: MethodCases,
     get_payment: MethodCases,
+    open_tenant_channel: MethodCases,
+    shutdown_channel: MethodCases,
+    get_channel_signing_status: MethodCases,
+    submit_channel_signature: MethodCases,
+    get_watchtower_signing_status: MethodCases,
+    submit_watchtower_signature: MethodCases,
+    lsp_get_tenant_registry_nonce: MethodCases,
+    lsp_register_tenant: MethodCases,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -319,6 +335,126 @@ struct GetInvoiceResultValues {
     status: String,
 }
 
+#[derive(Serialize)]
+struct SignerMaterialValues {
+    funding_pubkey: String,
+    tlc_base_key: String,
+    first_commitment_point: String,
+    second_commitment_point: String,
+    commitment_nonce: String,
+    next_commitment_nonce: String,
+    revocation_nonce: String,
+    channel_announcement_nonce: Option<String>,
+}
+
+#[derive(Serialize)]
+struct OpenTenantChannelParamsValues {
+    pubkey: String,
+    funding_amount: String,
+    shutdown_script: ScriptVector,
+    funding_lock_script: ScriptVector,
+    commitment_delay_epoch: Option<String>,
+    commitment_fee_rate: Option<String>,
+    external_channel_signer: SignerMaterialValues,
+}
+
+#[derive(Serialize)]
+struct OpeningContextValues {
+    remote_funding_key: String,
+    remote_settlement_key: String,
+    remote_shutdown_script: ScriptVector,
+    commitment_delay_epoch: String,
+    commitment_fee_rate: String,
+    local_amount: String,
+    remote_amount: String,
+    local_reserved_ckb_amount: String,
+    remote_reserved_ckb_amount: String,
+}
+
+#[derive(Serialize)]
+struct OpenTenantChannelResultValues {
+    channel_id: String,
+    unsigned_funding_tx: TransactionValues,
+    opening_context: OpeningContextValues,
+}
+
+#[derive(Serialize)]
+struct ShutdownChannelParamsValues {
+    channel_id: String,
+    close_script: Option<ScriptVector>,
+    fee_rate: Option<String>,
+    force: Option<bool>,
+}
+
+#[derive(Serialize)]
+struct SigningStatusResultValues {
+    channel_id: String,
+    status: String,
+}
+
+#[derive(Serialize)]
+struct NextMaterialValues {
+    next_commitment_point: String,
+    next_commitment_nonce: String,
+    next_revocation_nonce: String,
+}
+
+#[derive(Serialize)]
+struct SubmitChannelSignatureParamsValues {
+    channel_id: String,
+    request_id: String,
+    partial_signature: String,
+    next_material: Option<NextMaterialValues>,
+}
+
+#[derive(Serialize)]
+struct SubmitWatchtowerSignatureParamsValues {
+    channel_id: String,
+    request_id: String,
+    signature: String,
+}
+
+#[derive(Serialize)]
+struct SubmissionResultValues {
+    outcome: String,
+}
+
+#[derive(Serialize)]
+struct RootSignerPubkeyParamsValues {
+    root_signer_pubkey: String,
+}
+
+#[derive(Serialize)]
+struct TenantRegistryNonceResultValues {
+    lsp_node_id: String,
+    root_signer_pubkey: String,
+    nonce: String,
+}
+
+#[derive(Serialize)]
+struct RegisterTenantParamsValues {
+    root_signer_pubkey: String,
+    nonce: String,
+    signature: String,
+}
+
+#[derive(Serialize)]
+struct TenantStatusValues {
+    tenant_id: String,
+    root_signer_pubkey: Option<String>,
+    invoice_pubkey: String,
+    private_channel_id: Option<String>,
+    created_at: String,
+    runtime_status: String,
+    channel_online: bool,
+}
+
+#[derive(Serialize)]
+struct RegisterTenantResultValues {
+    tenant: TenantStatusValues,
+    access_token: String,
+}
+
 // --- from the harness's forms to fiber's types ---
 
 fn bytes_of<const N: usize>(hex_str: &str) -> [u8; N] {
@@ -347,6 +483,10 @@ fn u128_of(decimal: &str) -> u128 {
 
 fn json_bytes(hex_str: &str) -> JsonBytes {
     JsonBytes::from_vec(hex::decode(hex_str).unwrap())
+}
+
+fn vec_of(hex_str: &str) -> Vec<u8> {
+    hex::decode(hex_str).unwrap()
 }
 
 fn json_script(script: &ScriptVector) -> Script {
@@ -442,6 +582,39 @@ fn hash_algorithms() -> Vec<HashAlgorithm> {
     all
 }
 
+fn tenant_runtime_statuses() -> Vec<LspTenantRuntimeStatus> {
+    use LspTenantRuntimeStatus::*;
+    let all = vec![Cold, Active];
+    for status in &all {
+        match status {
+            Cold | Active => {}
+        }
+    }
+    all
+}
+
+fn channel_submission_results() -> Vec<SubmitChannelSignatureResult> {
+    use SubmitChannelSignatureResult::*;
+    let all = vec![Applied, AlreadyApplied];
+    for result in &all {
+        match result {
+            Applied | AlreadyApplied => {}
+        }
+    }
+    all
+}
+
+fn watchtower_submission_results() -> Vec<SubmitWatchtowerSignatureResult> {
+    use SubmitWatchtowerSignatureResult::*;
+    let all = vec![Applied, AlreadyApplied];
+    for result in &all {
+        match result {
+            Applied | AlreadyApplied => {}
+        }
+    }
+    all
+}
+
 fn channel_states() -> Vec<ChannelState> {
     use ChannelState::*;
     let all = vec![
@@ -497,6 +670,15 @@ fn named<T: Serialize + Copy>(all: &[T], name: &str) -> T {
     *all.iter().find(|value| name_of(*value) == name).unwrap_or_else(|| panic!("fiber has no {name}"))
 }
 
+/// The variant name of a union fiber tags with `type`.
+fn tag_of<T: Serialize>(value: &T) -> String {
+    serde_json::to_value(value).unwrap()["type"].as_str().unwrap().to_string()
+}
+
+fn tagged<T: Serialize + Copy>(all: &[T], name: &str) -> T {
+    *all.iter().find(|value| tag_of(*value) == name).unwrap_or_else(|| panic!("fiber has no {name}"))
+}
+
 fn emitted_flags(state: &Value) -> Vec<String> {
     state
         .get("state_flags")
@@ -548,6 +730,32 @@ fn assert_coverage(methods: &MethodVectors) {
         set(invoice_params.iter().map(|params| text(&params["hash_algorithm"])).collect()),
         set(hash_algorithms().iter().map(name_of).collect()),
         "hash algorithms"
+    );
+    assert_eq!(
+        set(values(&[&methods.lsp_register_tenant]).iter().map(|result| text(&result["tenant"]["runtime_status"])).collect()),
+        set(tenant_runtime_statuses().iter().map(name_of).collect()),
+        "tenant runtime statuses"
+    );
+    assert_eq!(
+        set(values(&[&methods.submit_channel_signature]).iter().map(|result| text(&result["outcome"])).collect()),
+        set(channel_submission_results().iter().map(tag_of).collect()),
+        "channel submission results"
+    );
+    assert_eq!(
+        set(values(&[&methods.submit_watchtower_signature]).iter().map(|result| text(&result["outcome"])).collect()),
+        set(watchtower_submission_results().iter().map(tag_of).collect()),
+        "watchtower submission results"
+    );
+    // The `SignatureRequired` statuses arrive with the signing task; until then every status case is the idle one.
+    assert_eq!(
+        set(values(&[&methods.get_channel_signing_status]).iter().map(|result| text(&result["status"])).collect()),
+        set(vec![tag_of(&ChannelSigningStatus::NoSignatureRequired)]),
+        "channel signing statuses"
+    );
+    assert_eq!(
+        set(values(&[&methods.get_watchtower_signing_status]).iter().map(|result| text(&result["status"])).collect()),
+        set(vec![tag_of(&WatchtowerSigningStatus::NoSignatureRequired)]),
+        "watchtower signing statuses"
     );
 }
 
@@ -603,6 +811,7 @@ fn json_invoice(invoice: &InvoiceValues) -> CkbInvoice {
 fn json_payment(payment: &PaymentValues) -> GetPaymentCommandResult {
     GetPaymentCommandResult {
         payment_hash: hash256(&payment.payment_hash),
+        payment_preimage: None,
         status: named(&payment_statuses(), &payment.status),
         created_at: u64_of(&payment.created_at),
         last_updated_at: u64_of(&payment.last_updated_at),
@@ -946,16 +1155,112 @@ fn attr(name: &str, value: Value) -> AttributeValues {
     AttributeValues { name: name.to_string(), value }
 }
 
+fn signing_key(label: &str) -> secp030::SecretKey {
+    secp030::SecretKey::from_slice(&blake2b_256(label.as_bytes())).unwrap()
+}
+
+fn signed_message(label: &str) -> Message {
+    Message::from_digest(blake2b_256(label.as_bytes()))
+}
+
+/// The 65 bytes of a recoverable signature: the compact form, then the recovery id.
+fn recoverable_signature_hex(key: &str, label: &str) -> String {
+    let (recovery_id, compact) =
+        SECP256K1.sign_ecdsa_recoverable(&signed_message(label), &signing_key(key)).serialize_compact();
+    hex::encode([compact.as_slice(), &[i32::from(recovery_id) as u8]].concat())
+}
+
+fn compact_signature_hex(key: &str, label: &str) -> String {
+    hex::encode(SECP256K1.sign_ecdsa(&signed_message(label), &signing_key(key)).serialize_compact())
+}
+
+/// A musig2 public nonce from a fixed seed, as the device publishes it: 66 bytes.
+fn pubnonce_hex(label: &str) -> String {
+    hex::encode(SecNonceBuilder::new(blake2b_256(label.as_bytes())).build().public_nonce().serialize())
+}
+
+fn signer_material(label: &str, announced: bool) -> SignerMaterialValues {
+    SignerMaterialValues {
+        funding_pubkey: pubkey_hex(&format!("{label} funding")),
+        tlc_base_key: pubkey_hex(&format!("{label} tlc base")),
+        first_commitment_point: pubkey_hex(&format!("{label} commitment point 1")),
+        second_commitment_point: pubkey_hex(&format!("{label} commitment point 2")),
+        commitment_nonce: pubnonce_hex(&format!("{label} commitment nonce")),
+        next_commitment_nonce: pubnonce_hex(&format!("{label} next commitment nonce")),
+        revocation_nonce: pubnonce_hex(&format!("{label} revocation nonce")),
+        channel_announcement_nonce: announced.then(|| pubnonce_hex(&format!("{label} announcement nonce"))),
+    }
+}
+
+fn json_signer_material(material: &SignerMaterialValues) -> ChannelOpenSignerMaterial {
+    ChannelOpenSignerMaterial {
+        base_public_keys: ChannelBasePublicKeys {
+            funding_pubkey: pubkey(&material.funding_pubkey),
+            tlc_base_key: pubkey(&material.tlc_base_key),
+        },
+        first_commitment_point: pubkey(&material.first_commitment_point),
+        second_commitment_point: pubkey(&material.second_commitment_point),
+        commitment_nonce: vec_of(&material.commitment_nonce),
+        next_commitment_nonce: vec_of(&material.next_commitment_nonce),
+        revocation_nonce: vec_of(&material.revocation_nonce),
+        channel_announcement_nonce: material.channel_announcement_nonce.as_deref().map(vec_of),
+    }
+}
+
+fn json_opening_context(context: &OpeningContextValues) -> TenantChannelOpeningContext {
+    TenantChannelOpeningContext {
+        remote_funding_key: pubkey(&context.remote_funding_key),
+        remote_settlement_key: pubkey(&context.remote_settlement_key),
+        remote_shutdown_script: json_script(&context.remote_shutdown_script),
+        commitment_delay_epoch: Uint64::from(u64_of(&context.commitment_delay_epoch)),
+        commitment_fee_rate: u64_of(&context.commitment_fee_rate),
+        local_amount: u128_of(&context.local_amount),
+        remote_amount: u128_of(&context.remote_amount),
+        local_reserved_ckb_amount: u64_of(&context.local_reserved_ckb_amount),
+        remote_reserved_ckb_amount: u64_of(&context.remote_reserved_ckb_amount),
+    }
+}
+
+fn opening_context(label: &str) -> OpeningContextValues {
+    OpeningContextValues {
+        remote_funding_key: pubkey_hex(&format!("{label} remote funding")),
+        remote_settlement_key: pubkey_hex(&format!("{label} remote settlement")),
+        remote_shutdown_script: sighash_script(&format!("{label} remote shutdown args")),
+        commitment_delay_epoch: ((1u64 << 40) | 1).to_string(),
+        commitment_fee_rate: "1000".to_string(),
+        local_amount: "62000000000".to_string(),
+        remote_amount: "18500000000".to_string(),
+        local_reserved_ckb_amount: "9900000000".to_string(),
+        remote_reserved_ckb_amount: "6300000000".to_string(),
+    }
+}
+
+fn json_tenant_status(tenant: &TenantStatusValues) -> LspTenantStatus {
+    LspTenantStatus {
+        tenant_id: tenant.tenant_id.clone(),
+        root_signer_pubkey: tenant.root_signer_pubkey.as_deref().map(pubkey),
+        invoice_pubkey: pubkey(&tenant.invoice_pubkey),
+        private_channel_id: tenant.private_channel_id.as_deref().map(hash256),
+        created_at: u64_of(&tenant.created_at),
+        runtime_status: named(&tenant_runtime_statuses(), &tenant.runtime_status),
+        channel_online: tenant.channel_online,
+    }
+}
+
+/// The id fiber derives for a root signer, bare hex as `TenantId` writes it.
+fn tenant_id(root_signer_pubkey: &str) -> String {
+    TenantId::from_root_signer_pubkey(&fiber_types::Pubkey(bytes_of(root_signer_pubkey))).as_str().to_string()
+}
+
+fn submission_case<T: Serialize + Copy>(all: &[T], name: &str, outcome: &str) -> Case {
+    case(name, &SubmissionResultValues { outcome: outcome.to_string() }, &tagged(all, outcome))
+}
+
 fn invoice(label: &str, currency: &str, amount: Option<&str>, signed: bool, attrs: Vec<AttributeValues>) -> InvoiceValues {
     InvoiceValues {
         currency: currency.to_string(),
         amount: amount.map(str::to_string),
-        signature: signed.then(|| {
-            let seckey = secp030::SecretKey::from_slice(&blake2b_256(b"lsp node")).unwrap();
-            let message = Message::from_digest(blake2b_256(label.as_bytes()));
-            let (recovery_id, compact) = SECP256K1.sign_ecdsa_recoverable(&message, &seckey).serialize_compact();
-            hex::encode([compact.as_slice(), &[i32::from(recovery_id) as u8]].concat())
-        }),
+        signature: signed.then(|| recoverable_signature_hex("lsp node", label)),
         data: InvoiceDataValues {
             timestamp: "1726000000000".to_string(),
             payment_hash: hash_hex(&format!("payment hash {label}")),
@@ -1042,6 +1347,7 @@ fn methods() -> MethodVectors {
             tlc_fee_proportional_millionths: None,
             max_tlc_value_in_flight: None,
             max_tlc_number_in_flight: None,
+            external_channel_signer: None,
         };
         case(name, &values, &json)
     };
@@ -1137,6 +1443,150 @@ fn methods() -> MethodVectors {
 
     let (get_invoice_params, get_payment_params) = payment_hash_params("by payment hash", &payment_hash);
     let (cancel_invoice_params, _) = payment_hash_params("by payment hash", &hash_hex("payment hash cancelled"));
+
+    let open_tenant_channel = |name: &str, values: OpenTenantChannelParamsValues| {
+        let json = OpenChannelWithExternalFundingParams {
+            pubkey: pubkey(&values.pubkey),
+            funding_amount: u128_of(&values.funding_amount),
+            public: Some(false),
+            funding_udt_type_script: None,
+            shutdown_script: json_script(&values.shutdown_script),
+            funding_lock_script: json_script(&values.funding_lock_script),
+            funding_lock_script_cell_deps: None,
+            commitment_delay_epoch: values.commitment_delay_epoch.as_deref().map(|epoch| Uint64::from(u64_of(epoch))),
+            commitment_fee_rate: values.commitment_fee_rate.as_deref().map(u64_of),
+            funding_fee_rate: None,
+            tlc_expiry_delta: None,
+            tlc_min_value: None,
+            tlc_fee_proportional_millionths: None,
+            max_tlc_value_in_flight: None,
+            max_tlc_number_in_flight: None,
+            external_channel_signer: Some(json_signer_material(&values.external_channel_signer)),
+        };
+        case(name, &values, &json)
+    };
+    let open_tenant_result = |name: &str, values: OpenTenantChannelResultValues| {
+        let json = OpenTenantChannelResult {
+            channel_id: hash256(&values.channel_id),
+            unsigned_funding_tx: json_transaction(&values.unsigned_funding_tx),
+            opening_context: json_opening_context(&values.opening_context),
+        };
+        case(name, &values, &json)
+    };
+    let shutdown_channel = |name: &str, values: ShutdownChannelParamsValues| {
+        let json = ShutdownChannelParams {
+            channel_id: hash256(&values.channel_id),
+            close_script: values.close_script.as_ref().map(json_script),
+            fee_rate: values.fee_rate.as_deref().map(u64_of),
+            force: values.force,
+        };
+        case(name, &values, &json)
+    };
+    let submit_channel_signature = |name: &str, values: SubmitChannelSignatureParamsValues| {
+        let json = SubmitChannelSignatureParams {
+            channel_id: hash256(&values.channel_id),
+            request_id: hash256(&values.request_id),
+            partial_signature: bytes_of(&values.partial_signature),
+            next_material: values.next_material.as_ref().map(|material| NextChannelSignerMaterial {
+                next_commitment_point: Some(pubkey(&material.next_commitment_point)),
+                next_commitment_nonce: Some(vec_of(&material.next_commitment_nonce)),
+                next_revocation_nonce: Some(vec_of(&material.next_revocation_nonce)),
+            }),
+        };
+        case(name, &values, &json)
+    };
+    let register_tenant_result = |name: &str, values: RegisterTenantResultValues| {
+        let json = RegisterLspTenantResult {
+            tenant: json_tenant_status(&values.tenant),
+            access_token: values.access_token.clone(),
+        };
+        case(name, &values, &json)
+    };
+
+    let tenant_channel_id = hash_hex("channel tenant");
+    let tenant_shutdown = sighash_script("tenant shutdown args");
+    let tenant_lock = sighash_script("tenant lock args");
+    let tenant_open = |delay: Option<&str>, fee_rate: Option<&str>, announced: bool| OpenTenantChannelParamsValues {
+        pubkey: peer.clone(),
+        funding_amount: "80500000000".to_string(),
+        shutdown_script: tenant_shutdown.clone(),
+        funding_lock_script: tenant_lock.clone(),
+        commitment_delay_epoch: delay.map(str::to_string),
+        commitment_fee_rate: fee_rate.map(str::to_string),
+        external_channel_signer: signer_material("tenant", announced),
+    };
+    let mut large_context = opening_context("large");
+    large_context.commitment_delay_epoch = ((12u64 << 40) | (3 << 24) | 7).to_string();
+    large_context.commitment_fee_rate = u64::MAX.to_string();
+    large_context.local_amount = u128::MAX.to_string();
+    large_context.remote_amount = u128::MAX.to_string();
+    large_context.local_reserved_ckb_amount = u64::MAX.to_string();
+    large_context.remote_reserved_ckb_amount = u64::MAX.to_string();
+    let signing_status = |name: &str| {
+        let values = SigningStatusResultValues {
+            channel_id: tenant_channel_id.clone(),
+            status: tag_of(&ChannelSigningStatus::NoSignatureRequired),
+        };
+        (
+            case(
+                name,
+                &values,
+                &GetChannelSigningStatusResult {
+                    channel_id: hash256(&values.channel_id),
+                    status: ChannelSigningStatus::NoSignatureRequired,
+                },
+            ),
+            case(
+                name,
+                &values,
+                &GetWatchtowerSigningStatusResult {
+                    channel_id: hash256(&values.channel_id),
+                    status: WatchtowerSigningStatus::NoSignatureRequired,
+                },
+            ),
+        )
+    };
+    let (channel_status_result, watchtower_status_result) = signing_status("no signature required");
+    let status_params = ChannelIdParamsValues { channel_id: tenant_channel_id.clone() };
+    let request_id = hash_hex("signing request");
+    let submit_signature = |next_material: Option<NextMaterialValues>| SubmitChannelSignatureParamsValues {
+        channel_id: tenant_channel_id.clone(),
+        request_id: request_id.clone(),
+        partial_signature: hash_hex("partial signature"),
+        next_material,
+    };
+    let watchtower_signature = SubmitWatchtowerSignatureParamsValues {
+        channel_id: tenant_channel_id.clone(),
+        request_id: hash_hex("watchtower request"),
+        signature: recoverable_signature_hex("tenant settlement", "watchtower request"),
+    };
+    let root_signer = pubkey_hex("root signer");
+    let registry_nonce = hash_hex("tenant registry nonce");
+    let root_signer_params = RootSignerPubkeyParamsValues { root_signer_pubkey: root_signer.clone() };
+    let nonce_result = TenantRegistryNonceResultValues {
+        lsp_node_id: pubkey_hex("lsp node"),
+        root_signer_pubkey: root_signer.clone(),
+        nonce: registry_nonce.clone(),
+    };
+    let register = RegisterTenantParamsValues {
+        root_signer_pubkey: root_signer.clone(),
+        nonce: registry_nonce.clone(),
+        signature: compact_signature_hex("root signer", "tenant registry payload"),
+    };
+    let tenant = |label: &str| TenantStatusValues {
+        tenant_id: tenant_id(&root_signer),
+        root_signer_pubkey: None,
+        invoice_pubkey: pubkey_hex(&format!("{label} invoice key")),
+        private_channel_id: None,
+        created_at: "1726000000000".to_string(),
+        runtime_status: "cold".to_string(),
+        channel_online: false,
+    };
+    let mut active_tenant = tenant("active tenant");
+    active_tenant.root_signer_pubkey = Some(root_signer.clone());
+    active_tenant.private_channel_id = Some(tenant_channel_id.clone());
+    active_tenant.runtime_status = "active".to_string();
+    active_tenant.channel_online = true;
 
     MethodVectors {
         open_channel_with_external_funding: MethodCases {
@@ -1339,6 +1789,145 @@ fn methods() -> MethodVectors {
                 payment_case("failed", failed),
             ],
         },
+        open_tenant_channel: MethodCases {
+            params: vec![
+                open_tenant_channel("private, no options", tenant_open(None, None, false)),
+                open_tenant_channel(
+                    "with delay and fee rate",
+                    tenant_open(Some(&((12u64 << 40) | (3 << 24) | 7).to_string()), Some("2500"), false),
+                ),
+                open_tenant_channel("with the announcement nonce", tenant_open(None, None, true)),
+            ],
+            results: vec![
+                open_tenant_result(
+                    "opening context",
+                    OpenTenantChannelResultValues {
+                        channel_id: tenant_channel_id.clone(),
+                        unsigned_funding_tx: funding_tx(false, false),
+                        opening_context: opening_context("tenant"),
+                    },
+                ),
+                open_tenant_result(
+                    "opening context, large amounts",
+                    OpenTenantChannelResultValues {
+                        channel_id: hash_hex("channel tenant large"),
+                        unsigned_funding_tx: funding_tx(false, false),
+                        opening_context: large_context,
+                    },
+                ),
+            ],
+        },
+        shutdown_channel: MethodCases {
+            params: vec![
+                shutdown_channel(
+                    "channel id only",
+                    ShutdownChannelParamsValues {
+                        channel_id: tenant_channel_id.clone(),
+                        close_script: None,
+                        fee_rate: None,
+                        force: None,
+                    },
+                ),
+                shutdown_channel(
+                    "with close script, fee rate and force",
+                    ShutdownChannelParamsValues {
+                        channel_id: tenant_channel_id.clone(),
+                        close_script: Some(sighash_script("tenant close args")),
+                        fee_rate: Some("1500".to_string()),
+                        force: Some(true),
+                    },
+                ),
+            ],
+            results: vec![case("null", &Value::Null, &())],
+        },
+        get_channel_signing_status: MethodCases {
+            params: vec![case(
+                "channel id",
+                &status_params,
+                &GetChannelSigningStatusParams { channel_id: hash256(&status_params.channel_id) },
+            )],
+            results: vec![channel_status_result],
+        },
+        submit_channel_signature: MethodCases {
+            params: vec![
+                submit_channel_signature(
+                    "with next material",
+                    submit_signature(Some(NextMaterialValues {
+                        next_commitment_point: pubkey_hex("tenant commitment point 3"),
+                        next_commitment_nonce: pubnonce_hex("tenant commitment nonce 3"),
+                        next_revocation_nonce: pubnonce_hex("tenant revocation nonce 3"),
+                    })),
+                ),
+                submit_channel_signature("without next material", submit_signature(None)),
+            ],
+            results: vec![
+                submission_case(&channel_submission_results(), "applied", "Applied"),
+                submission_case(&channel_submission_results(), "already applied", "AlreadyApplied"),
+            ],
+        },
+        get_watchtower_signing_status: MethodCases {
+            params: vec![case(
+                "channel id",
+                &status_params,
+                &GetWatchtowerSigningStatusParams { channel_id: hash256(&status_params.channel_id) },
+            )],
+            results: vec![watchtower_status_result],
+        },
+        submit_watchtower_signature: MethodCases {
+            params: vec![case(
+                "recoverable signature",
+                &watchtower_signature,
+                &SubmitWatchtowerSignatureParams {
+                    channel_id: hash256(&watchtower_signature.channel_id),
+                    request_id: hash256(&watchtower_signature.request_id),
+                    signature: vec_of(&watchtower_signature.signature),
+                },
+            )],
+            results: vec![
+                submission_case(&watchtower_submission_results(), "applied", "Applied"),
+                submission_case(&watchtower_submission_results(), "already applied", "AlreadyApplied"),
+            ],
+        },
+        lsp_get_tenant_registry_nonce: MethodCases {
+            params: vec![case(
+                "root signer pubkey",
+                &root_signer_params,
+                &GetLspTenantRegistryNonceParams { root_signer_pubkey: pubkey(&root_signer_params.root_signer_pubkey) },
+            )],
+            results: vec![case(
+                "nonce",
+                &nonce_result,
+                &GetLspTenantRegistryNonceResult {
+                    lsp_node_id: pubkey(&nonce_result.lsp_node_id),
+                    root_signer_pubkey: pubkey(&nonce_result.root_signer_pubkey),
+                    nonce: hash256(&nonce_result.nonce),
+                },
+            )],
+        },
+        lsp_register_tenant: MethodCases {
+            params: vec![case(
+                "signed payload",
+                &register,
+                &RegisterLspTenantParams {
+                    root_signer_pubkey: pubkey(&register.root_signer_pubkey),
+                    nonce: hash256(&register.nonce),
+                    signature: register.signature.clone(),
+                },
+            )],
+            results: vec![
+                register_tenant_result(
+                    "cold tenant without a channel",
+                    RegisterTenantResultValues {
+                        tenant: tenant("cold tenant"),
+                        access_token: "tenant-access-token-cold".to_string(),
+                    },
+                ),
+                register_tenant_result(
+                    "active tenant with a private channel",
+                    RegisterTenantResultValues { tenant: active_tenant, access_token: "tenant-access-token-active".to_string() },
+                ),
+            ],
+        },
     }
 }
 
@@ -1463,6 +2052,22 @@ fn method_params<'a>(methods: &'a MethodVectors, method: &str) -> Option<(&'a Me
         "cancel_invoice" => (&methods.cancel_invoice, round_trip::<InvoiceParams>),
         "send_payment" => (&methods.send_payment, round_trip::<SendPaymentCommandParams>),
         "get_payment" => (&methods.get_payment, round_trip::<GetPaymentCommandParams>),
+        "open_tenant_channel" => (&methods.open_tenant_channel, round_trip::<OpenChannelWithExternalFundingParams>),
+        "shutdown_channel" => (&methods.shutdown_channel, round_trip::<ShutdownChannelParams>),
+        "get_channel_signing_status" => {
+            (&methods.get_channel_signing_status, round_trip::<GetChannelSigningStatusParams>)
+        }
+        "submit_channel_signature" => (&methods.submit_channel_signature, round_trip::<SubmitChannelSignatureParams>),
+        "get_watchtower_signing_status" => {
+            (&methods.get_watchtower_signing_status, round_trip::<GetWatchtowerSigningStatusParams>)
+        }
+        "submit_watchtower_signature" => {
+            (&methods.submit_watchtower_signature, round_trip::<SubmitWatchtowerSignatureParams>)
+        }
+        "lsp_get_tenant_registry_nonce" => {
+            (&methods.lsp_get_tenant_registry_nonce, round_trip::<GetLspTenantRegistryNonceParams>)
+        }
+        "lsp_register_tenant" => (&methods.lsp_register_tenant, round_trip::<RegisterLspTenantParams>),
         _ => return None,
     })
 }
@@ -1544,7 +2149,7 @@ fn check_rpc_params(methods: &MethodVectors, written: &BTreeMap<String, Vec<TsPa
 mod tests {
     use super::*;
 
-    const CASES: usize = 17;
+    const CASES: usize = 29;
 
     /// What a correct TS writer emits.
     fn identity() -> Value {
@@ -1609,7 +2214,7 @@ mod tests {
     }
 
     #[test]
-    fn refuses_a_method_outside_the_ten() {
+    fn refuses_a_method_outside_the_eighteen() {
         let mut written = identity();
         written.as_object_mut().unwrap().insert("connect_peer".to_string(), json!([]));
         assert_refused(written, "connect_peer: not a method of the vectors");

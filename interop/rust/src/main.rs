@@ -1,15 +1,3 @@
-//! Cross-implementation vector generator and verifier for the SDK's derivation
-//! scheme, musig2 signing, signed-message digests and fiber's RPC forms; see
-//! `interop/README.md` for what each part of the vectors is and how to regenerate them.
-//!
-//! Subcommands:
-//!   gen-vectors <out.json>
-//!   verify-ts <vectors.json> <ts-out.json>
-//!   gen-rpc-vectors <out.json>
-//!   verify-rpc-params <rpc.json> <ts-rpc-out.json>
-//!   gen-invoice-vectors <out.json>
-//!   verify-invoices <invoice.json> <ts-invoice-out.json>
-
 mod invoice;
 mod rpc;
 
@@ -52,7 +40,7 @@ fn pubkey_of(sk: &SecretKey) -> PublicKey {
     PublicKey::from_secret_key(&secp, sk)
 }
 
-/// fiber `Privkey::tweak` — (scalar + sk) mod n.
+/// fiber `Privkey::tweak`: (scalar + sk) mod n.
 fn tweak(sk: &SecretKey, scalar: [u8; 32]) -> SecretKey {
     let scalar = Scalar::from_be_bytes(scalar).expect("scalar in range");
     sk.add_tweak(&scalar).expect("valid tweak")
@@ -197,7 +185,7 @@ fn nonce_seed(signer: &FiberSigner, commitment_number: u64, context: &str) -> [u
     ckb_blake2b(&[&seckey.secret_bytes(), context.as_bytes()])
 }
 
-// --- digest reconstruction (ported from crates/fiber-lib/src/fiber/channel.rs and fee.rs) ---
+// --- digest reconstruction: fiber-types' own witness, message and settlement check; what fiber-lib keeps private is ported, cited ---
 
 use ckb_types::packed::{
     Byte, Bytes as PackedBytes, BytesVec, CellDep, CellDepVec, CellInput, CellInputVec, CellOutput, CellOutputVec,
@@ -205,14 +193,33 @@ use ckb_types::packed::{
 };
 use ckb_types::core::Capacity;
 use ckb_types::prelude::*;
+use fiber_types::{
+    compute_tx_message, settlement_data_to_witness, settlement_matches_commitment_tx, CommitmentContractFeatures,
+    HashAlgorithm, SettlementData, SettlementTlc, TLCId,
+};
 
 const FUNDING_CELL_WITNESS_LEN: usize = 112;
-const COMMITMENT_LOCK_ARGS_PLACEHOLDER_LEN: usize = 57;
 const SINCE_RELATIVE_EPOCH_FLAGS: u64 = 0xA000_0000_0000_0000;
-const SINCE_ABSOLUTE_TIMESTAMP_FLAG: u64 = 0x4000_0000_0000_0000;
 const FEE_RATE_WEIGHT_SCALE: u128 = 1000;
 /// fiber `DEFAULT_MIN_SHUTDOWN_FEE`.
 const DEFAULT_MIN_SHUTDOWN_FEE: u64 = 100_000_000;
+
+/// The vectors' name of a lock layout (`CommitmentContractFeatures`, crates/fiber-types/src/channel.rs:1521-1575).
+fn lock_layout_name(features: CommitmentContractFeatures) -> &'static str {
+    if features.has_full_payment_hash() {
+        "full_payment_hash"
+    } else {
+        "legacy"
+    }
+}
+
+fn lock_layout_features(name: &str) -> CommitmentContractFeatures {
+    match name {
+        "legacy" => CommitmentContractFeatures::LEGACY,
+        "full_payment_hash" => CommitmentContractFeatures::ONCHAIN_FULL_PAYMENT_HASH,
+        other => panic!("unknown lock_layout {other}"),
+    }
+}
 
 fn blake160(data: &[u8]) -> [u8; 20] {
     blake2b_256(data)[0..20].try_into().unwrap()
@@ -223,6 +230,10 @@ fn derive_public_key(base: &PublicKey, commitment_point: &PublicKey) -> PublicKe
     let secp = Secp256k1::new();
     let tweak = Scalar::from_be_bytes(get_tweak_by_commitment_point(commitment_point)).unwrap();
     base.add_exp_tweak(&secp, &tweak).unwrap()
+}
+
+fn fiber_pubkey(key: &PublicKey) -> fiber_types::Pubkey {
+    fiber_types::Pubkey(key.serialize())
 }
 
 /// The x-only aggregate of the two keys in the exact order given, as fiber bakes it into lock args.
@@ -288,42 +299,35 @@ struct TlcVector {
     remote_commitment_point: String,
 }
 
-/// fiber `settlement_tlc_to_witness`: one 85-byte TLC record.
-fn settlement_tlc_witness(local: &FiberSigner, remote_tlc_base: &PublicKey, tlc: &TlcVector, for_remote: bool) -> Vec<u8> {
-    let offered = match tlc.direction.as_str() {
-        "offered" => true,
-        "received" => false,
+/// fiber `get_active_tlcs_for_settlement` (crates/fiber-lib/src/fiber/channel.rs:8667-8691) over `get_tlc_keys` (8588-8620).
+fn settlement_tlc(local: &FiberSigner, remote_tlc_base: &PublicKey, tlc: &TlcVector, for_remote: bool) -> SettlementTlc {
+    let id = match tlc.direction.as_str() {
+        "offered" => TLCId::Offered(tlc.id),
+        "received" => TLCId::Received(tlc.id),
         other => panic!("unknown direction {other}"),
     };
-    // for_remote=false flips every TLC id (fiber's flip_mut), which only shows up in the flag bit.
-    let effective_offered = if for_remote { offered } else { !offered };
-    let algorithm: u8 = match tlc.hash_algorithm.as_str() {
-        "ckb-hash" => 0,
-        "sha256" => 1,
+    let hash_algorithm = match tlc.hash_algorithm.as_str() {
+        "ckb-hash" => HashAlgorithm::CkbHash,
+        "sha256" => HashAlgorithm::Sha256,
         other => panic!("unknown hash_algorithm {other}"),
     };
-    let flag = (algorithm << 1) | u8::from(!effective_offered);
-    let amount: u128 = tlc.amount.parse().unwrap();
+    let payment_hash: [u8; 32] = hex::decode(&tlc.payment_hash).unwrap().try_into().unwrap();
     let point = PublicKey::from_slice(&hex::decode(&tlc.remote_commitment_point).unwrap()).unwrap();
-    let local_key_hash = blake160(&pubkey_of(&local.derive_tlc_key(tlc.created_at_remote_commitment_number)).serialize());
-    let remote_key_hash = blake160(&derive_public_key(remote_tlc_base, &point).serialize());
-    let since = SINCE_ABSOLUTE_TIMESTAMP_FLAG | (tlc.expiry_ms.parse::<u64>().unwrap() / 1000);
-
-    let mut witness = vec![flag];
-    witness.extend(amount.to_le_bytes());
-    witness.extend(&hex::decode(&tlc.payment_hash).unwrap()[0..20]);
-    if for_remote {
-        witness.extend(remote_key_hash);
-        witness.extend(local_key_hash);
-    } else {
-        witness.extend(local_key_hash);
-        witness.extend(remote_key_hash);
+    SettlementTlc {
+        // for_remote=false flips every TLC id (fiber's flip_mut in get_active_tlcs), which only shows up in the flag bit.
+        tlc_id: if for_remote { id } else { id.flip() },
+        hash_algorithm,
+        payment_amount: tlc.amount.parse().unwrap(),
+        payment_hash: payment_hash.into(),
+        expiry: tlc.expiry_ms.parse().unwrap(),
+        local_key: None,
+        local_key_pubkey: Some(fiber_pubkey(&pubkey_of(&local.derive_tlc_key(tlc.created_at_remote_commitment_number)))),
+        local_key_commitment_number: Some(tlc.created_at_remote_commitment_number),
+        remote_key: fiber_pubkey(&derive_public_key(remote_tlc_base, &point)),
     }
-    witness.extend(since.to_le_bytes());
-    witness
 }
 
-/// fiber `get_active_tlcs` ordering: two direction groups, each ascending by id.
+/// fiber `get_active_tlcs` ordering (crates/fiber-lib/src/fiber/channel.rs:8647-8665): two direction groups, ascending by id.
 fn ordered_tlcs<'a>(tlcs: &'a [TlcVector], for_remote: bool) -> Vec<&'a TlcVector> {
     let first_direction = if for_remote { "received" } else { "offered" };
     let mut first: Vec<&TlcVector> = tlcs.iter().filter(|tlc| tlc.direction == first_direction).collect();
@@ -333,33 +337,28 @@ fn ordered_tlcs<'a>(tlcs: &'a [TlcVector], for_remote: bool) -> Vec<&'a TlcVecto
     first.into_iter().chain(second).collect()
 }
 
-/// fiber `settlement_data_to_witness`.
-fn settlement_witness(
+/// The settlement data of one commitment, in the shape fiber hands its own `settlement_data_to_witness`.
+fn settlement_data(
     local: &FiberSigner,
     remote_tlc_base: &PublicKey,
     for_remote: bool,
     local_amount: u128,
     remote_amount: u128,
     tlcs: &[TlcVector],
-) -> Vec<u8> {
-    let mut witness = vec![u8::try_from(tlcs.len()).unwrap()];
-    for tlc in ordered_tlcs(tlcs, for_remote) {
-        witness.extend(settlement_tlc_witness(local, remote_tlc_base, tlc, for_remote));
+) -> SettlementData {
+    SettlementData {
+        local_amount,
+        remote_amount,
+        tlcs: ordered_tlcs(tlcs, for_remote)
+            .into_iter()
+            .map(|tlc| settlement_tlc(local, remote_tlc_base, tlc, for_remote))
+            .collect(),
     }
-    let local_hash = blake160(&pubkey_of(&local.tlc_base_key).serialize());
-    let remote_hash = blake160(&remote_tlc_base.serialize());
-    if for_remote {
-        witness.extend(remote_hash);
-        witness.extend(remote_amount.to_le_bytes());
-        witness.extend(local_hash);
-        witness.extend(local_amount.to_le_bytes());
-    } else {
-        witness.extend(local_hash);
-        witness.extend(local_amount.to_le_bytes());
-        witness.extend(remote_hash);
-        witness.extend(remote_amount.to_le_bytes());
-    }
-    witness
+}
+
+/// fiber `get_settlement_pubkeys` (crates/fiber-lib/src/fiber/channel.rs:8640-8645): both TLC base keys.
+fn settlement_pubkeys(local: &FiberSigner, remote_tlc_base: &PublicKey) -> (fiber_types::Pubkey, fiber_types::Pubkey) {
+    (fiber_pubkey(&pubkey_of(&local.tlc_base_key)), fiber_pubkey(remote_tlc_base))
 }
 
 /// fiber `commitment_tx_size` / `shutdown_tx_size`: the mock tx both fee calculations measure.
@@ -376,9 +375,15 @@ fn mock_tx_size(cell_deps_count: usize, outputs: Vec<CellOutput>, outputs_data: 
     (tx.as_slice().len() + 4) as u64
 }
 
-fn commitment_tx_size(cell_deps_count: usize, udt_type_script: &Option<ScriptVector>, commitment_lock: &ScriptVector) -> u64 {
+/// fiber `commitment_tx_size` (crates/fiber-lib/src/fiber/fee.rs:27-62): the lock mocked with `lock_args_len()` zero bytes.
+fn commitment_tx_size(
+    cell_deps_count: usize,
+    udt_type_script: &Option<ScriptVector>,
+    commitment_lock: &ScriptVector,
+    features: CommitmentContractFeatures,
+) -> u64 {
     let mock_lock = ScriptVector {
-        args: hex::encode([0u8; COMMITMENT_LOCK_ARGS_PLACEHOLDER_LEN]),
+        args: hex::encode(vec![0u8; features.lock_args_len()]),
         ..commitment_lock.clone()
     };
     let output = CellOutput::new_builder()
@@ -389,6 +394,7 @@ fn commitment_tx_size(cell_deps_count: usize, udt_type_script: &Option<ScriptVec
     mock_tx_size(cell_deps_count, vec![output], vec![data.pack()])
 }
 
+/// fiber `shutdown_tx_size` (crates/fiber-lib/src/fiber/fee.rs:65-109).
 fn shutdown_tx_size(cell_deps_count: usize, udt_type_script: &Option<ScriptVector>, close_scripts: [&ScriptVector; 2]) -> u64 {
     let outputs = close_scripts
         .iter()
@@ -403,11 +409,12 @@ fn shutdown_tx_size(cell_deps_count: usize, udt_type_script: &Option<ScriptVecto
     mock_tx_size(cell_deps_count, outputs, vec![data.pack(), data.pack()])
 }
 
-/// fiber `reserved_capacity` on a CKB channel.
-fn reserved_capacity(shutdown_script: &ScriptVector) -> u64 {
+/// fiber `reserved_capacity` (crates/fiber-lib/src/fiber/channel.rs:5853-5890): close script args at no less than `lock_args_len()`.
+fn reserved_capacity(shutdown_script: &ScriptVector, features: CommitmentContractFeatures) -> u64 {
     let script = packed_script(shutdown_script);
-    let min_lock_script = if script.args().raw_data().len() < COMMITMENT_LOCK_ARGS_PLACEHOLDER_LEN {
-        PackedScript::new_builder().args(vec![0u8; COMMITMENT_LOCK_ARGS_PLACEHOLDER_LEN].pack()).build()
+    let lock_args_len = features.lock_args_len();
+    let min_lock_script = if script.args().raw_data().len() < lock_args_len {
+        PackedScript::new_builder().args(vec![0u8; lock_args_len].pack()).build()
     } else {
         script
     };
@@ -424,19 +431,23 @@ fn fee_from_rate(fee_rate: u64, tx_size: u64) -> u64 {
     u64::try_from(u128::from(fee_rate) * u128::from(tx_size) / FEE_RATE_WEIGHT_SCALE).unwrap()
 }
 
-/// fiber `compute_tx_message`: the raw transaction hashed with its cell deps emptied.
-fn compute_raw_tx_message(raw: &RawTransaction) -> [u8; 32] {
-    let cleared = raw.clone().as_builder().cell_deps(CellDepVec::default()).build();
-    blake2b_256(cleared.as_slice())
-}
-
-fn commitment_lock_args(xonly: &[u8; 32], delay_epoch: u64, commitment_number: u64, witness: &[u8]) -> Vec<u8> {
-    let mut args = Vec::with_capacity(COMMITMENT_LOCK_ARGS_PLACEHOLDER_LEN);
+/// fiber's commitment lock args (crates/fiber-lib/src/fiber/channel.rs:11352-11372): the features byte follows the `0x00`.
+fn commitment_lock_args(
+    xonly: &[u8; 32],
+    delay_epoch: u64,
+    commitment_number: u64,
+    witness: &[u8],
+    features: CommitmentContractFeatures,
+) -> Vec<u8> {
+    let mut args = Vec::with_capacity(features.lock_args_len());
     args.extend(&blake2b_256(xonly)[0..20]);
     args.extend((SINCE_RELATIVE_EPOCH_FLAGS | delay_epoch).to_le_bytes());
     args.extend(commitment_number.to_be_bytes());
     args.extend(blake160(witness));
     args.push(0x00);
+    if features.has_full_payment_hash() {
+        args.push(features.bits());
+    }
     args
 }
 
@@ -469,7 +480,14 @@ struct DigestVectors {
 struct ReserveCaseVector {
     name: String,
     shutdown_script: ScriptVector,
-    reserved: String,
+    reserved: ReservedByLayout,
+}
+
+/// The device's reserve under each lock layout: a channel opens before its layout is known, so the device computes both.
+#[derive(Serialize, Deserialize)]
+struct ReservedByLayout {
+    legacy: String,
+    full_payment_hash: String,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -483,6 +501,7 @@ struct RemoteSignerVector {
 struct CommitmentCaseVector {
     name: String,
     for_remote: bool,
+    lock_layout: String,
     funding_out_point: OutPointVector,
     commitment_number: u64,
     delay_epoch: String,
@@ -527,6 +546,7 @@ struct ShutdownCaseVector {
 struct RevocationCaseVector {
     name: String,
     for_remote: bool,
+    lock_layout: String,
     revoked_commitment_number: u64,
     payout_script: ScriptVector,
     delay_epoch: String,
@@ -677,7 +697,7 @@ const CHANNEL_INDICES: [u64; 6] = [0, 1, 2, 7, 1000, 9007199254740991];
 const NONCE_CONTEXTS: [&str; 4] = ["COMMITMENT", "REVOKE", "CLOSE", "ANNOUNCEMENT"];
 
 const SCHEME_VERSION: u32 = 1;
-const FIBER_REF: &str = "b71a61c3";
+const FIBER_REF: &str = "8db6a117";
 
 /// Peer-side channel signer for the digest cases: its public halves are the "remote" inputs the node would attach.
 const REMOTE_SIGNER_SEED: [u8; 32] = [0x77; 32];
@@ -698,6 +718,7 @@ fn build_commitment_case(
     commitment_lock: &ScriptVector,
     mut case: CommitmentCaseVector,
 ) -> CommitmentCaseVector {
+    let features = lock_layout_features(&case.lock_layout);
     let local_pub = pubkey_of(&local.funding_key);
     let remote_pub = pubkey_of(&remote.funding_key);
     let xonly = if case.for_remote {
@@ -716,17 +737,13 @@ fn build_commitment_case(
 
     let witness_local = if is_udt { settlement_local } else { settlement_local + u128::from(local_reserved) };
     let witness_remote = if is_udt { settlement_remote } else { settlement_remote + u128::from(remote_reserved) };
-    let witness = settlement_witness(
-        local,
-        &pubkey_of(&remote.tlc_base_key),
-        case.for_remote,
-        witness_local,
-        witness_remote,
-        &case.tlcs,
-    );
-    let args = commitment_lock_args(&xonly, case.delay_epoch.parse().unwrap(), case.commitment_number, &witness);
+    let remote_tlc_base = pubkey_of(&remote.tlc_base_key);
+    let settlement = settlement_data(local, &remote_tlc_base, case.for_remote, witness_local, witness_remote, &case.tlcs);
+    let (local_settlement_key, remote_settlement_key) = settlement_pubkeys(local, &remote_tlc_base);
+    let witness = settlement_data_to_witness(&settlement, case.for_remote, features, local_settlement_key, remote_settlement_key);
+    let args = commitment_lock_args(&xonly, case.delay_epoch.parse().unwrap(), case.commitment_number, &witness, features);
 
-    let tx_size = commitment_tx_size(case.cell_deps_count as usize, &case.udt_type_script, commitment_lock);
+    let tx_size = commitment_tx_size(case.cell_deps_count as usize, &case.udt_type_script, commitment_lock, features);
     let fee = fee_from_rate(case.fee_rate.parse().unwrap(), tx_size);
     let liquid = to_local + to_remote;
     let total_reserved = local_reserved + remote_reserved;
@@ -748,12 +765,19 @@ fn build_commitment_case(
         .outputs(CellOutputVec::new_builder().set(vec![output]).build())
         .outputs_data(BytesVec::new_builder().set(vec![output_data]).build())
         .build();
+    let tx = Transaction::new_builder().raw(raw).build();
+    // fiber's own check that the lock args commit this settlement, under the layout the args declare.
+    assert!(
+        settlement_matches_commitment_tx(&tx, &settlement, local_settlement_key, remote_settlement_key, Some(case.for_remote)),
+        "{}: fiber does not read this settlement in the commitment lock args",
+        case.name
+    );
 
     case.settlement_witness = hex::encode(&witness);
     case.lock_args = hex::encode(&args);
     case.tx_size = tx_size;
     case.fee = fee.to_string();
-    case.digest = hex::encode(compute_raw_tx_message(&raw));
+    case.digest = hex::encode(compute_tx_message(&tx));
     case
 }
 
@@ -811,7 +835,7 @@ fn build_shutdown_case(local: &FiberSigner, remote: &FiberSigner, mut case: Shut
     case.tx_size = tx_size;
     case.local_fee = local_fee.to_string();
     case.remote_fee = remote_fee.to_string();
-    case.digest = hex::encode(compute_raw_tx_message(&raw));
+    case.digest = hex::encode(compute_tx_message(&Transaction::new_builder().raw(raw).build()));
     case
 }
 
@@ -837,7 +861,12 @@ fn build_revocation_case(
     let remote_reserved: u64 = case.remote_reserved.parse().unwrap();
     let fee = fee_from_rate(
         case.fee_rate.parse().unwrap(),
-        commitment_tx_size(case.cell_deps_count as usize, &case.udt_type_script, commitment_lock),
+        commitment_tx_size(
+            case.cell_deps_count as usize,
+            &case.udt_type_script,
+            commitment_lock,
+            lock_layout_features(&case.lock_layout),
+        ),
     );
     let liquid = to_local + to_remote;
     let total_reserved = local_reserved + remote_reserved;
@@ -1088,12 +1117,15 @@ fn digest_vectors(local: &FiberSigner) -> DigestVectors {
         },
     ];
 
-    // The device computes its own reserve and refuses any other.
-    let local_reserved = reserved_capacity(&local_close).to_string();
+    let legacy = CommitmentContractFeatures::LEGACY;
+    let full_payment_hash = CommitmentContractFeatures::ONCHAIN_FULL_PAYMENT_HASH;
+    // The device computes its own reserve under the channel's layout and refuses any other.
+    let local_reserved = |features: CommitmentContractFeatures| reserved_capacity(&local_close, features).to_string();
 
-    let commitment_case =|name: &str, for_remote: bool| CommitmentCaseVector {
+    let commitment_case = |name: &str, for_remote: bool, features: CommitmentContractFeatures| CommitmentCaseVector {
         name: name.to_string(),
         for_remote,
+        lock_layout: lock_layout_name(features).to_string(),
         funding_out_point: funding.clone(),
         commitment_number: 11,
         delay_epoch: DEFAULT_DELAY_EPOCH.to_string(),
@@ -1104,7 +1136,7 @@ fn digest_vectors(local: &FiberSigner) -> DigestVectors {
         to_remote: "18500000000".to_string(),
         settlement_local: "59750000000".to_string(),
         settlement_remote: "16250000000".to_string(),
-        local_reserved: local_reserved.clone(),
+        local_reserved: local_reserved(features),
         remote_reserved: "6300000000".to_string(),
         tlcs: Vec::new(),
         settlement_witness: String::new(),
@@ -1116,7 +1148,7 @@ fn digest_vectors(local: &FiberSigner) -> DigestVectors {
 
     let commitment_cases = vec![
         build_commitment_case(local, &remote, &commitment_lock, {
-            let mut case = commitment_case("ckb, no tlcs, for remote", true);
+            let mut case = commitment_case("ckb, no tlcs, for remote", true, legacy);
             case.commitment_number = 0;
             case.settlement_local = case.to_local.clone();
             case.settlement_remote = case.to_remote.clone();
@@ -1124,7 +1156,7 @@ fn digest_vectors(local: &FiberSigner) -> DigestVectors {
         }),
         // The next case's opening: the device signs no later state before it.
         build_commitment_case(local, &remote, &commitment_lock, {
-            let mut case = commitment_case("ckb, three tlcs channel, opening, for remote", true);
+            let mut case = commitment_case("ckb, three tlcs channel, opening, for remote", true, legacy);
             case.funding_out_point = OutPointVector { index: 3, ..funding.clone() };
             case.fee_rate = "1537".to_string();
             case.commitment_number = 0;
@@ -1133,21 +1165,54 @@ fn digest_vectors(local: &FiberSigner) -> DigestVectors {
             case
         }),
         build_commitment_case(local, &remote, &commitment_lock, {
-            let mut case = commitment_case("ckb, three tlcs, for remote", true);
+            let mut case = commitment_case("ckb, three tlcs, for remote", true, legacy);
             case.funding_out_point = OutPointVector { index: 3, ..funding.clone() };
             case.fee_rate = "1537".to_string();
             case.tlcs = ckb_tlcs.clone();
             case
         }),
         build_commitment_case(local, &remote, &commitment_lock, {
-            let mut case = commitment_case("ckb, three tlcs, for local", false);
+            let mut case = commitment_case("ckb, three tlcs, for local", false, legacy);
             case.delay_epoch = ((12u64 << 40) | (3 << 24) | 7).to_string();
             case.commitment_number = 12;
             case.tlcs = ckb_tlcs.clone();
             case
         }),
         build_commitment_case(local, &remote, &commitment_lock, {
-            let mut case = commitment_case("udt, two tlcs, for remote", true);
+            let mut case = commitment_case("udt, two tlcs, for remote", true, legacy);
+            case.cell_deps_count = 3;
+            case.udt_type_script = Some(udt_script.clone());
+            case.to_local = "500000000000000000000".to_string();
+            case.to_remote = "300000000000000000000".to_string();
+            case.settlement_local = "400000000000000000000".to_string();
+            case.settlement_remote = "250000000000000000000".to_string();
+            case.tlcs = udt_tlcs.clone();
+            case
+        }),
+        // The same channels under the full-payment-hash layout: 58-byte args, the whole hash per record, the fee mock a byte larger.
+        build_commitment_case(local, &remote, &commitment_lock, {
+            let mut case = commitment_case("ckb, no tlcs, for remote, full payment hash", true, full_payment_hash);
+            case.commitment_number = 0;
+            case.settlement_local = case.to_local.clone();
+            case.settlement_remote = case.to_remote.clone();
+            case
+        }),
+        build_commitment_case(local, &remote, &commitment_lock, {
+            let mut case = commitment_case("ckb, three tlcs, for remote, full payment hash", true, full_payment_hash);
+            case.funding_out_point = OutPointVector { index: 3, ..funding.clone() };
+            case.fee_rate = "1537".to_string();
+            case.tlcs = ckb_tlcs.clone();
+            case
+        }),
+        build_commitment_case(local, &remote, &commitment_lock, {
+            let mut case = commitment_case("ckb, three tlcs, for local, full payment hash", false, full_payment_hash);
+            case.delay_epoch = ((12u64 << 40) | (3 << 24) | 7).to_string();
+            case.commitment_number = 12;
+            case.tlcs = ckb_tlcs.clone();
+            case
+        }),
+        build_commitment_case(local, &remote, &commitment_lock, {
+            let mut case = commitment_case("udt, two tlcs, for remote, full payment hash", true, full_payment_hash);
             case.cell_deps_count = 3;
             case.udt_type_script = Some(udt_script.clone());
             case.to_local = "500000000000000000000".to_string();
@@ -1170,7 +1235,8 @@ fn digest_vectors(local: &FiberSigner) -> DigestVectors {
         udt_type_script: None,
         to_local: "62000000000".to_string(),
         to_remote: "18500000000".to_string(),
-        local_reserved: local_reserved.clone(),
+        // A close carries no layout: the reserve of a legacy channel.
+        local_reserved: local_reserved(legacy),
         remote_reserved: "6300000000".to_string(),
         tx_size: 0,
         local_fee: String::new(),
@@ -1189,26 +1255,29 @@ fn digest_vectors(local: &FiberSigner) -> DigestVectors {
         }),
     ];
 
-    let revocation_case = |name: &str, for_remote: bool, payout: &ScriptVector| RevocationCaseVector {
-        name: name.to_string(),
-        for_remote,
-        revoked_commitment_number: 4,
-        payout_script: payout.clone(),
-        delay_epoch: DEFAULT_DELAY_EPOCH.to_string(),
-        fee_rate: "1000".to_string(),
-        cell_deps_count: 2,
-        udt_type_script: None,
-        to_local: "62000000000".to_string(),
-        to_remote: "18500000000".to_string(),
-        local_reserved: local_reserved.clone(),
-        remote_reserved: "6300000000".to_string(),
-        fee: String::new(),
-        digest: String::new(),
+    let revocation_case = |name: &str, for_remote: bool, payout: &ScriptVector, features: CommitmentContractFeatures| {
+        RevocationCaseVector {
+            name: name.to_string(),
+            for_remote,
+            lock_layout: lock_layout_name(features).to_string(),
+            revoked_commitment_number: 4,
+            payout_script: payout.clone(),
+            delay_epoch: DEFAULT_DELAY_EPOCH.to_string(),
+            fee_rate: "1000".to_string(),
+            cell_deps_count: 2,
+            udt_type_script: None,
+            to_local: "62000000000".to_string(),
+            to_remote: "18500000000".to_string(),
+            local_reserved: local_reserved(features),
+            remote_reserved: "6300000000".to_string(),
+            fee: String::new(),
+            digest: String::new(),
+        }
     };
     let revocation_cases = vec![
-        build_revocation_case(local, &remote, &commitment_lock, revocation_case("ckb, send side", false, &remote_close)),
+        build_revocation_case(local, &remote, &commitment_lock, revocation_case("ckb, send side", false, &remote_close, legacy)),
         build_revocation_case(local, &remote, &commitment_lock, {
-            let mut case = revocation_case("udt, receive side", true, &local_close);
+            let mut case = revocation_case("udt, receive side", true, &local_close, legacy);
             case.revoked_commitment_number = 9;
             case.cell_deps_count = 3;
             case.udt_type_script = Some(udt_script.clone());
@@ -1216,6 +1285,13 @@ fn digest_vectors(local: &FiberSigner) -> DigestVectors {
             case.to_remote = "300000000000000000000".to_string();
             case
         }),
+        // The revoked commitment's args keep their 36 bytes under either layout; only the fee mock grows by a byte.
+        build_revocation_case(
+            local,
+            &remote,
+            &commitment_lock,
+            revocation_case("ckb, send side, full payment hash", false, &remote_close, full_payment_hash),
+        ),
     ];
 
     let node_one = pubkey_of(&SecretKey::from_slice(&blake2b_256(b"node one")).unwrap()).serialize();
@@ -1249,7 +1325,7 @@ fn digest_vectors(local: &FiberSigner) -> DigestVectors {
         }),
     ];
 
-    // Both sides of the 57-byte floor: the reserve reads only the args' length.
+    // Both sides of both floors, 57 and 58 bytes: the reserve reads only the args' length.
     let reserve_cases = [
         ("no args", "data", 0),
         ("20-byte args", "type", 20),
@@ -1265,7 +1341,10 @@ fn digest_vectors(local: &FiberSigner) -> DigestVectors {
             hash_type: hash_type.to_string(),
             args: hex::encode(vec![0x5a; args_len]),
         };
-        let reserved = reserved_capacity(&shutdown_script).to_string();
+        let reserved = ReservedByLayout {
+            legacy: reserved_capacity(&shutdown_script, legacy).to_string(),
+            full_payment_hash: reserved_capacity(&shutdown_script, full_payment_hash).to_string(),
+        };
         ReserveCaseVector { name: name.to_string(), shutdown_script, reserved }
     })
     .collect();

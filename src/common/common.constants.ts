@@ -39,6 +39,16 @@ export const X_ONLY_PUBLIC_KEY_LENGTH = 32;
 export const SCHNORR_SIGNATURE_LENGTH = 64;
 
 /**
+ * A compact ECDSA signature, `r || s`: the tenant registration's form.
+ */
+export const COMPACT_ECDSA_SIGNATURE_LENGTH = 64;
+
+/**
+ * A recoverable ECDSA signature, `r || s || v`: the form of an invoice's and of a watchtower's.
+ */
+export const RECOVERABLE_ECDSA_SIGNATURE_LENGTH = 65;
+
+/**
  * Fiber funding locks are strictly 2-of-2: a longer list is a different protocol, not a bigger channel.
  */
 export const MUSIG_PARTICIPANTS = 2;
@@ -51,7 +61,7 @@ export const PAYMENT_HASH_LENGTH = 32;
 export const PREIMAGE_LENGTH = 32;
 
 /**
- * The prefix of a payment hash a TLC's settlement witness binds.
+ * The prefix of a payment hash a TLC's settlement witness binds under the `legacy` lock layout.
  */
 export const TRUNCATED_PAYMENT_HASH_LENGTH = 20;
 

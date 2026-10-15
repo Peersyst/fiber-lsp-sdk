@@ -1,7 +1,7 @@
 import { TRUNCATED_PAYMENT_HASH_LENGTH } from "../common.constants";
 
 /**
- * Cuts a payment hash to what a TLC's settlement witness entry binds of it.
+ * Cuts a payment hash to what a legacy settlement witness binds of it, the key the payment records are filed under.
  * @param paymentHash The full payment hash.
  * @returns Its first 20 bytes.
  */

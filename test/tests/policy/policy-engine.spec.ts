@@ -20,6 +20,7 @@ import type {
 import { DebitIntentError, FundingCellError, HoldInvoiceError, PolicyEngine, PolicyRefusalError, SignerStore } from "../../../src/policy";
 import { buildSessionCommitment } from "../../../src/policy/utils";
 import { AsyncInMemorySignerStorage, InMemorySignerStorage } from "../../mocks/policy";
+import { fundedShannonsOf } from "../../utils/channel-opening";
 import { toChannelAnnouncementInput, toCommitmentTxInput, toRevocationInput, toShutdownTxInput, toTlc } from "../../utils/digest-inputs";
 import { caseOf, loadInteropVectors } from "../../utils/interop-vectors";
 import { SHUTDOWN_NONCE_NUMBER, revocationNonceNumber } from "../../utils/nonce-numbers";
@@ -68,8 +69,8 @@ const REGISTERED_PINS: ChannelPins = {
     fundedShannons: FUNDED,
     localCloseScript:
         "4900000010000000300000003100000074d3f63a22681bdb6ff6512866db95264338cfaee12f71e28b9f23c414990c9c0114000000da694932ba803b4c07f6e3a9b6b2ea3f9c6c66c7",
-    // Args under 57 bytes: 98 CKB occupied plus the 1 CKB close fee.
-    localReservedCkbShannons: "9900000000",
+    // Args under 57 bytes: 98 CKB occupied plus the 1 CKB close fee under legacy, one byte more under the full hash.
+    localReservedCkbShannons: { legacy: "9900000000", fullPaymentHash: "10000000000" },
     udtTypeScript: null,
 };
 
@@ -84,6 +85,7 @@ const OPENED_PINS: ChannelPins = {
     commitmentDelayEpoch: "1099511627777",
     commitmentFeeRate: "1000",
     remoteReservedCkbShannons: "6300000000",
+    lockLayout: "legacy",
 };
 
 const FUNDING_TX_HASH = "6f4ea49726c322dbedceb12a09d013a0256ea697dc362cc8865f8bbcdd17684e";
@@ -1611,7 +1613,6 @@ describe("checkAndClaim", () => {
                     fundingCapacityShannons: OPENED_PINS.fundingCapacityShannons,
                     liquidCapacityShannons: OPENED_PINS.liquidCapacityShannons,
                     remoteFundingPubkey: OPENED_PINS.remoteFundingPubkey,
-                    localReservedCkbShannons: OPENED_PINS.localReservedCkbShannons,
                     remoteReservedCkbShannons: OPENED_PINS.remoteReservedCkbShannons,
                 },
             ],
@@ -1624,8 +1625,8 @@ describe("checkAndClaim", () => {
                     remoteFundingPubkey: OPENED_PINS.remoteFundingPubkey,
                     commitmentDelayEpoch: OPENED_PINS.commitmentDelayEpoch,
                     commitmentFeeRate: OPENED_PINS.commitmentFeeRate,
-                    localReservedCkbShannons: OPENED_PINS.localReservedCkbShannons,
                     remoteReservedCkbShannons: OPENED_PINS.remoteReservedCkbShannons,
+                    lockLayout: "legacy",
                 },
             ],
             [
@@ -1873,6 +1874,7 @@ describe("checkAndClaim", () => {
                             direction: "offered",
                             hashAlgorithm: "ckb-hash",
                             boundPaymentHash: OFFERED_HASH.slice(0, 40),
+                            fullPaymentHash: null,
                             amountShannons: OFFERED_AMOUNT,
                             expirySeconds: "1723257890",
                         },
@@ -1880,6 +1882,7 @@ describe("checkAndClaim", () => {
                             direction: "offered",
                             hashAlgorithm: "sha256",
                             boundPaymentHash: OTHER_OFFERED_HASH.slice(0, 40),
+                            fullPaymentHash: null,
                             amountShannons: OTHER_OFFERED_AMOUNT,
                             expirySeconds: "1699999999",
                         },
@@ -1887,6 +1890,7 @@ describe("checkAndClaim", () => {
                             direction: "received",
                             hashAlgorithm: "sha256",
                             boundPaymentHash: RECEIVED_HASH.slice(0, 40),
+                            fullPaymentHash: null,
                             amountShannons: RECEIVED_AMOUNT,
                             expirySeconds: "1750000000",
                         },
@@ -2502,6 +2506,262 @@ describe("checkAndClaim", () => {
             await expect(store.getChannelRecord(CHANNEL_INDEX)).resolves.toMatchObject({
                 views: { remote: OPENING_VIEW, local: OPENING_VIEW },
             });
+        });
+    });
+
+    describe("the lock layout", () => {
+        const FULL_HASH_OPENING = caseOf(digest.commitment_cases, "ckb, no tlcs, for remote, full payment hash");
+        // The full-hash opening's settlement plus its local reserve, 1 CKB above the legacy channel's.
+        const FUNDED_FULL_HASH = fundedShannonsOf(FULL_HASH_OPENING);
+        const OPENED_FULL_HASH_PINS: ChannelPins = {
+            ...OPENED_PINS,
+            fundedShannons: FUNDED_FULL_HASH,
+            fundingCapacityShannons: "96800000000",
+            lockLayout: "fullPaymentHash",
+        };
+        const OPENING_FULL_HASH_VIEW = { exposureShannons: FUNDED_FULL_HASH, tlcs: [], chargedShannons: {}, creditedShannons: {} };
+        const TWIN_OFFERED_HASH = OFFERED_HASH.slice(0, 40) + "00".repeat(12);
+        const TWIN_RECEIVED_HASH = RECEIVED_HASH.slice(0, 40) + "00".repeat(12);
+
+        function fullHashCommitment(): Extract<SignOperation, { kind: "commitment_tx" }>["input"] {
+            return { ...toCommitmentTxInput(FULL_HASH_OPENING, digest.remote), commitmentNumber: 11 };
+        }
+
+        // The full-hash opening's channel with TLCs of the three-TLC full-hash case, some with their unbound bytes moved.
+        function fullHashRequest(
+            commitmentNumber: number,
+            settlementLocalShannons: string,
+            hashes: Record<number, string>,
+        ): PolicySignRequest {
+            const base = toCommitmentTxInput(FULL_HASH_OPENING, digest.remote);
+            const tlcs = caseOf(digest.commitment_cases, "ckb, three tlcs, for remote, full payment hash")
+                .tlcs.filter((tlc) => tlc.id in hashes)
+                .map((tlc) => ({ ...toTlc(tlc), paymentHash: hexToBytes(hashes[tlc.id] as string) }));
+            const settlementLocal = BigInt(settlementLocalShannons);
+            const input = {
+                ...base,
+                commitmentNumber,
+                settlementLocalShannons: settlementLocal,
+                settlementRemoteShannons:
+                    base.toLocalShannons +
+                    base.toRemoteShannons -
+                    settlementLocal -
+                    tlcs.reduce((sum, tlc) => sum + tlc.amountShannons, 0n),
+                tlcs,
+            };
+            return signedRequest({ kind: "commitment_tx", input }, commitmentNumber);
+        }
+
+        async function registeredFullHash() {
+            const context = newEngine();
+            await context.engine.registerChannel(CHANNEL_ID, CHANNEL_INDEX, FUNDED_FULL_HASH, CLOSE_SCRIPT);
+            return context;
+        }
+
+        async function openedFullHash() {
+            const context = await registeredFullHash();
+            await context.engine.checkAndClaim(KEYS, commitmentRequest("ckb, no tlcs, for remote, full payment hash"));
+            return context;
+        }
+
+        it("pins the layout at first sight, from the opening commitment, beside the reserve it states under it", async () => {
+            const { engine, store } = await registeredFullHash();
+            await expect(
+                engine.checkAndClaim(KEYS, commitmentRequest("ckb, no tlcs, for remote, full payment hash")),
+            ).resolves.toMatchObject({ status: "fresh", commitmentNumber: 0 });
+            await expect(store.getChannelRecord(CHANNEL_INDEX)).resolves.toMatchObject({
+                pins: OPENED_FULL_HASH_PINS,
+                views: { remote: OPENING_FULL_HASH_VIEW, local: OPENING_FULL_HASH_VIEW },
+            });
+        });
+
+        it.each([
+            ["a commitment", () => signedRequest({ kind: "commitment_tx", input: ckbCommitment() }, 11)],
+            ["a revocation", () => revocationRequest("ckb, send side")],
+        ])("refuses %s under the legacy layout once the full hash is pinned, and moves nothing", async (_, request) => {
+            const { engine, storage } = await openedFullHash();
+            const stored = new Map(storage.map);
+            const refusal = await refusalOf(engine.checkAndClaim(KEYS, request()));
+            expect(refusal.code).toBe("policy_refusal");
+            expect(refusal.message).toBe("the request states lockLayout legacy, but the channel pinned fullPaymentHash");
+            expect(storage.map).toEqual(stored);
+        });
+
+        it.each([
+            ["a commitment", () => signedRequest({ kind: "commitment_tx", input: fullHashCommitment() }, 11)],
+            ["a revocation", () => revocationRequest("ckb, send side, full payment hash")],
+        ])("refuses %s under the full hash once the legacy layout is pinned", async (_, request) => {
+            const { engine, storage } = await opened();
+            const stored = new Map(storage.map);
+            const refusal = await refusalOf(engine.checkAndClaim(KEYS, request()));
+            expect(refusal.message).toBe("the request states lockLayout fullPaymentHash, but the channel pinned legacy");
+            expect(storage.map).toEqual(stored);
+        });
+
+        it("signs the revocation sized under the pinned layout, pinning nothing new", async () => {
+            const { engine, store } = await openedFullHash();
+            await expect(engine.checkAndClaim(KEYS, revocationRequest("ckb, send side, full payment hash"))).resolves.toMatchObject({
+                status: "fresh",
+                context: "REVOKE",
+            });
+            await expect(store.getChannelRecord(CHANNEL_INDEX)).resolves.toMatchObject({ pins: OPENED_FULL_HASH_PINS });
+        });
+
+        it("pins the layout from a revocation when it comes first", async () => {
+            const { engine, store } = await registeredFullHash();
+            await engine.checkAndClaim(KEYS, revocationRequest("ckb, send side, full payment hash"));
+            await expect(store.getChannelRecord(CHANNEL_INDEX)).resolves.toMatchObject({ pins: { lockLayout: "fullPaymentHash" } });
+            const refusal = await refusalOf(engine.checkAndClaim(KEYS, commitmentRequest("ckb, no tlcs, for remote")));
+            expect(refusal.message).toBe("the request states lockLayout legacy, but the channel pinned fullPaymentHash");
+        });
+
+        // The reserve the layout computes: 100 CKB under the full hash over this close script, 99 under legacy.
+        it("refuses an opening under the full hash with the legacy reserve, 1 CKB short, writing nothing", async () => {
+            const { engine, storage } = await registeredFullHash();
+            const stored = new Map(storage.map);
+            const input = { ...fullHashCommitment(), commitmentNumber: 0, localReservedCkbShannons: 9_900_000_000n };
+            const refusal = await refusalOf(engine.checkAndClaim(KEYS, signedRequest({ kind: "commitment_tx", input }, 0)));
+            expect(refusal.code).toBe("policy_refusal");
+            expect(refusal.message).toBe("the request states localReservedCkbShannons 9900000000, but the channel pinned 10000000000");
+            expect(storage.map).toEqual(stored);
+        });
+
+        it("refuses an opening under legacy with the full-hash reserve, 1 CKB over, writing nothing", async () => {
+            const { engine, storage } = await registered();
+            const stored = new Map(storage.map);
+            const input = { ...ckbCommitment(), commitmentNumber: 0, localReservedCkbShannons: 10_000_000_000n };
+            const refusal = await refusalOf(engine.checkAndClaim(KEYS, signedRequest({ kind: "commitment_tx", input }, 0)));
+            expect(refusal.message).toBe("the request states localReservedCkbShannons 10000000000, but the channel pinned 9900000000");
+            expect(storage.map).toEqual(stored);
+        });
+
+        it("holds a close to the reserve of the pinned layout", async () => {
+            const { engine } = await openedFullHash();
+            // The funding cell as pinned: the reserve moved to the other side.
+            const input = { ...ckbShutdown(), localReservedCkbShannons: 9_900_000_000n, remoteReservedCkbShannons: 6_400_000_000n };
+            const refusal = await refusalOf(engine.checkAndClaim(KEYS, signedRequest({ kind: "shutdown_tx", input }, 11)));
+            expect(refusal.message).toBe("the request states localReservedCkbShannons 9900000000, but the channel pinned 10000000000");
+            const close = { ...ckbShutdown(), localReservedCkbShannons: 10_000_000_000n };
+            await expect(engine.checkAndClaim(KEYS, signedRequest({ kind: "shutdown_tx", input: close }, 11))).resolves.toMatchObject({
+                status: "fresh",
+            });
+        });
+
+        // Fiber builds no close that early, but the device does not assume it: the node picks between the two values computed.
+        it.each([
+            ["the legacy reserve", 9_900_000_000n],
+            ["the full-hash reserve", 10_000_000_000n],
+        ])("signs a close as the channel's first message with %s, pinning no layout", async (_, localReservedCkbShannons) => {
+            const { engine, store } = await registered();
+            const input = { ...ckbShutdown(), localReservedCkbShannons };
+            await expect(
+                engine.checkAndClaim(KEYS, signedRequest({ kind: "shutdown_tx", input }, SHUTDOWN_NONCE_NUMBER)),
+            ).resolves.toMatchObject({ status: "fresh" });
+            const record = await store.getChannelRecord(CHANNEL_INDEX);
+            expect(record?.pins.lockLayout).toBeUndefined();
+            expect(record?.pins.localReservedCkbShannons).toEqual(REGISTERED_PINS.localReservedCkbShannons);
+        });
+
+        it("refuses a close as the channel's first message with a third reserve, naming both values, writing nothing", async () => {
+            const { engine, storage } = await registered();
+            const stored = new Map(storage.map);
+            const input = { ...ckbShutdown(), localReservedCkbShannons: 9_950_000_000n };
+            const refusal = await refusalOf(
+                engine.checkAndClaim(KEYS, signedRequest({ kind: "shutdown_tx", input }, SHUTDOWN_NONCE_NUMBER)),
+            );
+            expect(refusal.code).toBe("policy_refusal");
+            expect(refusal.message).toBe(
+                "the request states localReservedCkbShannons 9950000000, but the channel pinned 9900000000 under legacy or 10000000000 under fullPaymentHash",
+            );
+            expect(storage.map).toEqual(stored);
+        });
+
+        it("signs a commitment under the full hash and keeps the whole hashes in its view", async () => {
+            const { engine, store } = await openedFullHash();
+            await recordThreeTlcIntents(engine);
+            const request = fullHashRequest(11, THREE_TLC_SETTLEMENT, {
+                [OFFERED_TLC_ID]: OFFERED_HASH,
+                [OTHER_OFFERED_TLC_ID]: OTHER_OFFERED_HASH,
+                [RECEIVED_TLC_ID]: RECEIVED_HASH,
+            });
+            await expect(engine.checkAndClaim(KEYS, request)).resolves.toMatchObject({ status: "fresh" });
+            const record = await store.getChannelRecord(CHANNEL_INDEX);
+            expect(record?.views.remote).toEqual({
+                exposureShannons: "69750000000",
+                tlcs: [
+                    {
+                        direction: "offered",
+                        hashAlgorithm: "ckb-hash",
+                        boundPaymentHash: OFFERED_HASH.slice(0, 40),
+                        fullPaymentHash: OFFERED_HASH,
+                        amountShannons: OFFERED_AMOUNT,
+                        expirySeconds: "1723257890",
+                    },
+                    {
+                        direction: "offered",
+                        hashAlgorithm: "sha256",
+                        boundPaymentHash: OTHER_OFFERED_HASH.slice(0, 40),
+                        fullPaymentHash: OTHER_OFFERED_HASH,
+                        amountShannons: OTHER_OFFERED_AMOUNT,
+                        expirySeconds: "1699999999",
+                    },
+                    {
+                        direction: "received",
+                        hashAlgorithm: "sha256",
+                        boundPaymentHash: RECEIVED_HASH.slice(0, 40),
+                        fullPaymentHash: RECEIVED_HASH,
+                        amountShannons: RECEIVED_AMOUNT,
+                        expirySeconds: "1750000000",
+                    },
+                ],
+                chargedShannons: {},
+                creditedShannons: {},
+            });
+        });
+
+        it("refuses an offered TLC under a twin of its intent's hash, through a real request, writing nothing", async () => {
+            const { engine, store, storage } = await openedFullHash();
+            await recordThreeTlcIntents(engine);
+            const stored = new Map(storage.map);
+            const request = fullHashRequest(11, THREE_TLC_SETTLEMENT, {
+                [OFFERED_TLC_ID]: TWIN_OFFERED_HASH,
+                [OTHER_OFFERED_TLC_ID]: OTHER_OFFERED_HASH,
+                [RECEIVED_TLC_ID]: RECEIVED_HASH,
+            });
+            const refusal = await refusalOf(engine.checkAndClaim(KEYS, request));
+            expect(refusal.code).toBe("policy_refusal");
+            expect(refusal.message).toBe(
+                `the remote commitment offers a TLC under ${TWIN_OFFERED_HASH}, not the ${OFFERED_HASH} the debit intent under its bound hash names`,
+            );
+            expect(storage.map).toEqual(stored);
+            await expect(store.getDebitIntent(OFFERED_HASH.slice(0, 40))).resolves.toMatchObject({ channelIndexes: [] });
+        });
+
+        // The twin is not the invoice's, so it holds nothing back; the invoice's own TLC would.
+        it("releases a preimage while a channel lists a twin of the invoice beside an offered TLC", async () => {
+            const { engine, store } = await openedFullHash();
+            await engine.recordDebitIntent(OFFERED_HASH, OFFERED_AMOUNT);
+            await engine.recordHoldInvoice(RECEIVED_HASH, RECEIVED_AMOUNT, "sha256");
+            await engine.checkAndClaim(
+                KEYS,
+                fullHashRequest(11, "60500000000", { [OFFERED_TLC_ID]: OFFERED_HASH, [RECEIVED_TLC_ID]: TWIN_RECEIVED_HASH }),
+            );
+            await engine.markHoldInvoiceReleased(RECEIVED_HASH);
+            await expect(store.getHoldInvoiceRecord(RECEIVED_HASH.slice(0, 40))).resolves.toMatchObject({
+                released: true,
+                channelIndexes: [CHANNEL_INDEX],
+            });
+        });
+
+        it("holds a preimage back while a channel lists the invoice's own TLC, bound whole, beside an offered TLC", async () => {
+            const { engine } = await openedFullHash();
+            await engine.recordDebitIntent(OFFERED_HASH, OFFERED_AMOUNT);
+            await engine.recordHoldInvoice(RECEIVED_HASH, RECEIVED_AMOUNT, "sha256");
+            await engine.checkAndClaim(
+                KEYS,
+                fullHashRequest(11, "60500000000", { [OFFERED_TLC_ID]: OFFERED_HASH, [RECEIVED_TLC_ID]: RECEIVED_HASH }),
+            );
+            await expect(engine.markHoldInvoiceReleased(RECEIVED_HASH)).rejects.toMatchObject({ code: "offered_in_flight" });
         });
     });
 

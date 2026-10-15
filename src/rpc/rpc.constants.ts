@@ -9,6 +9,14 @@ export const RPC_METHODS = [
     "cancel_invoice",
     "send_payment",
     "get_payment",
+    "open_tenant_channel",
+    "shutdown_channel",
+    "get_channel_signing_status",
+    "submit_channel_signature",
+    "get_watchtower_signing_status",
+    "submit_watchtower_signature",
+    "lsp_get_tenant_registry_nonce",
+    "lsp_register_tenant",
 ] as const;
 
 export const JSON_RPC_VERSION = "2.0";
@@ -78,3 +86,10 @@ export const LIST_CHANNELS_FILTERS = ["include_closed", "only_pending"] as const
 export const RPC_INVOICE_STATUSES = ["Open", "Cancelled", "Expired", "Received", "Paid"] as const;
 
 export const RPC_PAYMENT_STATUSES = ["Created", "Inflight", "Success", "Failed"] as const;
+
+/**
+ * The `type` tag of fiber's `SubmitChannelSignatureResult` and `SubmitWatchtowerSignatureResult`, which spell the same two.
+ */
+export const RPC_SUBMISSION_RESULTS = ["Applied", "AlreadyApplied"] as const;
+
+export const RPC_TENANT_RUNTIME_STATUSES = ["cold", "active"] as const;

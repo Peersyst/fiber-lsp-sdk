@@ -34,6 +34,9 @@ import {
 const vectors = loadInteropVectors();
 const digest = vectors.digest;
 const REMOTE = digest.remote;
+// The wire form carries no layout, so only the legacy cases round-trip through it.
+const LEGACY_COMMITMENT_CASES = digest.commitment_cases.filter((kase) => kase.lock_layout === "legacy");
+const LEGACY_REVOCATION_CASES = digest.revocation_cases.filter((kase) => kase.lock_layout === "legacy");
 const KEYS = deriveChannelKeys(hexToBytes(vectors.sdk_scheme.channel.seed));
 const LOCAL_FUNDING_PUBKEY_HEX = bytesToHex(pubkeyOf(KEYS.fundingKey));
 
@@ -91,7 +94,7 @@ describe("decodeSignSession", () => {
 });
 
 describe("decodeCommitmentTx", () => {
-    for (const kase of digest.commitment_cases) {
+    for (const kase of LEGACY_COMMITMENT_CASES) {
         it(`reads the "${kase.name}" case into the typed input, and back to fiber's digest`, () => {
             const decoded = decodeCommitmentTx(field(toCommitmentTxWire(kase, REMOTE), "commitment_tx"), COMMITMENT_LOCK_TESTNET);
             expect(decoded).toEqual(toCommitmentTxInput(kase, REMOTE));
@@ -255,7 +258,7 @@ describe("decodeShutdownTx", () => {
 });
 
 describe("decodeRevocation", () => {
-    for (const kase of digest.revocation_cases) {
+    for (const kase of LEGACY_REVOCATION_CASES) {
         it(`reads the "${kase.name}" case into the typed input, and back to fiber's digest`, () => {
             const decoded = decodeRevocation(field(toRevocationWire(kase, REMOTE), "revocation"), COMMITMENT_LOCK_TESTNET);
             expect(decoded).toEqual(toRevocationInput(kase, REMOTE));

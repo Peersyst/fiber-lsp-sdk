@@ -10,12 +10,13 @@ const HASH_R = "cc".repeat(20);
 const FULL_HASH_A = HASH_A + "01".repeat(12);
 const FULL_HASH_R = HASH_R + "01".repeat(12);
 
+// Legacy TLCs: the witness binds no full hash.
 function off(boundPaymentHash: string, amountShannons: string, expirySeconds: string, hashAlgorithm: TlcHashAlgorithm): PolicyViewTlc {
-    return { direction: "offered", hashAlgorithm, boundPaymentHash, amountShannons, expirySeconds };
+    return { direction: "offered", hashAlgorithm, boundPaymentHash, fullPaymentHash: null, amountShannons, expirySeconds };
 }
 
 function rec(boundPaymentHash: string, amountShannons: string, expirySeconds: string, hashAlgorithm: TlcHashAlgorithm): PolicyViewTlc {
-    return { direction: "received", hashAlgorithm, boundPaymentHash, amountShannons, expirySeconds };
+    return { direction: "received", hashAlgorithm, boundPaymentHash, fullPaymentHash: null, amountShannons, expirySeconds };
 }
 
 const NO_RECORDS: BalanceRuleContext = { intents: new Map(), invoices: new Map(), otherChannels: [] };
@@ -35,108 +36,137 @@ function refusalOf(judge: () => unknown): PolicyRefusalError {
 }
 
 describe("toPolicyViewTlcs", () => {
-    it("keeps what the witness binds: the direction, 20 bytes of the hash, the amount and the expiry in seconds", () => {
-        const tlcs = toPolicyViewTlcs([
-            {
-                id: 7,
-                direction: "offered",
-                hashAlgorithm: "ckb-hash",
-                amountShannons: 1500n,
-                paymentHash: hexToBytes(FULL_HASH_A),
-                expiryMs: 1723257890123n,
-                createdAtRemoteCommitmentNumber: 3,
-                remoteCommitmentPoint: new Uint8Array(33),
-            },
-        ]);
-        expect(tlcs).toEqual([
+    const OFFERED_A = {
+        id: 7,
+        direction: "offered" as const,
+        hashAlgorithm: "ckb-hash" as const,
+        amountShannons: 1500n,
+        paymentHash: hexToBytes(FULL_HASH_A),
+        expiryMs: 1723257890123n,
+        createdAtRemoteCommitmentNumber: 3,
+        remoteCommitmentPoint: new Uint8Array(33),
+    };
+
+    it("keeps what a legacy witness binds: the direction, 20 bytes of the hash, the amount and the expiry in seconds", () => {
+        expect(toPolicyViewTlcs([OFFERED_A], "legacy")).toEqual([
             {
                 direction: "offered",
                 hashAlgorithm: "ckb-hash" as const,
                 boundPaymentHash: HASH_A,
+                fullPaymentHash: null,
                 amountShannons: "1500",
                 expirySeconds: "1723257890",
             },
         ]);
     });
 
-    it("reads two TLCs the witness cannot tell apart as the same entry, whatever their ids and unbound bytes", () => {
-        const [first, second] = toPolicyViewTlcs([
+    it("keeps the whole hash too under the full-hash layout, beside the 20 bytes the records are keyed by", () => {
+        expect(toPolicyViewTlcs([OFFERED_A], "fullPaymentHash")).toEqual([
             {
-                id: 1,
-                direction: "received",
-                hashAlgorithm: "ckb-hash",
-                amountShannons: 10n,
-                paymentHash: hexToBytes(HASH_R + "01".repeat(12)),
-                expiryMs: 5000n,
-                createdAtRemoteCommitmentNumber: 1,
-                remoteCommitmentPoint: new Uint8Array(33),
-            },
-            {
-                id: 2,
-                direction: "received",
-                hashAlgorithm: "ckb-hash",
-                amountShannons: 10n,
-                paymentHash: hexToBytes(HASH_R + "02".repeat(12)),
-                expiryMs: 5999n,
-                createdAtRemoteCommitmentNumber: 2,
-                remoteCommitmentPoint: new Uint8Array(33).fill(2),
+                direction: "offered",
+                hashAlgorithm: "ckb-hash" as const,
+                boundPaymentHash: HASH_A,
+                fullPaymentHash: FULL_HASH_A,
+                amountShannons: "1500",
+                expirySeconds: "1723257890",
             },
         ]);
+    });
+
+    // Two TLCs apart in their unbound bytes alone: one entry under legacy, two under the full hash.
+    const TWINS = [
+        {
+            id: 1,
+            direction: "received" as const,
+            hashAlgorithm: "ckb-hash" as const,
+            amountShannons: 10n,
+            paymentHash: hexToBytes(HASH_R + "01".repeat(12)),
+            expiryMs: 5000n,
+            createdAtRemoteCommitmentNumber: 1,
+            remoteCommitmentPoint: new Uint8Array(33),
+        },
+        {
+            id: 2,
+            direction: "received" as const,
+            hashAlgorithm: "ckb-hash" as const,
+            amountShannons: 10n,
+            paymentHash: hexToBytes(HASH_R + "02".repeat(12)),
+            expiryMs: 5999n,
+            createdAtRemoteCommitmentNumber: 2,
+            remoteCommitmentPoint: new Uint8Array(33).fill(2),
+        },
+    ];
+
+    it("reads two TLCs a legacy witness cannot tell apart as the same entry, whatever their ids and unbound bytes", () => {
+        const [first, second] = toPolicyViewTlcs(TWINS, "legacy");
         expect(first).toEqual(second);
+    });
+
+    it("tells the same two TLCs apart by the full hash alone under the full-hash layout", () => {
+        const [first, second] = toPolicyViewTlcs(TWINS, "fullPaymentHash");
+        expect(first?.fullPaymentHash).toBe(HASH_R + "01".repeat(12));
+        expect(second?.fullPaymentHash).toBe(HASH_R + "02".repeat(12));
+        expect({ ...first, fullPaymentHash: null }).toEqual({ ...second, fullPaymentHash: null });
     });
 
     // The witness binds the algorithm in its flag byte.
     it("reads two TLCs that differ in their hash algorithm alone as two entries", () => {
-        const [first, second] = toPolicyViewTlcs([
-            {
-                id: 1,
-                direction: "received",
-                hashAlgorithm: "ckb-hash",
-                amountShannons: 10n,
-                paymentHash: hexToBytes(FULL_HASH_R),
-                expiryMs: 5000n,
-                createdAtRemoteCommitmentNumber: 1,
-                remoteCommitmentPoint: new Uint8Array(33),
-            },
-            {
-                id: 2,
-                direction: "received",
-                hashAlgorithm: "sha256",
-                amountShannons: 10n,
-                paymentHash: hexToBytes(FULL_HASH_R),
-                expiryMs: 5000n,
-                createdAtRemoteCommitmentNumber: 1,
-                remoteCommitmentPoint: new Uint8Array(33),
-            },
-        ]);
+        const [first, second] = toPolicyViewTlcs(
+            [
+                {
+                    id: 1,
+                    direction: "received",
+                    hashAlgorithm: "ckb-hash",
+                    amountShannons: 10n,
+                    paymentHash: hexToBytes(FULL_HASH_R),
+                    expiryMs: 5000n,
+                    createdAtRemoteCommitmentNumber: 1,
+                    remoteCommitmentPoint: new Uint8Array(33),
+                },
+                {
+                    id: 2,
+                    direction: "received",
+                    hashAlgorithm: "sha256",
+                    amountShannons: 10n,
+                    paymentHash: hexToBytes(FULL_HASH_R),
+                    expiryMs: 5000n,
+                    createdAtRemoteCommitmentNumber: 1,
+                    remoteCommitmentPoint: new Uint8Array(33),
+                },
+            ],
+            "legacy",
+        );
         expect(first?.hashAlgorithm).toBe("ckb-hash");
         expect(second?.hashAlgorithm).toBe("sha256");
         expect(first).not.toEqual(second);
     });
 
     it("orders the entries by what they bind, not by the order the node sent them", () => {
-        const tlcs = toPolicyViewTlcs([
-            {
-                id: 1,
-                direction: "received",
-                hashAlgorithm: "ckb-hash",
-                amountShannons: 10n,
-                paymentHash: hexToBytes(FULL_HASH_R),
-                expiryMs: 5000n,
-                createdAtRemoteCommitmentNumber: 1,
-                remoteCommitmentPoint: new Uint8Array(33),
-            },
-            {
-                id: 2,
-                direction: "offered",
-                hashAlgorithm: "ckb-hash",
-                amountShannons: 20n,
-                paymentHash: hexToBytes(FULL_HASH_A),
-                expiryMs: 6000n,
-                createdAtRemoteCommitmentNumber: 1,
-                remoteCommitmentPoint: new Uint8Array(33),
-            },
-        ]);
+        const tlcs = toPolicyViewTlcs(
+            [
+                {
+                    id: 1,
+                    direction: "received",
+                    hashAlgorithm: "ckb-hash",
+                    amountShannons: 10n,
+                    paymentHash: hexToBytes(FULL_HASH_R),
+                    expiryMs: 5000n,
+                    createdAtRemoteCommitmentNumber: 1,
+                    remoteCommitmentPoint: new Uint8Array(33),
+                },
+                {
+                    id: 2,
+                    direction: "offered",
+                    hashAlgorithm: "ckb-hash",
+                    amountShannons: 20n,
+                    paymentHash: hexToBytes(FULL_HASH_A),
+                    expiryMs: 6000n,
+                    createdAtRemoteCommitmentNumber: 1,
+                    remoteCommitmentPoint: new Uint8Array(33),
+                },
+            ],
+            "legacy",
+        );
         expect(tlcs.map((tlc) => tlc.direction)).toEqual(["offered", "received"]);
     });
 });
@@ -154,6 +184,7 @@ describe("judgeCommitment", () => {
                             direction: "offered",
                             hashAlgorithm: "ckb-hash" as const,
                             boundPaymentHash: HASH_A,
+                            fullPaymentHash: null,
                             amountShannons: "100",
                             expirySeconds: "50",
                         },
@@ -174,6 +205,7 @@ describe("judgeCommitment", () => {
                         direction: "offered",
                         hashAlgorithm: "ckb-hash" as const,
                         boundPaymentHash: HASH_A,
+                        fullPaymentHash: null,
                         amountShannons: "100",
                         expirySeconds: "50",
                     },
@@ -195,6 +227,7 @@ describe("judgeCommitment", () => {
                                 direction: "offered",
                                 hashAlgorithm: "ckb-hash" as const,
                                 boundPaymentHash: HASH_A,
+                                fullPaymentHash: null,
                                 amountShannons: "100",
                                 expirySeconds: "50",
                             },
@@ -219,6 +252,7 @@ describe("judgeCommitment", () => {
                                 direction: "offered",
                                 hashAlgorithm: "ckb-hash" as const,
                                 boundPaymentHash: HASH_A,
+                                fullPaymentHash: null,
                                 amountShannons: "100",
                                 expirySeconds: "50",
                             },
@@ -251,6 +285,7 @@ describe("judgeCommitment", () => {
                                 direction: "offered",
                                 hashAlgorithm: "ckb-hash" as const,
                                 boundPaymentHash: HASH_A,
+                                fullPaymentHash: null,
                                 amountShannons: "100",
                                 expirySeconds: "50",
                             },
@@ -322,6 +357,7 @@ describe("judgeCommitment", () => {
                         direction: "offered",
                         hashAlgorithm: "ckb-hash" as const,
                         boundPaymentHash: HASH_A,
+                        fullPaymentHash: null,
                         amountShannons: "100",
                         expirySeconds: "50",
                     },
@@ -339,6 +375,7 @@ describe("judgeCommitment", () => {
                             direction: "offered",
                             hashAlgorithm: "ckb-hash" as const,
                             boundPaymentHash: HASH_A,
+                            fullPaymentHash: null,
                             amountShannons: "100",
                             expirySeconds: "50",
                         },
@@ -364,6 +401,7 @@ describe("judgeCommitment", () => {
                     direction: "offered",
                     hashAlgorithm: "ckb-hash" as const,
                     boundPaymentHash: HASH_A,
+                    fullPaymentHash: null,
                     amountShannons: "60",
                     expirySeconds: "50",
                 },
@@ -371,6 +409,7 @@ describe("judgeCommitment", () => {
                     direction: "offered",
                     hashAlgorithm: "ckb-hash" as const,
                     boundPaymentHash: HASH_A,
+                    fullPaymentHash: null,
                     amountShannons: second,
                     expirySeconds: "51",
                 },
@@ -403,6 +442,7 @@ describe("judgeCommitment", () => {
                         direction: "offered",
                         hashAlgorithm: "ckb-hash" as const,
                         boundPaymentHash: HASH_A,
+                        fullPaymentHash: null,
                         amountShannons: "60",
                         expirySeconds: "50",
                     },
@@ -424,6 +464,7 @@ describe("judgeCommitment", () => {
                         direction: "offered" as const,
                         hashAlgorithm: "ckb-hash" as const,
                         boundPaymentHash: HASH_A,
+                        fullPaymentHash: null,
                         amountShannons: "50",
                         expirySeconds: "50",
                     },
@@ -504,6 +545,7 @@ describe("judgeCommitment", () => {
                                 direction: "offered",
                                 hashAlgorithm: "ckb-hash" as const,
                                 boundPaymentHash: HASH_A,
+                                fullPaymentHash: null,
                                 amountShannons: "50",
                                 expirySeconds: "50",
                             },
@@ -539,6 +581,7 @@ describe("judgeCommitment", () => {
                                 direction: "offered",
                                 hashAlgorithm: "ckb-hash" as const,
                                 boundPaymentHash: HASH_A,
+                                fullPaymentHash: null,
                                 amountShannons: "30",
                                 expirySeconds: "50",
                             },
@@ -565,6 +608,7 @@ describe("judgeCommitment", () => {
                 direction: "offered" as const,
                 hashAlgorithm: "ckb-hash" as const,
                 boundPaymentHash: HASH_A,
+                fullPaymentHash: null,
                 amountShannons: "100",
                 expirySeconds: "50",
             };
@@ -599,6 +643,7 @@ describe("judgeCommitment", () => {
                         direction: "offered",
                         hashAlgorithm: "ckb-hash" as const,
                         boundPaymentHash: HASH_A,
+                        fullPaymentHash: null,
                         amountShannons: "100",
                         expirySeconds: "50",
                     },
@@ -613,6 +658,7 @@ describe("judgeCommitment", () => {
                         direction: "offered" as const,
                         hashAlgorithm: "ckb-hash" as const,
                         boundPaymentHash: HASH_A,
+                        fullPaymentHash: null,
                         amountShannons: "100",
                         expirySeconds: "60",
                     },
@@ -642,6 +688,7 @@ describe("judgeCommitment", () => {
                         direction: "offered",
                         hashAlgorithm: "ckb-hash" as const,
                         boundPaymentHash: HASH_A,
+                        fullPaymentHash: null,
                         amountShannons: "100",
                         expirySeconds: "50",
                     },
@@ -675,6 +722,7 @@ describe("judgeCommitment", () => {
                             direction: "received",
                             hashAlgorithm: "ckb-hash" as const,
                             boundPaymentHash: HASH_R,
+                            fullPaymentHash: null,
                             amountShannons: "100",
                             expirySeconds: "50",
                         },
@@ -694,6 +742,7 @@ describe("judgeCommitment", () => {
                     direction: "offered",
                     hashAlgorithm: "ckb-hash" as const,
                     boundPaymentHash: HASH_A,
+                    fullPaymentHash: null,
                     amountShannons: "100",
                     expirySeconds: "50",
                 },
@@ -701,6 +750,7 @@ describe("judgeCommitment", () => {
                     direction: "offered",
                     hashAlgorithm: "ckb-hash" as const,
                     boundPaymentHash: HASH_B,
+                    fullPaymentHash: null,
                     amountShannons: "100",
                     expirySeconds: "50",
                 },
@@ -717,6 +767,7 @@ describe("judgeCommitment", () => {
                         direction: "offered",
                         hashAlgorithm: "ckb-hash" as const,
                         boundPaymentHash: HASH_A,
+                        fullPaymentHash: null,
                         amountShannons: "100",
                         expirySeconds: "50",
                     },
@@ -780,6 +831,7 @@ describe("judgeCommitment", () => {
                         direction: "offered",
                         hashAlgorithm: "ckb-hash" as const,
                         boundPaymentHash: HASH_A,
+                        fullPaymentHash: null,
                         amountShannons: "100",
                         expirySeconds: "50",
                     },
@@ -787,6 +839,7 @@ describe("judgeCommitment", () => {
                         direction: "offered",
                         hashAlgorithm: "ckb-hash" as const,
                         boundPaymentHash: HASH_B,
+                        fullPaymentHash: null,
                         amountShannons: "70",
                         expirySeconds: "50",
                     },
@@ -823,6 +876,7 @@ describe("judgeCommitment", () => {
                         direction: "offered",
                         hashAlgorithm: "ckb-hash" as const,
                         boundPaymentHash: HASH_A,
+                        fullPaymentHash: null,
                         amountShannons: "100",
                         expirySeconds: "50",
                     },
@@ -830,6 +884,7 @@ describe("judgeCommitment", () => {
                         direction: "received",
                         hashAlgorithm: "ckb-hash" as const,
                         boundPaymentHash: HASH_R,
+                        fullPaymentHash: null,
                         amountShannons: "30",
                         expirySeconds: "50",
                     },
@@ -974,6 +1029,7 @@ describe("judgeCommitment", () => {
                         direction: "offered" as const,
                         hashAlgorithm: "ckb-hash" as const,
                         boundPaymentHash: HASH_A,
+                        fullPaymentHash: null,
                         amountShannons: "10",
                         expirySeconds: String(index),
                     })),
@@ -1005,6 +1061,7 @@ describe("judgeCommitment", () => {
                     direction: "offered" as const,
                     hashAlgorithm: "ckb-hash" as const,
                     boundPaymentHash: HASH_A,
+                    fullPaymentHash: null,
                     amountShannons: "10",
                     expirySeconds: String(index),
                 })),
@@ -1039,6 +1096,7 @@ describe("judgeCommitment", () => {
                     direction: "received",
                     hashAlgorithm: "ckb-hash" as const,
                     boundPaymentHash: HASH_R,
+                    fullPaymentHash: null,
                     amountShannons: "100",
                     expirySeconds: "50",
                 },
@@ -1130,6 +1188,7 @@ describe("judgeCommitment", () => {
                         direction: "received",
                         hashAlgorithm: "ckb-hash" as const,
                         boundPaymentHash: HASH_R,
+                        fullPaymentHash: null,
                         amountShannons: "60",
                         expirySeconds: "50",
                     },
@@ -1204,6 +1263,7 @@ describe("judgeCommitment", () => {
                         direction: "offered",
                         hashAlgorithm: "ckb-hash" as const,
                         boundPaymentHash: HASH_A,
+                        fullPaymentHash: null,
                         amountShannons: "100",
                         expirySeconds: "50",
                     },
@@ -1500,6 +1560,365 @@ describe("judgeCommitment", () => {
             expect(next.tlcs).toHaveLength(2);
         });
     });
+
+    describe("the full payment hash", () => {
+        // The same bound 20 bytes, other unbound 12.
+        const TWIN_A = HASH_A + "02".repeat(12);
+        const TWIN_R = HASH_R + "02".repeat(12);
+        const INTENT_A: BalanceRuleContext = {
+            intents: new Map([
+                [HASH_A, { version: 1 as const, paymentHash: FULL_HASH_A, maxShannons: "100", open: true, channelIndexes: [] }],
+            ]),
+            invoices: new Map(),
+            otherChannels: [],
+        };
+        const RELEASED_R: BalanceRuleContext = {
+            intents: new Map(),
+            invoices: new Map([
+                [
+                    HASH_R,
+                    {
+                        version: 1 as const,
+                        paymentHash: FULL_HASH_R,
+                        amountShannons: "100",
+                        hashAlgorithm: "ckb-hash" as const,
+                        released: true,
+                        channelIndexes: [],
+                    },
+                ],
+            ]),
+            otherChannels: [],
+        };
+
+        function offFull(fullPaymentHash: string, amountShannons: string, expirySeconds: string): PolicyViewTlc {
+            return {
+                direction: "offered",
+                hashAlgorithm: "ckb-hash",
+                boundPaymentHash: fullPaymentHash.slice(0, 40),
+                fullPaymentHash,
+                amountShannons,
+                expirySeconds,
+            };
+        }
+
+        function recFull(
+            fullPaymentHash: string,
+            amountShannons: string,
+            expirySeconds: string,
+            hashAlgorithm: TlcHashAlgorithm,
+        ): PolicyViewTlc {
+            return {
+                direction: "received",
+                hashAlgorithm,
+                boundPaymentHash: fullPaymentHash.slice(0, 40),
+                fullPaymentHash,
+                amountShannons,
+                expirySeconds,
+            };
+        }
+
+        it("signs an offered TLC binding the whole hash of its intent, and keeps it in the snapshot", () => {
+            const next = judgeCommitment(
+                "remote",
+                { remote: OPENING, local: UNUSED_VIEW },
+                { exposureShannons: 900n, tlcs: [offFull(FULL_HASH_A, "100", "50")] },
+                INTENT_A,
+            );
+            expect(next.tlcs).toEqual([offFull(FULL_HASH_A, "100", "50")]);
+        });
+
+        it("refuses an offered TLC under a twin of its intent's hash, naming both", () => {
+            const refusal = refusalOf(() =>
+                judgeCommitment(
+                    "remote",
+                    { remote: OPENING, local: UNUSED_VIEW },
+                    { exposureShannons: 900n, tlcs: [offFull(TWIN_A, "100", "50")] },
+                    INTENT_A,
+                ),
+            );
+            expect(refusal.code).toBe("policy_refusal");
+            expect(refusal.message).toBe(
+                `the remote commitment offers a TLC under ${TWIN_A}, not the ${FULL_HASH_A} the debit intent under its bound hash names`,
+            );
+        });
+
+        // The twin is refused before the budget is read, so catching up with the other view does not let it in.
+        it("refuses a twin the channel's other view already shows the intent's TLC beside", () => {
+            const views: Record<PolicyView, PolicyViewSnapshot> = {
+                remote: { exposureShannons: "900", tlcs: [offFull(FULL_HASH_A, "100", "50")], chargedShannons: {}, creditedShannons: {} },
+                local: OPENING,
+            };
+            const refusal = refusalOf(() =>
+                judgeCommitment("local", views, { exposureShannons: 900n, tlcs: [offFull(TWIN_A, "100", "50")] }, INTENT_A),
+            );
+            expect(refusal.message).toContain(`offers a TLC under ${TWIN_A}`);
+        });
+
+        it("leaves an offered twin under no intent to the budget rule", () => {
+            const refusal = refusalOf(() =>
+                judgeCommitment(
+                    "remote",
+                    { remote: OPENING, local: UNUSED_VIEW },
+                    { exposureShannons: 900n, tlcs: [offFull(TWIN_A, "100", "50")] },
+                    NO_RECORDS,
+                ),
+            );
+            expect(refusal.message).toBe(`the remote commitment offers a TLC under ${HASH_A}, which no debit intent covers`);
+        });
+
+        it("takes an offered TLC binding no full hash as its intent's, by the bound hash alone", () => {
+            const next = judgeCommitment(
+                "remote",
+                { remote: OPENING, local: UNUSED_VIEW },
+                { exposureShannons: 900n, tlcs: [off(HASH_A, "100", "50", "ckb-hash")] },
+                INTENT_A,
+            );
+            expect(next.tlcs).toEqual([off(HASH_A, "100", "50", "ckb-hash")]);
+        });
+
+        it("tells two offered TLCs apart by the full hash alone: the one replacing the other is a twin", () => {
+            const shown: PolicyViewSnapshot = {
+                exposureShannons: "900",
+                tlcs: [offFull(FULL_HASH_A, "100", "50")],
+                chargedShannons: {},
+                creditedShannons: {},
+            };
+            const refusal = refusalOf(() =>
+                judgeCommitment(
+                    "remote",
+                    { remote: shown, local: UNUSED_VIEW },
+                    { exposureShannons: 900n, tlcs: [offFull(TWIN_A, "100", "50")] },
+                    INTENT_A,
+                ),
+            );
+            expect(refusal.message).toContain(`offers a TLC under ${TWIN_A}`);
+        });
+
+        it("reads the same replacement under legacy as the same entry, charging nothing", () => {
+            const shown: PolicyViewSnapshot = {
+                exposureShannons: "900",
+                tlcs: [off(HASH_A, "100", "50", "ckb-hash")],
+                chargedShannons: {},
+                creditedShannons: {},
+            };
+            const next = judgeCommitment(
+                "remote",
+                { remote: shown, local: UNUSED_VIEW },
+                { exposureShannons: 900n, tlcs: [off(HASH_A, "100", "50", "ckb-hash")] },
+                INTENT_A,
+            );
+            expect(next).toEqual(shown);
+        });
+
+        it("sums growth under one intent across a legacy channel and a full-hash channel", () => {
+            const legacy: PolicyViewSnapshot = {
+                exposureShannons: "500",
+                tlcs: [off(HASH_A, "60", "50", "ckb-hash")],
+                chargedShannons: {},
+                creditedShannons: {},
+            };
+            const context = (max: string): BalanceRuleContext => ({
+                intents: new Map([
+                    [HASH_A, { version: 1 as const, paymentHash: FULL_HASH_A, maxShannons: max, open: true, channelIndexes: [] }],
+                ]),
+                invoices: new Map(),
+                otherChannels: [{ remote: legacy, local: legacy }],
+            });
+            const next = { exposureShannons: 950n, tlcs: [offFull(FULL_HASH_A, "50", "50")] };
+            expect(refusalOf(() => judgeCommitment("remote", { remote: OPENING, local: UNUSED_VIEW }, next, context("109"))).message).toBe(
+                `the remote view draws 110 shannons under ${HASH_A}, above its debit intent of 109`,
+            );
+            expect(() => judgeCommitment("remote", { remote: OPENING, local: UNUSED_VIEW }, next, context("110"))).not.toThrow();
+        });
+
+        it("asks payment for the invoice's own TLC, bound whole, when it leaves", () => {
+            const holding: PolicyViewSnapshot = {
+                exposureShannons: "1000",
+                tlcs: [recFull(FULL_HASH_R, "100", "50", "ckb-hash")],
+                chargedShannons: {},
+                creditedShannons: {},
+            };
+            expect(
+                refusalOf(() =>
+                    judgeCommitment("remote", { remote: holding, local: UNUSED_VIEW }, { exposureShannons: 1000n, tlcs: [] }, RELEASED_R),
+                ).message,
+            ).toBe("the remote commitment lowers the holdings by 100 shannons, which no offered TLC took");
+            const paid = judgeCommitment(
+                "remote",
+                { remote: holding, local: UNUSED_VIEW },
+                { exposureShannons: 1100n, tlcs: [] },
+                RELEASED_R,
+            );
+            expect(paid.creditedShannons).toEqual({ [HASH_R]: "100" });
+        });
+
+        it("asks nothing for a received twin of a released invoice that leaves, and credits it nothing when paid", () => {
+            const holding: PolicyViewSnapshot = {
+                exposureShannons: "1000",
+                tlcs: [recFull(TWIN_R, "100", "50", "ckb-hash")],
+                chargedShannons: {},
+                creditedShannons: {},
+            };
+            const failed = judgeCommitment(
+                "remote",
+                { remote: holding, local: UNUSED_VIEW },
+                { exposureShannons: 1000n, tlcs: [] },
+                RELEASED_R,
+            );
+            expect(failed.creditedShannons).toEqual({});
+            const paid = judgeCommitment(
+                "remote",
+                { remote: holding, local: UNUSED_VIEW },
+                { exposureShannons: 1100n, tlcs: [] },
+                RELEASED_R,
+            );
+            expect(paid.creditedShannons).toEqual({});
+        });
+
+        // Like a keysend: never asked for, so it may have paid an offered TLC.
+        it("reads a received twin that left as collected unasked, where the invoice's own TLC is asked for", () => {
+            const context: BalanceRuleContext = { ...RELEASED_R, intents: INTENT_A.intents };
+            const withTwin: PolicyViewSnapshot = {
+                exposureShannons: "100",
+                tlcs: [offFull(FULL_HASH_A, "10", "50"), recFull(TWIN_R, "10", "50", "ckb-hash")],
+                chargedShannons: {},
+                creditedShannons: {},
+            };
+            // Nothing fallen: the twin widens what the offered TLC could have been paid, so it is charged and nothing is credited.
+            const settled = judgeCommitment(
+                "remote",
+                { remote: withTwin, local: UNUSED_VIEW },
+                { exposureShannons: 110n, tlcs: [] },
+                context,
+            );
+            expect(settled.chargedShannons).toEqual({ [HASH_A]: "10" });
+            expect(settled.creditedShannons).toEqual({});
+            // Both failed: the twin owes nothing, so the fall is the offered TLC's alone.
+            const fallen = judgeCommitment(
+                "remote",
+                { remote: withTwin, local: UNUSED_VIEW },
+                { exposureShannons: 100n, tlcs: [] },
+                context,
+            );
+            expect(fallen.chargedShannons).toEqual({ [HASH_A]: "10" });
+            const withOwn: PolicyViewSnapshot = {
+                ...withTwin,
+                tlcs: [offFull(FULL_HASH_A, "10", "50"), recFull(FULL_HASH_R, "10", "50", "ckb-hash")],
+            };
+            expect(
+                refusalOf(() =>
+                    judgeCommitment("remote", { remote: withOwn, local: UNUSED_VIEW }, { exposureShannons: 100n, tlcs: [] }, context),
+                ).message,
+            ).toBe("the remote commitment lowers the holdings by 20 shannons, which no offered TLC took");
+        });
+
+        it("does not hold a received twin to the release: an offered TLC may sit beside it", () => {
+            const context: BalanceRuleContext = { ...RELEASED_R, intents: INTENT_A.intents };
+            const holding: PolicyViewSnapshot = {
+                exposureShannons: "1000",
+                tlcs: [recFull(TWIN_R, "100", "50", "ckb-hash")],
+                chargedShannons: {},
+                creditedShannons: {},
+            };
+            const next = judgeCommitment(
+                "remote",
+                { remote: holding, local: UNUSED_VIEW },
+                { exposureShannons: 900n, tlcs: [...holding.tlcs, offFull(FULL_HASH_A, "100", "50")] },
+                context,
+            );
+            expect(next.tlcs).toHaveLength(2);
+            const own: PolicyViewSnapshot = { ...holding, tlcs: [recFull(FULL_HASH_R, "100", "50", "ckb-hash")] };
+            expect(
+                refusalOf(() =>
+                    judgeCommitment(
+                        "remote",
+                        { remote: own, local: UNUSED_VIEW },
+                        { exposureShannons: 900n, tlcs: [...own.tlcs, offFull(FULL_HASH_A, "100", "50")] },
+                        context,
+                    ),
+                ).message,
+            ).toBe("the remote commitment would show an offered TLC beside a held TLC whose preimage was released");
+        });
+
+        it("does not hold a received twin to the invoice's algorithm", () => {
+            const holding: PolicyViewSnapshot = {
+                exposureShannons: "1000",
+                tlcs: [recFull(FULL_HASH_R, "100", "50", "ckb-hash")],
+                chargedShannons: {},
+                creditedShannons: {},
+            };
+            const next = judgeCommitment(
+                "remote",
+                { remote: holding, local: UNUSED_VIEW },
+                { exposureShannons: 1000n, tlcs: [...holding.tlcs, recFull(TWIN_R, "50", "60", "sha256")] },
+                RELEASED_R,
+            );
+            expect(next.tlcs).toHaveLength(2);
+            expect(
+                refusalOf(() =>
+                    judgeCommitment(
+                        "remote",
+                        { remote: holding, local: UNUSED_VIEW },
+                        { exposureShannons: 1000n, tlcs: [...holding.tlcs, recFull(FULL_HASH_R, "50", "60", "sha256")] },
+                        RELEASED_R,
+                    ),
+                ).message,
+            ).toBe(`the remote commitment adds a TLC under ${HASH_R} locked with another algorithm than its released invoice`);
+        });
+
+        it("takes a received TLC binding no full hash as the released invoice's, by the bound hash alone", () => {
+            const holding: PolicyViewSnapshot = {
+                exposureShannons: "1000",
+                tlcs: [rec(HASH_R, "100", "50", "ckb-hash")],
+                chargedShannons: {},
+                creditedShannons: {},
+            };
+            expect(
+                refusalOf(() =>
+                    judgeCommitment("remote", { remote: holding, local: UNUSED_VIEW }, { exposureShannons: 1000n, tlcs: [] }, RELEASED_R),
+                ).message,
+            ).toBe("the remote commitment lowers the holdings by 100 shannons, which no offered TLC took");
+        });
+
+        // The twin rule reads offered TLCs: a received one is the invoices' to judge, and under no invoice it is nobody's.
+        it("leaves a received TLC under an intent's key to the invoices, twin or not", () => {
+            const next = judgeCommitment(
+                "remote",
+                { remote: OPENING, local: UNUSED_VIEW },
+                { exposureShannons: 1000n, tlcs: [recFull(TWIN_A, "100", "50", "ckb-hash")] },
+                INTENT_A,
+            );
+            expect(next.tlcs).toEqual([recFull(TWIN_A, "100", "50", "ckb-hash")]);
+        });
+
+        it("tells the invoice's TLC from a twin replacing it in one message: the swap is a departure to pay for", () => {
+            const holding: PolicyViewSnapshot = {
+                exposureShannons: "1000",
+                tlcs: [recFull(FULL_HASH_R, "100", "50", "ckb-hash")],
+                chargedShannons: {},
+                creditedShannons: {},
+            };
+            const swapped = [recFull(TWIN_R, "100", "50", "ckb-hash")];
+            expect(
+                refusalOf(() =>
+                    judgeCommitment(
+                        "remote",
+                        { remote: holding, local: UNUSED_VIEW },
+                        { exposureShannons: 1000n, tlcs: swapped },
+                        RELEASED_R,
+                    ),
+                ).message,
+            ).toBe("the remote commitment lowers the holdings by 100 shannons, which no offered TLC took");
+            const paid = judgeCommitment(
+                "remote",
+                { remote: holding, local: UNUSED_VIEW },
+                { exposureShannons: 1100n, tlcs: swapped },
+                RELEASED_R,
+            );
+            expect(paid.creditedShannons).toEqual({ [HASH_R]: "100" });
+            expect(paid.tlcs).toEqual(swapped);
+        });
+    });
 });
 
 describe("judgeOpeningCommitment", () => {
@@ -1563,6 +1982,7 @@ describe("judgeShutdown", () => {
                     direction: "received",
                     hashAlgorithm: "ckb-hash" as const,
                     boundPaymentHash: HASH_R,
+                    fullPaymentHash: null,
                     amountShannons: "1",
                     expirySeconds: "50",
                 },

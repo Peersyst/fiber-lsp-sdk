@@ -12,14 +12,19 @@ import {
     assertUnsignedBigInt,
     assertUnsignedInteger,
     blake160,
-    truncatePaymentHash,
     uint128Le,
     uint64Le,
 } from "../common";
 import type { FiberChannelKeys } from "../derivation";
 import { MAX_COMMITMENT_NUMBER, derivePublicKey, deriveTlcKey, pubkeyOf } from "../derivation";
-import { MAX_SETTLEMENT_TLCS, MAX_SINCE_PAYLOAD, SINCE_ABSOLUTE_TIMESTAMP_FLAG } from "./digest.constants";
-import type { SettlementTlc } from "./digest.types";
+import {
+    COMMITMENT_LOCK_LAYOUTS,
+    MAX_SETTLEMENT_TLCS,
+    MAX_SINCE_PAYLOAD,
+    SINCE_ABSOLUTE_TIMESTAMP_FLAG,
+    WITNESS_PAYMENT_HASH_LENGTHS,
+} from "./digest.constants";
+import type { CommitmentLockLayout, SettlementTlc } from "./digest.types";
 
 export type SettlementWitnessInput = {
     /**
@@ -33,24 +38,29 @@ export type SettlementWitnessInput = {
     localAmountShannons: bigint;
     remoteAmountShannons: bigint;
     tlcs: SettlementTlc[];
+    /**
+     * Decides how much of each payment hash a record binds.
+     */
+    lockLayout: CommitmentLockLayout;
 };
 
 /**
  * Port of fiber's `settlement_data_to_witness`: the byte string whose blake160 the commitment lock args commit to.
  * @param keys The channel's four secrets, source of the local settlement and per-TLC keys.
  * @param input The witness inputs as the node attached them.
- * @returns The `73 + 85n` witness bytes.
+ * @returns The `73 + n * (65 + h)` witness bytes, `h` being 20 under `legacy` and 32 under `fullPaymentHash`.
  */
 export function buildSettlementWitness(keys: FiberChannelKeys, input: SettlementWitnessInput): Uint8Array {
-    const { forRemote, remoteTlcBasePubkey, localAmountShannons, remoteAmountShannons, tlcs } = input;
+    const { forRemote, remoteTlcBasePubkey, localAmountShannons, remoteAmountShannons, tlcs, lockLayout } = input;
     assertBytes("remoteTlcBasePubkey", remoteTlcBasePubkey, COMPRESSED_POINT_LENGTH);
     assertUnsignedBigInt("localAmountShannons", localAmountShannons, MAX_AMOUNT_SHANNONS);
     assertUnsignedBigInt("remoteAmountShannons", remoteAmountShannons, MAX_AMOUNT_SHANNONS);
     if (!Array.isArray(tlcs) || tlcs.length > MAX_SETTLEMENT_TLCS) {
         throw new TypeError(`tlcs must be an array of at most ${MAX_SETTLEMENT_TLCS} TLCs`);
     }
+    assertOneOf("lockLayout", lockLayout, COMMITMENT_LOCK_LAYOUTS);
 
-    const records = orderTlcs(tlcs, forRemote).map((tlc) => buildTlcRecord(keys, tlc, forRemote, remoteTlcBasePubkey));
+    const records = orderTlcs(tlcs, forRemote).map((tlc) => buildTlcRecord(keys, tlc, forRemote, remoteTlcBasePubkey, lockLayout));
     const localHash = blake160(pubkeyOf(keys.tlcBaseKey));
     const remoteHash = blake160(remoteTlcBasePubkey);
     const localBlock = concatBytes(localHash, uint128Le(localAmountShannons));
@@ -80,14 +90,21 @@ function orderTlcs(tlcs: SettlementTlc[], forRemote: boolean): SettlementTlc[] {
 }
 
 /**
- * Port of fiber's `settlement_tlc_to_witness`: one 85-byte TLC record.
+ * Port of fiber's `settlement_tlc_to_witness`: one TLC record.
  * @param keys The channel's four secrets, source of the local per-TLC key.
  * @param tlc The TLC to serialize.
  * @param forRemote Direction of the witness; it flips the direction flag and swaps the key hashes.
  * @param remoteTlcBasePubkey The peer's TLC base pubkey its per-TLC key derives from.
- * @returns The 85 bytes.
+ * @param lockLayout The layout; it sizes the payment hash the record binds.
+ * @returns The 85 bytes under `legacy`, 97 under `fullPaymentHash`.
  */
-function buildTlcRecord(keys: FiberChannelKeys, tlc: SettlementTlc, forRemote: boolean, remoteTlcBasePubkey: Uint8Array): Uint8Array {
+function buildTlcRecord(
+    keys: FiberChannelKeys,
+    tlc: SettlementTlc,
+    forRemote: boolean,
+    remoteTlcBasePubkey: Uint8Array,
+    lockLayout: CommitmentLockLayout,
+): Uint8Array {
     assertUnsignedInteger("tlc.id", tlc.id, Number.MAX_SAFE_INTEGER);
     assertUnsignedBigInt("tlc.amountShannons", tlc.amountShannons, MAX_AMOUNT_SHANNONS);
     assertBytes("tlc.paymentHash", tlc.paymentHash, PAYMENT_HASH_LENGTH);
@@ -109,7 +126,7 @@ function buildTlcRecord(keys: FiberChannelKeys, tlc: SettlementTlc, forRemote: b
     return concatBytes(
         Uint8Array.of(flag),
         uint128Le(tlc.amountShannons),
-        truncatePaymentHash(tlc.paymentHash),
+        tlc.paymentHash.slice(0, WITNESS_PAYMENT_HASH_LENGTHS[lockLayout]),
         ...keyHashes,
         uint64Le(since),
     );

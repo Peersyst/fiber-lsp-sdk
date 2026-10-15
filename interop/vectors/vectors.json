@@ -1,6 +1,6 @@
 {
   "scheme_version": 1,
-  "fiber_ref": "b71a61c3",
+  "fiber_ref": "8db6a117",
   "hashes": [
     {
       "label": "empty",
@@ -381,6 +381,7 @@
       {
         "name": "ckb, no tlcs, for remote",
         "for_remote": true,
+        "lock_layout": "legacy",
         "funding_out_point": {
           "tx_hash": "6f4ea49726c322dbedceb12a09d013a0256ea697dc362cc8865f8bbcdd17684e",
           "index": 0
@@ -406,6 +407,7 @@
       {
         "name": "ckb, three tlcs channel, opening, for remote",
         "for_remote": true,
+        "lock_layout": "legacy",
         "funding_out_point": {
           "tx_hash": "6f4ea49726c322dbedceb12a09d013a0256ea697dc362cc8865f8bbcdd17684e",
           "index": 3
@@ -431,6 +433,7 @@
       {
         "name": "ckb, three tlcs, for remote",
         "for_remote": true,
+        "lock_layout": "legacy",
         "funding_out_point": {
           "tx_hash": "6f4ea49726c322dbedceb12a09d013a0256ea697dc362cc8865f8bbcdd17684e",
           "index": 3
@@ -487,6 +490,7 @@
       {
         "name": "ckb, three tlcs, for local",
         "for_remote": false,
+        "lock_layout": "legacy",
         "funding_out_point": {
           "tx_hash": "6f4ea49726c322dbedceb12a09d013a0256ea697dc362cc8865f8bbcdd17684e",
           "index": 0
@@ -543,6 +547,7 @@
       {
         "name": "udt, two tlcs, for remote",
         "for_remote": true,
+        "lock_layout": "legacy",
         "funding_out_point": {
           "tx_hash": "6f4ea49726c322dbedceb12a09d013a0256ea697dc362cc8865f8bbcdd17684e",
           "index": 0
@@ -589,6 +594,197 @@
         "tx_size": 594,
         "fee": "594",
         "digest": "412e8869fc4337f71fa379f56a1622bef30d524aa5793f15ee9a0d69b0dd1907"
+      },
+      {
+        "name": "ckb, no tlcs, for remote, full payment hash",
+        "for_remote": true,
+        "lock_layout": "full_payment_hash",
+        "funding_out_point": {
+          "tx_hash": "6f4ea49726c322dbedceb12a09d013a0256ea697dc362cc8865f8bbcdd17684e",
+          "index": 0
+        },
+        "commitment_number": 0,
+        "delay_epoch": "1099511627777",
+        "fee_rate": "1000",
+        "cell_deps_count": 2,
+        "udt_type_script": null,
+        "to_local": "62000000000",
+        "to_remote": "18500000000",
+        "settlement_local": "62000000000",
+        "settlement_remote": "18500000000",
+        "local_reserved": "10000000000",
+        "remote_reserved": "6300000000",
+        "tlcs": [],
+        "settlement_witness": "00e5b099614920970b0ec3c35f979f4d1a070336d600f831c60500000000000000000000006b5e8d9ad1828550472e07fe80b39585cc0837d600d088c3100000000000000000000000",
+        "lock_args": "7ff980b4d180ee128bbfc295ef936f8d73a5dea501000000000100a00000000000000000a3fb323d57dc2dd514d0f7640d3a778b930ceb260001",
+        "tx_size": 457,
+        "fee": "457",
+        "digest": "e657647747f0a460de52bc8a1435f126a2063612588e2f718e1bd98f76e4223e"
+      },
+      {
+        "name": "ckb, three tlcs, for remote, full payment hash",
+        "for_remote": true,
+        "lock_layout": "full_payment_hash",
+        "funding_out_point": {
+          "tx_hash": "6f4ea49726c322dbedceb12a09d013a0256ea697dc362cc8865f8bbcdd17684e",
+          "index": 3
+        },
+        "commitment_number": 11,
+        "delay_epoch": "1099511627777",
+        "fee_rate": "1537",
+        "cell_deps_count": 2,
+        "udt_type_script": null,
+        "to_local": "62000000000",
+        "to_remote": "18500000000",
+        "settlement_local": "59750000000",
+        "settlement_remote": "16250000000",
+        "local_reserved": "10000000000",
+        "remote_reserved": "6300000000",
+        "tlcs": [
+          {
+            "id": 7,
+            "direction": "offered",
+            "hash_algorithm": "ckb-hash",
+            "amount": "1500000000",
+            "payment_hash": "6844f645bb03ff9d1c9c48ee5e9e971be09bf34a3612c81b20c2a5a1bff2a6b6",
+            "expiry_ms": "1723257890123",
+            "created_at_remote_commitment_number": 5,
+            "remote_commitment_point": "02efb7cbbfeee505f9a1703828ad8d8ed9309e496cee736dc962555504e2adee89"
+          },
+          {
+            "id": 2,
+            "direction": "received",
+            "hash_algorithm": "sha256",
+            "amount": "2250000000",
+            "payment_hash": "5b36757f3945408453a6282c4aba2c78bfaba94219e459932924b01f7fc09d1e",
+            "expiry_ms": "1750000000000",
+            "created_at_remote_commitment_number": 0,
+            "remote_commitment_point": "037ad3da8665c8589b8c7532bfdee0a83bf7ad3d54ceb70210ae363502c37c2643"
+          },
+          {
+            "id": 5,
+            "direction": "offered",
+            "hash_algorithm": "sha256",
+            "amount": "750000000",
+            "payment_hash": "c5403872f3e0258e74e8b2ae5aa77e4d8b8dc93c799288270fef73997f8d93f5",
+            "expiry_ms": "1699999999999",
+            "created_at_remote_commitment_number": 1,
+            "remote_commitment_point": "0301f43fb173598b9018374875ac88deb1d7f616dfbc3dc4e75a478e4a1298cc7e"
+          }
+        ],
+        "settlement_witness": "030380461c860000000000000000000000005b36757f3945408453a6282c4aba2c78bfaba94219e459932924b01f7fc09d1e6b2f2504fef1935df010e231430ca2a9408d12c9e2175cb46376d77bf439d72adc5b73b74e47dbcc80e14e6800000040028017b42c000000000000000000000000c5403872f3e0258e74e8b2ae5aa77e4d8b8dc93c799288270fef73997f8d93f57b306c7090a4a63b2af9e2576ada8d249f2e08447c55efe3492d53c407fd929b9fdcb5a2bec596b0fff053650000004000002f68590000000000000000000000006844f645bb03ff9d1c9c48ee5e9e971be09bf34a3612c81b20c2a5a1bff2a6b6d68b6e7796aa927fe4e8ec6358e43b2f8326be85762ca522e146b6a327c4899f6b5a9c27e66dde0f22d4b66600000040e5b099614920970b0ec3c35f979f4d1a070336d680b115400500000000000000000000006b5e8d9ad1828550472e07fe80b39585cc0837d680896c3d100000000000000000000000",
+        "lock_args": "7ff980b4d180ee128bbfc295ef936f8d73a5dea501000000000100a0000000000000000b1bdcafcabd6c35d762a4b29778f96ca952dc4fce0001",
+        "tx_size": 457,
+        "fee": "702",
+        "digest": "1de41d376d6dc08bd1246be2a827a25e4dd9c98792ecc8c782cfdb2ef9ea2ffa"
+      },
+      {
+        "name": "ckb, three tlcs, for local, full payment hash",
+        "for_remote": false,
+        "lock_layout": "full_payment_hash",
+        "funding_out_point": {
+          "tx_hash": "6f4ea49726c322dbedceb12a09d013a0256ea697dc362cc8865f8bbcdd17684e",
+          "index": 0
+        },
+        "commitment_number": 12,
+        "delay_epoch": "13194189864967",
+        "fee_rate": "1000",
+        "cell_deps_count": 2,
+        "udt_type_script": null,
+        "to_local": "62000000000",
+        "to_remote": "18500000000",
+        "settlement_local": "59750000000",
+        "settlement_remote": "16250000000",
+        "local_reserved": "10000000000",
+        "remote_reserved": "6300000000",
+        "tlcs": [
+          {
+            "id": 7,
+            "direction": "offered",
+            "hash_algorithm": "ckb-hash",
+            "amount": "1500000000",
+            "payment_hash": "6844f645bb03ff9d1c9c48ee5e9e971be09bf34a3612c81b20c2a5a1bff2a6b6",
+            "expiry_ms": "1723257890123",
+            "created_at_remote_commitment_number": 5,
+            "remote_commitment_point": "02efb7cbbfeee505f9a1703828ad8d8ed9309e496cee736dc962555504e2adee89"
+          },
+          {
+            "id": 2,
+            "direction": "received",
+            "hash_algorithm": "sha256",
+            "amount": "2250000000",
+            "payment_hash": "5b36757f3945408453a6282c4aba2c78bfaba94219e459932924b01f7fc09d1e",
+            "expiry_ms": "1750000000000",
+            "created_at_remote_commitment_number": 0,
+            "remote_commitment_point": "037ad3da8665c8589b8c7532bfdee0a83bf7ad3d54ceb70210ae363502c37c2643"
+          },
+          {
+            "id": 5,
+            "direction": "offered",
+            "hash_algorithm": "sha256",
+            "amount": "750000000",
+            "payment_hash": "c5403872f3e0258e74e8b2ae5aa77e4d8b8dc93c799288270fef73997f8d93f5",
+            "expiry_ms": "1699999999999",
+            "created_at_remote_commitment_number": 1,
+            "remote_commitment_point": "0301f43fb173598b9018374875ac88deb1d7f616dfbc3dc4e75a478e4a1298cc7e"
+          }
+        ],
+        "settlement_witness": "03038017b42c000000000000000000000000c5403872f3e0258e74e8b2ae5aa77e4d8b8dc93c799288270fef73997f8d93f57c55efe3492d53c407fd929b9fdcb5a2bec596b07b306c7090a4a63b2af9e2576ada8d249f2e0844fff053650000004001002f68590000000000000000000000006844f645bb03ff9d1c9c48ee5e9e971be09bf34a3612c81b20c2a5a1bff2a6b6762ca522e146b6a327c4899f6b5a9c27e66dde0fd68b6e7796aa927fe4e8ec6358e43b2f8326be8522d4b666000000400280461c860000000000000000000000005b36757f3945408453a6282c4aba2c78bfaba94219e459932924b01f7fc09d1ee2175cb46376d77bf439d72adc5b73b74e47dbcc6b2f2504fef1935df010e231430ca2a9408d12c980e14e68000000406b5e8d9ad1828550472e07fe80b39585cc0837d680896c3d100000000000000000000000e5b099614920970b0ec3c35f979f4d1a070336d680b11540050000000000000000000000",
+        "lock_args": "4483f0fbfe1784b42de8fd2c7900febe16cf8c7907000003000c00a0000000000000000ca14c4beffe9f24eec8a5b4824838786f07d871280001",
+        "tx_size": 457,
+        "fee": "457",
+        "digest": "5f95fb69253d38b408d3277e48af56fb949059eb4903d5914a963f9b06ae8e9c"
+      },
+      {
+        "name": "udt, two tlcs, for remote, full payment hash",
+        "for_remote": true,
+        "lock_layout": "full_payment_hash",
+        "funding_out_point": {
+          "tx_hash": "6f4ea49726c322dbedceb12a09d013a0256ea697dc362cc8865f8bbcdd17684e",
+          "index": 0
+        },
+        "commitment_number": 11,
+        "delay_epoch": "1099511627777",
+        "fee_rate": "1000",
+        "cell_deps_count": 3,
+        "udt_type_script": {
+          "code_hash": "912f64f976947ed5467ff5e7ba4c87bd37f240cdbdba0b38da619372056ef827",
+          "hash_type": "type",
+          "args": "8612706980baca14e3d03ea4d77d185e6f7338cd6e98a0ea0cd17a69918f2578"
+        },
+        "to_local": "500000000000000000000",
+        "to_remote": "300000000000000000000",
+        "settlement_local": "400000000000000000000",
+        "settlement_remote": "250000000000000000000",
+        "local_reserved": "10000000000",
+        "remote_reserved": "6300000000",
+        "tlcs": [
+          {
+            "id": 1,
+            "direction": "offered",
+            "hash_algorithm": "ckb-hash",
+            "amount": "100000000000000000000",
+            "payment_hash": "54f6990dc5b918ebb7443496fb35503aa84ae6e6fc1049b74ee1c2fd4f7b119e",
+            "expiry_ms": "1731234567891",
+            "created_at_remote_commitment_number": 3,
+            "remote_commitment_point": "0366cfe3df3f97f5349aba54a572fb7fd07ac702aef080994a56762ec12d457201"
+          },
+          {
+            "id": 9,
+            "direction": "received",
+            "hash_algorithm": "sha256",
+            "amount": "50000000000000000000",
+            "payment_hash": "0bc6fbd2644683a080d640ea4ac39edbe19bad7d19ef3b5fb1b4350760eb6aeb",
+            "expiry_ms": "1745678901234",
+            "created_at_remote_commitment_number": 8,
+            "remote_commitment_point": "029013ed95b03d4b386288ea47ab8e02fe5723e4f25e33d747c2ece8cb4dea5502"
+          }
+        ],
+        "settlement_witness": "0203000088b116afe3b502000000000000000bc6fbd2644683a080d640ea4ac39edbe19bad7d19ef3b5fb1b4350760eb6aebd8ba5649d5ba3310ba259b9bcabeec1c9f3e84cb469efa39bd439aa2a26ca616afcea5b0089ce2d335f20c680000004000000010632d5ec76b050000000000000054f6990dc5b918ebb7443496fb35503aa84ae6e6fc1049b74ee1c2fd4f7b119e7f24c37daedc70133f3485fc9f8079d7330823fac1db1ed2e9b49ff2835d5e1ac7ca5fd70e00a49e078b306700000040e5b099614920970b0ec3c35f979f4d1a070336d60000a877716b728d0d000000000000006b5e8d9ad1828550472e07fe80b39585cc0837d60000408cb5781daf1500000000000000",
+        "lock_args": "7ff980b4d180ee128bbfc295ef936f8d73a5dea501000000000100a0000000000000000ba3e5b72371277c143f4672fe7d13aea59cf59ad70001",
+        "tx_size": 595,
+        "fee": "595",
+        "digest": "7ebf9fa2e08ab35c3f3c6b397a81b6155e74a8d6945fd6852be209c185c3bf2a"
       }
     ],
     "shutdown_cases": [
@@ -659,6 +855,7 @@
       {
         "name": "ckb, send side",
         "for_remote": false,
+        "lock_layout": "legacy",
         "revoked_commitment_number": 4,
         "payout_script": {
           "code_hash": "014f879c667f549df6067c1797534f2b2de2312feff188d100669d4b8ad6f045",
@@ -679,6 +876,7 @@
       {
         "name": "udt, receive side",
         "for_remote": true,
+        "lock_layout": "legacy",
         "revoked_commitment_number": 9,
         "payout_script": {
           "code_hash": "74d3f63a22681bdb6ff6512866db95264338cfaee12f71e28b9f23c414990c9c",
@@ -699,6 +897,27 @@
         "remote_reserved": "6300000000",
         "fee": "594",
         "digest": "7eff2332683b051309803c3890ee2889114f004cf5dde4bcc1b34d77838a9703"
+      },
+      {
+        "name": "ckb, send side, full payment hash",
+        "for_remote": false,
+        "lock_layout": "full_payment_hash",
+        "revoked_commitment_number": 4,
+        "payout_script": {
+          "code_hash": "014f879c667f549df6067c1797534f2b2de2312feff188d100669d4b8ad6f045",
+          "hash_type": "data1",
+          "args": "0682a2f376b830a421ddc7d3b8cf4bffb31bfdf2942f46780359b1ef4f107f36"
+        },
+        "delay_epoch": "1099511627777",
+        "fee_rate": "1000",
+        "cell_deps_count": 2,
+        "udt_type_script": null,
+        "to_local": "62000000000",
+        "to_remote": "18500000000",
+        "local_reserved": "10000000000",
+        "remote_reserved": "6300000000",
+        "fee": "457",
+        "digest": "cae34cda391727885e27f5541ef594d1545aaa7f0296d5b9a1bb7663d80f0c15"
       }
     ],
     "announcement_cases": [
@@ -760,7 +979,10 @@
           "hash_type": "data",
           "args": ""
         },
-        "reserved": "9900000000"
+        "reserved": {
+          "legacy": "9900000000",
+          "full_payment_hash": "10000000000"
+        }
       },
       {
         "name": "20-byte args",
@@ -769,7 +991,10 @@
           "hash_type": "type",
           "args": "5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a"
         },
-        "reserved": "9900000000"
+        "reserved": {
+          "legacy": "9900000000",
+          "full_payment_hash": "10000000000"
+        }
       },
       {
         "name": "56-byte args",
@@ -778,7 +1003,10 @@
           "hash_type": "data1",
           "args": "5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a"
         },
-        "reserved": "9900000000"
+        "reserved": {
+          "legacy": "9900000000",
+          "full_payment_hash": "10000000000"
+        }
       },
       {
         "name": "57-byte args",
@@ -787,7 +1015,10 @@
           "hash_type": "data2",
           "args": "5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a"
         },
-        "reserved": "9900000000"
+        "reserved": {
+          "legacy": "9900000000",
+          "full_payment_hash": "10000000000"
+        }
       },
       {
         "name": "58-byte args",
@@ -796,7 +1027,10 @@
           "hash_type": "type",
           "args": "5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a"
         },
-        "reserved": "10000000000"
+        "reserved": {
+          "legacy": "10000000000",
+          "full_payment_hash": "10000000000"
+        }
       },
       {
         "name": "100-byte args",
@@ -805,7 +1039,10 @@
           "hash_type": "type",
           "args": "5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a"
         },
-        "reserved": "14200000000"
+        "reserved": {
+          "legacy": "14200000000",
+          "full_payment_hash": "14200000000"
+        }
       }
     ]
   }

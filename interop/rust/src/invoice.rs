@@ -1,6 +1,3 @@
-//! Fiber's invoice string, pinned from fiber's own encoder and decoder: invoices written by `CkbInvoice`'s `Display`, the
-//! arithmetic coder on data no invoice reaches, UTF-8 as Rust reads it, and the variants of one invoice with fiber's verdict.
-
 use std::collections::BTreeSet;
 use std::io::Cursor;
 use std::time::Duration;
@@ -275,6 +272,7 @@ fn attribute_values(attribute: &Attribute) -> AttributeValues {
         Attribute::HashAlgorithm(algorithm) => ("hash_algorithm", json!(hash_algorithm_name(*algorithm))),
         Attribute::Feature(feature) => ("feature", json!(hex::encode(feature.bytes()))),
         Attribute::PaymentSecret(secret) => ("payment_secret", json!(hex::encode(secret.as_ref()))),
+        Attribute::TrampolineRouteHint(key) => ("trampoline_route_hint", json!(hex::encode(key.serialize()))),
     };
     AttributeValues { kind: kind.to_string(), value }
 }
@@ -301,6 +299,7 @@ fn attribute_of(values: &AttributeValues) -> Attribute {
         }),
         "feature" => Attribute::Feature(FeatureVector::from(bytes())),
         "payment_secret" => Attribute::PaymentSecret(<[u8; 32]>::try_from(bytes()).unwrap().into()),
+        "trampoline_route_hint" => Attribute::TrampolineRouteHint(PublicKey::from_slice(&bytes()).unwrap()),
         other => panic!("attribute {other}"),
     }
 }

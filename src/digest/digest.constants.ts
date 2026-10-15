@@ -1,6 +1,6 @@
 import { hexToBytes } from "@noble/hashes/utils.js";
 import type { ScriptTemplate } from "../common";
-import { UINT64_MAX } from "../common";
+import { PAYMENT_HASH_LENGTH, TRUNCATED_PAYMENT_HASH_LENGTH, UINT64_MAX } from "../common";
 
 /**
  * CKB cell capacities and fees are u64 shannons, unlike the u128 channel amounts.
@@ -18,9 +18,24 @@ export const FEE_RATE_WEIGHT_SCALE = 1000n;
 export const FUNDING_CELL_WITNESS_LENGTH = 112;
 
 /**
- * The commitment lock args: 20-byte key hash, 8-byte delay, 8-byte version, 20-byte settlement hash, one trailing zero byte.
+ * Fiber's `CommitmentContractFeatures`: `fullPaymentHash` appends a feature byte to the lock args and binds each TLC's whole hash.
  */
-export const COMMITMENT_LOCK_ARGS_LENGTH = 57;
+export const COMMITMENT_LOCK_LAYOUTS = ["legacy", "fullPaymentHash"] as const;
+
+export const COMMITMENT_LOCK_ARGS_LENGTHS = { legacy: 57, fullPaymentHash: 58 } as const satisfies Record<
+    (typeof COMMITMENT_LOCK_LAYOUTS)[number],
+    number
+>;
+
+export const WITNESS_PAYMENT_HASH_LENGTHS = {
+    legacy: TRUNCATED_PAYMENT_HASH_LENGTH,
+    fullPaymentHash: PAYMENT_HASH_LENGTH,
+} as const satisfies Record<(typeof COMMITMENT_LOCK_LAYOUTS)[number], number>;
+
+/**
+ * Fiber's `CommitmentContractFeatures::ONCHAIN_FULL_PAYMENT_HASH` bits, the byte `fullPaymentHash` appends after the trailing zero.
+ */
+export const FULL_PAYMENT_HASH_FEATURE_BYTE = 0x01;
 
 /**
  * The settlement witness counts its TLCs in a single byte.

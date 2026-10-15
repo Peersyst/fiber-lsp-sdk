@@ -83,6 +83,8 @@ export function decodeCommitmentTx(field: WireField, commitmentLock: ScriptTempl
         remoteReservedCkbShannons: decodeUintHex(at("remote_reserved"), UINT64_MAX),
         tlcs: tlcs.map(decodeSettlementTlc),
         commitmentLock,
+        // The wire form predates the layout, so the decoder fills the one it knew.
+        lockLayout: "legacy",
     };
 }
 
@@ -131,6 +133,7 @@ export function decodeRevocation(field: WireField, commitmentLock: ScriptTemplat
         localReservedCkbShannons: decodeUintHex(at("local_reserved"), UINT64_MAX),
         remoteReservedCkbShannons: decodeUintHex(at("remote_reserved"), UINT64_MAX),
         commitmentLock,
+        lockLayout: "legacy",
     };
 }
 

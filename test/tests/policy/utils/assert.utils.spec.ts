@@ -15,7 +15,7 @@ function record(): ChannelPolicyRecord {
         pins: {
             fundedShannons: "5000000000",
             localCloseScript: "ab".repeat(53),
-            localReservedCkbShannons: "9900000000",
+            localReservedCkbShannons: { legacy: "9900000000", fullPaymentHash: "10000000000" },
             udtTypeScript: null,
         },
         views: {

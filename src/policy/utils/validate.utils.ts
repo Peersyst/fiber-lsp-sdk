@@ -17,12 +17,14 @@ import {
     isUnsignedInteger,
 } from "../../common";
 import { MAX_CHANNEL_INDEX, MAX_COMMITMENT_NUMBER, NONCE_CONTEXTS } from "../../derivation";
+import { COMMITMENT_LOCK_LAYOUTS } from "../../digest";
 import { CHANNEL_POLICY_RECORD_VERSION, FIRST_SIGHT_CHANNEL_PINS, PAYMENT_RECORD_VERSION, POLICY_VIEWS } from "../policy.constants";
 import type { ChannelPolicyRecord, DebitIntentRecord, FirstSightChannelPin, HoldInvoicePolicyRecord } from "../policy.types";
 
 const CONTEXTS: readonly string[] = NONCE_CONTEXTS;
 const DIRECTIONS: readonly unknown[] = TLC_DIRECTIONS;
 const HASH_ALGORITHMS: readonly unknown[] = TLC_HASH_ALGORITHMS;
+const LOCK_LAYOUTS: readonly string[] = COMMITMENT_LOCK_LAYOUTS;
 const MAX_UINT64_DIGITS = UINT64_MAX.toString().length;
 
 const FIRST_SIGHT_PIN_FORMS: Record<FirstSightChannelPin, (value: string) => boolean> = {
@@ -34,6 +36,7 @@ const FIRST_SIGHT_PIN_FORMS: Record<FirstSightChannelPin, (value: string) => boo
     commitmentDelayEpoch: isUint64Decimal,
     commitmentFeeRate: isUint64Decimal,
     remoteReservedCkbShannons: isUint64Decimal,
+    lockLayout: (value) => LOCK_LAYOUTS.includes(value),
 };
 
 /**
@@ -98,12 +101,27 @@ function isChannelPins(value: unknown): boolean {
         typeof value.fundedShannons === "string" &&
         isUint64Decimal(value.fundedShannons) &&
         isNonEmptyHexBytes(value.localCloseScript) &&
-        typeof value.localReservedCkbShannons === "string" &&
-        isUint64Decimal(value.localReservedCkbShannons) &&
+        isReserveByLayout(value.localReservedCkbShannons) &&
         value.udtTypeScript === null &&
         FIRST_SIGHT_CHANNEL_PINS.every((pin) => {
             const pinned = value[pin];
             return pinned === undefined || (typeof pinned === "string" && FIRST_SIGHT_PIN_FORMS[pin](pinned));
+        })
+    );
+}
+
+/**
+ * Checks that a value holds the device's reserve under each lock layout and no other key, each a u64 in canonical decimal.
+ * @param value Value to check.
+ * @returns Whether the value is a reserve-by-layout map.
+ */
+function isReserveByLayout(value: unknown): boolean {
+    if (!isPlainObject(value)) return false;
+    return (
+        Object.keys(value).length === COMMITMENT_LOCK_LAYOUTS.length &&
+        COMMITMENT_LOCK_LAYOUTS.every((layout) => {
+            const reserved = value[layout];
+            return typeof reserved === "string" && isUint64Decimal(reserved);
         })
     );
 }
@@ -166,10 +184,21 @@ function isViewTlc(value: unknown): boolean {
         DIRECTIONS.includes(value.direction) &&
         HASH_ALGORITHMS.includes(value.hashAlgorithm) &&
         isHexBytes(value.boundPaymentHash, TRUNCATED_PAYMENT_HASH_LENGTH) &&
+        isViewTlcFullHash(value.fullPaymentHash, value.boundPaymentHash) &&
         isDecimalShannons(value.amountShannons) &&
         typeof value.expirySeconds === "string" &&
         isUint64Decimal(value.expirySeconds)
     );
+}
+
+/**
+ * Checks that a view TLC's full payment hash is `null`, or the whole hash the bound one is the prefix of.
+ * @param value Value to check.
+ * @param boundPaymentHash The TLC's bound payment hash, already checked.
+ * @returns Whether the value is a view TLC's full payment hash.
+ */
+function isViewTlcFullHash(value: unknown, boundPaymentHash: string): boolean {
+    return value === null || (isHexBytes(value, PAYMENT_HASH_LENGTH) && value.startsWith(boundPaymentHash));
 }
 
 /**

@@ -1,5 +1,5 @@
 {
-  "fiber_ref": "b71a61c3",
+  "fiber_ref": "8db6a117",
   "payee_secret_key": "1111111111111111111111111111111111111111111111111111111111111111",
   "payee_public_key": "034f355bdcb7cc0af728ef3cceb9615d90684bb5b2ca5f859ab0f0b704075871aa",
   "invoices": [
@@ -1140,7 +1140,7 @@
       "name": "unknown attribute id 10",
       "string": "fibt11pvwwx88x092gfw0pmm6vk9jsjls9llqqqqzqhuh9qdaxlkn2f40wjyuydzfddz5a8mmv63tvk2kgyzpg69vq02z8l9g3rsawgg2tj32rxmcqtyarzgkgj9f9j0ml3fx3f6c2v8gh6wsxkfn0hsq690jff2lfnm20zwe0tpednynqeduu92dkyzrxp57f9ardpsxuqqpq2jkr",
       "fiber": "refused",
-      "error": "Molecule error: InvoiceAttrReader item id (=10) is an unknown id, only has 10 kind of items"
+      "error": "Molecule error: TrampolineRouteHintReader total size doesn't match, expect 1, actual 8"
     },
     {
       "name": "deprecated final htlc timeout",

@@ -1,8 +1,12 @@
 import { bytesToHex } from "@noble/hashes/utils.js";
 import type { OutPoint, Script } from "../common";
 import { moleculeScript } from "../common";
+import { COMMITMENT_LOCK_LAYOUTS } from "../digest";
 import { FIRST_SIGHT_CHANNEL_PINS } from "./policy.constants";
 import type { ChannelPinConflict, ChannelPins, SignOperation, StatedChannelPins } from "./policy.types";
+
+// The device's reserve is a value per layout; every other pin is one string.
+type PlainChannelPin = Exclude<keyof StatedChannelPins, "localReservedCkbShannons">;
 
 /**
  * Builds the pins of the funding cell as the host reads it from the funding tx it is to sign.
@@ -20,12 +24,13 @@ export function fundingCellPins(fundingOutPoint: OutPoint, capacityShannons: str
  * @returns Each value it states, in the pins' forms.
  */
 export function statedChannelPins(operation: SignOperation): StatedChannelPins {
-    // Asset first: a conflict names the first value that differs, and the asset is the others' unit.
+    // Asset first, then layout: a conflict names the first value that differs, and the rest are read under those two.
     switch (operation.kind) {
         case "commitment_tx": {
             const { input } = operation;
             return {
                 udtTypeScript: scriptOptPin(input.udtTypeScript),
+                lockLayout: input.lockLayout,
                 ...fundingCapacityPins(input),
                 fundingOutPoint: outPointPin(input.fundingOutPoint),
                 remoteFundingPubkey: bytesToHex(input.remoteFundingPubkey),
@@ -48,6 +53,7 @@ export function statedChannelPins(operation: SignOperation): StatedChannelPins {
             const { input } = operation;
             return {
                 udtTypeScript: scriptOptPin(input.udtTypeScript),
+                lockLayout: input.lockLayout,
                 ...fundingCapacityPins(input),
                 remoteFundingPubkey: bytesToHex(input.remoteFundingPubkey),
                 commitmentDelayEpoch: input.commitmentDelayEpoch.toString(),
@@ -76,8 +82,9 @@ export function statedChannelPins(operation: SignOperation): StatedChannelPins {
  */
 export function findChannelPinConflict(pins: ChannelPins, stated: StatedChannelPins): ChannelPinConflict | null {
     for (const [field, value] of statedEntries(stated)) {
-        const pinned = pins[field];
-        if (pinned !== undefined && pinned !== value) return { field, pinned, stated: value };
+        const conflict =
+            field === "localReservedCkbShannons" ? reserveConflict(pins, stated.lockLayout, value) : plainConflict(pins, field, value);
+        if (conflict !== null) return conflict;
     }
     return null;
 }
@@ -95,6 +102,40 @@ export function withChannelPins(pins: ChannelPins, stated: StatedChannelPins): C
     const next = { ...pins };
     for (const field of fresh) next[field] = stated[field];
     return next;
+}
+
+/**
+ * Contrasts a stated value with the one pinned under its field.
+ * @param pins The channel's pins.
+ * @param field The field stated.
+ * @param stated The value stated.
+ * @returns The conflict, or `null` when the field is pinned to that value or not pinned yet.
+ */
+function plainConflict(pins: ChannelPins, field: PlainChannelPin, stated: string | null): ChannelPinConflict | null {
+    const pinned = pins[field];
+    return pinned === undefined || pinned === stated ? null : { field, pinned, stated };
+}
+
+/**
+ * Contrasts a stated reserve with the one computed under the declared layout, else the pinned one, else under either.
+ * @param pins The channel's pins.
+ * @param declared The layout the statement declares, if it declares one.
+ * @param stated The reserve stated.
+ * @returns The conflict, naming the value computed under that layout, or `null` when the statement matches it.
+ */
+function reserveConflict(pins: ChannelPins, declared: string | undefined, stated: string | null): ChannelPinConflict | null {
+    const reserves = pins.localReservedCkbShannons;
+    const known = declared ?? pins.lockLayout;
+    const layout = COMMITMENT_LOCK_LAYOUTS.find((candidate) => candidate === known);
+    if (layout !== undefined) {
+        return reserves[layout] === stated ? null : { field: "localReservedCkbShannons", pinned: reserves[layout], stated };
+    }
+    if (COMMITMENT_LOCK_LAYOUTS.some((candidate) => reserves[candidate] === stated)) return null;
+    return {
+        field: "localReservedCkbShannons",
+        pinned: COMMITMENT_LOCK_LAYOUTS.map((candidate) => `${reserves[candidate]} under ${candidate}`).join(" or "),
+        stated,
+    };
 }
 
 /**

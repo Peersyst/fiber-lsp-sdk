@@ -113,6 +113,85 @@ export type InvoiceResultVector = { invoice_address: string; invoice: InvoiceVec
 
 export type GetInvoiceResultVector = InvoiceResultVector & { status: string };
 
+export type ChannelOpenSignerMaterialVector = {
+    funding_pubkey: string;
+    tlc_base_key: string;
+    first_commitment_point: string;
+    second_commitment_point: string;
+    commitment_nonce: string;
+    next_commitment_nonce: string;
+    revocation_nonce: string;
+    channel_announcement_nonce: string | null;
+};
+
+export type OpenTenantChannelParamsVector = {
+    pubkey: string;
+    funding_amount: string;
+    shutdown_script: ScriptVector;
+    funding_lock_script: ScriptVector;
+    commitment_delay_epoch: string | null;
+    commitment_fee_rate: string | null;
+    external_channel_signer: ChannelOpenSignerMaterialVector;
+};
+
+export type TenantChannelOpeningContextVector = {
+    remote_funding_key: string;
+    remote_settlement_key: string;
+    remote_shutdown_script: ScriptVector;
+    commitment_delay_epoch: string;
+    commitment_fee_rate: string;
+    local_amount: string;
+    remote_amount: string;
+    local_reserved_ckb_amount: string;
+    remote_reserved_ckb_amount: string;
+};
+
+export type OpenTenantChannelResultVector = OpenChannelResultVector & { opening_context: TenantChannelOpeningContextVector };
+
+export type ShutdownChannelParamsVector = {
+    channel_id: string;
+    close_script: ScriptVector | null;
+    fee_rate: string | null;
+    force: boolean | null;
+};
+
+export type SigningStatusResultVector = { channel_id: string; status: string };
+
+export type NextChannelSignerMaterialVector = {
+    next_commitment_point: string;
+    next_commitment_nonce: string;
+    next_revocation_nonce: string;
+};
+
+export type SubmitChannelSignatureParamsVector = {
+    channel_id: string;
+    request_id: string;
+    partial_signature: string;
+    next_material: NextChannelSignerMaterialVector | null;
+};
+
+export type SubmissionResultVector = { outcome: string };
+
+export type SubmitWatchtowerSignatureParamsVector = { channel_id: string; request_id: string; signature: string };
+
+export type TenantRegistryNonceParamsVector = { root_signer_pubkey: string };
+
+export type TenantRegistryNonceResultVector = { lsp_node_id: string; root_signer_pubkey: string; nonce: string };
+
+export type RegisterTenantParamsVector = { root_signer_pubkey: string; nonce: string; signature: string };
+
+export type LspTenantStatusVector = {
+    tenant_id: string;
+    root_signer_pubkey: string | null;
+    invoice_pubkey: string;
+    private_channel_id: string | null;
+    created_at: string;
+    runtime_status: string;
+    channel_online: boolean;
+};
+
+export type RegisterTenantResultVector = { tenant: LspTenantStatusVector; access_token: string };
+
 export type RpcVectorShapes = {
     open_channel_with_external_funding: { params: OpenChannelParamsVector; result: OpenChannelResultVector };
     submit_signed_funding_tx: { params: SubmitSignedFundingTxParamsVector; result: SubmitSignedFundingTxResultVector };
@@ -124,6 +203,14 @@ export type RpcVectorShapes = {
     cancel_invoice: { params: PaymentHashParamsVector; result: GetInvoiceResultVector };
     send_payment: { params: SendPaymentParamsVector; result: PaymentVector };
     get_payment: { params: PaymentHashParamsVector; result: PaymentVector };
+    open_tenant_channel: { params: OpenTenantChannelParamsVector; result: OpenTenantChannelResultVector };
+    shutdown_channel: { params: ShutdownChannelParamsVector; result: null };
+    get_channel_signing_status: { params: ChannelIdParamsVector; result: SigningStatusResultVector };
+    submit_channel_signature: { params: SubmitChannelSignatureParamsVector; result: SubmissionResultVector };
+    get_watchtower_signing_status: { params: ChannelIdParamsVector; result: SigningStatusResultVector };
+    submit_watchtower_signature: { params: SubmitWatchtowerSignatureParamsVector; result: SubmissionResultVector };
+    lsp_get_tenant_registry_nonce: { params: TenantRegistryNonceParamsVector; result: TenantRegistryNonceResultVector };
+    lsp_register_tenant: { params: RegisterTenantParamsVector; result: RegisterTenantResultVector };
 };
 
 export type RpcCaseVector<Values> = { name: string; values: Values; json: unknown };
@@ -268,6 +355,69 @@ function asPaymentHashParams(value: unknown, path: string): PaymentHashParamsVec
     return asStringFields(value, path, ["payment_hash"] as const);
 }
 
+function asChannelIdParams(value: unknown, path: string): ChannelIdParamsVector {
+    return asStringFields(value, path, ["channel_id"] as const);
+}
+
+function asOpenResult(value: unknown, path: string): OpenChannelResultVector {
+    const record = asRecord(value, path);
+    return {
+        channel_id: asString(record.channel_id, `${path}.channel_id`),
+        unsigned_funding_tx: asTransaction(record.unsigned_funding_tx, `${path}.unsigned_funding_tx`),
+    };
+}
+
+function asSignerMaterial(value: unknown, path: string): ChannelOpenSignerMaterialVector {
+    const record = asRecord(value, path);
+    return {
+        channel_announcement_nonce: asNullable(record.channel_announcement_nonce, `${path}.channel_announcement_nonce`, asString),
+        ...asStringFields(record, path, [
+            "funding_pubkey",
+            "tlc_base_key",
+            "first_commitment_point",
+            "second_commitment_point",
+            "commitment_nonce",
+            "next_commitment_nonce",
+            "revocation_nonce",
+        ] as const),
+    };
+}
+
+function asOpeningContext(value: unknown, path: string): TenantChannelOpeningContextVector {
+    const record = asRecord(value, path);
+    return {
+        remote_shutdown_script: asScript(record.remote_shutdown_script, `${path}.remote_shutdown_script`),
+        ...asStringFields(record, path, [
+            "remote_funding_key",
+            "remote_settlement_key",
+            "commitment_delay_epoch",
+            "commitment_fee_rate",
+            "local_amount",
+            "remote_amount",
+            "local_reserved_ckb_amount",
+            "remote_reserved_ckb_amount",
+        ] as const),
+    };
+}
+
+function asSigningStatusResult(value: unknown, path: string): SigningStatusResultVector {
+    return asStringFields(value, path, ["channel_id", "status"] as const);
+}
+
+function asSubmissionResult(value: unknown, path: string): SubmissionResultVector {
+    return asStringFields(value, path, ["outcome"] as const);
+}
+
+function asTenantStatus(value: unknown, path: string): LspTenantStatusVector {
+    const record = asRecord(value, path);
+    return {
+        root_signer_pubkey: asNullable(record.root_signer_pubkey, `${path}.root_signer_pubkey`, asString),
+        private_channel_id: asNullable(record.private_channel_id, `${path}.private_channel_id`, asString),
+        channel_online: asBoolean(record.channel_online, `${path}.channel_online`),
+        ...asStringFields(record, path, ["tenant_id", "invoice_pubkey", "created_at", "runtime_status"] as const),
+    };
+}
+
 function asNull(value: unknown, path: string): null {
     if (value !== null) throw new Error(`${path} must be null`);
     return null;
@@ -291,13 +441,7 @@ const METHOD_PARSERS: {
                 ...asStringFields(record, path, ["pubkey", "funding_amount"] as const),
             };
         },
-        result: (value, path) => {
-            const record = asRecord(value, path);
-            return {
-                channel_id: asString(record.channel_id, `${path}.channel_id`),
-                unsigned_funding_tx: asTransaction(record.unsigned_funding_tx, `${path}.unsigned_funding_tx`),
-            };
-        },
+        result: asOpenResult,
     },
     submit_signed_funding_tx: {
         params: (value, path) => {
@@ -309,10 +453,7 @@ const METHOD_PARSERS: {
         },
         result: (value, path) => asStringFields(value, path, ["channel_id", "funding_tx_hash"] as const),
     },
-    abandon_channel: {
-        params: (value, path) => asStringFields(value, path, ["channel_id"] as const),
-        result: asNull,
-    },
+    abandon_channel: { params: asChannelIdParams, result: asNull },
     list_channels: {
         params: (value, path) => {
             const record = asRecord(value, path);
@@ -350,6 +491,67 @@ const METHOD_PARSERS: {
         result: asPayment,
     },
     get_payment: { params: asPaymentHashParams, result: asPayment },
+    open_tenant_channel: {
+        params: (value, path) => {
+            const record = asRecord(value, path);
+            return {
+                shutdown_script: asScript(record.shutdown_script, `${path}.shutdown_script`),
+                funding_lock_script: asScript(record.funding_lock_script, `${path}.funding_lock_script`),
+                commitment_delay_epoch: asNullable(record.commitment_delay_epoch, `${path}.commitment_delay_epoch`, asString),
+                commitment_fee_rate: asNullable(record.commitment_fee_rate, `${path}.commitment_fee_rate`, asString),
+                external_channel_signer: asSignerMaterial(record.external_channel_signer, `${path}.external_channel_signer`),
+                ...asStringFields(record, path, ["pubkey", "funding_amount"] as const),
+            };
+        },
+        result: (value, path) => ({
+            ...asOpenResult(value, path),
+            opening_context: asOpeningContext(asRecord(value, path).opening_context, `${path}.opening_context`),
+        }),
+    },
+    shutdown_channel: {
+        params: (value, path) => {
+            const record = asRecord(value, path);
+            return {
+                channel_id: asString(record.channel_id, `${path}.channel_id`),
+                close_script: asNullable(record.close_script, `${path}.close_script`, asScript),
+                fee_rate: asNullable(record.fee_rate, `${path}.fee_rate`, asString),
+                force: asNullable(record.force, `${path}.force`, asBoolean),
+            };
+        },
+        result: asNull,
+    },
+    get_channel_signing_status: { params: asChannelIdParams, result: asSigningStatusResult },
+    submit_channel_signature: {
+        params: (value, path) => {
+            const record = asRecord(value, path);
+            return {
+                next_material: asNullable(record.next_material, `${path}.next_material`, (material, at) =>
+                    asStringFields(material, at, ["next_commitment_point", "next_commitment_nonce", "next_revocation_nonce"] as const),
+                ),
+                ...asStringFields(record, path, ["channel_id", "request_id", "partial_signature"] as const),
+            };
+        },
+        result: asSubmissionResult,
+    },
+    get_watchtower_signing_status: { params: asChannelIdParams, result: asSigningStatusResult },
+    submit_watchtower_signature: {
+        params: (value, path) => asStringFields(value, path, ["channel_id", "request_id", "signature"] as const),
+        result: asSubmissionResult,
+    },
+    lsp_get_tenant_registry_nonce: {
+        params: (value, path) => asStringFields(value, path, ["root_signer_pubkey"] as const),
+        result: (value, path) => asStringFields(value, path, ["lsp_node_id", "root_signer_pubkey", "nonce"] as const),
+    },
+    lsp_register_tenant: {
+        params: (value, path) => asStringFields(value, path, ["root_signer_pubkey", "nonce", "signature"] as const),
+        result: (value, path) => {
+            const record = asRecord(value, path);
+            return {
+                tenant: asTenantStatus(record.tenant, `${path}.tenant`),
+                access_token: asString(record.access_token, `${path}.access_token`),
+            };
+        },
+    },
 };
 
 function asCases<Values>(value: unknown, path: string, parse: Parser<Values>): RpcCaseVector<Values>[] {

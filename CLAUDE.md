@@ -8,7 +8,8 @@ Guidance for AI coding agents working on this repository.
 device (a mobile wallet) holds the channel keys, derives all channel secrets from a host-provided master seed, produces musig2
 (BIP-327) partial signatures on request, and enforces a signing policy so it never blind-signs.
 
-Upstream reference: `nervosnetwork/fiber` @ `b71a61c3` (v0.9.0-rc7). The key derivation scheme ports fiber's
+Upstream reference: `nervosnetwork/fiber` @ `8db6a117`, the head of the hosted-LSP PR (nervosnetwork/fiber#1623), where the
+key derivation is byte for byte the one of `b71a61c3` (v0.9.0-rc7). The key derivation scheme ports fiber's
 `InMemorySigner` derivation (`crates/fiber-types/src/channel.rs`) byte for byte; re-validate it against new fiber releases.
 
 ## Hard constraints

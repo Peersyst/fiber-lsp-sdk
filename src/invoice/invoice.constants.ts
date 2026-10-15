@@ -1,3 +1,4 @@
+import { RECOVERABLE_ECDSA_SIGNATURE_LENGTH } from "../common";
 import type { InvoiceCurrency } from "./invoice.types";
 
 /**
@@ -26,7 +27,7 @@ export const INVOICE_ATTRIBUTE_TYPES = [
     "paymentSecret",
 ] as const;
 
-export const INVOICE_SIGNATURE_LENGTH = 65;
+export const INVOICE_SIGNATURE_LENGTH = RECOVERABLE_ECDSA_SIGNATURE_LENGTH;
 
 export const INVOICE_SIGNATURE_GROUPS = 104;
 

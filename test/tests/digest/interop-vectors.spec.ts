@@ -1,7 +1,7 @@
 import { bytesToHex, hexToBytes } from "@noble/hashes/utils.js";
 import { deriveChannelKeys } from "../../../src/derivation/fiber-scheme";
 import { computeChannelAnnouncementDigest } from "../../../src/digest/channel-announcement";
-import { buildCommitmentLockArgs, computeCommitmentTxDigest } from "../../../src/digest/commitment-tx";
+import { buildCommitmentLockArgs, computeCommitmentTxDigest, readCommitmentLockLayout } from "../../../src/digest/commitment-tx";
 import { COMMITMENT_LOCK_TESTNET } from "../../../src/digest/digest.constants";
 import { calculateTxFee, commitmentTxSize, shutdownTxSize } from "../../../src/digest/fee";
 import { computeRevocationDigest } from "../../../src/digest/revocation";
@@ -11,6 +11,7 @@ import { aggregateXOnlyPubkey } from "../../../src/digest/utils/digest.utils";
 import {
     toChannelAnnouncementInput,
     toCommitmentTxInput,
+    toLockLayout,
     toOutPoint,
     toRevocationInput,
     toScript,
@@ -18,7 +19,7 @@ import {
     toShutdownTxInput,
     toTlc,
 } from "../../utils/digest-inputs";
-import { loadInteropVectors } from "../../utils/interop-vectors";
+import { caseOf, loadInteropVectors } from "../../utils/interop-vectors";
 
 const vectors = loadInteropVectors();
 const digest = vectors.digest;
@@ -37,10 +38,36 @@ describe("digest cross-implementation vectors", () => {
         expect(COMMITMENT_LOCK_TESTNET.hashType).toBe(digest.commitment_lock.hash_type);
     });
 
+    // Both layouts are pinned by case name, so a regeneration that drops either side cannot stay green.
+    describe("lock layouts", () => {
+        it.each([
+            ["ckb, no tlcs, for remote", "legacy"],
+            ["ckb, three tlcs channel, opening, for remote", "legacy"],
+            ["ckb, three tlcs, for remote", "legacy"],
+            ["ckb, three tlcs, for local", "legacy"],
+            ["udt, two tlcs, for remote", "legacy"],
+            ["ckb, no tlcs, for remote, full payment hash", "full_payment_hash"],
+            ["ckb, three tlcs, for remote, full payment hash", "full_payment_hash"],
+            ["ckb, three tlcs, for local, full payment hash", "full_payment_hash"],
+            ["udt, two tlcs, for remote, full payment hash", "full_payment_hash"],
+        ])("carry the commitment case %p under %s", (name, layout) => {
+            expect(caseOf(digest.commitment_cases, name).lock_layout).toBe(layout);
+        });
+
+        it.each([
+            ["ckb, send side", "legacy"],
+            ["udt, receive side", "legacy"],
+            ["ckb, send side, full payment hash", "full_payment_hash"],
+        ])("carry the revocation case %p under %s", (name, layout) => {
+            expect(caseOf(digest.revocation_cases, name).lock_layout).toBe(layout);
+        });
+    });
+
     describe("commitment tx", () => {
         for (const kase of digest.commitment_cases) {
             describe(kase.name, () => {
                 const isUdt = kase.udt_type_script !== null;
+                const lockLayout = toLockLayout(kase.lock_layout);
                 const input = toCommitmentTxInput(kase, digest.remote);
 
                 it("rebuilds the settlement witness", () => {
@@ -50,6 +77,7 @@ describe("digest cross-implementation vectors", () => {
                         localAmountShannons: BigInt(kase.settlement_local) + (isUdt ? 0n : BigInt(kase.local_reserved)),
                         remoteAmountShannons: BigInt(kase.settlement_remote) + (isUdt ? 0n : BigInt(kase.remote_reserved)),
                         tlcs: kase.tlcs.map(toTlc),
+                        lockLayout,
                     });
                     expect(bytesToHex(witness)).toBe(kase.settlement_witness);
                 });
@@ -63,12 +91,22 @@ describe("digest cross-implementation vectors", () => {
                         BigInt(kase.delay_epoch),
                         kase.commitment_number,
                         hexToBytes(kase.settlement_witness),
+                        lockLayout,
                     );
                     expect(bytesToHex(lockArgs)).toBe(kase.lock_args);
                 });
 
+                it("reads the layout back from the lock args", () => {
+                    expect(readCommitmentLockLayout(hexToBytes(kase.lock_args))).toBe(lockLayout);
+                });
+
                 it("sizes the mock tx and its fee", () => {
-                    const txSize = commitmentTxSize(kase.cell_deps_count, toScriptOrNull(kase.udt_type_script), COMMITMENT_LOCK_TESTNET);
+                    const txSize = commitmentTxSize(
+                        kase.cell_deps_count,
+                        toScriptOrNull(kase.udt_type_script),
+                        COMMITMENT_LOCK_TESTNET,
+                        lockLayout,
+                    );
                     expect(txSize).toBe(kase.tx_size);
                     expect(calculateTxFee(BigInt(kase.fee_rate), txSize)).toBe(BigInt(kase.fee));
                 });

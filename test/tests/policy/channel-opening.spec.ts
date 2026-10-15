@@ -9,7 +9,7 @@ const digest = loadInteropVectors().digest;
 const LOCAL_CLOSE_SCRIPT_PIN =
     "4900000010000000300000003100000074d3f63a22681bdb6ff6512866db95264338cfaee12f71e28b9f23c414990c9c0114000000da694932ba803b4c07f6e3a9b6b2ea3f9c6c66c7";
 
-// Args under 57 bytes: a 99 CKB reserve.
+// Args under 57 bytes: a 99 CKB reserve under legacy, 100 CKB under the full hash.
 const CLOSE_SCRIPT: Script = { codeHash: new Uint8Array(32), hashType: "type", args: new Uint8Array(20) };
 
 describe("assertChannelOpening", () => {
@@ -38,6 +38,15 @@ describe("assertChannelOpening", () => {
         expect(() => assertChannelOpening(funded, CLOSE_SCRIPT)).toThrow(message);
     });
 
+    it("holds the funded amount to the legacy reserve, the lower floor, where the full-hash reserve is 1 CKB more", () => {
+        expect(openingChannelPins("9900000000", CLOSE_SCRIPT).localReservedCkbShannons).toEqual({
+            legacy: "9900000000",
+            fullPaymentHash: "10000000000",
+        });
+        expect(() => assertChannelOpening("9900000000", CLOSE_SCRIPT)).not.toThrow();
+        expect(() => assertChannelOpening("9899999999", CLOSE_SCRIPT)).toThrow(RangeError);
+    });
+
     it("rejects a funded amount in hex as malformed", () => {
         expect(() => assertChannelOpening("0x1", CLOSE_SCRIPT)).toThrow(
             new TypeError("fundedShannons must be an amount in decimal shannons"),
@@ -45,6 +54,7 @@ describe("assertChannelOpening", () => {
         expect(() => assertChannelOpening("0x1", CLOSE_SCRIPT)).not.toThrow(RangeError);
     });
 
+    // Args at 58 bytes: both layouts count them as they are, 100 CKB.
     it("reads the reserve over the close script it is given", () => {
         const longScript = { ...CLOSE_SCRIPT, args: new Uint8Array(58) };
         expect(() => assertChannelOpening("9900000000", longScript)).toThrow(
@@ -68,19 +78,26 @@ describe("assertChannelOpening", () => {
 });
 
 describe("openingChannelPins", () => {
-    it("fixes the funded amount, the close script as its molecule bytes, the reserve fiber sizes over it, and the CKB asset", () => {
+    it("fixes the funded amount, the close script as its molecule bytes, the reserve fiber sizes over it under each layout, and the CKB asset", () => {
         const localCloseScript = toShutdownTxInput(caseOf(digest.shutdown_cases, "ckb"), digest.remote).localCloseScript;
         expect(openingChannelPins("71900000000", localCloseScript)).toEqual<ChannelPins>({
             fundedShannons: "71900000000",
             localCloseScript: LOCAL_CLOSE_SCRIPT_PIN,
-            localReservedCkbShannons: "9900000000",
+            localReservedCkbShannons: { legacy: "9900000000", fullPaymentHash: "10000000000" },
             udtTypeScript: null,
         });
     });
 
-    it.each(digest.reserve_cases.map((kase) => [kase.name, kase] as const))("reserves what fiber does over a script with %s", (_, kase) => {
-        expect(openingChannelPins(kase.reserved, toScript(kase.shutdown_script)).localReservedCkbShannons).toBe(kase.reserved);
-    });
+    // Funded at the legacy reserve, the floor: the lower value must pass where the two differ.
+    it.each(digest.reserve_cases.map((kase) => [kase.name, kase] as const))(
+        "reserves what fiber does over a script with %s, under each layout",
+        (_, kase) => {
+            expect(openingChannelPins(kase.reserved.legacy, toScript(kase.shutdown_script)).localReservedCkbShannons).toEqual({
+                legacy: kase.reserved.legacy,
+                fullPaymentHash: kase.reserved.full_payment_hash,
+            });
+        },
+    );
 
     it("refuses what the opening assertion refuses, before building anything", () => {
         expect(() => openingChannelPins("9899999999", CLOSE_SCRIPT)).toThrow(RangeError);

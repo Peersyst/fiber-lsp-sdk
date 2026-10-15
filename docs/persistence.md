@@ -18,9 +18,10 @@ keys carry the `fiber-lsp-sdk:` namespace, because the host may back that storag
 | `fiber-lsp-sdk:activity`            | What the facade's poller still asks the node about, JSON             |
 
 The prefixes are fixed and disjoint, so a channel id and a payment hash can be the same string without colliding.
-`<boundHash>` is the bound payment hash: the first 20 bytes of the payment hash, the part a commitment binds. A record
-keyed by all 32 would let a node that changes the other 12 find no invoice to pay for ([policy.md](./policy.md)). The
-record holds the whole hash, and a record whose hash does not start with its key's reads as corruption.
+`<boundHash>` is the bound payment hash: the first 20 bytes of the payment hash, all a commitment binds under the
+`legacy` lock layout, and the key under both layouts. A record keyed by all 32 would let a node that changes the other
+12 find no invoice to pay for ([policy.md](./policy.md)). The record holds the whole hash, which is what a TLC under the
+`fullPaymentHash` layout is held to, and a record whose hash does not start with its key's reads as corruption.
 
 The last two are the facade's ([sdk.md](./sdk.md)): the allocator keeps, per kind, the last index it handed out, and the
 activity record lists the channels, payments and invoices the poller watches with the last status an event was emitted
@@ -64,22 +65,23 @@ the durable store for channel state.
 | `pins`                        | The channel's constant values, each held to one value for the channel's life              |
 | `views`                       | One snapshot per commitment the device signs, `remote` (the peer's) and `local` (its own) |
 
-`pins` holds four values from the registration, `fundedShannons` and `localReservedCkbShannons` (base 10),
-`localCloseScript` (the script's molecule bytes, hex) and `udtTypeScript` (always `null`), and eight more that are absent
+`pins` holds four values from the registration, `fundedShannons` (base 10), `localReservedCkbShannons` (a map from each
+lock layout, `legacy` and `fullPaymentHash`, to the reserve computed under it in base 10, exactly those two keys),
+`localCloseScript` (the script's molecule bytes, hex) and `udtTypeScript` (always `null`), and nine more that are absent
 until the host or the first message stating them sets them: `fundingOutPoint` (`<tx hash hex>:<index>`),
 `fundingCapacityShannons`, `liquidCapacityShannons`, `commitmentDelayEpoch`, `commitmentFeeRate` and
-`remoteReservedCkbShannons` (base 10), and
-`remoteFundingPubkey` and `remoteTlcBasePubkey` (33 bytes, hex). One canonical string per value, so a pin is compared by
+`remoteReservedCkbShannons` (base 10), `remoteFundingPubkey` and `remoteTlcBasePubkey` (33 bytes, hex), and `lockLayout`
+(`legacy` or `fullPaymentHash`, which picks the reserve). One canonical string per value, so a pin is compared by
 equality ([policy.md](./policy.md)). A pin is never cleared: an absent one reads as not seen yet, never as unknown.
 
 A view's snapshot holds:
 
-| Field              | What it holds                                                                                                 |
-| ------------------ | ------------------------------------------------------------------------------------------------------------- |
-| `exposureShannons` | What that message's witness paid the device, reserve included, integer shannons in base 10                    |
-| `tlcs`             | The TLCs that message listed: direction, hash algorithm, `boundPaymentHash`, amount, expiry in seconds; no id |
-| `chargedShannons`  | Per `<boundHash>`, what offered TLCs that left the view took with them                                        |
-| `creditedShannons` | Per `<boundHash>`, what received TLCs of a released invoice had to pay the view                               |
+| Field              | What it holds                                                                                                                                                                                          |
+| ------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `exposureShannons` | What that message's witness paid the device, reserve included, integer shannons in base 10                                                                                                             |
+| `tlcs`             | The TLCs that message listed: direction, hash algorithm, `boundPaymentHash` (20 bytes), `fullPaymentHash` (all 32 under the full-hash layout, `null` under `legacy`), amount, expiry in seconds; no id |
+| `chargedShannons`  | Per `<boundHash>`, what offered TLCs that left the view took with them                                                                                                                                 |
+| `creditedShannons` | Per `<boundHash>`, what received TLCs of a released invoice had to pay the view                                                                                                                        |
 
 Two fields carry more than their name suggests, and [policy.md](./policy.md) is where the reasoning lives:
 

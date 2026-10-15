@@ -24,20 +24,30 @@ const CLOSE_SCRIPT_LONG: Script = { codeHash: hexToBytes("ee".repeat(32)), hashT
 
 describe("commitmentTxSize", () => {
     // The 456-byte reference: a CKB channel with the shipped configs' two funding-lock cell deps.
-    it("measures the canonical CKB mock at 456 bytes", () => {
-        expect(commitmentTxSize(2, null, COMMITMENT_LOCK_TESTNET)).toBe(456);
+    it("measures the canonical CKB mock at 456 bytes under legacy and 457 under fullPaymentHash", () => {
+        expect(commitmentTxSize(2, null, COMMITMENT_LOCK_TESTNET, "legacy")).toBe(456);
+        expect(commitmentTxSize(2, null, COMMITMENT_LOCK_TESTNET, "fullPaymentHash")).toBe(457);
     });
 
-    it("measures the UDT mock with a 32-byte-args type script and three deps at 594 bytes", () => {
-        expect(commitmentTxSize(3, UDT_SCRIPT, COMMITMENT_LOCK_TESTNET)).toBe(594);
+    it("measures the UDT mock with a 32-byte-args type script and three deps at 594 bytes, 595 under fullPaymentHash", () => {
+        expect(commitmentTxSize(3, UDT_SCRIPT, COMMITMENT_LOCK_TESTNET, "legacy")).toBe(594);
+        expect(commitmentTxSize(3, UDT_SCRIPT, COMMITMENT_LOCK_TESTNET, "fullPaymentHash")).toBe(595);
     });
 
     it("grows by exactly one 37-byte dep per count", () => {
-        expect(commitmentTxSize(3, null, COMMITMENT_LOCK_TESTNET) - commitmentTxSize(2, null, COMMITMENT_LOCK_TESTNET)).toBe(37);
+        expect(
+            commitmentTxSize(3, null, COMMITMENT_LOCK_TESTNET, "legacy") - commitmentTxSize(2, null, COMMITMENT_LOCK_TESTNET, "legacy"),
+        ).toBe(37);
     });
 
     it("refuses a cell dep count beyond the sanity bound", () => {
-        expect(() => commitmentTxSize(256, null, COMMITMENT_LOCK_TESTNET)).toThrow(RangeError);
+        expect(() => commitmentTxSize(256, null, COMMITMENT_LOCK_TESTNET, "legacy")).toThrow(RangeError);
+    });
+
+    it.each([undefined, null, "full_payment_hash", "Legacy", "constructor"])("refuses the layout %p", (lockLayout) => {
+        expect(() => commitmentTxSize(2, null, COMMITMENT_LOCK_TESTNET, lockLayout as never)).toThrow(
+            new TypeError("lockLayout must be one of legacy, fullPaymentHash"),
+        );
     });
 });
 
@@ -76,6 +86,12 @@ describe("calculateTxFee", () => {
 });
 
 describe("calculateCommitmentTxFee", () => {
+    it("charges the mock's extra byte under fullPaymentHash", () => {
+        const sizing = { commitmentFeeRate: 1000n, cellDepsCount: 2, udtTypeScript: null, commitmentLock: COMMITMENT_LOCK_TESTNET };
+        expect(calculateCommitmentTxFee({ ...sizing, lockLayout: "legacy" })).toBe(456n);
+        expect(calculateCommitmentTxFee({ ...sizing, lockLayout: "fullPaymentHash" })).toBe(457n);
+    });
+
     it.each(digest.commitment_cases.map((kase) => [kase.name, kase] as const))("takes fiber's fee for the commitment %s", (_, kase) => {
         expect(calculateCommitmentTxFee(toCommitmentTxInput(kase, digest.remote))).toBe(BigInt(kase.fee));
     });

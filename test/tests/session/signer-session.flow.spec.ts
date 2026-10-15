@@ -76,11 +76,12 @@ const REGISTERED_PINS = {
     fundedShannons: "71900000000",
     localCloseScript:
         "4900000010000000300000003100000074d3f63a22681bdb6ff6512866db95264338cfaee12f71e28b9f23c414990c9c0114000000da694932ba803b4c07f6e3a9b6b2ea3f9c6c66c7",
-    localReservedCkbShannons: "9900000000",
+    localReservedCkbShannons: { legacy: "9900000000", fullPaymentHash: "10000000000" },
     udtTypeScript: null,
 };
 const OPENED_PINS = {
     ...REGISTERED_PINS,
+    lockLayout: "legacy",
     fundingOutPoint: "6f4ea49726c322dbedceb12a09d013a0256ea697dc362cc8865f8bbcdd17684e:0",
     fundingCapacityShannons: "96700000000",
     liquidCapacityShannons: "80500000000",

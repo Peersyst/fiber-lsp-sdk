@@ -1,6 +1,6 @@
 import type { TlcDirection, TlcHashAlgorithm } from "../common";
 import type { NonceContext } from "../derivation";
-import type { ChannelAnnouncementInput, CommitmentTxInput, RevocationInput, ShutdownTxInput } from "../digest";
+import type { ChannelAnnouncementInput, CommitmentLockLayout, CommitmentTxInput, RevocationInput, ShutdownTxInput } from "../digest";
 import type {
     CHANNEL_POLICY_RECORD_VERSION,
     DEBIT_INTENT_ERROR_CODES,
@@ -50,9 +50,9 @@ export type ChannelPins = {
      */
     localCloseScript: string;
     /**
-     * Fiber sizes it over `localCloseScript`.
+     * One per layout, since fiber counts the close script's args at no less than the lock's; the pinned `lockLayout` picks.
      */
-    localReservedCkbShannons: string;
+    localReservedCkbShannons: Record<CommitmentLockLayout, string>;
     /**
      * CKB channels only, until the multi-asset shape is decided.
      */
@@ -81,9 +81,13 @@ export type PolicyViewTlc = {
     direction: TlcDirection;
     hashAlgorithm: TlcHashAlgorithm;
     /**
-     * First 20 bytes of the payment hash, lowercase hex.
+     * First 20 bytes, lowercase hex: the key of the payment records under both layouts, and all a `legacy` witness binds.
      */
     boundPaymentHash: string;
+    /**
+     * The whole 32-byte hash, lowercase hex, when the layout binds it; `null` under `legacy`.
+     */
+    fullPaymentHash: string | null;
     amountShannons: string;
     expirySeconds: string;
 };

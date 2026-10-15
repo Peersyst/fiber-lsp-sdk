@@ -10,6 +10,12 @@ const COMMITMENT = toCommitmentTxInput(caseOf(digest.commitment_cases, "ckb, no 
 const THREE_TLCS = toCommitmentTxInput(caseOf(digest.commitment_cases, "ckb, three tlcs, for remote"), digest.remote);
 const REVOCATION = toRevocationInput(caseOf(digest.revocation_cases, "ckb, send side"), digest.remote);
 const SHUTDOWN = toShutdownTxInput(caseOf(digest.shutdown_cases, "ckb"), digest.remote);
+// The same commitment and revocation under the full-hash layout: the feature byte makes the mock 457 bytes.
+const FULL_HASH_COMMITMENT = toCommitmentTxInput(
+    caseOf(digest.commitment_cases, "ckb, no tlcs, for remote, full payment hash"),
+    digest.remote,
+);
+const FULL_HASH_REVOCATION = toRevocationInput(caseOf(digest.revocation_cases, "ckb, send side, full payment hash"), digest.remote);
 
 function refusalOf(judge: () => unknown): PolicyRefusalError {
     try {
@@ -47,6 +53,26 @@ describe("judgeCapacityBounds", () => {
             const refusal = refusalOf(() => judgeCapacityBounds(operation(109_649_125n)));
             expect(refusal.code).toBe("policy_refusal");
             expect(refusal.message).toBe("the commitment fee is 50000001 shannons, above the 50000000 the reserve keeps for it");
+        });
+
+        // 109_409_193 shannons per KB: 457 bytes cross the bound by one shannon, 456 stay 109_408 below it.
+        it.each([
+            [
+                "a commitment",
+                (rate: bigint) => ({ kind: "commitment_tx" as const, input: { ...FULL_HASH_COMMITMENT, commitmentFeeRate: rate } }),
+                (rate: bigint) => ({ kind: "commitment_tx" as const, input: { ...COMMITMENT, commitmentFeeRate: rate } }),
+            ],
+            [
+                "a revocation",
+                (rate: bigint) => ({ kind: "revocation" as const, input: { ...FULL_HASH_REVOCATION, commitmentFeeRate: rate } }),
+                (rate: bigint) => ({ kind: "revocation" as const, input: { ...REVOCATION, commitmentFeeRate: rate } }),
+            ],
+        ])("reaches the bound one byte sooner for %s under the full-hash layout", (_, fullHash, legacy) => {
+            expect(() => judgeCapacityBounds(fullHash(109_409_192n))).not.toThrow();
+            const refusal = refusalOf(() => judgeCapacityBounds(fullHash(109_409_193n)));
+            expect(refusal.code).toBe("policy_refusal");
+            expect(refusal.message).toBe("the commitment fee is 50000001 shannons, above the 50000000 the reserve keeps for it");
+            expect(() => judgeCapacityBounds(legacy(109_409_193n))).not.toThrow();
         });
 
         it("sizes the fee over the cell deps the request states", () => {

@@ -6,8 +6,10 @@ check that the string the node returns for an invoice the device asked for carri
 Both need a reader that sees what fiber's decoder sees, so the `invoice` module is a port, pinned against fiber's own encoder
 and decoder by vectors of its own.
 
-Every claim about fiber refers to `nervosnetwork/fiber` @ `b71a61c3`, `crates/fiber-types/src/invoice.rs` unless another file
-is named.
+Every claim about fiber refers to `nervosnetwork/fiber` @ `8db6a117`, `crates/fiber-types/src/invoice.rs` unless another file
+is named. That commit adds an eleventh attribute, `TrampolineRouteHint`, which the codec does not read yet: a string carrying
+a well-formed one is refused as an unknown item, which nothing pins yet (the vectors' "unknown attribute id 10" variant
+carries a malformed one, which fiber refuses too).
 
 ## The string
 

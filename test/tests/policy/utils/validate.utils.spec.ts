@@ -26,7 +26,7 @@ describe("isChannelPolicyRecord", () => {
         return {
             fundedShannons: "71900000000",
             localCloseScript: "55000000100000003000000031000000" + "74".repeat(32) + "01" + "0400000000",
-            localReservedCkbShannons: "9900000000",
+            localReservedCkbShannons: { legacy: "9900000000", fullPaymentHash: "10000000000" },
             udtTypeScript: null,
             fundingOutPoint: `${"6f".repeat(32)}:0`,
             fundingCapacityShannons: "96700000000",
@@ -36,6 +36,7 @@ describe("isChannelPolicyRecord", () => {
             commitmentDelayEpoch: "1099511627777",
             commitmentFeeRate: "1000",
             remoteReservedCkbShannons: "6300000000",
+            lockLayout: "legacy",
         };
     }
 
@@ -51,6 +52,7 @@ describe("isChannelPolicyRecord", () => {
                     direction: "offered",
                     hashAlgorithm: "ckb-hash",
                     boundPaymentHash: "33".repeat(20),
+                    fullPaymentHash: null,
                     amountShannons: "100",
                     expirySeconds: "1700000000",
                 },
@@ -81,7 +83,7 @@ describe("isChannelPolicyRecord", () => {
                 pins: {
                     fundedShannons: "0",
                     localCloseScript: pins().localCloseScript,
-                    localReservedCkbShannons: "0",
+                    localReservedCkbShannons: { legacy: "0", fullPaymentHash: "0" },
                     udtTypeScript: null,
                 },
                 views: {
@@ -192,12 +194,41 @@ describe("isChannelPolicyRecord", () => {
         ["an uppercase peer TLC base key", { remoteTlcBasePubkey: "03" + "AB".repeat(32) }],
         ["a delay above u64", { commitmentDelayEpoch: "18446744073709551616" }],
         ["a fee rate with a leading zero", { commitmentFeeRate: "01000" }],
-        ["a negative local reserve", { localReservedCkbShannons: "-1" }],
-        ["a numeric local reserve", { localReservedCkbShannons: 9900000000 }],
+        ["a local reserve as one string, the form before the layouts", { localReservedCkbShannons: "9900000000" }],
+        ["a null local reserve", { localReservedCkbShannons: null }],
+        ["a local reserve that is an array", { localReservedCkbShannons: ["9900000000", "10000000000"] }],
+        ["a local reserve missing the legacy layout", { localReservedCkbShannons: { fullPaymentHash: "10000000000" } }],
+        ["a local reserve missing the full-hash layout", { localReservedCkbShannons: { legacy: "9900000000" } }],
+        [
+            "a local reserve under a third layout",
+            { localReservedCkbShannons: { legacy: "9900000000", fullPaymentHash: "10000000000", future: "10100000000" } },
+        ],
+        ["a negative local reserve", { localReservedCkbShannons: { legacy: "-1", fullPaymentHash: "10000000000" } }],
+        ["a numeric local reserve", { localReservedCkbShannons: { legacy: "9900000000", fullPaymentHash: 10000000000 } }],
+        ["a local reserve in hex", { localReservedCkbShannons: { legacy: "0x1", fullPaymentHash: "10000000000" } }],
+        ["a local reserve with a leading zero", { localReservedCkbShannons: { legacy: "9900000000", fullPaymentHash: "010000000000" } }],
+        ["a local reserve above u64", { localReservedCkbShannons: { legacy: "18446744073709551616", fullPaymentHash: "10000000000" } }],
         ["a remote reserve of more digits than u64 has", { remoteReservedCkbShannons: "1".repeat(21) }],
         ["a pin set to null", { commitmentFeeRate: null }],
+        ["a lock layout fiber does not define", { lockLayout: "full_payment_hash" }],
+        ["a capitalised lock layout", { lockLayout: "Legacy" }],
+        ["an empty lock layout", { lockLayout: "" }],
+        ["a null lock layout", { lockLayout: null }],
+        ["a numeric lock layout", { lockLayout: 1 }],
     ])("rejects pins with %s", (_, override) => {
         expect(isChannelPolicyRecord(withPins(override))).toBe(false);
+    });
+
+    it.each(["legacy", "fullPaymentHash"])("accepts the %s lock layout", (lockLayout) => {
+        expect(isChannelPolicyRecord(withPins({ lockLayout }))).toBe(true);
+    });
+
+    it("accepts the reserves at u64's maximum under both layouts", () => {
+        expect(
+            isChannelPolicyRecord(
+                withPins({ localReservedCkbShannons: { legacy: "18446744073709551615", fullPaymentHash: "18446744073709551615" } }),
+            ),
+        ).toBe(true);
     });
 
     it("accepts the boundary out point index and u64 values", () => {
@@ -244,11 +275,14 @@ describe("isChannelPolicyRecord", () => {
         expect(isChannelPolicyRecord(withRemote(override))).toBe(false);
     });
 
-    it.each(["direction", "hashAlgorithm", "boundPaymentHash", "amountShannons", "expirySeconds"])("rejects a TLC missing %s", (field) => {
-        const tlc: Record<string, unknown> = { ...snapshot().tlcs[0] };
-        delete tlc[field];
-        expect(isChannelPolicyRecord(withRemote({ tlcs: [tlc] }))).toBe(false);
-    });
+    it.each(["direction", "hashAlgorithm", "boundPaymentHash", "fullPaymentHash", "amountShannons", "expirySeconds"])(
+        "rejects a TLC missing %s",
+        (field) => {
+            const tlc: Record<string, unknown> = { ...snapshot().tlcs[0] };
+            delete tlc[field];
+            expect(isChannelPolicyRecord(withRemote({ tlcs: [tlc] }))).toBe(false);
+        },
+    );
 
     it.each([
         ["an unknown direction", { direction: "forwarded" }],
@@ -261,12 +295,26 @@ describe("isChannelPolicyRecord", () => {
         ["a negative expiry", { expirySeconds: "-1" }],
         ["an expiry above u64", { expirySeconds: "18446744073709551616" }],
         ["an expiry of more digits than u64 has", { expirySeconds: "1".repeat(21) }],
+        ["a full hash of 31 bytes", { fullPaymentHash: "33".repeat(31) }],
+        ["a full hash of 33 bytes", { fullPaymentHash: "33".repeat(33) }],
+        ["an uppercase full hash", { fullPaymentHash: "33".repeat(20) + "AB".repeat(12) }],
+        ["a full hash the bound hash is not the prefix of", { fullPaymentHash: "34".repeat(32) }],
+        [
+            "a full hash that differs from the bound one in its last bound byte",
+            { fullPaymentHash: "33".repeat(19) + "34" + "33".repeat(12) },
+        ],
+        ["a numeric full hash", { fullPaymentHash: 0 }],
+        ["an undefined full hash", { fullPaymentHash: undefined }],
     ])("rejects a TLC with %s", (_, override) => {
         expect(isChannelPolicyRecord(withTlc(override))).toBe(false);
     });
 
     it("accepts a TLC expiring at the last second u64 can hold", () => {
         expect(isChannelPolicyRecord(withTlc({ expirySeconds: "18446744073709551615" }))).toBe(true);
+    });
+
+    it("accepts a TLC binding the whole hash its bound hash is the prefix of", () => {
+        expect(isChannelPolicyRecord(withTlc({ fullPaymentHash: "33".repeat(20) + "ab".repeat(12) }))).toBe(true);
     });
 });
 

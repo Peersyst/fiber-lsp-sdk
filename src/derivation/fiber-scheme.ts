@@ -1,6 +1,3 @@
-/**
- * Port of fiber's channel key derivation (`crates/fiber-types/src/channel.rs` @ `b71a61c3`): keep the interop vectors green.
- */
 import { secp256k1 } from "@noble/curves/secp256k1.js";
 import { bytesToNumberBE, numberToBytesBE } from "@noble/curves/utils.js";
 import { utf8ToBytes } from "@noble/hashes/utils.js";
