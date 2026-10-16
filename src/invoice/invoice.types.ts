@@ -26,6 +26,7 @@ type InvoiceAttributeValues = {
     payeePublicKey: { publicKey: Uint8Array };
     hashAlgorithm: { algorithm: TlcHashAlgorithm };
     paymentSecret: { secret: Uint8Array };
+    trampolineRouteHint: { nodeId: Uint8Array };
 };
 
 export type InvoiceAttribute = {

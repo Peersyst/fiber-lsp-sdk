@@ -157,10 +157,10 @@ TS reader, which refuses an item id it does not know.
 `vectors/invoice.json` holds `invoices`, each built from fixed values by fiber's `CkbInvoice`, signed with a fixed test key by
 its `update_signature` and written by its `Display`, with the molecule, the compressed stream, the signed digest and the
 signature beside the string: each attribute alone and all together, the three currencies, no amount and `u128::MAX`, signed
-and unsigned, the hold and multi-path invoices as `new_invoice` shapes them, and data at the decoder's 16384-byte limit. The
+and unsigned, the hold, multi-path and tenant invoices as `new_invoice` shapes them, and data at the decoder's 16384-byte limit. The
 harness writes each one again from its own parts and requires fiber's string, which pins its coder port. `coder` holds streams
 compressed and decompressed past what an invoice reaches, `utf8` byte sequences with what `String::from_utf8` reads, and
-`variants` 67 malformed or malleated strings, each with the verdict of fiber's signed-only decoder: `accepted`, `rewritten`
+`variants` 74 malformed or malleated strings, each with the verdict of fiber's signed-only decoder: `accepted`, `rewritten`
 (read, but written back as another string), `refused` with its message, or `panicked`. The variants are generated, so every
 verdict is fiber's and none is copied from a document. `test/tests/invoice/interop-vectors.spec.ts` holds the SDK to them,
 and [`docs/invoice.md`](../docs/invoice.md) states the rule.

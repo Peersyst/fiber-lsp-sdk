@@ -37,6 +37,25 @@ const HOLD: Invoice = {
     ),
 };
 
+// HOLD created by a tenant, written by fiber: the hosted node adds trampoline routing and its public node's id.
+const TENANT_STRING =
+    "fibt2500000001pqhasxqgu6cqzg7dwfhddwy0xmlq7akyjrk5gssvn4vxhxu9aund6wzunpukucwsx0fdur93tn2amrj3jercwshr6dfxeu5n0p6n9f2j9u67vvc56yyr6423tn48rv7p5gnh0ekmpkmmg0rk0y4qajvjfdpth8wuxpfuphnfkt9htcfdn9vuukynaf4m80v2yrjad0t4qx94c92fpumdz0ttym784h23dj7yxl4kz88df34p7jl089frfmq0keczzp24lanc8sxpuz78wlgtfd3ylycavjjxfx0hqnrvn64a2kcdppy7a0h3dycaztcejdfsqkrgkt6hpnjqudms7gegqunewv8p6n5uk5hht94jd9j8kv2rytzq7s2jkndp0vj2h72z0mjqq6h5eh4";
+const TENANT: Invoice = {
+    ...HOLD_UNSIGNED,
+    attributes: [
+        { type: "description", text: "coffee" },
+        { type: "expiryTime", seconds: 3600n },
+        { type: "feature", bits: Uint8Array.of(0x20) },
+        { type: "trampolineRouteHint", nodeId: hexToBytes("02466d7fcae563e5cb09a0d1870bb580344804617879a14949cf22285f1bae3f27") },
+        { type: "finalHtlcMinimumExpiryDelta", milliseconds: 9600000n },
+        { type: "hashAlgorithm", algorithm: "ckb-hash" },
+        { type: "payeePublicKey", publicKey: hexToBytes(PAYEE) },
+    ],
+    signature: hexToBytes(
+        "98d93d57aab61a1093dd7de2d263a25e3326a600b0d165eae19c81c6ee1e46500e4f2e61c3a9d396a5eeb2d64d2c8f6628645881e82a569b42f64957f284fdc800",
+    ),
+};
+
 // The smallest signed invoice: no amount, no attributes; its 42-byte stream is padded with a zero byte in the digest.
 const MIN_STRING =
     "fibd1pgw7y8090f2gfw0pmm6vkrwufvqqqqqqqp632ualle4w96ac4fujt2y5fzhc7a7m3u4ksfutp5v37h25hvtmy90apph8u9zzhyjz3yvasdt3zzpc9tzmce4us4y0a6v49e4wsxjsk7jqpprhj9vkhtuqczt7xez2ylzq4zz8mxsqqcfwk3n";
@@ -94,6 +113,10 @@ describe("encodeInvoice", () => {
         expect(encodeInvoice(HOLD)).toBe(HOLD_STRING);
     });
 
+    it("writes the tenant invoice as fiber does", () => {
+        expect(encodeInvoice(TENANT)).toBe(TENANT_STRING);
+    });
+
     it("writes an invoice without an amount with the currency alone", () => {
         expect(encodeInvoice(sign(MIN_UNSIGNED))).toBe(MIN_STRING);
     });
@@ -129,6 +152,10 @@ describe("encodeInvoice", () => {
 describe("decodeInvoice", () => {
     it("reads the hold invoice fiber wrote", () => {
         expect(decodeInvoice(HOLD_STRING)).toEqual(HOLD);
+    });
+
+    it("reads the tenant invoice fiber wrote", () => {
+        expect(decodeInvoice(TENANT_STRING)).toEqual(TENANT);
     });
 
     it.each([
