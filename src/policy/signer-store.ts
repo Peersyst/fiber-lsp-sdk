@@ -18,8 +18,9 @@ import {
     DEBIT_INTENT_KEY_PREFIX,
     HOLD_INVOICE_PREIMAGE_KEY_PREFIX,
     HOLD_INVOICE_RECORD_KEY_PREFIX,
+    STORAGE_KEY_NAMESPACE,
 } from "./policy.constants";
-import type { ChannelPolicyRecord, DebitIntentRecord, HoldInvoicePolicyRecord } from "./policy.types";
+import type { ChannelPolicyRecord, DebitIntentRecord, HoldInvoicePolicyRecord, SignerRecordFormat } from "./policy.types";
 import {
     assertChannelPolicyRecord,
     assertDebitIntentRecord,
@@ -30,31 +31,41 @@ import {
     isHoldInvoicePolicyRecord,
 } from "./utils";
 
-type RecordFormat<T> = {
-    name: string;
-    is: (value: unknown) => value is T;
-    assert: (name: string, value: unknown) => asserts value is T;
-    /**
-     * Whether the record agrees with the key it is stored under.
-     */
-    belongsAt: (key: string, record: T) => boolean;
-};
+const POLICY_KEYS = [
+    CHANNEL_RECORD_KEY_PREFIX,
+    CHANNEL_ALIAS_KEY_PREFIX,
+    DEBIT_INTENT_KEY_PREFIX,
+    HOLD_INVOICE_RECORD_KEY_PREFIX,
+    HOLD_INVOICE_PREIMAGE_KEY_PREFIX,
+    BALANCE_LANE_KEY,
+];
 
-const CHANNEL_RECORD_FORMAT: RecordFormat<ChannelPolicyRecord> = {
+/**
+ * Asserts that a key is another module's: inside the namespace, outside the policy's own.
+ * @param key Storage key to check.
+ */
+function assertForeignKey(key: string): void {
+    assertNonEmptyString("key", key);
+    // The storage may be shared: outside the namespace is the host's.
+    if (!key.startsWith(`${STORAGE_KEY_NAMESPACE}:`)) throw new TypeError(`key ${key} is outside the ${STORAGE_KEY_NAMESPACE} namespace`);
+    if (POLICY_KEYS.some((policyKey) => key.startsWith(policyKey))) throw new TypeError(`key ${key} belongs to the policy`);
+}
+
+const CHANNEL_RECORD_FORMAT: SignerRecordFormat<ChannelPolicyRecord> = {
     name: "channel policy record",
     is: isChannelPolicyRecord,
     assert: assertChannelPolicyRecord,
     belongsAt: () => true,
 };
 
-const DEBIT_INTENT_FORMAT: RecordFormat<DebitIntentRecord> = {
+const DEBIT_INTENT_FORMAT: SignerRecordFormat<DebitIntentRecord> = {
     name: "debit intent record",
     is: isDebitIntentRecord,
     assert: assertDebitIntentRecord,
     belongsAt: (key, record) => key === DEBIT_INTENT_KEY_PREFIX + boundPaymentHashOf(record.paymentHash),
 };
 
-const HOLD_INVOICE_FORMAT: RecordFormat<HoldInvoicePolicyRecord> = {
+const HOLD_INVOICE_FORMAT: SignerRecordFormat<HoldInvoicePolicyRecord> = {
     name: "hold invoice record",
     is: isHoldInvoicePolicyRecord,
     assert: assertHoldInvoicePolicyRecord,
@@ -138,7 +149,7 @@ export class SignerStore {
         update: (current: ChannelPolicyRecord | null) => ChannelPolicyRecord,
     ): Promise<ChannelPolicyRecord> {
         assertUnsignedInteger("channelIndex", channelIndex, MAX_CHANNEL_INDEX);
-        return this.updateRecord(CHANNEL_RECORD_KEY_PREFIX + channelIndex, CHANNEL_RECORD_FORMAT, update);
+        return this.updateAt(CHANNEL_RECORD_KEY_PREFIX + channelIndex, CHANNEL_RECORD_FORMAT, update);
     }
 
     /**
@@ -163,7 +174,7 @@ export class SignerStore {
         update: (current: DebitIntentRecord | null) => DebitIntentRecord,
     ): Promise<DebitIntentRecord> {
         assertHexBytes("boundPaymentHashHex", boundPaymentHashHex, TRUNCATED_PAYMENT_HASH_LENGTH);
-        return this.updateRecord(DEBIT_INTENT_KEY_PREFIX + boundPaymentHashHex, DEBIT_INTENT_FORMAT, update);
+        return this.updateAt(DEBIT_INTENT_KEY_PREFIX + boundPaymentHashHex, DEBIT_INTENT_FORMAT, update);
     }
 
     /**
@@ -188,7 +199,57 @@ export class SignerStore {
         update: (current: HoldInvoicePolicyRecord | null) => HoldInvoicePolicyRecord,
     ): Promise<HoldInvoicePolicyRecord> {
         assertHexBytes("boundPaymentHashHex", boundPaymentHashHex, TRUNCATED_PAYMENT_HASH_LENGTH);
-        return this.updateRecord(HOLD_INVOICE_RECORD_KEY_PREFIX + boundPaymentHashHex, HOLD_INVOICE_FORMAT, update);
+        return this.updateAt(HOLD_INVOICE_RECORD_KEY_PREFIX + boundPaymentHashHex, HOLD_INVOICE_FORMAT, update);
+    }
+
+    /**
+     * Reads a record of another module's format at a key of its own, under the same parsing and corruption rules.
+     * @param key Storage key of the record.
+     * @param format The kind of record the key holds.
+     * @returns The record, or `null` if the key was never written.
+     */
+    async getRecord<T>(key: string, format: SignerRecordFormat<T>): Promise<T | null> {
+        assertForeignKey(key);
+        return this.serialize(key, () => this.readRecord(key, format));
+    }
+
+    /**
+     * Reads, updates and writes a record of another module's format at a key of its own, as one step in that key's lane.
+     * @param key Storage key of the record.
+     * @param format The kind of record the key holds.
+     * @param update Synchronous updater; handing back the record it was given, `null` included, skips the write.
+     * @returns The record the key now holds, `null` when it was never written and still is not.
+     */
+    async updateRecord<T, Next extends T | null = T>(
+        key: string,
+        format: SignerRecordFormat<T>,
+        update: (current: T | null) => Next,
+    ): Promise<Next> {
+        assertForeignKey(key);
+        return this.updateAt(key, format, update);
+    }
+
+    /**
+     * Reads, updates and writes the record at a key as one step in that key's lane, whoever owns the key.
+     * @param key Storage key of the record.
+     * @param format The kind of record the key holds.
+     * @param update Synchronous updater; handing back the record it was given skips the write.
+     * @returns The record the key now holds.
+     */
+    private async updateAt<T, Next extends T | null>(
+        key: string,
+        format: SignerRecordFormat<T>,
+        update: (current: T | null) => Next,
+    ): Promise<Next> {
+        return this.serialize(key, async () => {
+            const current = await this.readRecord(key, format);
+            const next = update(current);
+            if (next === current) return next;
+            format.assert("updated record", next);
+            if (!format.belongsAt(key, next)) throw new TypeError(`updated record does not belong at ${key}`);
+            await this.writeRecord(key, next);
+            return next;
+        });
     }
 
     /**
@@ -253,30 +314,11 @@ export class SignerStore {
      * @param format The kind of record the key holds.
      * @returns The record, or `null` if the key was never written.
      */
-    private async readRecord<T>(key: string, format: RecordFormat<T>): Promise<T | null> {
+    private async readRecord<T>(key: string, format: SignerRecordFormat<T>): Promise<T | null> {
         const raw = (await this.storage.get(key)) ?? null;
         if (raw === null) return null;
         // Corruption must throw: a record read as absent would re-open sign-once slots or forget charges.
         return parseRecord(key, raw, format);
-    }
-
-    /**
-     * Reads, updates and writes the record at a storage key as one step.
-     * @param key Storage key of the record.
-     * @param format The kind of record the key holds.
-     * @param update Synchronous updater; handing back the record it was given skips the write.
-     * @returns The record the key now holds.
-     */
-    private async updateRecord<T>(key: string, format: RecordFormat<T>, update: (current: T | null) => T): Promise<T> {
-        return this.serialize(key, async () => {
-            const current = await this.readRecord(key, format);
-            const next = update(current);
-            if (next === current) return next;
-            format.assert("updated record", next);
-            if (!format.belongsAt(key, next)) throw new TypeError(`updated record does not belong at ${key}`);
-            await this.writeRecord(key, next);
-            return next;
-        });
     }
 
     /**
@@ -315,7 +357,7 @@ export class SignerStore {
  * @param format The kind of record the key holds.
  * @returns The parsed record.
  */
-function parseRecord<T>(key: string, raw: string, format: RecordFormat<T>): T {
+function parseRecord<T>(key: string, raw: string, format: SignerRecordFormat<T>): T {
     let parsed: unknown;
     try {
         parsed = JSON.parse(raw);

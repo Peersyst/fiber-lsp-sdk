@@ -5,6 +5,7 @@ import { WireError, decodeHexBytes, readObject } from "../../../src/wire";
 import { FetchMock } from "../../mocks/rpc";
 import { rejection } from "../../utils/rejection";
 import { loadRpcVectors } from "../../utils/rpc-vectors";
+import { withRuntime } from "../../utils/with-runtime";
 
 const vectors = loadRpcVectors();
 
@@ -27,17 +28,6 @@ function decodeChannelId(field: WireField): Uint8Array {
 
 function clientOf(mock: FetchMock, token?: string): FiberRpcClient {
     return new FiberRpcClient({ url: URL, token, fetch: mock.fetch });
-}
-
-function withRuntimeFetch<Value>(runtimeFetch: unknown, run: () => Value): Value {
-    const runtime = globalThis as { fetch?: unknown };
-    const original = runtime.fetch;
-    runtime.fetch = runtimeFetch;
-    try {
-        return run();
-    } finally {
-        runtime.fetch = original;
-    }
 }
 
 describe("FiberRpcClient", () => {
@@ -67,9 +57,17 @@ describe("FiberRpcClient", () => {
             expect(() => clientOf(new FetchMock(), token)).toThrow(new TypeError("token must be printable ASCII without spaces"));
         });
 
+        it.each([
+            ["null", null],
+            ["a number", 12345],
+            ["an array of one token", [TOKEN]],
+        ])("refuses a token that is %s, which the pattern alone would read as text", (_, token) => {
+            expect(() => clientOf(new FetchMock(), token as never)).toThrow(new TypeError("token must be printable ASCII without spaces"));
+        });
+
         it("defaults to the runtime's fetch, read at construction and called without a receiver", async () => {
             const runtime = new FetchMock().answer(ok('{"jsonrpc":"2.0","id":1,"result":null}'));
-            const client = withRuntimeFetch(runtime.fetch, () => new FiberRpcClient({ url: URL }));
+            const client = withRuntime({ fetch: runtime.fetch }, () => new FiberRpcClient({ url: URL }));
             await client.call("abandon_channel", PARAMS, passThrough);
             expect(runtime.requests).toHaveLength(1);
             expect(runtime.last.url).toBe(URL);
@@ -79,7 +77,7 @@ describe("FiberRpcClient", () => {
         it("prefers the host's fetch over the runtime's", async () => {
             const runtime = new FetchMock();
             const host = new FetchMock().answer(ok('{"jsonrpc":"2.0","id":1,"result":null}'));
-            const client = withRuntimeFetch(runtime.fetch, () => new FiberRpcClient({ url: URL, fetch: host.fetch }));
+            const client = withRuntime({ fetch: runtime.fetch }, () => new FiberRpcClient({ url: URL, fetch: host.fetch }));
             await client.call("abandon_channel", PARAMS, passThrough);
             expect(host.requests).toHaveLength(1);
             expect(runtime.requests).toHaveLength(0);
@@ -89,7 +87,7 @@ describe("FiberRpcClient", () => {
             ["no fetch", undefined],
             ["a fetch that is not a function", {}],
         ])("refuses to default when the runtime has %s", (_, runtimeFetch) => {
-            expect(() => withRuntimeFetch(runtimeFetch, () => new FiberRpcClient({ url: URL }))).toThrow(
+            expect(() => withRuntime({ fetch: runtimeFetch }, () => new FiberRpcClient({ url: URL }))).toThrow(
                 new TypeError("this runtime has no fetch: pass one in the options"),
             );
         });

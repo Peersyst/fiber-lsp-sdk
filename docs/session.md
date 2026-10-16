@@ -24,10 +24,12 @@ first. The handler properties are typed through a method signature so that a run
 than the session reads, assign to it under strict function types: `new WebSocket(url)` satisfies the interface as it is.
 Only text frames are spoken; a binary message is refused by the codec like any other unreadable frame.
 
-`ITimer` is one method, `schedule(callback, delayMs)` returning a cancel function, which avoids the handle type that
-differs per runtime. The session arms each of its three timers through a `TimerSlot`, which numbers every arming and lets
-a callback run only if it belongs to the latest one, so a host timer whose cancel does nothing cannot fire a stale connect
-timeout into an established session: cancelling is an optimisation, never what correctness rests on.
+The socket factory, like every host effect that is a bare function, is called without a receiver. `ITimer` is one
+method, `schedule(callback, delayMs)` returning a cancel function, which avoids the handle type that differs per
+runtime. The session arms each of its three timers through a `TimerSlot`, which numbers every arming and lets a callback
+run only if it belongs to the latest one, so a host timer whose cancel does nothing cannot fire a stale connect timeout
+into an established session: cancelling is an optimisation, never what correctness rests on. A host cancel that throws
+is dropped before it is called and its throw swallowed, so it is called once and never breaks a teardown.
 
 ## States
 
@@ -175,8 +177,8 @@ a richer error taxonomy are decided with the facade, which is what consumes them
 - **No attempt limit, no close codes of its own.** The device closes with `1000` and a reason string, the one code a
   browser lets a client send outside the private range: `disconnect`, `connect timeout`, `heartbeat timeout`,
   `protocol violation`, `protocol version mismatch`, `authentication failed`, `send failed`.
-- **Nothing published.** `src/index.ts` does not export the session yet: the injection interfaces and the event types go
-  out with the facade, which is the first thing that lets a host construct a session at all.
+- **Not constructed by the host.** `src/index.ts` publishes the injection interfaces, the state and the two errors, which
+  a host meets through the facade ([sdk.md](./sdk.md)); the session itself is built there and reached through it.
 
 ## Where it lives
 
@@ -185,7 +187,7 @@ a richer error taxonomy are decided with the facade, which is what consumes them
 | `src/session/signer-session.ts`                  | `SignerSession`: the state machine, the FIFO, the heartbeat, the reconnect, the correlation     |
 | `src/session/session.types.ts`                   | The states, the events, the options and the reconnect policy                                    |
 | `src/session/session.error.ts`                   | `SessionError`, with its seven kinds, and `BridgeError`                                         |
-| `src/session/session.constants.ts`               | The defaults, the timer ceiling, the close code and reasons                                     |
+| `src/session/session.constants.ts`               | The defaults, the close code and reasons; the timer ceiling is `common`'s `MAX_TIMER_DELAY_MS`  |
 | `src/session/interfaces/`                        | `IWebSocketLike`, `WebSocketFactory`, `ITimer`, `ISessionAuthenticator`, `ISessionHandler`      |
 | `src/session/utils/backoff.utils.ts`             | The delay before a reconnect attempt                                                            |
 | `src/session/utils/timer-slot.ts`                | One armed timer at a time, immune to a cancel that does nothing                                 |

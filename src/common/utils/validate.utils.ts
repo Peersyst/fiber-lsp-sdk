@@ -1,4 +1,5 @@
-import { MAX_AMOUNT_SHANNONS } from "../common.constants";
+import { secp256k1 } from "@noble/curves/secp256k1.js";
+import { COMPRESSED_POINT_LENGTH, MAX_AMOUNT_SHANNONS } from "../common.constants";
 
 const CANONICAL_DECIMAL_PATTERN = /^(0|[1-9][0-9]*)$/;
 const LOWERCASE_HEX_PATTERN = /^[0-9a-f]*$/;
@@ -70,4 +71,19 @@ export function isDecimalShannons(value: unknown): value is string {
     return (
         typeof value === "string" && value.length <= MAX_AMOUNT_DIGITS && isCanonicalDecimal(value) && BigInt(value) <= MAX_AMOUNT_SHANNONS
     );
+}
+
+/**
+ * Checks that a value is a compressed secp256k1 point, the only form fiber writes.
+ * @param value Value to check.
+ * @returns Whether the value is 33 bytes that decode to a point.
+ */
+export function isCompressedPoint(value: unknown): value is Uint8Array {
+    if (!(value instanceof Uint8Array) || value.length !== COMPRESSED_POINT_LENGTH) return false;
+    try {
+        secp256k1.Point.fromBytes(value);
+        return true;
+    } catch {
+        return false;
+    }
 }

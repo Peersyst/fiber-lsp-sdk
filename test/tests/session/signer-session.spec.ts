@@ -1,5 +1,6 @@
 import { schnorr } from "@noble/curves/secp256k1.js";
 import { bytesToHex, hexToBytes } from "@noble/hashes/utils.js";
+import { MAX_TIMER_DELAY_MS } from "../../../src/common";
 import { deriveChannelKeys, pubkeyOf } from "../../../src/derivation";
 import { PROTOCOL_VERSION, decodeInboundFrame, sessionChallengeDigest } from "../../../src/protocol";
 import type { ISessionAuthenticator, SessionEvent, SessionOptions, SessionState } from "../../../src/session";
@@ -8,7 +9,6 @@ import {
     DEFAULT_HEARTBEAT_INTERVAL_MS,
     DEFAULT_HEARTBEAT_TIMEOUT_MS,
     DEFAULT_SESSION_CONNECT_TIMEOUT_MS,
-    MAX_SESSION_DELAY_MS,
     SessionError,
     SignerSession,
 } from "../../../src/session";
@@ -122,10 +122,10 @@ describe("SignerSession", () => {
             ["connectTimeoutMs", -1],
             ["connectTimeoutMs", 1.5],
             ["connectTimeoutMs", NaN],
-            ["connectTimeoutMs", MAX_SESSION_DELAY_MS + 1],
+            ["connectTimeoutMs", MAX_TIMER_DELAY_MS + 1],
             ["heartbeatIntervalMs", -1],
             ["heartbeatIntervalMs", 0.5],
-            ["heartbeatIntervalMs", MAX_SESSION_DELAY_MS + 1],
+            ["heartbeatIntervalMs", MAX_TIMER_DELAY_MS + 1],
             ["heartbeatTimeoutMs", 0],
             ["heartbeatTimeoutMs", -1],
             ["heartbeatTimeoutMs", Infinity],
@@ -137,10 +137,10 @@ describe("SignerSession", () => {
             { initialDelayMs: 0 },
             { initialDelayMs: -1 },
             { initialDelayMs: 1.5 },
-            { initialDelayMs: MAX_SESSION_DELAY_MS + 1 },
+            { initialDelayMs: MAX_TIMER_DELAY_MS + 1 },
             { maxDelayMs: 999 },
             { maxDelayMs: 0 },
-            { maxDelayMs: MAX_SESSION_DELAY_MS + 1 },
+            { maxDelayMs: MAX_TIMER_DELAY_MS + 1 },
             { factor: 0.99 },
             { factor: 0 },
             { factor: NaN },
@@ -151,10 +151,56 @@ describe("SignerSession", () => {
         });
 
         it.each([
+            ["connectTimeoutMs", "an integer between 1 and 2147483647"],
+            ["heartbeatIntervalMs", "an integer between 0 and 2147483647"],
+            ["heartbeatTimeoutMs", "an integer between 1 and 2147483647"],
+        ])("refuses a null %s instead of taking its default", (name, form) => {
+            expect(() => harness({ [name]: null })).toThrow(new RangeError(`${name} must be ${form}, got null`));
+        });
+
+        it.each([
+            ["initialDelayMs", "reconnect.initialDelayMs must be an integer between 1 and 2147483647, got null"],
+            ["maxDelayMs", "reconnect.maxDelayMs must be an integer between 1000 and 2147483647, got null"],
+            ["factor", "reconnect.factor must be a finite number of at least 1, got null"],
+        ])("refuses a null reconnect %s instead of taking its default", (field, message) => {
+            expect(() => harness({ reconnect: { [field]: null } as never })).toThrow(new RangeError(message));
+        });
+
+        it.each([null, "fast", 5, []])("refuses a reconnect policy that is %p, not an object", (reconnect) => {
+            expect(() => harness({ reconnect: reconnect as never })).toThrow(new TypeError("reconnect must be an object"));
+        });
+
+        it.each(["initialDelayMs", "factor", "maxDelayMs"])("takes the default for a reconnect %s given as undefined", (field) => {
+            expect(() => harness({ reconnect: { [field]: undefined } })).not.toThrow();
+        });
+
+        it("keeps the fields given beside one given as undefined", async () => {
+            const h = harness({ reconnect: { initialDelayMs: 2_000, maxDelayMs: undefined } });
+            const socket = await establish(h);
+            socket.close();
+            await flush();
+            expect(h.timer.delays).toContain(2_000);
+        });
+
+        it("calls the socket factory without a receiver, so it never sees the session as this", () => {
+            const receivers: unknown[] = [];
+            const factory = new WebSocketFactoryMock();
+            const h = harness({
+                createWebSocket: function (this: unknown, url: string) {
+                    receivers.push(this);
+                    return factory.create(url);
+                },
+            });
+            void h.session.connect().catch(() => undefined);
+            expect(receivers).toEqual([undefined]);
+            h.session.disconnect();
+        });
+
+        it.each([
             { heartbeatIntervalMs: 0 },
             { reconnect: { maxDelayMs: 1000 } },
             { reconnect: { factor: 1 } },
-            { connectTimeoutMs: MAX_SESSION_DELAY_MS },
+            { connectTimeoutMs: MAX_TIMER_DELAY_MS },
         ])("accepts %p, the edge of what it takes", (options) => {
             expect(() => harness(options)).not.toThrow();
         });

@@ -65,7 +65,10 @@ export class FiberRpcClient {
         this.url = options.url;
         this.headers = { "content-type": RPC_CONTENT_TYPE };
         if (options.token !== undefined) {
-            if (!TOKEN_PATTERN.test(options.token)) throw new TypeError("token must be printable ASCII without spaces");
+            // The pattern alone would read `null` as the token "null".
+            if (typeof options.token !== "string" || !TOKEN_PATTERN.test(options.token)) {
+                throw new TypeError("token must be printable ASCII without spaces");
+            }
             this.headers.authorization = RPC_BEARER_PREFIX + options.token;
         }
         this.fetch = options.fetch ?? this.runtimeFetch();

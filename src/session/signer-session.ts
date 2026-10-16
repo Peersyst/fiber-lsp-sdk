@@ -1,4 +1,4 @@
-import { SCHNORR_SIGNATURE_LENGTH, X_ONLY_PUBLIC_KEY_LENGTH, assertBytes, isUnsignedInteger } from "../common";
+import { ListenerSet, SCHNORR_SIGNATURE_LENGTH, X_ONLY_PUBLIC_KEY_LENGTH, assertBytes, assertTimerDelayMs, isPlainObject } from "../common";
 import type { InboundFrame, OutboundFrame, SignError, SignRequest } from "../protocol";
 import { PROTOCOL_VERSION, ProtocolError, decodeInboundFrame, encodeOutboundFrame } from "../protocol";
 import type { DispatchOutcome, PendingChannelRegistration } from "../signer";
@@ -9,7 +9,6 @@ import {
     DEFAULT_HEARTBEAT_TIMEOUT_MS,
     DEFAULT_RECONNECT_POLICY,
     DEFAULT_SESSION_CONNECT_TIMEOUT_MS,
-    MAX_SESSION_DELAY_MS,
     SESSION_CLOSE_REASONS,
     SESSION_NORMAL_CLOSE_CODE,
 } from "./session.constants";
@@ -55,7 +54,7 @@ export class SignerSession {
 
     private socket: IWebSocketLike | undefined;
 
-    private readonly listeners = new Set<SessionListener>();
+    private readonly listeners = new ListenerSet<SessionEvent>();
 
     private readonly connectWaiters: ConnectWaiter[] = [];
 
@@ -87,16 +86,25 @@ export class SignerSession {
         this.backoff = new TimerSlot(options.timer);
         this.authenticator = options.authenticator;
         this.handler = options.handler;
-        this.connectTimeoutMs = options.connectTimeoutMs ?? DEFAULT_SESSION_CONNECT_TIMEOUT_MS;
-        this.heartbeatIntervalMs = options.heartbeatIntervalMs ?? DEFAULT_HEARTBEAT_INTERVAL_MS;
-        this.heartbeatTimeoutMs = options.heartbeatTimeoutMs ?? DEFAULT_HEARTBEAT_TIMEOUT_MS;
-        this.reconnect = { ...DEFAULT_RECONNECT_POLICY, ...options.reconnect };
+        // Not `??`: a `null` is refused below.
+        this.connectTimeoutMs = options.connectTimeoutMs === undefined ? DEFAULT_SESSION_CONNECT_TIMEOUT_MS : options.connectTimeoutMs;
+        this.heartbeatIntervalMs = options.heartbeatIntervalMs === undefined ? DEFAULT_HEARTBEAT_INTERVAL_MS : options.heartbeatIntervalMs;
+        this.heartbeatTimeoutMs = options.heartbeatTimeoutMs === undefined ? DEFAULT_HEARTBEAT_TIMEOUT_MS : options.heartbeatTimeoutMs;
+        const reconnect: unknown = options.reconnect;
+        if (reconnect !== undefined && !isPlainObject(reconnect)) throw new TypeError("reconnect must be an object");
+        // Not spread: an explicit `undefined` would override the default.
+        const given = options.reconnect ?? {};
+        this.reconnect = {
+            initialDelayMs: given.initialDelayMs === undefined ? DEFAULT_RECONNECT_POLICY.initialDelayMs : given.initialDelayMs,
+            factor: given.factor === undefined ? DEFAULT_RECONNECT_POLICY.factor : given.factor,
+            maxDelayMs: given.maxDelayMs === undefined ? DEFAULT_RECONNECT_POLICY.maxDelayMs : given.maxDelayMs,
+        };
         this.random = options.random ?? Math.random;
-        assertDelayMs("connectTimeoutMs", this.connectTimeoutMs, 1);
-        assertDelayMs("heartbeatIntervalMs", this.heartbeatIntervalMs, 0);
-        assertDelayMs("heartbeatTimeoutMs", this.heartbeatTimeoutMs, 1);
-        assertDelayMs("reconnect.initialDelayMs", this.reconnect.initialDelayMs, 1);
-        assertDelayMs("reconnect.maxDelayMs", this.reconnect.maxDelayMs, this.reconnect.initialDelayMs);
+        assertTimerDelayMs("connectTimeoutMs", this.connectTimeoutMs, 1);
+        assertTimerDelayMs("heartbeatIntervalMs", this.heartbeatIntervalMs, 0);
+        assertTimerDelayMs("heartbeatTimeoutMs", this.heartbeatTimeoutMs, 1);
+        assertTimerDelayMs("reconnect.initialDelayMs", this.reconnect.initialDelayMs, 1);
+        assertTimerDelayMs("reconnect.maxDelayMs", this.reconnect.maxDelayMs, this.reconnect.initialDelayMs);
         if (!(typeof this.reconnect.factor === "number" && Number.isFinite(this.reconnect.factor) && this.reconnect.factor >= 1)) {
             throw new RangeError(`reconnect.factor must be a finite number of at least 1, got ${this.reconnect.factor}`);
         }
@@ -112,10 +120,7 @@ export class SignerSession {
      * @returns A function that unsubscribes it.
      */
     onEvent(listener: SessionListener): () => void {
-        this.listeners.add(listener);
-        return () => {
-            this.listeners.delete(listener);
-        };
+        return this.listeners.add(listener);
     }
 
     /**
@@ -173,10 +178,12 @@ export class SignerSession {
         if (this.currentState !== "connecting" || this.socket) return;
         let socket: IWebSocketLike;
         try {
-            socket = this.createWebSocket(this.url);
+            // Not `this.createWebSocket(url)`: the host's factory gets no receiver.
+            const create = this.createWebSocket;
+            socket = create(this.url);
         } catch (cause) {
             this.scheduleReconnect();
-            this.emit({ type: "error", cause });
+            this.listeners.emit({ type: "error", cause });
             return;
         }
         this.socket = socket;
@@ -287,7 +294,7 @@ export class SignerSession {
      */
     private violation(detail: string): void {
         const error = new SessionError("protocol_violation", detail);
-        if (this.currentState === "established") this.emit({ type: "error", cause: error });
+        if (this.currentState === "established") this.listeners.emit({ type: "error", cause: error });
         else this.fail(error, SESSION_CLOSE_REASONS.protocolViolation);
     }
 
@@ -314,7 +321,7 @@ export class SignerSession {
         this.teardown(reason);
         const reject = this.takeWaiting();
         this.setState("closed");
-        this.emit({ type: "error", cause: error });
+        this.listeners.emit({ type: "error", cause: error });
         reject(error);
     }
 
@@ -351,7 +358,7 @@ export class SignerSession {
     private lost(error: SessionError): void {
         const registrations = this.takeRegistrations();
         this.scheduleReconnect();
-        this.emit({ type: "error", cause: error });
+        this.listeners.emit({ type: "error", cause: error });
         for (const registration of registrations) registration.reject(error);
     }
 
@@ -362,7 +369,7 @@ export class SignerSession {
      */
     private onError(socket: IWebSocketLike, cause: unknown): void {
         if (socket !== this.socket) return;
-        this.emit({ type: "error", cause });
+        this.listeners.emit({ type: "error", cause });
     }
 
     /**
@@ -423,7 +430,7 @@ export class SignerSession {
             case "sign_request": {
                 const outcome = await this.handle(work.request);
                 if (outcome.kind === "fault") {
-                    this.emit({ type: "error", cause: outcome.cause });
+                    this.listeners.emit({ type: "error", cause: outcome.cause });
                     return;
                 }
                 const requestId = work.request.requestId;
@@ -482,7 +489,7 @@ export class SignerSession {
     private takeRegistration(requestId: string, frameType: string): PendingRegistration | undefined {
         const registration = this.registrations.get(requestId);
         if (!registration) {
-            this.emit({
+            this.listeners.emit({
                 type: "error",
                 cause: new SessionError("protocol_violation", `${frameType} frame for an unknown request id ${requestId}`),
             });
@@ -526,7 +533,7 @@ export class SignerSession {
             socket.send(encodeOutboundFrame(frame));
             return true;
         } catch (cause) {
-            this.emit({ type: "error", cause });
+            this.listeners.emit({ type: "error", cause });
             return false;
         }
     }
@@ -551,7 +558,7 @@ export class SignerSession {
         try {
             socket.close(SESSION_NORMAL_CLOSE_CODE, reason);
         } catch (cause) {
-            this.emit({ type: "error", cause });
+            this.listeners.emit({ type: "error", cause });
         }
     }
 
@@ -561,32 +568,6 @@ export class SignerSession {
      */
     private setState(state: SessionState): void {
         this.currentState = state;
-        this.emit({ type: "state", state });
-    }
-
-    /**
-     * Delivers an event to every listener; a listener that throws never breaks the session.
-     * @param event The event.
-     */
-    private emit(event: SessionEvent): void {
-        for (const listener of [...this.listeners]) {
-            try {
-                listener(event);
-            } catch {
-                // A listener's failure is the host's, not the session's.
-            }
-        }
-    }
-}
-
-/**
- * Asserts that a timing option is a whole number of milliseconds a timer can take.
- * @param name Name of the option, used in the error message.
- * @param value Value to check.
- * @param min Lowest accepted value, inclusive.
- */
-function assertDelayMs(name: string, value: number, min: number): void {
-    if (!isUnsignedInteger(value, MAX_SESSION_DELAY_MS) || value < min) {
-        throw new RangeError(`${name} must be an integer between ${min} and ${MAX_SESSION_DELAY_MS}, got ${value}`);
+        this.listeners.emit({ type: "state", state });
     }
 }
