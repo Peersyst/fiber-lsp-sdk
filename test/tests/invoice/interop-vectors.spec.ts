@@ -28,6 +28,7 @@ const DELIBERATE_REFUSALS: Record<string, string> = {
     "recovery id flipped, with a payee key": "signature must be by the payee key the invoice carries",
     "duplicate expiry": "data.attributes[1] must not repeat an attribute type",
     "duplicate payee key, another key second": "data.attributes[1] must not repeat an attribute type",
+    "duplicate trampoline route hint, another key second": "data.attributes[1] must not repeat an attribute type",
     "udt script with hash type 9": "data.attributes[0].udtScript.value.hashType must be one of data, type, data1, data2",
 };
 
@@ -86,6 +87,8 @@ function generatedInvoices(count: number): UnsignedInvoice[] {
                 return { type, algorithm: below(2) === 0 ? "ckb-hash" : "sha256" };
             case "paymentSecret":
                 return { type, secret: bytes(32) };
+            case "trampolineRouteHint":
+                return { type, nodeId: secp256k1.getPublicKey(bytes(32), true) };
         }
     };
     return Array.from({ length: count }, () => {

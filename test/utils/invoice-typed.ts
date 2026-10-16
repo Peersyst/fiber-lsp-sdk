@@ -33,6 +33,8 @@ export function toInvoiceAttribute(vector: InvoiceAttributeVector): InvoiceAttri
             return { type: "hashAlgorithm", algorithm: hashAlgorithmOf(value) };
         case "payment_secret":
             return { type: "paymentSecret", secret: hexToBytes(value) };
+        case "trampoline_route_hint":
+            return { type: "trampolineRouteHint", nodeId: hexToBytes(value) };
     }
 }
 
@@ -65,6 +67,8 @@ export function toInvoiceAttributeVector(attribute: InvoiceAttribute): InvoiceAt
             return { type: "hash_algorithm", value: HASH_ALGORITHM_WIRE[attribute.algorithm] as string };
         case "paymentSecret":
             return { type: "payment_secret", value: bytesToHex(attribute.secret) };
+        case "trampolineRouteHint":
+            return { type: "trampoline_route_hint", value: bytesToHex(attribute.nodeId) };
     }
 }
 

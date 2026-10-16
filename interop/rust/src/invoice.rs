@@ -227,6 +227,10 @@ fn payee_attr(key: &[u8]) -> Vec<u8> {
     attr(7, table(&[mol_bytes(key)]))
 }
 
+fn hint_attr(key: &[u8]) -> Vec<u8> {
+    attr(10, table(&[mol_bytes(key)]))
+}
+
 // --- fiber's invoices ---
 
 fn currency_name(currency: Currency) -> &'static str {
@@ -392,6 +396,12 @@ fn mpp_feature() -> FeatureVector {
     feature
 }
 
+fn trampoline_feature() -> FeatureVector {
+    let mut feature = FeatureVector::new();
+    feature.set_trampoline_routing_optional();
+    feature
+}
+
 /// The largest description that keeps the molecule at the decoder's limit, given the other fields of `max_data`.
 fn max_description() -> String {
     // Table header 16, timestamp 16, hash 32, dynvec header 8, union id 4, description table header 8, Bytes length 4.
@@ -400,6 +410,7 @@ fn max_description() -> String {
 
 fn invoices() -> Vec<InvoiceCase> {
     let payee = public(PAYEE_SECRET_KEY);
+    let hint = public(OTHER_SECRET_KEY);
     let ts = 1_704_067_200_000;
     let one = |name: &str, attribute: Attribute| invoice_case(name, Currency::Fibd, Some(1), 5, vec![attribute], true);
     vec![
@@ -413,6 +424,23 @@ fn invoices() -> Vec<InvoiceCase> {
             vec![
                 Attribute::Description("coffee".to_string()),
                 Attribute::ExpiryTime(Duration::from_secs(3600)),
+                Attribute::FinalHtlcMinimumExpiryDelta(9_600_000),
+                Attribute::HashAlgorithm(HashAlgorithm::CkbHash),
+                Attribute::PayeePublicKey(payee),
+            ],
+            true,
+        ),
+        invoice_case(
+            "tenant invoice as the hosted node shapes it",
+            Currency::Fibt,
+            Some(250_000_000),
+            ts,
+            vec![
+                Attribute::Description("coffee".to_string()),
+                Attribute::ExpiryTime(Duration::from_secs(3600)),
+                // The hint sets the trampoline feature, then pushes itself (invoice_impl.rs:103-106, rpc/invoice.rs:370-372).
+                Attribute::Feature(trampoline_feature()),
+                Attribute::TrampolineRouteHint(hint),
                 Attribute::FinalHtlcMinimumExpiryDelta(9_600_000),
                 Attribute::HashAlgorithm(HashAlgorithm::CkbHash),
                 Attribute::PayeePublicKey(payee),
@@ -447,6 +475,7 @@ fn invoices() -> Vec<InvoiceCase> {
                 Attribute::UdtScript(udt_script(4)),
                 Attribute::HashAlgorithm(HashAlgorithm::Sha256),
                 Attribute::PayeePublicKey(payee),
+                Attribute::TrampolineRouteHint(hint),
             ],
             true,
         ),
@@ -466,6 +495,7 @@ fn invoices() -> Vec<InvoiceCase> {
         one("ckb hash alone", Attribute::HashAlgorithm(HashAlgorithm::CkbHash)),
         one("sha256 alone", Attribute::HashAlgorithm(HashAlgorithm::Sha256)),
         one("payment secret alone", Attribute::PaymentSecret([9u8; 32].into())),
+        one("trampoline route hint alone", Attribute::TrampolineRouteHint(hint)),
         invoice_case(
             "multi-path as new_invoice shapes it",
             Currency::Fibt,
@@ -501,11 +531,15 @@ fn assert_invoice_coverage(cases: &[InvoiceCase]) {
         Attribute::HashAlgorithm(HashAlgorithm::CkbHash),
         Attribute::Feature(FeatureVector::new()),
         Attribute::PaymentSecret([0u8; 32].into()),
+        Attribute::TrampolineRouteHint(public(OTHER_SECRET_KEY)),
     ]
     .iter()
     .map(|attribute| attribute_values(attribute).kind)
     .collect();
     assert_eq!(alone, every, "every attribute alone");
+    let together = cases.iter().find(|case| case.name == "every attribute").unwrap();
+    let kinds: BTreeSet<String> = together.values.attrs.iter().map(|attribute| attribute.kind.clone()).collect();
+    assert_eq!(kinds, every, "every attribute together");
     let currencies: BTreeSet<&str> = cases.iter().map(|case| case.values.currency.as_str()).collect();
     assert_eq!(currencies, BTreeSet::from(["Fibb", "Fibt", "Fibd"]), "every currency");
     let algorithms: BTreeSet<&str> = cases
@@ -650,6 +684,7 @@ fn variants() -> Vec<VariantCase> {
     let payee = public(PAYEE_SECRET_KEY).serialize().to_vec();
     let payee_uncompressed = public(PAYEE_SECRET_KEY).serialize_uncompressed().to_vec();
     let other = public(OTHER_SECRET_KEY).serialize().to_vec();
+    let other_uncompressed = public(OTHER_SECRET_KEY).serialize_uncompressed().to_vec();
     let ts = 1_704_067_200_000;
     let hrp = "fibt100000000";
     let base_attrs = |algorithm: u8, key: &[u8]| vec![attr(0, le(3600, 8)), attr(3, le(9_600_000, 8)), attr(8, vec![algorithm]), payee_attr(key)];
@@ -720,6 +755,18 @@ fn variants() -> Vec<VariantCase> {
         "uncompressed payee key, signed over the bytes received",
         signed_string(hrp, &raw(ts, &base_attrs(1, &payee_uncompressed)), PAYEE_SECRET_KEY),
     );
+    {
+        let hinted = |key: &[u8]| raw(ts, &[base_attrs(1, &payee), vec![hint_attr(key)]].concat());
+        let over_compressed = sign(hrp, &ar_encompress(&hinted(&other)), PAYEE_SECRET_KEY);
+        push(
+            "uncompressed trampoline route hint under the same signature",
+            with(&ar_encompress(&hinted(&other_uncompressed)), &over_compressed),
+        );
+        push(
+            "uncompressed trampoline route hint, signed over the bytes received",
+            signed_string(hrp, &hinted(&other_uncompressed), PAYEE_SECRET_KEY),
+        );
+    }
     push("payee key of another signer", small(raw(5, &[payee_attr(&other)])));
     push("no payee key", small(raw(5, &[attr(0, le(1, 8))])));
     {
@@ -737,12 +784,15 @@ fn variants() -> Vec<VariantCase> {
     push("duplicate expiry", small(raw(5, &[attr(0, le(1, 8)), attr(0, le(99_999_999_999, 8))])));
     push("duplicate payee key, another key second", small(raw(5, &[payee_attr(&payee), payee_attr(&other)])));
     push("payee key of 32 bytes", small(raw(5, &[payee_attr(&payee[1..])])));
-    {
-        let mut not_a_point = vec![0x02];
-        not_a_point.extend([0xff; 32]);
-        push("payee key not on the curve", small(raw(5, &[payee_attr(&not_a_point)])));
-    }
-    push("unknown attribute id 10", small(raw(5, &[attr(10, le(1, 8)), attr(0, le(1, 8))])));
+    let mut not_a_point = vec![0x02];
+    not_a_point.extend([0xff; 32]);
+    push("payee key not on the curve", small(raw(5, &[payee_attr(&not_a_point)])));
+    push("duplicate trampoline route hint, another key second", small(raw(5, &[hint_attr(&other), hint_attr(&payee)])));
+    push("trampoline route hint of 32 bytes", small(raw(5, &[hint_attr(&other[1..])])));
+    push("trampoline route hint of 34 bytes", small(raw(5, &[hint_attr(&[other.as_slice(), &[0]].concat())])));
+    push("trampoline route hint not on the curve", small(raw(5, &[hint_attr(&not_a_point)])));
+    push("trampoline route hint that is not a table", small(raw(5, &[attr(10, le(1, 8)), attr(0, le(1, 8))])));
+    push("unknown attribute id 11", small(raw(5, &[attr(11, le(1, 8)), attr(0, le(1, 8))])));
     push("deprecated final htlc timeout", small(raw(5, &[attr(2, le(5, 8)), attr(0, le(1, 8))])));
     push("description of 700 bytes", small(raw(5, &[attr(1, table(&[mol_bytes(&[0x61; 700])]))])));
     push("description that is not utf-8", small(raw(5, &[attr(1, table(&[mol_bytes(&[0xff, 0xfe])]))])));

@@ -9,7 +9,17 @@ export type FiberVerdict = (typeof FIBER_VERDICTS)[number];
 
 export type InvoiceAttributeVector =
     | { type: "expiry_time" | "final_htlc_timeout" | "final_htlc_minimum_expiry_delta"; value: string }
-    | { type: "description" | "fallback_addr" | "feature" | "payee_public_key" | "hash_algorithm" | "payment_secret"; value: string }
+    | {
+          type:
+              | "description"
+              | "fallback_addr"
+              | "feature"
+              | "payee_public_key"
+              | "hash_algorithm"
+              | "payment_secret"
+              | "trampoline_route_hint";
+          value: string;
+      }
     | { type: "udt_script"; value: ScriptVector };
 
 export type InvoiceValuesVector = {

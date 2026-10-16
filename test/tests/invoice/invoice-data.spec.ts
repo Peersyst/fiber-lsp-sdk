@@ -10,6 +10,10 @@ const PAYEE = "034f355bdcb7cc0af728ef3cceb9615d90684bb5b2ca5f859ab0f0b704075871a
 const PAYEE_UNCOMPRESSED =
     "044f355bdcb7cc0af728ef3cceb9615d90684bb5b2ca5f859ab0f0b704075871aa385b6b1b8ead809ca67454d9683fcf2ba03456d6fe2c4abe2b07f0fbdbb2f1c1";
 const PAYMENT_HASH = "03".repeat(32);
+// The public node's id, the key of secret 0x22 repeated.
+const HINT = "02466d7fcae563e5cb09a0d1870bb580344804617879a14949cf22285f1bae3f27";
+const HINT_UNCOMPRESSED =
+    "04466d7fcae563e5cb09a0d1870bb580344804617879a14949cf22285f1bae3f276728176c3c6431f8eeda4538dc37c865e2784f3a9e77d044f33e407797e1278a";
 
 // The data of a hold invoice as fiber's `new_invoice` shapes it, written by fiber.
 const HOLD: InvoiceData = {
@@ -26,6 +30,22 @@ const HOLD: InvoiceData = {
 const HOLD_MOLECULE =
     "bc00000010000000200000004000000000f451c28c010000000000000000000003030303030303030303030303030303030303030303030303030303030303037c000000180000002e0000003a000000460000004b00000001000000120000000800000006000000636f6666656500000000100e00000000000003000000007c9200000000000800000000070000002d0000000800000021000000034f355bdcb7cc0af728ef3cceb9615d90684bb5b2ca5f859ab0f0b704075871aa";
 
+// HOLD created by a tenant, written by fiber: the hosted node adds trampoline routing and its public node's id.
+const TENANT: InvoiceData = {
+    ...HOLD,
+    attributes: [
+        { type: "description", text: "coffee" },
+        { type: "expiryTime", seconds: 3600n },
+        { type: "feature", bits: Uint8Array.of(0x20) },
+        { type: "trampolineRouteHint", nodeId: hexToBytes(HINT) },
+        { type: "finalHtlcMinimumExpiryDelta", milliseconds: 9600000n },
+        { type: "hashAlgorithm", algorithm: "ckb-hash" },
+        { type: "payeePublicKey", publicKey: hexToBytes(PAYEE) },
+    ],
+};
+const TENANT_MOLECULE =
+    "0601000010000000200000004000000000f451c28c01000000000000000000000303030303030303030303030303030303030303030303030303030303030303c60000002000000036000000420000005300000084000000900000009500000001000000120000000800000006000000636f6666656500000000100e000000000000050000000d0000000800000001000000200a0000002d000000080000002100000002466d7fcae563e5cb09a0d1870bb580344804617879a14949cf22285f1bae3f2703000000007c9200000000000800000000070000002d0000000800000021000000034f355bdcb7cc0af728ef3cceb9615d90684bb5b2ca5f859ab0f0b704075871aa";
+
 const bytesTable = (data: Uint8Array): Uint8Array => moleculeTable([moleculeBytes(data)]);
 
 // A `RawInvoiceData` around raw union items, so a test writes the one item it breaks byte by byte.
@@ -38,6 +58,13 @@ const data = (...attributes: InvoiceAttribute[]): InvoiceData => ({ timestampMs:
 describe("encodeInvoiceData", () => {
     it("writes the hold invoice's data as fiber does", () => {
         expect(bytesToHex(encodeInvoiceData(HOLD))).toBe(HOLD_MOLECULE);
+    });
+
+    it("writes the tenant invoice's data, its hint under union id 10", () => {
+        expect(bytesToHex(encodeInvoiceData(TENANT))).toBe(TENANT_MOLECULE);
+        expect(bytesToHex(encodeInvoiceData(data({ type: "trampolineRouteHint", nodeId: hexToBytes(HINT) })))).toBe(
+            bytesToHex(withItems(item(10, bytesTable(hexToBytes(HINT))))),
+        );
     });
 
     it("writes each attribute under its union id, in the order given", () => {
@@ -123,6 +150,36 @@ describe("encodeInvoiceData", () => {
             "attributes[0].publicKey must be a 33-byte compressed public key",
         ],
         [
+            "an uncompressed route hint",
+            data({ type: "trampolineRouteHint", nodeId: hexToBytes(HINT_UNCOMPRESSED) }),
+            "attributes[0].nodeId must be a 33-byte compressed public key",
+        ],
+        [
+            "a route hint off the curve",
+            data({ type: "trampolineRouteHint", nodeId: hexToBytes(`03${"ff".repeat(32)}`) }),
+            "attributes[0].nodeId must be a 33-byte compressed public key",
+        ],
+        [
+            "a route hint that is not bytes",
+            data({ type: "trampolineRouteHint", nodeId: HINT as never }),
+            "attributes[0].nodeId must be a 33-byte compressed public key",
+        ],
+        [
+            "a missing route hint",
+            data({ type: "trampolineRouteHint" } as never),
+            "attributes[0].nodeId must be a 33-byte compressed public key",
+        ],
+        [
+            "a null route hint",
+            data({ type: "trampolineRouteHint", nodeId: null as never }),
+            "attributes[0].nodeId must be a 33-byte compressed public key",
+        ],
+        [
+            "a repeated route hint",
+            data({ type: "trampolineRouteHint", nodeId: hexToBytes(HINT) }, { type: "trampolineRouteHint", nodeId: hexToBytes(PAYEE) }),
+            "attributes[1] must not repeat an attribute type",
+        ],
+        [
             "an unknown hash algorithm",
             data({ type: "hashAlgorithm", algorithm: "blake3" as never }),
             "attributes[0].algorithm must be one of",
@@ -150,6 +207,10 @@ describe("decodeInvoiceData", () => {
         expect(decodeInvoiceData(hexToBytes(HOLD_MOLECULE))).toEqual(HOLD);
     });
 
+    it("reads the tenant invoice's data", () => {
+        expect(decodeInvoiceData(hexToBytes(TENANT_MOLECULE))).toEqual(TENANT);
+    });
+
     it("reads data without attributes", () => {
         expect(decodeInvoiceData(withItems())).toEqual(data());
     });
@@ -173,8 +234,8 @@ describe("decodeInvoiceData", () => {
         ],
         [
             "an attribute id past the union",
-            withItems(item(10, uint64Le(1n))),
-            new InvoiceError("data.attributes[0]", "must have an item id below 10"),
+            withItems(item(11, bytesTable(hexToBytes(HINT)))),
+            new InvoiceError("data.attributes[0]", "must have an item id below 11"),
         ],
         [
             "an expiry of 7 bytes",
@@ -257,6 +318,41 @@ describe("decodeInvoiceData", () => {
             new InvoiceError("data.attributes[0].paymentSecret", "must be exactly 32 bytes"),
         ],
         [
+            "an uncompressed route hint, which fiber reads and writes back compressed",
+            withItems(item(10, bytesTable(hexToBytes(HINT_UNCOMPRESSED)))),
+            new InvoiceError("data.attributes[0].trampolineRouteHint.nodeId", "must be a 33-byte compressed public key"),
+        ],
+        [
+            "a route hint off the curve",
+            withItems(item(10, bytesTable(hexToBytes(`03${"ff".repeat(32)}`)))),
+            new InvoiceError("data.attributes[0].trampolineRouteHint.nodeId", "must be a 33-byte compressed public key"),
+        ],
+        [
+            "a route hint of 32 bytes",
+            withItems(item(10, bytesTable(hexToBytes(HINT).subarray(1)))),
+            new InvoiceError("data.attributes[0].trampolineRouteHint.nodeId", "must be a 33-byte compressed public key"),
+        ],
+        [
+            "a route hint of 34 bytes",
+            withItems(item(10, bytesTable(hexToBytes(`${HINT}00`)))),
+            new InvoiceError("data.attributes[0].trampolineRouteHint.nodeId", "must be a 33-byte compressed public key"),
+        ],
+        [
+            "a route hint that is not a table",
+            withItems(item(10, uint64Le(1n))),
+            new InvoiceError("data.attributes[0].trampolineRouteHint", "must be exactly as long as its size says"),
+        ],
+        [
+            "a route hint whose length is wrong",
+            withItems(item(10, moleculeTable([Uint8Array.of(33, 0, 0, 0, 2)]))),
+            new InvoiceError("data.attributes[0].trampolineRouteHint.nodeId", "must be exactly as long as its length says"),
+        ],
+        [
+            "a route hint twice, which fiber reads keeping the first",
+            withItems(item(10, bytesTable(hexToBytes(HINT))), item(10, bytesTable(hexToBytes(PAYEE)))),
+            new InvoiceError("data.attributes[1]", "must not repeat an attribute type"),
+        ],
+        [
             "an attribute type twice, which fiber reads keeping the first",
             withItems(item(0, uint64Le(1n)), item(8, Uint8Array.of(0)), item(0, uint64Le(2n))),
             new InvoiceError("data.attributes[2]", "must not repeat an attribute type"),
@@ -277,6 +373,7 @@ describe("decodeInvoiceData", () => {
             { type: "payeePublicKey", publicKey: hexToBytes(PAYEE) },
             { type: "hashAlgorithm", algorithm: "sha256" },
             { type: "paymentSecret", secret: new Uint8Array(32) },
+            { type: "trampolineRouteHint", nodeId: hexToBytes(HINT) },
         ];
         const edge = { timestampMs: (1n << 128n) - 1n, paymentHash: new Uint8Array(32).fill(0xff), attributes: edges };
         expect(decodeInvoiceData(encodeInvoiceData(edge))).toEqual(edge);

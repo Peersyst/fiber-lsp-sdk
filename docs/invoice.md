@@ -7,9 +7,7 @@ Both need a reader that sees what fiber's decoder sees, so the `invoice` module 
 and decoder by vectors of its own.
 
 Every claim about fiber refers to `nervosnetwork/fiber` @ `8db6a117`, `crates/fiber-types/src/invoice.rs` unless another file
-is named. That commit adds an eleventh attribute, `TrampolineRouteHint`, which the codec does not read yet: a string carrying
-a well-formed one is refused as an unknown item, which nothing pins yet (the vectors' "unknown attribute id 10" variant
-carries a malformed one, which fiber refuses too).
+is named.
 
 ## The string
 
@@ -26,18 +24,23 @@ The amount has no multiplier, so `fibt250000000` is 2.5 CKB. Currency and amount
 everything else in `RawInvoiceData`: a table of the timestamp (`u128`, milliseconds), the payment hash and a vector of
 attributes, each a union item:
 
-| Id  | Attribute                     | SDK type                      | Value                                                  |
-| --- | ----------------------------- | ----------------------------- | ------------------------------------------------------ |
-| 0   | `ExpiryTime`                  | `expiryTime`                  | `u64` seconds                                          |
-| 1   | `Description`                 | `description`                 | UTF-8                                                  |
-| 2   | `FinalHtlcTimeout`            | `finalHtlcTimeout`            | `u64` milliseconds; deprecated, still read and written |
-| 3   | `FinalHtlcMinimumExpiryDelta` | `finalHtlcMinimumExpiryDelta` | `u64` milliseconds                                     |
-| 4   | `FallbackAddr`                | `fallbackAddr`                | UTF-8                                                  |
-| 5   | `Feature`                     | `feature`                     | Fiber's feature bit vector, kept as the bytes it is    |
-| 6   | `UdtScript`                   | `udtScript`                   | A CKB `Script`                                         |
-| 7   | `PayeePublicKey`              | `payeePublicKey`              | A compressed secp256k1 key                             |
-| 8   | `HashAlgorithm`               | `hashAlgorithm`               | One byte: `0` ckb-hash, `1` sha256                     |
-| 9   | `PaymentSecret`               | `paymentSecret`               | 32 bytes                                               |
+| Id  | Attribute                     | SDK type                      | Value                                                        |
+| --- | ----------------------------- | ----------------------------- | ------------------------------------------------------------ |
+| 0   | `ExpiryTime`                  | `expiryTime`                  | `u64` seconds                                                |
+| 1   | `Description`                 | `description`                 | UTF-8                                                        |
+| 2   | `FinalHtlcTimeout`            | `finalHtlcTimeout`            | `u64` milliseconds; deprecated, still read and written       |
+| 3   | `FinalHtlcMinimumExpiryDelta` | `finalHtlcMinimumExpiryDelta` | `u64` milliseconds                                           |
+| 4   | `FallbackAddr`                | `fallbackAddr`                | UTF-8                                                        |
+| 5   | `Feature`                     | `feature`                     | Fiber's feature bit vector, kept as the bytes it is          |
+| 6   | `UdtScript`                   | `udtScript`                   | A CKB `Script`                                               |
+| 7   | `PayeePublicKey`              | `payeePublicKey`              | A compressed secp256k1 key                                   |
+| 8   | `HashAlgorithm`               | `hashAlgorithm`               | One byte: `0` ckb-hash, `1` sha256                           |
+| 9   | `PaymentSecret`               | `paymentSecret`               | 32 bytes                                                     |
+| 10  | `TrampolineRouteHint`         | `trampolineRouteHint`         | A compressed secp256k1 key, the hosted node's public node id |
+
+The hosted node puts the route hint on every invoice a tenant creates, always after a `Feature` with the trampoline-routing
+optional bit, which the builder adds first (`crates/fiber-lib/src/invoice/invoice_impl.rs:103-106`). The SDK names the
+hint's key `nodeId`, as the molecule field `node_id` does, and reads and refuses it as it does the payee key.
 
 The attributes keep their order: it is part of the bytes the signature covers. The payee signs
 `sha256(hrp ‖ compressed ‖ one zero byte when the compressed length is not a multiple of five)`, the bytes fiber's five-bit
@@ -68,15 +71,15 @@ strings are one invoice with one valid signature.
 
 The SDK reads exactly one string per invoice, the one fiber's encoder writes, and refuses the rest naming the layer:
 
-| Layer        | What is refused                                                                                                                                                                                                        |
-| ------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `invoice`    | Any uppercase character, no separator, a character outside the charset, a plain bech32 or broken checksum                                                                                                              |
-| `currency`   | A prefix other than `fibb`, `fibt`, `fibd`                                                                                                                                                                             |
-| `amount`     | Anything but canonical decimal within `u128`: a leading zero, a sign, a multiplier                                                                                                                                     |
-| `flag`       | Anything but the signed flag                                                                                                                                                                                           |
-| `compressed` | Padding that is not zero or is a whole group, a stream that runs out, data past 16384 bytes, and any stream other than the one the coder writes for its data                                                           |
-| `data…`      | Whatever molecule's strict reader refuses, invalid UTF-8, a payee key that is not a 33-byte compressed point, a hash algorithm byte other than 0 or 1, a script hash type CKB does not define, an attribute type twice |
-| `signature`  | `r` or `s` out of range, a recovery id past 3, a high-S signature, one that recovers no key, and one not by the payee key the invoice carries                                                                          |
+| Layer        | What is refused                                                                                                                                                                                                                      |
+| ------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `invoice`    | Any uppercase character, no separator, a character outside the charset, a plain bech32 or broken checksum                                                                                                                            |
+| `currency`   | A prefix other than `fibb`, `fibt`, `fibd`                                                                                                                                                                                           |
+| `amount`     | Anything but canonical decimal within `u128`: a leading zero, a sign, a multiplier                                                                                                                                                   |
+| `flag`       | Anything but the signed flag                                                                                                                                                                                                         |
+| `compressed` | Padding that is not zero or is a whole group, a stream that runs out, data past 16384 bytes, and any stream other than the one the coder writes for its data                                                                         |
+| `data…`      | Whatever molecule's strict reader refuses, invalid UTF-8, a payee key or route hint that is not a 33-byte compressed point, a hash algorithm byte other than 0 or 1, a script hash type CKB does not define, an attribute type twice |
+| `signature`  | `r` or `s` out of range, a recovery id past 3, a high-S signature, one that recovers no key, and one not by the payee key the invoice carries                                                                                        |
 
 The stream check is a re-encoding: the data is compressed again and must give the very bytes received. The other layers are
 canonical by construction: strict padding leaves one group count per byte length, and molecule's strict layout leaves one
@@ -110,7 +113,7 @@ reader's.
 | File                                  | Contents                                                                                                      |
 | ------------------------------------- | ------------------------------------------------------------------------------------------------------------- |
 | `src/invoice/invoice.ts`              | `decodeInvoice`, `encodeInvoice`, `computeInvoiceDigest`: the human-readable part and the signature           |
-| `src/invoice/invoice-data.ts`         | `RawInvoiceData` and its ten attributes, written and read strictly                                            |
+| `src/invoice/invoice-data.ts`         | `RawInvoiceData` and its eleven attributes, written and read strictly                                         |
 | `src/invoice/arithmetic-coder.ts`     | The port of `arcode`                                                                                          |
 | `src/invoice/bech32m.ts`              | The checksum, the charset and the strict five-to-eight regrouping                                             |
 | `src/invoice/utils/molecule.utils.ts` | Molecule's strict readers: table, dynvec, `Bytes`, fixed values, union, `Script`                              |
@@ -125,15 +128,15 @@ The barrel lists its exports one by one, as the other ports' do: the three funct
 `interop/vectors/invoice.json` is written by the harness from fiber's own types (see [interop/README.md](../interop/README.md)):
 
 - **Invoices fiber wrote**: each attribute alone and all together, the three currencies, no amount and `u128::MAX`, signed and
-  unsigned, the hold invoice and the multi-path invoice as `new_invoice` shapes them, and data of exactly 16384 bytes. Each
-  carries its molecule, its compressed stream, its digest and its signature besides the string, so a divergence names its layer,
-  and the harness checks its own encoding of each against fiber's `Display`.
+  unsigned, the hold invoice, the multi-path invoice and a tenant's invoice as `new_invoice` shapes them, and data of exactly
+  16384 bytes. Each carries its molecule, its compressed stream, its digest and its signature besides the string, so a
+  divergence names its layer, and the harness checks its own encoding of each against fiber's `Display`.
 - **The coder past what an invoice reaches**: streams for every byte value, a long run, pseudo-random data of up to 16384
   bytes; and streams the decoder reads past what the coder wrote or refuses: bytes after the marker, every bit of the last byte
   flipped, one to seven bytes cut.
 - **UTF-8 as Rust reads it**: every boundary of every width, overlong forms, surrogates, past U+10FFFF, cut sequences.
-- **Variants of one invoice with fiber's verdict**: 67 strings, each marked accepted, rewritten, refused or panicked by fiber's
-  signed-only decoder. The SDK accepts a variant exactly when fiber accepts it and writes it back unchanged, save four
+- **Variants of one invoice with fiber's verdict**: 74 strings, each marked accepted, rewritten, refused or panicked by fiber's
+  signed-only decoder. The SDK accepts a variant exactly when fiber accepts it and writes it back unchanged, save five
   variants of the table's differences whose strings fiber accepts as they are, each with the refusal it must end in; the panic is refused.
 
 `verify-invoices` closes the loop the other way: fiber's decoder reads every string the SDK's encoder wrote, the signed vectors
@@ -164,23 +167,32 @@ Coverage of the module is 100% of statements, functions and lines. The branches 
 | Plain bech32's checksum constant                                       | 51                |
 | The digest pads with two zero bytes                                    | 47                |
 | The string split at the first 1                                        | 38                |
+| An attribute type list without the route hint                          | 30                |
 | The digest pads the stream to 8-byte blocks                            | 19                |
+| The route hint read as a bare Bytes, not a table                       | 14                |
 | Every count starts at 2                                                | 13                |
+| The route hint written as a bare Bytes, not a table                    | 13                |
 | Overlong UTF-8 accepted                                                | 12                |
+| The route hint at id 11, after a placeholder                           | 12                |
 | The model's total not raised with a count                              | 11                |
 | The digest computed without the amount                                 | 8                 |
+| The route hint read without its point checked                          | 8                 |
 | An uppercase string read as lowercase, as fiber does                   | 7                 |
 | The recovered key not compared with the payee key, as fiber does       | 7                 |
 | The decompression limit off by one                                     | 6                 |
 | A table field more than the schema's accepted                          | 6                 |
 | Only flag 2 refused, the unsigned flag accepted                        | 5                 |
 | A lone surrogate written                                               | 5                 |
+| The route hint's refusal names the payee key's field                   | 5                 |
 | Surrogates accepted on read                                            | 4                 |
+| The route hint written without its point checked                       | 4                 |
 | Padding bits that are not zero accepted                                | 3                 |
 | Leading zeros in the amount accepted                                   | 3                 |
 | The decoder reads a repeated attribute type                            | 3                 |
 | An unknown hash algorithm byte read as ckb-hash, as fiber does         | 3                 |
 | A union id one past the schema accepted                                | 3                 |
+| An uncompressed public key accepted by the shared reader               | 3                 |
+| An uncompressed public key accepted by the shared writer               | 3                 |
 | The decoder pads 8 bits more                                           | 2                 |
 | The decoder pads 1 bit less                                            | 2                 |
 | An empty human-readable part accepted                                  | 2                 |

@@ -70,6 +70,50 @@
       "string": "fibt2500000001phdztk3fx62gfw0pmm6vk9qxlq05dw76a7fh3qy3z9ud27n2l6ukehhkvu7ujkjee90rscgxrru4j5f07eq5kujq9pa07vsfywssvphrqwn5u338ygmn90y70f80luahy3xjgc65n3s83m23ntql5vf57q0vlulm069j0ae0zfxcx9jsjv2h835a70nr856rrq45y4d7tftqqdwnzsptaznsvs9ce8la6uf300yz4qjpqyvvfjsmddr5zrmcsahv89vv6je2dqewx60cm42mv7ctpzwqa5500uahfazlfqznjqhwq3lqpkqm3p3"
     },
     {
+      "name": "tenant invoice as the hosted node shapes it",
+      "values": {
+        "currency": "Fibt",
+        "amount": "250000000",
+        "timestamp": "1704067200000",
+        "payment_hash": "0303030303030303030303030303030303030303030303030303030303030303",
+        "attrs": [
+          {
+            "type": "description",
+            "value": "coffee"
+          },
+          {
+            "type": "expiry_time",
+            "value": "3600"
+          },
+          {
+            "type": "feature",
+            "value": "20"
+          },
+          {
+            "type": "trampoline_route_hint",
+            "value": "02466d7fcae563e5cb09a0d1870bb580344804617879a14949cf22285f1bae3f27"
+          },
+          {
+            "type": "final_htlc_minimum_expiry_delta",
+            "value": "9600000"
+          },
+          {
+            "type": "hash_algorithm",
+            "value": "ckb_hash"
+          },
+          {
+            "type": "payee_public_key",
+            "value": "034f355bdcb7cc0af728ef3cceb9615d90684bb5b2ca5f859ab0f0b704075871aa"
+          }
+        ]
+      },
+      "molecule": "0601000010000000200000004000000000f451c28c01000000000000000000000303030303030303030303030303030303030303030303030303030303030303c60000002000000036000000420000005300000084000000900000009500000001000000120000000800000006000000636f6666656500000000100e000000000000050000000d0000000800000001000000200a0000002d000000080000002100000002466d7fcae563e5cb09a0d1870bb580344804617879a14949cf22285f1bae3f2703000000007c9200000000000800000000070000002d0000000800000021000000034f355bdcb7cc0af728ef3cceb9615d90684bb5b2ca5f859ab0f0b704075871aa",
+      "compressed": "05fb03011cd6002479ae4ddad711e6dfc1eed8921da8884193ab0d7370bde4dba70b930f2dcc3a067a5bc1962b9abbb1ca32c8f0e85c7a6a4d9e526f0ea654aa45e6bcc6629a2107aaaa2b9d4e36783444eefcdb61b6f6878ecf2541d93249685773bb860a781bcd36596ebc25b32b39cb127d4d7677b1441cbad7aea0316b82a921e6da27ad64df8f5baa2d97886fd6c239da98d43e97de72a469d81f6ce0420aabfecf078183c178eefa1696c49f263ac948c933ee",
+      "digest": "65f9f57a23333c4a9329fd478a458febccc1c2585e3711aab5a7634224ec2249",
+      "signature": "98d93d57aab61a1093dd7de2d263a25e3326a600b0d165eae19c81c6ee1e46500e4f2e61c3a9d396a5eeb2d64d2c8f6628645881e82a569b42f64957f284fdc800",
+      "string": "fibt2500000001pqhasxqgu6cqzg7dwfhddwy0xmlq7akyjrk5gssvn4vxhxu9aund6wzunpukucwsx0fdur93tn2amrj3jercwshr6dfxeu5n0p6n9f2j9u67vvc56yyr6423tn48rv7p5gnh0ekmpkmmg0rk0y4qajvjfdpth8wuxpfuphnfkt9htcfdn9vuukynaf4m80v2yrjad0t4qx94c92fpumdz0ttym784h23dj7yxl4kz88df34p7jl089frfmq0keczzp24lanc8sxpuz78wlgtfd3ylycavjjxfx0hqnrvn64a2kcdppy7a0h3dycaztcejdfsqkrgkt6hpnjqudms7gegqunewv8p6n5uk5hht94jd9j8kv2rytzq7s2jkndp0vj2h72z0mjqq6h5eh4"
+    },
+    {
       "name": "hold invoice unsigned",
       "values": {
         "currency": "Fibt",
@@ -148,14 +192,18 @@
           {
             "type": "payee_public_key",
             "value": "034f355bdcb7cc0af728ef3cceb9615d90684bb5b2ca5f859ab0f0b704075871aa"
+          },
+          {
+            "type": "trampoline_route_hint",
+            "value": "02466d7fcae563e5cb09a0d1870bb580344804617879a14949cf22285f1bae3f27"
           }
         ]
       },
-      "molecule": "74010000100000002000000040000000ffffffffffffffffffffffffffffffff0303030303030303030303030303030303030303030303030303030303030303340100002c0000004a000000560000006d0000007e000000a2000000ae000000ba000000fe00000003010000010000001a000000080000000e0000006465736372697074696f6e20c3a900000000ffffffffffffffff0400000013000000080000000700000061646472657373050000000d00000008000000010000000809000000070707070707070707070707070707070707070707070707070707070707070702000000050000000000000003000000ffffffffffffffff06000000400000000800000038000000100000003000000031000000abababababababababababababababababababababababababababababababab04030000000102030800000001070000002d0000000800000021000000034f355bdcb7cc0af728ef3cceb9615d90684bb5b2ca5f859ab0f0b704075871aa",
-      "compressed": "738d70938884f0230bab3f7fb9c4a947339d3007969300c0563410a3e30bfacfecda9ac05de5908122d21a6024c3ece8873472932b2a1cc29aa27666275e844ed4a86b244933a8a417a4d3e4782c9cc43992069568fa7cbafdb046f87bed762d57f39fc2841df95365ca1e31f5279c6d3b9a7c6fa5e877e087a5ee989f924ffa2478e8207ea257f718225f04e05060c57fb21750fb1916db8316f93fda4023c4844d63d7c4acbb1b0d328874ff42c10a2bad10200487a86b3adb4bdfac39b111ddb27a737ad3e873bee0e11ec0bf5c1990dd2e54bfb9507dd7bed5873556d5fc26e111e005401938d7853e3f7ca650433580",
-      "digest": "3bc5172b25b9ec8c76f437c8410754f3024eb0fc37149cbc4a065a3279af0ee8",
-      "signature": "367e3c12038afa8e8f3baadcc08bea2691498bce547f9f8da8e5c388f1b3684128da582f9d9b288a6448685439ec90c00cdd1e94c9db84069808aebcc7a394f701",
-      "string": "fibb3402823669209384634633746074317682114551pwwxhpyugsnczxzat8almn39fguee6vq8j6fspszkxsg28cctlt87ek56cpw7tyypytfp5cpyc0kw3pe5w2fjk2suc2d2yanxya0ggnk54p4jgjfn4zjp0fxnu3uze8xy8xfqd9tglf7t4ldsgmu8hmtk94tl887zsswlj5m9eg0rraf8n3knhxnud7j7salqs7j7axyljf8l5frcaqs8agjh7uvzyhcyupgxp3tlkgt4p7cezmdcx9he8ldyqg7ys3xk847y4ja3krfj3p607skppg466ypqqjr6s6e6md9altpekygamvn6wdad86rnhmswz8kqhawpnyxa9e2tlw2s0htma4v8x4tdtlpxuyg7qp2qryud0pf78a72v5zrxkqqxelrcysr3tagarem4twvpzl2y6g5nz7w23lelrdguhpc3udndpqj3kjc97wek2y2v3yxs4peajgvqrxar62vnkuyq6vq3t4uc73efacpwrestz"
+      "molecule": "a9010000100000002000000040000000ffffffffffffffffffffffffffffffff030303030303030303030303030303030303030303030303030303030303030369010000300000004e0000005a0000007100000082000000a6000000b2000000be000000020100000701000038010000010000001a000000080000000e0000006465736372697074696f6e20c3a900000000ffffffffffffffff0400000013000000080000000700000061646472657373050000000d00000008000000010000000809000000070707070707070707070707070707070707070707070707070707070707070702000000050000000000000003000000ffffffffffffffff06000000400000000800000038000000100000003000000031000000abababababababababababababababababababababababababababababababab04030000000102030800000001070000002d0000000800000021000000034f355bdcb7cc0af728ef3cceb9615d90684bb5b2ca5f859ab0f0b704075871aa0a0000002d000000080000002100000002466d7fcae563e5cb09a0d1870bb580344804617879a14949cf22285f1bae3f27",
+      "compressed": "a858a55ebd4ff0230bab3f7fb044a923339d2e0996a300c4773412a6005b91fda329b667973379727829d588b774df38ad47142a61574c3d2450bd6fd62c8b75831170582686e21485d093c2dbc90e0af5e5488096a66be5b51b57a165de2ce132dda08f57cb9492c4b185a20c8fb0f15085d2275b95383c5783a5836413774d2352b6e08baee41e6f88a4dd23c02a748cbfceeef09db54ddc4df142b4a02884bec45f7fa889253817f423a4f97f4855efa4cfeeda134a912dd554bb14f65061d74738269a542d0d138f14b65a86a6b76f0cb1ea1baee25eb3c989845850e93748188d38afb8165e6f941af4c3b60843175cc07ef72ed4047a5f734d77cbe008059e75af8493002de011dac6987fa36cdd4e8d3d449dcfa04023992cd2d9ea80",
+      "digest": "b2f9d632460a6fe3d3e2e64ecb52d4ab6c14133e5509eab4ac713c601cd3a972",
+      "signature": "ca519511ba778607d60e77124148415d5a797ef38c7adbbb86567161695169b56ed19334525098c631d4fcdf9c15a59263bd6766d66304caa89b6bb6823a58d501",
+      "string": "fibb3402823669209384634633746074317682114551p4pv22h4aflczxzat8almq39fyvee6tsfj63sp3rhxsf2vqzmj876x2dkv7tnx7tj0q5atz9hwn0n3t28zs4xz46v85j9p0t06ckgkavrz9c9sf5xug2gt5ynctdujrs27hj53qyk5e47tdgm27skth3vuyedmgy02l9efykykxz6yry0krc4ppwjyade2wpu27p6tqmyzdm56g6jkmsghthyrehc3fxay0qz5ayvhl8wauyak4xacn03g262q2yyhmz97lag3yjns9l5ywj0jl6g2hh6fnlwmgf54yfd642tk98k2psaw3ecy6d9gtgdzw83fdj6s6ntwmcvk84phthzt6eunzvytpgwjd6grzxn3tacze0xl9q67npmvzzrzawvqlhh9m2qg7jlwdxh0jlqpqzeuad0sjfsqt0qz8dvdxrl5dkd6n5d84zfmnaqgq3ejtxjm84gqefge2yd6w7rq04swwufyzjzpt4d8jlhn33adhwux2eckz623dx6ka5vnx3f9pxxxx820ehuuzkjeycaavandvccye25fk6aksga934gperrary"
     },
     {
       "name": "zero amount",
@@ -483,6 +531,26 @@
       "digest": "4177a18a772b140e30396115182f5fca6accf9f8e5347134459db2d0f9b62e20",
       "signature": "aa24102db7ed67ef28572217bc53712651e6a9c5909d533cbd23c1df182c9c684c9738de5efd310fb03f6bb4210d12d242a8b4ff136f6dea5192e1551779e4e901",
       "string": "fibd11pdw2xh9xhy2gfw0pmm6vk9jsjls9llqqqqzqhuh9qdaxlkn2f40wjyuydzfddz5awpkhc26ezq8n5y6vj7qtt0xd4fnn6965hfstpm08twq4gjpqtdha4n772zhygtmc5m3yeg7d2w9jzw4x09ay0qa7xpvn35ye9ecme006vg0kqlkhdppp5fdys4gknl3xmmdafge9c24zau7f6gp8g8e8k"
+    },
+    {
+      "name": "trampoline route hint alone",
+      "values": {
+        "currency": "Fibd",
+        "amount": "1",
+        "timestamp": "5",
+        "payment_hash": "0303030303030303030303030303030303030303030303030303030303030303",
+        "attrs": [
+          {
+            "type": "trampoline_route_hint",
+            "value": "02466d7fcae563e5cb09a0d1870bb580344804617879a14949cf22285f1bae3f27"
+          }
+        ]
+      },
+      "molecule": "7900000010000000200000004000000005000000000000000000000000000000030303030303030303030303030303030303030303030303030303030303030339000000080000000a0000002d000000080000002100000002466d7fcae563e5cb09a0d1870bb580344804617879a14949cf22285f1bae3f27",
+      "compressed": "78877887e41590973c33de9962ca12fc0bff800000817e5ca06f4dfb4d49abdd22708d125ad153b819cbc797d76311e468bd89c7277f95d58c44f6f0cf5c1070fbf682848e86535813e6f6e10c6a93a20a87520b3cf27770c0",
+      "digest": "586bc6584b4eff073285516eb31a6cbc2dc057e54ded2faedc209237be31201f",
+      "signature": "0831299c32e754635addfe446923787c1139a5a2630314da048e087508ddc27363f4bee330df65b2a5732340a52bf498fb3b51929e0bdafd7f88491c62d5827e00",
+      "string": "fibd11p0zrh3plyzkgfw0pnm6vk9jsjls9llqqqqzqhuh9qdaxlkn2f40wjyuydzfddz5acr89u097hvvg7g69a38rjwlu46kxyfahseawpqu8m76pgfr5x2dvp8ehkuyxx4yazp2r4yzeu7fmhpsqpqcjn8pjua2xxkkalezxjgmc0sgnnfdzvvp3fksy3cy82zxacfek8a97uvcd7edj54ejxs99906f37em2xffuz76l4lcsjguvt2cylsqd3ncy2"
     },
     {
       "name": "multi-path as new_invoice shapes it",
@@ -1089,6 +1157,18 @@
       "error": "Invalid signature"
     },
     {
+      "name": "uncompressed trampoline route hint under the same signature",
+      "string": "fibt1000000001p7cylvznpj7gfw0pmm6vk9qqahr9vyc9z2ahp6y3z9ud276u0xexmmlctmlkexz8u23d7ltskrj39x36mjpjhj054s474yyt7q24kxcums4p6d0q3qzkpz9rkl2z90duwrjmhlwjgzmqy8uwv9asvdute9493zuyrwnclwse2urq5lt3uycugfurz0pxdfdfdhmv7lw74rxrzy4ctu2eh39przmwzytregt7sasgz8x4elnxv7wlszkfl57hjzha85kqtyzycyae43qx95t7ma6uaxv6g0nl6gzdfgkldewckax8m6qtjt2ghas3dvxlkez8ujhj89mpqgdzd8rhcwum30a7esxr5q6jt7qx8c9yedes5shyn8z3us3ulamc8h2av63e99ara7wthu7kxpxk8gqagdapn",
+      "fiber": "rewritten",
+      "error": null
+    },
+    {
+      "name": "uncompressed trampoline route hint, signed over the bytes received",
+      "string": "fibt1000000001p7cylvznpj7gfw0pmm6vk9qqahr9vyc9z2ahp6y3z9ud276u0xexmmlctmlkexz8u23d7ltskrj39x36mjpjhj054s474yyt7q24kxcums4p6d0q3qzkpz9rkl2z90duwrjmhlwjgzmqy8uwv9asvdute9493zuyrwnclwse2urq5lt3uycugfurz0pxdfdfdhmv7lw74rxrzy4ctu2eh39przmwzytregt7sasgz8x4elnxv7wlszkfl57hjzha85kqtyzycyae43qx95t7ma6uaxv6g0nl6gzdfgkldewckax8m6qp7h9qgndd3rek59ff8udwa4l08zj8y7y73hrfellnaus963j57gzeu54edseke2at736e3hmv5955d2jpmlhp0hshv0c265y5qrdqvgptrejsc",
+      "fiber": "refused",
+      "error": "Invalid signature"
+    },
+    {
       "name": "payee key of another signer",
       "string": "fibt11p0zrh3plyzkgfw0pnm6vk9jsjls9llqqqqzqhuh9qdaxlkn2f40wjyuydzfddz5acr89u097pmu5qaydc2hq2q8y48kxpa0z8suzlsms3usqek497n5ukk630k26w8cfww9lgvg0a26nyysqxfxrnzwkj7xm34n2n68pvtsq9jy4fy748hzp4j77vpk8h6z0c7ep28mtmr2hlhkfsu6dfdecztyy3wu8ck0tjgg5jt4zame9uss2wrcpxhqka0",
       "fiber": "refused",
@@ -1137,10 +1217,40 @@
       "error": "Invalid payee public key"
     },
     {
-      "name": "unknown attribute id 10",
+      "name": "duplicate trampoline route hint, another key second",
+      "string": "fibt11p44f265ccuzgfw0pnm6vk9jsjls9llqqqqzqhuh9qdaxlkn2f40wjyuydzfddz5lp6hed0vpjh27mpgp9g57488hp4lk0u9wap69yd0akpdk8wn2zfc6fp4qdq7nxukadnkza9g9xd7hmuvhuuwgycpzk9vsuv59u6lptp4qendg55ttp30phwxklfr3027knz90qld947n4htw3a0ud8cv5tahlexyp70yhj8ns3l89kvw7r7c4890kke6ha87z52u6u8d8yqfcl6w5e25jh432pfxdug0cnrdfrpmkhjzx3pjug8emavxrfddhgpjerv9k",
+      "fiber": "accepted",
+      "error": null
+    },
+    {
+      "name": "trampoline route hint of 32 bytes",
+      "string": "fibt11pw7y80z8rz6gfw0pmm6vk9jsjls9llqqqqzqhuh9qdaxlkn2f40wjyuydzfddz5ah20c0m9r8vvg2g3jecwpatzvky7pgrvuerf98ppen3sj3l732jfgn7tl9fnqypxna3astvcpmm64qh49sc9e0rhmhksw8hknxwsjp4chu5ujmpd5060j8n0h2ffrftg8zt06axksrjrh49qv9fww3r5w7f02f6avwkqg2nmsswdp4uqrlmmcq9u0xhs",
+      "fiber": "refused",
+      "error": "Invalid trampoline route hint"
+    },
+    {
+      "name": "trampoline route hint of 34 bytes",
+      "string": "fibt11p0xr8nph9zjgfw0pnm6vk9jsjls9llqqqqzqhuh9qdaxlkn2f40wjyuydzfddz5acm7nfrx68vvfjfzepflgdeej6xkxrzkveeawpqu85jlpgfr5x2dvp8ehkmqzyvpyu3ezau4r49nnp7jqm9dx7r0350lu6j88ra4nty6w4tyralpv5xhvlwluwlzavuhf3kvxva603eyp5vrqsz67943wefukyem0lsphy4f56dcscj6k7da7awgqyu43lt",
+      "fiber": "refused",
+      "error": "Invalid trampoline route hint"
+    },
+    {
+      "name": "trampoline route hint not on the curve",
+      "string": "fibt11p0zrh3plyzkgfw0pnm6vk9jsjls9llqqqqzqhuh9qdaxlkn2f40wjyuydzfddz5acr89u097hvvg7g69a38rj0r8fgmugq73y83gpy9dtgrehxmp36rnqtvsnlhudzdrdjch3pe4lvj63ddyj8d067vltzgda8e7kez4p8yy7e55lfydfr9rs06lastu587nq6xxpjjyn39ttma87qvqedhxw5qjx3qqfh8egj",
+      "fiber": "refused",
+      "error": "Invalid trampoline route hint"
+    },
+    {
+      "name": "trampoline route hint that is not a table",
       "string": "fibt11pvwwx88x092gfw0pmm6vk9jsjls9llqqqqzqhuh9qdaxlkn2f40wjyuydzfddz5a8mmv63tvk2kgyzpg69vq02z8l9g3rsawgg2tj32rxmcqtyarzgkgj9f9j0ml3fx3f6c2v8gh6wsxkfn0hsq690jff2lfnm20zwe0tpednynqeduu92dkyzrxp57f9ardpsxuqqpq2jkr",
       "fiber": "refused",
       "error": "Molecule error: TrampolineRouteHintReader total size doesn't match, expect 1, actual 8"
+    },
+    {
+      "name": "unknown attribute id 11",
+      "string": "fibt11pvwwx88x092gfw0pmm6vk9jsjls9llqqqqzqhuh9qdaxlkn2f40wjyuydzfddz5a8mmv63tvk2kgczfma7r902z8l9g3rsqg28szu02d96zacx2enpcet57jkuq2qn88e7wypzw0ykm2cxnue80e9tk0utgjha6yn7gjvj5t0wvmfxk9mxezpsknsquym99t253zgp3lucma",
+      "fiber": "refused",
+      "error": "Molecule error: InvoiceAttrReader item id (=11) is an unknown id, only has 11 kind of items"
     },
     {
       "name": "deprecated final htlc timeout",

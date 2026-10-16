@@ -39,7 +39,8 @@ These properties reflect the current specification and may evolve with it while 
 core, construction, `connect`/`disconnect` and the events, while the operations a wallet calls (open a channel, create an
 invoice, pay one) land next, so the public API is not settled yet. The upstream reference is the head of Fiber's hosted-LSP
 PR (nervosnetwork/fiber#1623, `8db6a117`), whose polled signing protocol the modules under the facade are being aligned to:
-so far `digest` and `policy` know both commitment-lock layouts and `rpc` writes the tenant API's forms.
+so far `digest` and `policy` know both commitment-lock layouts, `rpc` writes the tenant API's forms and `invoice` reads the
+trampoline route hint every tenant invoice carries.
 
 ## Repository layout
 

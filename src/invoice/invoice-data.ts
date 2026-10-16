@@ -44,6 +44,17 @@ export type InvoiceData = Pick<UnsignedInvoice, "timestampMs" | "paymentHash" | 
 const RAW_INVOICE_DATA_FIELDS = 3;
 
 /**
+ * Serializes a compressed public key as a one-field table of `Bytes`.
+ * @param key The key.
+ * @param name Its path, used in the error message.
+ * @returns The table's bytes.
+ */
+function publicKeyTable(key: Uint8Array, name: string): Uint8Array {
+    if (!isCompressedPoint(key)) throw new TypeError(`${name} must be a 33-byte compressed public key`);
+    return moleculeTable([moleculeBytes(key)]);
+}
+
+/**
  * Serializes one attribute's union item body, the part after its id.
  * @param attribute The attribute.
  * @param name Its path, used in the error message.
@@ -68,16 +79,15 @@ function encodeAttributeItem(attribute: InvoiceAttribute, name: string): Uint8Ar
         case "udtScript":
             return moleculeTable([moleculeScript(attribute.script, `${name}.script`)]);
         case "payeePublicKey":
-            if (!isCompressedPoint(attribute.publicKey)) {
-                throw new TypeError(`${name}.publicKey must be a 33-byte compressed public key`);
-            }
-            return moleculeTable([moleculeBytes(attribute.publicKey)]);
+            return publicKeyTable(attribute.publicKey, `${name}.publicKey`);
         case "hashAlgorithm":
             assertOneOf(`${name}.algorithm`, attribute.algorithm, TLC_HASH_ALGORITHMS);
             return Uint8Array.of(TLC_HASH_ALGORITHM_BYTES[attribute.algorithm]);
         case "paymentSecret":
             assertBytes(`${name}.secret`, attribute.secret, HASH256_LENGTH);
             return attribute.secret;
+        case "trampolineRouteHint":
+            return publicKeyTable(attribute.nodeId, `${name}.nodeId`);
     }
 }
 
@@ -109,11 +119,25 @@ export function encodeInvoiceData(data: InvoiceData): Uint8Array {
  * Reads the body of a union item that is a one-field table of `Bytes`.
  * @param item The item.
  * @param path What is being read, named in a refusal.
+ * @param field The field's name in the schema, named in a refusal.
  * @returns The raw data.
  */
-function readBytesTable(item: Uint8Array, path: string): Uint8Array {
+function readBytesTable(item: Uint8Array, path: string, field: string): Uint8Array {
     const [value] = readInvoiceMoleculeTable(item, 1, path) as [Uint8Array];
-    return readInvoiceMoleculeBytes(value, `${path}.value`).slice();
+    return readInvoiceMoleculeBytes(value, `${path}.${field}`).slice();
+}
+
+/**
+ * Reads the body of a union item that is a compressed public key in a one-field table of `Bytes`.
+ * @param item The item.
+ * @param path What is being read, named in a refusal.
+ * @param field The field's name in the schema, named in a refusal.
+ * @returns The compressed key.
+ */
+function readPublicKeyTable(item: Uint8Array, path: string, field: string): Uint8Array {
+    const key = readBytesTable(item, path, field);
+    if (!isCompressedPoint(key)) refuseInvoice(`${path}.${field}`, "must be a 33-byte compressed public key");
+    return key;
 }
 
 /**
@@ -128,23 +152,20 @@ function decodeAttributeItem(type: InvoiceAttributeType, item: Uint8Array, path:
         case "expiryTime":
             return { type, seconds: readInvoiceMoleculeUint(item, UINT64_LENGTH, path) };
         case "description":
-            return { type, text: decodeInvoiceUtf8(readBytesTable(item, path), `${path}.value`) };
+            return { type, text: decodeInvoiceUtf8(readBytesTable(item, path, "value"), `${path}.value`) };
         case "finalHtlcTimeout":
         case "finalHtlcMinimumExpiryDelta":
             return { type, milliseconds: readInvoiceMoleculeUint(item, UINT64_LENGTH, path) };
         case "fallbackAddr":
-            return { type, address: decodeInvoiceUtf8(readBytesTable(item, path), `${path}.value`) };
+            return { type, address: decodeInvoiceUtf8(readBytesTable(item, path, "value"), `${path}.value`) };
         case "feature":
-            return { type, bits: readBytesTable(item, path) };
+            return { type, bits: readBytesTable(item, path, "value") };
         case "udtScript": {
             const [script] = readInvoiceMoleculeTable(item, 1, path) as [Uint8Array];
             return { type, script: readInvoiceMoleculeScript(script, `${path}.value`) };
         }
-        case "payeePublicKey": {
-            const publicKey = readBytesTable(item, path);
-            if (!isCompressedPoint(publicKey)) refuseInvoice(`${path}.value`, "must be a 33-byte compressed public key");
-            return { type, publicKey };
-        }
+        case "payeePublicKey":
+            return { type, publicKey: readPublicKeyTable(item, path, "value") };
         case "hashAlgorithm": {
             const byte = readInvoiceMoleculeFixed(item, 1, path)[0];
             // Fiber reads any other byte as ckb-hash and writes it back as 0.
@@ -154,6 +175,8 @@ function decodeAttributeItem(type: InvoiceAttributeType, item: Uint8Array, path:
         }
         case "paymentSecret":
             return { type, secret: readInvoiceMoleculeFixed(item, HASH256_LENGTH, path).slice() };
+        case "trampolineRouteHint":
+            return { type, nodeId: readPublicKeyTable(item, path, "nodeId") };
     }
 }
 

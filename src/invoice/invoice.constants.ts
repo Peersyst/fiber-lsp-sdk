@@ -25,6 +25,7 @@ export const INVOICE_ATTRIBUTE_TYPES = [
     "payeePublicKey",
     "hashAlgorithm",
     "paymentSecret",
+    "trampolineRouteHint",
 ] as const;
 
 export const INVOICE_SIGNATURE_LENGTH = RECOVERABLE_ECDSA_SIGNATURE_LENGTH;
