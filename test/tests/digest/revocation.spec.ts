@@ -4,6 +4,7 @@ import { deriveChannelKeys, pubkeyOf } from "../../../src/derivation/fiber-schem
 import { COMMITMENT_LOCK_TESTNET } from "../../../src/digest/digest.constants";
 import type { Script } from "../../../src/common";
 import type { RevocationInput } from "../../../src/digest/digest.types";
+import { calculateCommitmentTxFee } from "../../../src/digest/fee";
 import { computeRevocationDigest } from "../../../src/digest/revocation";
 
 const MASTER_SEED = new Uint8Array(32).fill(0x24);
@@ -27,6 +28,7 @@ const BASE_INPUT: RevocationInput = {
     localReservedCkbShannons: 4_200_000_000n,
     remoteReservedCkbShannons: 6_300_000_000n,
     commitmentLock: COMMITMENT_LOCK_TESTNET,
+    lockLayout: "legacy",
 };
 
 const baseDigest = bytesToHex(computeRevocationDigest(channelKeys, BASE_INPUT));
@@ -58,12 +60,22 @@ describe("computeRevocationDigest", () => {
         ["localReservedCkbShannons", { localReservedCkbShannons: 4_200_000_001n }],
         ["remoteReservedCkbShannons", { remoteReservedCkbShannons: 6_300_000_001n }],
         ["udtTypeScript", { udtTypeScript: { codeHash: hexToBytes("aa".repeat(32)), hashType: "type", args: new Uint8Array(0) } }],
+        ["lockLayout", { lockLayout: "fullPaymentHash" }],
     ])("commits to %s", (_, overrides) => {
         expect(digestOf(overrides)).not.toBe(baseDigest);
     });
 
-    // The commitment lock never appears in the revocation message; it only sizes the fee mock, where its args are zeroed
-    // at a fixed 57 bytes, so a different code hash or hash type must leave the digest untouched.
+    // The revoked cell's 36-byte args carry no feature byte; only the fee mock, a byte larger under fullPaymentHash, sees the layout.
+    it("commits to the layout only through the fee", () => {
+        expect(calculateCommitmentTxFee(BASE_INPUT)).toBe(456n);
+        expect(calculateCommitmentTxFee({ ...BASE_INPUT, lockLayout: "fullPaymentHash" })).toBe(457n);
+        expect(digestOf({ lockLayout: "fullPaymentHash" })).not.toBe(baseDigest);
+        expect(digestOf({ commitmentFeeRate: 0n, lockLayout: "fullPaymentHash" })).toBe(
+            digestOf({ commitmentFeeRate: 0n, lockLayout: "legacy" }),
+        );
+    });
+
+    // The commitment lock only sizes the fee mock, its args zeroed, so its code hash and hash type never reach the digest.
     it("does not commit to the commitment lock's content", () => {
         expect(digestOf({ commitmentLock: { ...COMMITMENT_LOCK_TESTNET, hashType: "data" } })).toBe(baseDigest);
         expect(digestOf({ commitmentLock: { ...COMMITMENT_LOCK_TESTNET, codeHash: new Uint8Array(32) } })).toBe(baseDigest);
@@ -81,5 +93,10 @@ describe("computeRevocationDigest", () => {
         expect(() => digestOf({ toLocalShannons: 1n << 128n })).toThrow(RangeError);
         expect(() => digestOf({ localReservedCkbShannons: -1n })).toThrow(RangeError);
         expect(() => digestOf({ payoutScript: { ...PAYOUT_SCRIPT, codeHash: new Uint8Array(31) } })).toThrow(TypeError);
+        expect(() => digestOf({ lockLayout: undefined })).toThrow(new TypeError("lockLayout must be one of legacy, fullPaymentHash"));
+        expect(() => digestOf({ lockLayout: null as never })).toThrow(new TypeError("lockLayout must be one of legacy, fullPaymentHash"));
+        expect(() => digestOf({ lockLayout: "full_payment_hash" as never })).toThrow(
+            new TypeError("lockLayout must be one of legacy, fullPaymentHash"),
+        );
     });
 });

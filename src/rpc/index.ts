@@ -7,4 +7,6 @@ export * from "./payments";
 export * from "./rpc.constants";
 export * from "./rpc.error";
 export * from "./rpc.types";
+export * from "./signing";
+export * from "./tenants";
 export * from "./utils";

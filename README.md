@@ -37,7 +37,9 @@ These properties reflect the current specification and may evolve with it while 
 
 `derivation`, `digest`, `invoice`, `signer`, `policy`, `wire`, `protocol`, `session` and `rpc` are implemented; `sdk` has its
 core, construction, `connect`/`disconnect` and the events, while the operations a wallet calls (open a channel, create an
-invoice, pay one) land next, so the public API is not settled yet.
+invoice, pay one) land next, so the public API is not settled yet. The upstream reference is the head of Fiber's hosted-LSP
+PR (nervosnetwork/fiber#1623, `8db6a117`), whose polled signing protocol the modules under the facade are being aligned to:
+so far `digest` and `policy` know both commitment-lock layouts and `rpc` writes the tenant API's forms.
 
 ## Repository layout
 

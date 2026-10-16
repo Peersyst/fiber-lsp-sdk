@@ -5,7 +5,6 @@ import {
     decodeListChannelsResult,
     decodeOpenChannelWithExternalFundingResult,
     decodeSubmitSignedFundingTxResult,
-    encodeAbandonChannelParams,
     encodeListChannelsParams,
     encodeOpenChannelWithExternalFundingParams,
     encodeSubmitSignedFundingTxParams,
@@ -42,7 +41,7 @@ import type {
     SubmitSignedFundingTxParams,
     SubmitSignedFundingTxResult,
 } from "./rpc.types";
-import { encodeRpcPaymentHashParams } from "./utils";
+import { encodeRpcChannelIdParams, encodeRpcPaymentHashParams } from "./utils";
 
 // A header value every runtime accepts, so a bad token fails at construction.
 const TOKEN_PATTERN = /^[\x21-\x7e]+$/;
@@ -120,7 +119,7 @@ export class FiberRpcClient {
      * @param params The channel to abandon.
      */
     async abandonChannel(params: AbandonChannelParams): Promise<void> {
-        await this.call("abandon_channel", encodeAbandonChannelParams(params), decodeAbandonChannelResult);
+        await this.call("abandon_channel", encodeRpcChannelIdParams(params), decodeAbandonChannelResult);
     }
 
     /**

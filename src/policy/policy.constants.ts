@@ -43,6 +43,7 @@ export const FIRST_SIGHT_CHANNEL_PINS = [
     "commitmentDelayEpoch",
     "commitmentFeeRate",
     "remoteReservedCkbShannons",
+    "lockLayout",
 ] as const;
 
 /**

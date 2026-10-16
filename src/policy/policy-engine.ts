@@ -36,7 +36,7 @@ import type {
     SignSlotRef,
 } from "./policy.types";
 import type { SignerStore } from "./signer-store";
-import { assertSignSession, boundPaymentHashOf, buildSessionCommitment, resolveSignSlot, signSlotKey } from "./utils";
+import { assertSignSession, boundPaymentHashOf, buildSessionCommitment, isTlcOfPaymentRecord, resolveSignSlot, signSlotKey } from "./utils";
 
 export class PolicyEngine {
     private readonly store: SignerStore;
@@ -241,8 +241,8 @@ export class PolicyEngine {
                 const record = await this.store.getChannelRecord(index);
                 if (record === null) throw unlistedRecord(index);
                 const tlcs = POLICY_VIEWS.flatMap((view) => record.views[view].tlcs);
-                // Received only: no intent can take this hash.
-                const held = tlcs.filter((tlc) => tlc.boundPaymentHash === key);
+                // Received only: no intent can take this hash. A twin under the full-hash layout is not the invoice's.
+                const held = tlcs.filter((tlc) => tlc.boundPaymentHash === key && isTlcOfPaymentRecord(tlc, current));
                 // The preimage does not open a TLC under another algorithm.
                 if (held.some((tlc) => tlc.hashAlgorithm !== current.hashAlgorithm)) {
                     throw new HoldInvoiceError(
@@ -293,7 +293,7 @@ export class PolicyEngine {
             sessionCommitment: buildSessionCommitment(session),
             stateVersion,
             operation,
-            tlcs: operation.kind === "commitment_tx" ? toPolicyViewTlcs(operation.input.tlcs) : [],
+            tlcs: operation.kind === "commitment_tx" ? toPolicyViewTlcs(operation.input.tlcs, operation.input.lockLayout) : [],
         };
         // Serialized: channels share budgets, and nothing may move the record between deciding and claiming.
         return this.store.withBalanceLock(async () => {

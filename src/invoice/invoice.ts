@@ -1,7 +1,15 @@
 import { secp256k1 } from "@noble/curves/secp256k1.js";
 import { sha256 } from "@noble/hashes/sha2.js";
 import { concatBytes } from "@noble/hashes/utils.js";
-import { assertBytes, assertDecimalShannons, assertOneOf, assertString, compareBytes, isDecimalShannons } from "../common";
+import {
+    COMPACT_ECDSA_SIGNATURE_LENGTH,
+    assertBytes,
+    assertDecimalShannons,
+    assertOneOf,
+    assertString,
+    compareBytes,
+    isDecimalShannons,
+} from "../common";
 import { arDecompress, arEncompress } from "./arithmetic-coder";
 import { bytesToInvoiceGroups, decodeInvoiceBech32m, encodeInvoiceBech32m, invoiceGroupsToBytes } from "./bech32m";
 import { decodeInvoiceData, encodeInvoiceData } from "./invoice-data";
@@ -13,7 +21,6 @@ import { encodeInvoiceUtf8 } from "./utils";
 type PayeeAttribute = Extract<InvoiceAttribute, { type: "payeePublicKey" }>;
 
 const SIGNED_FLAG = 1;
-const COMPACT_SIGNATURE_LENGTH = 64;
 const MAX_RECOVERY_ID = 3;
 // Fiber appends one zero byte to the signed stream unless its length is a multiple of this.
 const DIGEST_BLOCK = 5;
@@ -83,11 +90,11 @@ export function encodeInvoice(invoice: Invoice): string {
 function verifySignature(signature: Uint8Array, digest: Uint8Array, payeePublicKey: Uint8Array | undefined): void {
     let compact: InstanceType<typeof secp256k1.Signature>;
     try {
-        compact = secp256k1.Signature.fromBytes(signature.subarray(0, COMPACT_SIGNATURE_LENGTH), "compact");
+        compact = secp256k1.Signature.fromBytes(signature.subarray(0, COMPACT_ECDSA_SIGNATURE_LENGTH), "compact");
     } catch {
         refuseInvoice("signature", "must have r and s within the curve order");
     }
-    const recoveryId = signature[COMPACT_SIGNATURE_LENGTH] ?? 0;
+    const recoveryId = signature[COMPACT_ECDSA_SIGNATURE_LENGTH] ?? 0;
     if (recoveryId > MAX_RECOVERY_ID) refuseInvoice("signature", `must have a recovery id of at most ${MAX_RECOVERY_ID}`);
     if (compact.hasHighS()) refuseInvoice("signature", "must be low-S");
     let recovered: Uint8Array;

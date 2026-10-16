@@ -107,7 +107,7 @@ function generatedInvoices(count: number): UnsignedInvoice[] {
 
 describe("invoice interop vectors", () => {
     it("declares the fiber release they were generated with, and the payee key of its secret", () => {
-        expect(vectors.fiber_ref).toBe("b71a61c3");
+        expect(vectors.fiber_ref).toBe("8db6a117");
         expect(bytesToHex(secp256k1.getPublicKey(PAYEE_SECRET_KEY, true))).toBe(vectors.payee_public_key);
     });
 

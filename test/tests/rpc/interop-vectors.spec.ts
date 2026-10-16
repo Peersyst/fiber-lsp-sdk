@@ -9,6 +9,8 @@ import {
     RPC_INVOICE_STATUSES,
     RPC_METHODS,
     RPC_PAYMENT_STATUSES,
+    RPC_SUBMISSION_RESULTS,
+    RPC_TENANT_RUNTIME_STATUSES,
     RPC_UNAUTHORIZED_CODE,
 } from "../../../src/rpc";
 import { WIRE_TLC_HASH_ALGORITHMS } from "../../../src/wire";
@@ -32,7 +34,7 @@ describe("rpc interop vectors", () => {
     const openResults = vectors.methods.open_channel_with_external_funding.results;
 
     it("declares the fiber release and the jsonrpsee version they were generated with", () => {
-        expect(vectors.fiber_ref).toBe("b71a61c3");
+        expect(vectors.fiber_ref).toBe("8db6a117");
         expect(vectors.jsonrpsee_version).toBe("0.25.1");
     });
 
@@ -184,6 +186,60 @@ describe("rpc interop vectors", () => {
         it("cover an invoice without an amount and one without a signature", () => {
             expect(invoiceResults.some((entry) => entry.values.invoice.amount === null)).toBe(true);
             expect(invoiceResults.some((entry) => entry.values.invoice.signature === null)).toBe(true);
+        });
+    });
+
+    describe("tenant channels, signing requests and registrations", () => {
+        const tenants = vectors.methods.lsp_register_tenant.results.map((entry) => entry.values.tenant);
+        const openParams = vectors.methods.open_tenant_channel.params.map((entry) => entry.values);
+        const shutdownParams = vectors.methods.shutdown_channel.params.map((entry) => entry.values);
+
+        it("cover the open without options, with the delay and the fee rate, and with the announcement nonce", () => {
+            expect(openParams.some((entry) => entry.commitment_delay_epoch === null && entry.commitment_fee_rate === null)).toBe(true);
+            expect(openParams.some((entry) => entry.commitment_delay_epoch !== null && entry.commitment_fee_rate !== null)).toBe(true);
+            expect(openParams.some((entry) => entry.external_channel_signer.channel_announcement_nonce === null)).toBe(true);
+            expect(openParams.some((entry) => entry.external_channel_signer.channel_announcement_nonce !== null)).toBe(true);
+        });
+
+        it("cover a shutdown by channel id alone and one with its three options", () => {
+            expect(shutdownParams.some((entry) => entry.close_script === null && entry.fee_rate === null && entry.force === null)).toBe(
+                true,
+            );
+            expect(shutdownParams.some((entry) => entry.close_script !== null && entry.fee_rate !== null && entry.force !== null)).toBe(
+                true,
+            );
+        });
+
+        it("cover a submit with and without next material", () => {
+            const materials = vectors.methods.submit_channel_signature.params.map((entry) => entry.values.next_material);
+            expect(materials.some((material) => material === null)).toBe(true);
+            expect(materials.some((material) => material !== null)).toBe(true);
+        });
+
+        it.each(["get_channel_signing_status", "get_watchtower_signing_status"] as const)(
+            "cover NoSignatureRequired on %s, written as its tag",
+            (method) => {
+                const results = vectors.methods[method].results;
+                expect(results.map((entry) => entry.values.status)).toContain("NoSignatureRequired");
+                for (const entry of results) {
+                    expect((entry.json as { status: unknown }).status).toEqual({ type: entry.values.status });
+                }
+            },
+        );
+
+        it.each(["submit_channel_signature", "submit_watchtower_signature"] as const)(
+            "cover both outcomes of %s, and no other",
+            (method) => {
+                const outcomes = vectors.methods[method].results.map((entry) => entry.values.outcome);
+                expect(new Set(outcomes)).toEqual(new Set(RPC_SUBMISSION_RESULTS));
+            },
+        );
+
+        it("cover both runtime statuses, a tenant without a root signer or a channel and one with both", () => {
+            expect(new Set(tenants.map((tenant) => tenant.runtime_status))).toEqual(new Set(RPC_TENANT_RUNTIME_STATUSES));
+            expect(tenants.some((tenant) => tenant.root_signer_pubkey === null && tenant.private_channel_id === null)).toBe(true);
+            expect(tenants.some((tenant) => tenant.root_signer_pubkey !== null && tenant.private_channel_id !== null)).toBe(true);
+            expect(new Set(tenants.map((tenant) => tenant.channel_online))).toEqual(new Set([true, false]));
         });
     });
 

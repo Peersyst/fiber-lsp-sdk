@@ -1,4 +1,7 @@
 import type { OutPoint, Script, ScriptTemplate, TlcDirection, TlcHashAlgorithm } from "../common";
+import type { COMMITMENT_LOCK_LAYOUTS } from "./digest.constants";
+
+export type CommitmentLockLayout = (typeof COMMITMENT_LOCK_LAYOUTS)[number];
 
 /**
  * One TLC of the settlement witness, as the node attaches it: selection and status filtering happen node-side, the
@@ -69,6 +72,10 @@ export type CommitmentTxInput = {
     remoteReservedCkbShannons: bigint;
     tlcs: SettlementTlc[];
     commitmentLock: ScriptTemplate;
+    /**
+     * Read from the args the node attaches; it shapes the lock args, each TLC record of the witness and the fee mock.
+     */
+    lockLayout: CommitmentLockLayout;
 };
 
 /**
@@ -122,6 +129,10 @@ export type RevocationInput = {
      * The commitment fee is sized over a mock carrying this lock, so the revocation digest depends on it too.
      */
     commitmentLock: ScriptTemplate;
+    /**
+     * The revoked cell's 36-byte args carry no feature byte, but the fee is sized over the commitment mock, which does.
+     */
+    lockLayout: CommitmentLockLayout;
 };
 
 /**

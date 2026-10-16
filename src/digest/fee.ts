@@ -1,15 +1,16 @@
 import type { Script, ScriptTemplate } from "../common";
-import { assertUnsignedBigInt, assertUnsignedInteger } from "../common";
+import { assertOneOf, assertUnsignedBigInt, assertUnsignedInteger } from "../common";
 import {
     CELL_DEP_LENGTH,
     CELL_INPUT_LENGTH,
-    COMMITMENT_LOCK_ARGS_LENGTH,
+    COMMITMENT_LOCK_ARGS_LENGTHS,
+    COMMITMENT_LOCK_LAYOUTS,
     FEE_RATE_WEIGHT_SCALE,
     FUNDING_CELL_WITNESS_LENGTH,
     MAX_CAPACITY_SHANNONS,
     MAX_CELL_DEPS_COUNT,
 } from "./digest.constants";
-import type { CommitmentTxInput, ShutdownTxInput } from "./digest.types";
+import type { CommitmentLockLayout, CommitmentTxInput, ShutdownTxInput } from "./digest.types";
 import { moleculeCellOutput, moleculeRawTransaction, moleculeTransaction } from "./utils";
 
 const UDT_AMOUNT_DATA_LENGTH = 16;
@@ -24,10 +25,17 @@ const BLOCK_SIZE_OVERHEAD = 4;
  * @param cellDepsCount Cell deps of the funding lock plus the UDT's; mocked as zeroed deps.
  * @param udtTypeScript The channel's UDT type script, or `null` for a CKB channel.
  * @param commitmentLock The network's commitment lock template.
+ * @param lockLayout The layout; the mock zeroes the args at its length (fiber's `lock_args_len`).
  * @returns The size in bytes.
  */
-export function commitmentTxSize(cellDepsCount: number, udtTypeScript: Script | null, commitmentLock: ScriptTemplate): number {
-    const mockLock: Script = { ...commitmentLock, args: new Uint8Array(COMMITMENT_LOCK_ARGS_LENGTH) };
+export function commitmentTxSize(
+    cellDepsCount: number,
+    udtTypeScript: Script | null,
+    commitmentLock: ScriptTemplate,
+    lockLayout: CommitmentLockLayout,
+): number {
+    assertOneOf("lockLayout", lockLayout, COMMITMENT_LOCK_LAYOUTS);
+    const mockLock: Script = { ...commitmentLock, args: new Uint8Array(COMMITMENT_LOCK_ARGS_LENGTHS[lockLayout]) };
     const outputs = [moleculeCellOutput(0n, mockLock, udtTypeScript)];
     const outputsData = [udtTypeScript === null ? new Uint8Array(0) : new Uint8Array(UDT_AMOUNT_DATA_LENGTH)];
     return mockTxSize(cellDepsCount, outputs, outputsData);
@@ -66,9 +74,12 @@ export function calculateTxFee(feeRate: bigint, txSize: number): bigint {
  * @returns The fee in shannons.
  */
 export function calculateCommitmentTxFee(
-    input: Pick<CommitmentTxInput, "commitmentFeeRate" | "cellDepsCount" | "udtTypeScript" | "commitmentLock">,
+    input: Pick<CommitmentTxInput, "commitmentFeeRate" | "cellDepsCount" | "udtTypeScript" | "commitmentLock" | "lockLayout">,
 ): bigint {
-    return calculateTxFee(input.commitmentFeeRate, commitmentTxSize(input.cellDepsCount, input.udtTypeScript, input.commitmentLock));
+    return calculateTxFee(
+        input.commitmentFeeRate,
+        commitmentTxSize(input.cellDepsCount, input.udtTypeScript, input.commitmentLock, input.lockLayout),
+    );
 }
 
 /**

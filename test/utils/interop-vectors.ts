@@ -47,6 +47,7 @@ export type TlcVector = {
 export type CommitmentCaseVector = {
     name: string;
     for_remote: boolean;
+    lock_layout: string;
     funding_out_point: OutPointVector;
     commitment_number: number;
     delay_epoch: string;
@@ -89,6 +90,7 @@ export type ShutdownCaseVector = {
 export type RevocationCaseVector = {
     name: string;
     for_remote: boolean;
+    lock_layout: string;
     revoked_commitment_number: number;
     payout_script: ScriptVector;
     delay_epoch: string;
@@ -116,7 +118,7 @@ export type AnnouncementCaseVector = {
 export type ReserveCaseVector = {
     name: string;
     shutdown_script: ScriptVector;
-    reserved: string;
+    reserved: { legacy: string; full_payment_hash: string };
 };
 
 export type DigestVectors = {
@@ -192,6 +194,7 @@ function asDigestVectors(value: unknown): DigestVectors {
                 tx_size: asNumber(record.tx_size, `${path}.tx_size`),
                 ...asStringFields(record, path, [
                     "name",
+                    "lock_layout",
                     "delay_epoch",
                     "fee_rate",
                     "to_local",
@@ -242,6 +245,7 @@ function asDigestVectors(value: unknown): DigestVectors {
                 udt_type_script: asNullable(record.udt_type_script, `${path}.udt_type_script`, asScript),
                 ...asStringFields(record, path, [
                     "name",
+                    "lock_layout",
                     "delay_epoch",
                     "fee_rate",
                     "to_local",
@@ -270,7 +274,8 @@ function asDigestVectors(value: unknown): DigestVectors {
             const record = asRecord(entry, path);
             return {
                 shutdown_script: asScript(record.shutdown_script, `${path}.shutdown_script`),
-                ...asStringFields(record, path, ["name", "reserved"] as const),
+                reserved: asStringFields(record.reserved, `${path}.reserved`, ["legacy", "full_payment_hash"] as const),
+                ...asStringFields(record, path, ["name"] as const),
             };
         }),
     };
@@ -283,11 +288,6 @@ function asNonceContext(value: unknown, path: string): NonceContext {
     return context;
 }
 
-/**
- * Validates parsed JSON against the shape the suite expects.
- * @param value The raw parsed JSON.
- * @returns The typed vectors.
- */
 export function parseVectors(value: unknown): Vectors {
     const root = asRecord(value, "vectors");
     const fiberScheme = asRecord(root.fiber_scheme, "fiber_scheme");
@@ -355,22 +355,12 @@ export function parseVectors(value: unknown): Vectors {
     };
 }
 
-/**
- * Reads and validates the committed vector file.
- * @returns The typed vectors.
- */
 export function loadInteropVectors(): Vectors {
     const path = join(__dirname, "../../interop/vectors/vectors.json");
     const raw: unknown = JSON.parse(readFileSync(path, "utf8"));
     return parseVectors(raw);
 }
 
-/**
- * Finds a vector case by name, failing loudly when the vectors no longer carry it.
- * @param cases Cases of one construction.
- * @param name Name of the case.
- * @returns The case.
- */
 export function caseOf<Vector extends { name: string }>(cases: Vector[], name: string): Vector {
     const found = cases.find((entry) => entry.name === name);
     if (found === undefined) throw new Error(`the vectors carry no case named "${name}"`);

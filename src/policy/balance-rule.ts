@@ -1,21 +1,32 @@
 import { bytesToHex } from "@noble/hashes/utils.js";
 import { MILLISECONDS_PER_SECOND, truncatePaymentHash } from "../common";
-import type { SettlementTlc } from "../digest";
+import type { CommitmentLockLayout, SettlementTlc } from "../digest";
 import { MAX_EXACT_CHARGE_TLCS, POLICY_VIEWS } from "./policy.constants";
 import { refusePolicyRequest } from "./policy.error";
-import type { BalanceRuleCommitment, BalanceRuleContext, PolicyView, PolicyViewSnapshot, PolicyViewTlc } from "./policy.types";
+import type {
+    BalanceRuleCommitment,
+    BalanceRuleContext,
+    DebitIntentRecord,
+    HoldInvoicePolicyRecord,
+    PolicyView,
+    PolicyViewSnapshot,
+    PolicyViewTlc,
+} from "./policy.types";
+import { isTlcOfPaymentRecord } from "./utils";
 
 /**
  * Reduces a commitment's TLCs to what its settlement witness binds.
  * @param tlcs The TLCs the node attached to the commitment.
+ * @param lockLayout The witness's layout, which decides how much of each payment hash it binds.
  * @returns One entry per TLC, sorted.
  */
-export function toPolicyViewTlcs(tlcs: readonly SettlementTlc[]): PolicyViewTlc[] {
+export function toPolicyViewTlcs(tlcs: readonly SettlementTlc[], lockLayout: CommitmentLockLayout): PolicyViewTlc[] {
     return tlcs
         .map((tlc) => ({
             direction: tlc.direction,
             hashAlgorithm: tlc.hashAlgorithm,
             boundPaymentHash: bytesToHex(truncatePaymentHash(tlc.paymentHash)),
+            fullPaymentHash: lockLayout === "fullPaymentHash" ? bytesToHex(tlc.paymentHash) : null,
             amountShannons: tlc.amountShannons.toString(),
             expirySeconds: (tlc.expiryMs / MILLISECONDS_PER_SECOND).toString(),
         }))
@@ -36,21 +47,42 @@ export function judgeCommitment(
     next: BalanceRuleCommitment,
     context: BalanceRuleContext,
 ): PolicyViewSnapshot {
+    // Under the full-hash layout an offered TLC is the intent's only when the whole hash agrees: a twin draws on no budget.
+    for (const tlc of next.tlcs) {
+        const intent = context.intents.get(tlc.boundPaymentHash);
+        if (tlc.direction === "offered" && intent !== undefined && intentOf(context, tlc) === undefined) {
+            refusePolicyRequest(
+                "policy_refusal",
+                `the ${view} commitment offers a TLC under ${tlc.fullPaymentHash}, not the ${intent.paymentHash} ` +
+                    "the debit intent under its bound hash names",
+            );
+        }
+    }
+
     const previous = views[view];
     const left = multisetDifference(previous.tlcs, next.tlcs);
 
     const creditedShannons = { ...previous.creditedShannons };
     let credit = 0n;
     let uncreditedReceived = 0n;
-    for (const [boundPaymentHash, amount] of sumByHash(left, "received")) {
-        const invoice = context.invoices.get(boundPaymentHash);
-        const owed = invoice?.released === true ? BigInt(invoice.amountShannons) - creditedAcross(previous, context, boundPaymentHash) : 0n;
-        const credited = min(amount, max(owed, 0n));
-        if (credited > 0n)
-            creditedShannons[boundPaymentHash] = (readAmount(previous.creditedShannons, boundPaymentHash) + credited).toString();
-        credit += credited;
+    for (const tlc of left) {
+        if (tlc.direction !== "received") continue;
+        const amount = BigInt(tlc.amountShannons);
+        const invoice = invoiceOf(context, tlc);
+        // No invoice of the device's, or a twin of one: the node may have collected it on its own.
+        if (invoice === undefined) {
+            uncreditedReceived += amount;
+            continue;
+        }
         // Unreleased, a held TLC can only have failed.
-        if (invoice?.released !== false) uncreditedReceived += amount - credited;
+        if (!invoice.released) continue;
+        const owed = BigInt(invoice.amountShannons) - creditedAcross(creditedShannons, context, tlc.boundPaymentHash);
+        const credited = min(amount, max(owed, 0n));
+        if (credited > 0n) {
+            creditedShannons[tlc.boundPaymentHash] = (readAmount(creditedShannons, tlc.boundPaymentHash) + credited).toString();
+        }
+        credit += credited;
+        uncreditedReceived += amount - credited;
     }
 
     const shortfall = holdings(BigInt(previous.exposureShannons), previous.tlcs) + credit - holdings(next.exposureShannons, next.tlcs);
@@ -106,7 +138,7 @@ export function judgeCommitment(
 
     // The preimage does not open a TLC under another algorithm.
     for (const tlc of multisetDifference(next.tlcs, previous.tlcs)) {
-        const invoice = context.invoices.get(tlc.boundPaymentHash);
+        const invoice = invoiceOf(context, tlc);
         if (tlc.direction === "received" && invoice?.released === true && tlc.hashAlgorithm !== invoice.hashAlgorithm) {
             refusePolicyRequest(
                 "policy_refusal",
@@ -128,7 +160,7 @@ export function judgeCommitment(
 function mixesReleasedHeld(lists: readonly (readonly PolicyViewTlc[])[], context: BalanceRuleContext, kinds: "both" | "either"): boolean {
     const tlcs = lists.flat();
     const offered = tlcs.some((tlc) => tlc.direction === "offered");
-    const releasedHeld = tlcs.some((tlc) => tlc.direction === "received" && context.invoices.get(tlc.boundPaymentHash)?.released === true);
+    const releasedHeld = tlcs.some((tlc) => tlc.direction === "received" && invoiceOf(context, tlc)?.released === true);
     return kinds === "both" ? offered && releasedHeld : offered || releasedHeld;
 }
 
@@ -167,6 +199,28 @@ export function judgeShutdown(views: Record<PolicyView, PolicyViewSnapshot>, pay
             );
         }
     }
+}
+
+/**
+ * Finds the debit intent a TLC draws on: the one under its bound hash, when the TLC is that intent's.
+ * @param context Holds the intents.
+ * @param tlc The TLC.
+ * @returns The intent, or `undefined` when none is recorded under the hash or the TLC binds another full hash.
+ */
+function intentOf(context: BalanceRuleContext, tlc: PolicyViewTlc): DebitIntentRecord | undefined {
+    const intent = context.intents.get(tlc.boundPaymentHash);
+    return intent !== undefined && isTlcOfPaymentRecord(tlc, intent) ? intent : undefined;
+}
+
+/**
+ * Finds the hold invoice a TLC pays: the one under its bound hash, when the TLC is that invoice's.
+ * @param context Holds the invoices.
+ * @param tlc The TLC.
+ * @returns The invoice, or `undefined` when none is recorded under the hash or the TLC binds another full hash.
+ */
+function invoiceOf(context: BalanceRuleContext, tlc: PolicyViewTlc): HoldInvoicePolicyRecord | undefined {
+    const invoice = context.invoices.get(tlc.boundPaymentHash);
+    return invoice !== undefined && isTlcOfPaymentRecord(tlc, invoice) ? invoice : undefined;
 }
 
 /**
@@ -224,18 +278,18 @@ function holdings(exposure: bigint, tlcs: readonly PolicyViewTlc[]): bigint {
 }
 
 /**
- * Sums what an invoice is surely paid: this view's credit, and each other channel's at its less paid view.
- * @param previous This channel's snapshot of the view.
+ * Sums what an invoice is surely paid: this view's credit so far, and each other channel's at its less paid view.
+ * @param credited This view's credits, those of the message being judged included.
  * @param context Holds both views of the other channels.
  * @param boundPaymentHash Bound payment hash of the invoice.
  * @returns The credited total.
  */
-function creditedAcross(previous: PolicyViewSnapshot, context: BalanceRuleContext, boundPaymentHash: string): bigint {
+function creditedAcross(credited: Readonly<Record<string, string>>, context: BalanceRuleContext, boundPaymentHash: string): bigint {
     return context.otherChannels.reduce(
         (sum, other) =>
             sum +
             min(readAmount(other.remote.creditedShannons, boundPaymentHash), readAmount(other.local.creditedShannons, boundPaymentHash)),
-        readAmount(previous.creditedShannons, boundPaymentHash),
+        readAmount(credited, boundPaymentHash),
     );
 }
 
@@ -287,7 +341,8 @@ function multisetDifference(from: readonly PolicyViewTlc[], remove: readonly Pol
  * @returns A key two TLCs share when the witness cannot tell them apart.
  */
 function tlcKey(tlc: PolicyViewTlc): string {
-    return `${tlc.direction}:${tlc.hashAlgorithm}:${tlc.boundPaymentHash}:${tlc.amountShannons}:${tlc.expirySeconds}`;
+    const hashes = `${tlc.boundPaymentHash}:${tlc.fullPaymentHash ?? ""}`;
+    return `${tlc.direction}:${tlc.hashAlgorithm}:${hashes}:${tlc.amountShannons}:${tlc.expirySeconds}`;
 }
 
 /**

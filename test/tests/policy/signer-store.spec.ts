@@ -27,7 +27,7 @@ function record(overrides: Partial<ChannelPolicyRecord> = {}): ChannelPolicyReco
         pins: {
             fundedShannons: "5000000100",
             localCloseScript: "ab".repeat(53),
-            localReservedCkbShannons: "9900000000",
+            localReservedCkbShannons: { legacy: "9900000000", fullPaymentHash: "10000000000" },
             udtTypeScript: null,
             commitmentFeeRate: "1000",
         },
@@ -39,6 +39,7 @@ function record(overrides: Partial<ChannelPolicyRecord> = {}): ChannelPolicyReco
                         direction: "offered",
                         hashAlgorithm: "ckb-hash",
                         boundPaymentHash: "33".repeat(20),
+                        fullPaymentHash: null,
                         amountShannons: "100",
                         expirySeconds: "1700000000",
                     },
@@ -291,13 +292,16 @@ describe("channel records", () => {
             "77".repeat(20) +
             '":"1500000000"},"tlcs":[{"expirySeconds":"1723257890","amountShannons":"750000000","boundPaymentHash":"' +
             "88".repeat(20) +
+            '","fullPaymentHash":"' +
+            "88".repeat(32) +
             '","hashAlgorithm":"sha256","direction":"offered"}],"exposureShannons":"122706789"}},"lastStateVersion":42,' +
             '"signedSessions":{"REVOKE:9":"' +
             "cd".repeat(32) +
             '","COMMITMENT:10":"' +
             "ef".repeat(32) +
             '"},"lastSignedCommitmentNumbers":{"REVOKE":9,"COMMITMENT":10},' +
-            '"pins":{"remoteReservedCkbShannons":"6300000000","localReservedCkbShannons":"9900000000",' +
+            '"pins":{"lockLayout":"fullPaymentHash","remoteReservedCkbShannons":"6300000000",' +
+            '"localReservedCkbShannons":{"fullPaymentHash":"10000000000","legacy":"9900000000"},' +
             '"commitmentFeeRate":"1000","commitmentDelayEpoch":"1099511627777","remoteTlcBasePubkey":"03' +
             "25".repeat(32) +
             '","remoteFundingPubkey":"02' +
@@ -328,8 +332,9 @@ describe("channel records", () => {
                 remoteTlcBasePubkey: "03" + "25".repeat(32),
                 commitmentDelayEpoch: "1099511627777",
                 commitmentFeeRate: "1000",
-                localReservedCkbShannons: "9900000000",
+                localReservedCkbShannons: { legacy: "9900000000", fullPaymentHash: "10000000000" },
                 remoteReservedCkbShannons: "6300000000",
+                lockLayout: "fullPaymentHash",
             },
             views: {
                 remote: {
@@ -339,6 +344,7 @@ describe("channel records", () => {
                             direction: "offered",
                             hashAlgorithm: "sha256",
                             boundPaymentHash: "88".repeat(20),
+                            fullPaymentHash: "88".repeat(32),
                             amountShannons: "750000000",
                             expirySeconds: "1723257890",
                         },
@@ -354,6 +360,16 @@ describe("channel records", () => {
                 },
             },
         });
+    });
+
+    // The form before the layouts: nothing released holds a record in it, so it is refused rather than migrated.
+    it("throws on a stored record whose reserve is one string", async () => {
+        const storage = new InMemorySignerStorage();
+        const pins = { ...record().pins, localReservedCkbShannons: "9900000000" };
+        storage.map.set(CHANNEL_KEY, JSON.stringify({ ...record(), pins }));
+        await expect(new SignerStore(storage).getChannelRecord(CHANNEL_INDEX)).rejects.toThrow(
+            new TypeError(`stored value at ${CHANNEL_KEY} is not a channel policy record`),
+        );
     });
 
     it("round-trips a record at every boundary at once", async () => {
@@ -377,8 +393,9 @@ describe("channel records", () => {
                 remoteTlcBasePubkey: "00".repeat(33),
                 commitmentDelayEpoch: "18446744073709551615",
                 commitmentFeeRate: "0",
-                localReservedCkbShannons: "18446744073709551615",
+                localReservedCkbShannons: { legacy: "18446744073709551615", fullPaymentHash: "0" },
                 remoteReservedCkbShannons: "0",
+                lockLayout: "fullPaymentHash",
             },
             views: {
                 remote: {
@@ -388,6 +405,7 @@ describe("channel records", () => {
                             direction: "received",
                             hashAlgorithm: "ckb-hash",
                             boundPaymentHash: "ff".repeat(20),
+                            fullPaymentHash: "ff".repeat(32),
                             amountShannons: "340282366920938463463374607431768211455",
                             expirySeconds: "18446744073709551615",
                         },
@@ -395,6 +413,7 @@ describe("channel records", () => {
                             direction: "offered",
                             hashAlgorithm: "ckb-hash",
                             boundPaymentHash: "00".repeat(20),
+                            fullPaymentHash: null,
                             amountShannons: "0",
                             expirySeconds: "0",
                         },

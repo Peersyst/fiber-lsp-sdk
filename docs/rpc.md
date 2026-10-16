@@ -1,10 +1,11 @@
 # RPC
 
 The client of the fiber node's JSON-RPC: one HTTP POST per call, over the host's `fetch` or the runtime's. This document
-covers its transport (how a call is written, how the answer is read, and the three ways a call fails) and the ten methods
-built on it, by subject: channels, invoices and payments.
+covers its transport (how a call is written, how the answer is read, and the three ways a call fails) and the eighteen
+methods built on it, by subject: channels, invoices, payments, the tenant's channels, the signing requests and the
+registration.
 
-Every claim about fiber refers to `nervosnetwork/fiber` @ `b71a61c3`, and the forms it rests on are pinned by
+Every claim about fiber refers to `nervosnetwork/fiber` @ `8db6a117`, and the forms it rests on are pinned by
 `interop/vectors/rpc.json`, written by fiber's own serde and jsonrpsee `0.25.1` (see [interop/README.md](../interop/README.md)).
 
 ## The host's fetch
@@ -45,8 +46,10 @@ header fails there and not on every call. No error the client throws carries it.
   case-sensitively by fiber. Each call gets its own copy, so a `fetch` that alters them cannot reach the next call.
 - **Ids** are a counter per client, from 1, one per call and never reused, a failed call included. A notification (no
   id) is always refused by fiber, so there is none.
-- **The params are typed per method** by `RpcParamsWireByMethod`, which names all ten, so `call` cannot be handed the
-  params of another method. The typed method of each RPC is what a caller uses; `call` is what they share.
+- **The params are typed per method** by `RpcParamsWireByMethod`, which names all eighteen, so `call` cannot be handed
+  the params of another method. The typed method of each RPC is what a caller uses; `call` is what they share. The eight
+  methods of the tenant API have their codecs and no client method yet: each lands with the task that calls it, which is
+  the one that observes what it sends, and until then a caller composes `call` with the codec.
 
 The answer is read strictly, as `response`:
 
@@ -222,6 +225,105 @@ A payment is read as:
 
 `custom_records` is not read, nor `routers`, which only a debug build of fiber writes.
 
+## Tenant channel methods
+
+Two methods open and close a tenant's channel on the hosted node, which holds no channel key: the device supplies the
+public signer material at the open, and signs on request afterwards ([Signing request methods](#signing-request-methods)).
+
+| Method                | Sends                                                                                                                                                                             | Reads                                                  |
+| --------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------ |
+| `open_tenant_channel` | the open's `pubkey`, `funding_amount`, `public`, `shutdown_script`, `funding_lock_script`; `commitment_delay_epoch` and `commitment_fee_rate` if given; `external_channel_signer` | `channel_id`, `unsigned_funding_tx`, `opening_context` |
+| `shutdown_channel`    | `channel_id`; `close_script`, `fee_rate` and `force` if given                                                                                                                     | `null`                                                 |
+
+- **The open is the external-funding open plus the signer material**: the same five members, written by the same encoder,
+  with `public` always `false`. A tenant channel is private, fiber refuses to announce one, and the choice is the SDK's,
+  not an inherited default; an input that carries `public: true` still sends `false`.
+- **`external_channel_signer` is the device's public material**: `base_public_keys` (`funding_pubkey`, `tlc_base_key`),
+  `first_commitment_point`, `second_commitment_point`, each a 33-byte point written bare, and `commitment_nonce`,
+  `next_commitment_nonce`, `revocation_nonce`, each a 66-byte musig2 public nonce written with its `0x`.
+  `channel_announcement_nonce` is written only when the input has one; the SDK's input is `null` for the private channel
+  it opens, since fiber refuses the nonce on one.
+- **The two options are sent only when given**, as `U64Hex`: the delay as the full `EpochNumberWithFraction` value, the
+  rate in shannons per kilobyte; absent, the node's defaults apply. Left to the node, as on the external-funding open:
+  `funding_udt_type_script`, `funding_lock_script_cell_deps`, `funding_fee_rate` and the four TLC settings.
+- **The answer is the channel's final id**, derived from both settlement keys, the unsigned funding transaction (the only
+  copy of it) and the `opening_context`: the terms the node froze, which the device checks its opening intent against
+  before signing anything. It is read field by field, each refusal naming its path:
+
+| Field                                  | From                                    | Form                                    |
+| -------------------------------------- | --------------------------------------- | --------------------------------------- |
+| `remoteFundingKey`                     | `remote_funding_key`                    | 33 bytes, read bare                     |
+| `remoteSettlementKey`                  | `remote_settlement_key`                 | 33 bytes, read bare                     |
+| `remoteShutdownScript`                 | `remote_shutdown_script`                | A script                                |
+| `commitmentDelayEpoch`                 | `commitment_delay_epoch`                | A `bigint`, the full epoch value, a u64 |
+| `commitmentFeeRate`                    | `commitment_fee_rate`                   | A `bigint`, a u64                       |
+| `localAmountShannons`                  | `local_amount`                          | Decimal shannons, the reserve included  |
+| `remoteAmountShannons`                 | `remote_amount`                         | Decimal shannons                        |
+| `local`/`remote` `ReservedCkbShannons` | `local`/`remote` `_reserved_ckb_amount` | Decimal shannons, a u64                 |
+
+- **The shutdown sends the id alone for a cooperative close on the node's defaults**: `close_script` (the node's default
+  funding lock), `fee_rate` (the node's default) and `force` (`false`) are written only when given, never as
+  `null`, and a `force` close ignores the other two for the values fixed at the open. It answers `null`, read as such.
+
+## Signing request methods
+
+Four methods carry the polled signing protocol: the device reads whether the node waits on a signature, and submits one.
+Two getters and two submissions, one pair for the channel and one for the watchtower, with the same forms.
+
+| Method                          | Sends                                                                   | Reads                  |
+| ------------------------------- | ----------------------------------------------------------------------- | ---------------------- |
+| `get_channel_signing_status`    | `channel_id`                                                            | `channel_id`, `status` |
+| `submit_channel_signature`      | `channel_id`, `request_id`, `partial_signature`; `next_material` if any | `type`                 |
+| `get_watchtower_signing_status` | `channel_id`                                                            | `channel_id`, `status` |
+| `submit_watchtower_signature`   | `channel_id`, `request_id`, `signature`                                 | `type`                 |
+
+- **The status is the signing protocol's**, a tagged object: `{ "type": "NoSignatureRequired" }` or
+  `{ "type": "SignatureRequired", ... }` with the request's id, the transition and the plaintext to sign. The client reads
+  the `channel_id` and hands `status` over as the `WireField` it arrived in, positioned at `response.result.status`, so
+  the protocol's decoder refuses with the full path; `rpc` never reads inside it, and does not import `protocol`.
+- **A channel signature is a 32-byte musig2 partial signature** for the request it names, with `next_material`: the next
+  commitment point (bare) and the next commitment and revocation nonces (`0x`), all three always written, or left out
+  when the request takes none, never sent as `null`, as every absent option of the client is.
+- **A watchtower signature is recoverable ECDSA**, 65 bytes with the recovery id, written with its `0x`.
+- **A submission answers one of two outcomes**, read from the `type` tag against `RPC_SUBMISSION_RESULTS`: `Applied`, the
+  signature verified and the node resumed, or `AlreadyApplied`, the same signature already taken for this request. Both
+  are success: a device that lost the answer resubmits and reads the second without reconciling anything.
+
+## Registration methods
+
+Two methods register a device's root signer as a tenant of the hosted LSP, under the operator's token: the registration
+is the one exchange a tenant cannot make with its own token, which it does not have yet.
+
+| Method                          | Sends                                      | Reads                                        |
+| ------------------------------- | ------------------------------------------ | -------------------------------------------- |
+| `lsp_get_tenant_registry_nonce` | `root_signer_pubkey`                       | `lsp_node_id`, `root_signer_pubkey`, `nonce` |
+| `lsp_register_tenant`           | `root_signer_pubkey`, `nonce`, `signature` | `tenant`, `access_token`                     |
+
+- **The nonce is single-use and bound to the root signer** it was issued to; the answer also names the LSP's node id,
+  which the registry payload the device signs covers.
+- **The signature is compact ECDSA**, 64 bytes, over fiber's `TenantRegistryPayload`, and is written as **bare hex**, 128
+  characters without `0x`, as fiber's own agent writes it. Fiber reads a prefixed one too, so the params loop of
+  [interop/README.md](../interop/README.md) is what pins the spelling.
+- **The answer is the tenant and its access token**, a non-empty string, the Biscuit the device calls everything else
+  with. The tenant is read field by field:
+
+| Field              | From                 | Form                                                                          |
+| ------------------ | -------------------- | ----------------------------------------------------------------------------- |
+| `tenantId`         | `tenant_id`          | 32 bytes of bare hex, the digest of the root signer's key, kept as the string |
+| `rootSignerPubkey` | `root_signer_pubkey` | 33 bytes bare, or `null` for a tenant fiber's operator registered another way |
+| `invoicePubkey`    | `invoice_pubkey`     | 33 bytes bare, the tenant's protocol key                                      |
+| `privateChannelId` | `private_channel_id` | The wire string, `0x` hex, or `null` before the channel is bound              |
+| `createdAtMs`      | `created_at`         | A `bigint` of milliseconds, a u64                                             |
+| `runtimeStatus`    | `runtime_status`     | `cold` or `active`, from `RPC_TENANT_RUNTIME_STATUSES`                        |
+| `channelOnline`    | `channel_online`     | A boolean                                                                     |
+
+## What a tenant's token allows
+
+Fiber's middleware checks a tenant token against an allowlist after the Biscuit's own checks (`TENANT_ALLOWED_METHODS`),
+and every method outside it is refused. Of the eighteen methods of the client, a tenant may call all but five: the two
+registration methods, which take the operator's token, as above, and `open_channel_with_external_funding`,
+`abandon_channel` and `cancel_invoice`, which stay in the client because a node that is not a hosted LSP has them.
+
 ## Forms only the RPC uses
 
 The `wire` module holds these next to the forms the signing protocol shares:
@@ -255,23 +357,26 @@ inputs do, and the host hands it to its CKB signer as it is.
 
 ## Where it lives
 
-| File                                  | Contents                                                                                                                                                              |
-| ------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `src/rpc/fiber-rpc-client.ts`         | `FiberRpcClient`: the request, the status, the three errors, the methods                                                                                              |
-| `src/rpc/channels.ts`                 | The codecs of the four channel methods, the channel and its state                                                                                                     |
-| `src/rpc/invoices.ts`                 | The codecs of the four invoice methods                                                                                                                                |
-| `src/rpc/payments.ts`                 | The codecs of the two payment methods                                                                                                                                 |
-| `src/rpc/json-rpc.ts`                 | The pure envelope codec: the request text, the response read against its id                                                                                           |
-| `src/rpc/rpc.error.ts`                | `RpcTransportError`, `RpcError`, `RpcResponseError`                                                                                                                   |
-| `src/rpc/rpc.constants.ts`            | The ten methods, the version, the Bearer prefix, fiber's two error codes, the channel states and their flags, the listing's filters, the invoice and payment statuses |
-| `src/rpc/interfaces/i-fetch.ts`       | `IFetchLike`                                                                                                                                                          |
-| `src/rpc/utils/amount.utils.ts`       | Decimal shannons to and from `U128Hex`                                                                                                                                |
-| `src/rpc/utils/payment-hash.utils.ts` | The params of the three methods that take a payment hash and nothing else                                                                                             |
-| `src/wire/flags.ts`                   | Fiber's flag sets                                                                                                                                                     |
-| `src/wire/transaction.ts`             | CKB's transaction JSON, read and written                                                                                                                              |
-| `test/mocks/rpc/fetch.mock.ts`        | `FetchMock`: records every request and its receiver, answers from a script                                                                                            |
-| `test/utils/rpc-typed.ts`             | The vectors' values projected into the client's typed params and results                                                                                              |
-| `test/utils/rpc-answers.ts`           | The result field and the scripted answers the method specs share                                                                                                      |
+| File                                  | Contents                                                                                                                                                                                               |
+| ------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `src/rpc/fiber-rpc-client.ts`         | `FiberRpcClient`: the request, the status, the three errors, the methods                                                                                                                               |
+| `src/rpc/channels.ts`                 | The codecs of the four channel methods and the two tenant channel methods, the channel, its state and the opening context                                                                              |
+| `src/rpc/invoices.ts`                 | The codecs of the four invoice methods                                                                                                                                                                 |
+| `src/rpc/payments.ts`                 | The codecs of the two payment methods                                                                                                                                                                  |
+| `src/rpc/signing.ts`                  | The codecs of the four signing request methods: the status handed over as a field, the two signatures, the two outcomes                                                                                |
+| `src/rpc/tenants.ts`                  | The codecs of the two registration methods, the tenant's status                                                                                                                                        |
+| `src/rpc/json-rpc.ts`                 | The pure envelope codec: the request text, the response read against its id                                                                                                                            |
+| `src/rpc/rpc.error.ts`                | `RpcTransportError`, `RpcError`, `RpcResponseError`                                                                                                                                                    |
+| `src/rpc/rpc.constants.ts`            | The eighteen methods, the version, the Bearer prefix, fiber's two error codes, the channel states and their flags, the listing's filters, the invoice, payment, submission and tenant runtime statuses |
+| `src/rpc/interfaces/i-fetch.ts`       | `IFetchLike`                                                                                                                                                                                           |
+| `src/rpc/utils/amount.utils.ts`       | Decimal shannons to and from `U128Hex`                                                                                                                                                                 |
+| `src/rpc/utils/payment-hash.utils.ts` | The params of the three methods that take a payment hash and nothing else                                                                                                                              |
+| `src/rpc/utils/channel-id.utils.ts`   | The params of the three methods that take a channel id and nothing else: the abandon and the two signing status getters                                                                                |
+| `src/wire/flags.ts`                   | Fiber's flag sets                                                                                                                                                                                      |
+| `src/wire/transaction.ts`             | CKB's transaction JSON, read and written                                                                                                                                                               |
+| `test/mocks/rpc/fetch.mock.ts`        | `FetchMock`: records every request and its receiver, answers from a script                                                                                                                             |
+| `test/utils/rpc-typed.ts`             | The vectors' values projected into the client's typed params and results                                                                                                                               |
+| `test/utils/rpc-answers.ts`           | The result field and the scripted answers the method specs share                                                                                                                                       |
 
 ## What the tests guarantee
 
@@ -318,6 +423,29 @@ inputs do, and the host hands it to its CKB signer as it is.
 - **The forms**: the flag set against every rule above; the transaction read field by field from a literal, written back
   equal, one refusal per field with its path, a `hash` ignored on read and never written; the bare key, the new encoders and
   their refusals of typed input, which send nothing.
+- **The tenant channel methods against fiber**: every params case of the two methods (the open without options, with the
+  delay and the fee rate, and with the announcement nonce; the shutdown by id alone and with its three options) written as
+  fiber's serde wrote it and read back by its deserializers; both opening contexts decoded and compared with the vector's
+  values; a literal context read field by field with the amounts and reserves in decimal; the largest amounts, reserves,
+  delay and rate; `public` false even when the input says true; each option written on its own and never as `null`; the
+  exact body of a shutdown through `call`.
+- **The signing request methods against fiber**: every params case of the four (a submit with and without next material,
+  the 65-byte watchtower signature) written as fiber's serde wrote it; `NoSignatureRequired` of both getters decoded and
+  compared with the vector's values, which pins that fiber writes the unit variant as its tag alone; both outcomes of both
+  submissions; the status handed over untouched, the same value with its path, whatever it holds; a null next material
+  left out and never sent as `null`; the exact body of a submission through `call`, and `AlreadyApplied` resolved as a result.
+- **The registration methods against fiber**: both params cases written as fiber's serde wrote them, the signature bare;
+  both tenants decoded and compared with the vector's values, which carry both runtime statuses, a tenant without a root
+  signer or a channel and one with both; a literal cold and a literal active tenant read field by field; the operator's
+  token on the request through `call`.
+- **One refusal per field of the eight methods, written and read**: a point of the wrong length or given as hex, a nonce
+  of 65 or 67 bytes, a partial signature of 31, 33 or 64 bytes, a registration signature of 63 or 65 and a watchtower
+  signature of 64 or 66, a delay or a fee rate negative, past a u64, as a number or a string, an option given as `null`
+  where the type says absent, a `force` that is not a boolean, a material missing or given as a string, an announcement
+  nonce or a next material left `undefined` where the type says `null`, with nothing sent; each member read missing,
+  `null`, in another form, past its width or in the other spelling (a key prefixed, a hash bare, a tenant id prefixed,
+  short, uppercase or empty), an unknown `type` or `runtime_status`, a lowercase or padded one, an empty access token,
+  each with its full path; a result that is not an object; the members not read accepted however malformed.
 - **Amounts**: every amount of the params vectors, `u128::MAX` included, written as fiber's serde wrote it and read back;
   the bounds; one refusal per malformed form.
 
@@ -363,6 +491,26 @@ Coverage of the module and of `wire` is 100% on all four metrics, and the assert
 | Any state's flag is accepted in any state                    | 2                 |
 | A flag named twice is accepted                               | 2                 |
 | Flags are split with their padding trimmed                   | 2                 |
+| The partial signature is checked at 64 bytes                 | 21                |
+| The status is read as the result's `type`, not handed over   | 10                |
+| A submission outcome is read without checking its tag        | 9                 |
+| The registration signature is checked at 65 bytes            | 8                 |
+| The runtime status is read without checking its name         | 8                 |
+| A tenant id of any string is accepted                        | 6                 |
+| The getter's channel id is written without checking its form | 6                 |
+| The watchtower signature is checked at 64 bytes              | 6                 |
+| The registry nonce is read as bare hex                       | 5                 |
+| The shutdown's `null` is not checked                         | 5                 |
+| An absent delay is sent as `null`                            | 4                 |
+| The access token may be empty                                | 4                 |
+| The registration signature is written with a `0x` prefix     | 4                 |
+| The announcement nonce is sent as `null` when there is none  | 3                 |
+| The opening context's amounts are read as u64                | 3                 |
+| The shutdown's `force` is sent without checking it           | 3                 |
+| The shutdown's absent close script is sent as `null`         | 3                 |
+| A `null` next material is sent as `null`                     | 2                 |
+| A missing root signer on the tenant status is read as `null` | 1                 |
+| The opening context's reserves are read as u128              | 1                 |
 | `public` is omitted when true                                | 2                 |
 | A `since` is read as a u128                                  | 1                 |
 | A `capacity` is read as a u128                               | 1                 |
@@ -407,3 +555,6 @@ Coverage of the module and of `wire` is 100% on all four metrics, and the assert
 | A missing `failed_error` is read as no error                 | 1                 |
 | `settleInvoice` does not read the answer                     | 1                 |
 | `newInvoice` reads the answer as an invoice with a status    | 1                 |
+
+One mutant changes nothing observable and is left out: dropping the `public: false` the tenant's open writes after the
+spread, since the encoder it spreads already writes it; the member stays for the literal type the wire form states.

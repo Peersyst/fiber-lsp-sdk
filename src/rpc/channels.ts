@@ -1,4 +1,12 @@
-import { COMPRESSED_POINT_LENGTH, HASH256_LENGTH, UINT64_MAX, assertBoolean, assertOneOf } from "../common";
+import {
+    COMPRESSED_POINT_LENGTH,
+    HASH256_LENGTH,
+    PUBLIC_NONCE_LENGTH,
+    UINT64_MAX,
+    assertBoolean,
+    assertOneOf,
+    isPlainObject,
+} from "../common";
 import type { WireField } from "../wire";
 import {
     assertWireHexBytes,
@@ -8,13 +16,16 @@ import {
     decodeHexBytes,
     decodeNull,
     decodeOrNull,
+    decodeScript,
     decodeScriptOrNull,
     decodeString,
     decodeTransaction,
     decodeUintHex,
     encodeBareHexBytes,
+    encodeHexBytes,
     encodeScript,
     encodeTransaction,
+    encodeUintHex,
     malformedWireField,
     readArray,
     readObject,
@@ -22,7 +33,8 @@ import {
 } from "../wire";
 import { LIST_CHANNELS_FILTERS, RPC_CHANNEL_STATE_FLAGS, RPC_CHANNEL_STATE_NAMES } from "./rpc.constants";
 import type {
-    AbandonChannelParams,
+    ChannelOpenSignerMaterial,
+    ChannelOpenSignerMaterialWire,
     ListChannelsParams,
     ListChannelsParamsWire,
     ListChannelsResultWire,
@@ -30,17 +42,24 @@ import type {
     OpenChannelWithExternalFundingParamsWire,
     OpenChannelWithExternalFundingResult,
     OpenChannelWithExternalFundingResultWire,
+    OpenTenantChannelParams,
+    OpenTenantChannelParamsWire,
+    OpenTenantChannelResult,
+    OpenTenantChannelResultWire,
     RpcChannel,
-    RpcChannelIdParamsWire,
     RpcChannelState,
     RpcChannelStateFlag,
     RpcChannelStateName,
     RpcChannelStateWire,
     RpcChannelWire,
+    ShutdownChannelParams,
+    ShutdownChannelParamsWire,
     SubmitSignedFundingTxParams,
     SubmitSignedFundingTxParamsWire,
     SubmitSignedFundingTxResult,
     SubmitSignedFundingTxResultWire,
+    TenantChannelOpeningContext,
+    TenantChannelOpeningContextWire,
 } from "./rpc.types";
 import { decodeRpcShannons, encodeRpcShannons } from "./utils";
 
@@ -76,6 +95,127 @@ export function decodeOpenChannelWithExternalFundingResult(field: WireField): Op
 }
 
 /**
+ * Writes the params of `open_tenant_channel`: the external-funding open, private, with the device's public signer material.
+ * @param params The channel to open and the material of its signer.
+ * @returns The wire params.
+ */
+export function encodeOpenTenantChannelParams(params: OpenTenantChannelParams): OpenTenantChannelParamsWire {
+    const { peerPubkey, fundingAmountShannons, shutdownScript, fundingLockScript, commitmentDelayEpoch, commitmentFeeRate } = params;
+    return {
+        ...encodeOpenChannelWithExternalFundingParams({
+            peerPubkey,
+            fundingAmountShannons,
+            public: false,
+            shutdownScript,
+            fundingLockScript,
+        }),
+        // Repeated after the spread to narrow `public` to the literal the wire type states.
+        public: false,
+        ...(commitmentDelayEpoch === undefined
+            ? {}
+            : { commitment_delay_epoch: encodeUintHex("commitmentDelayEpoch", commitmentDelayEpoch, UINT64_MAX) }),
+        ...(commitmentFeeRate === undefined
+            ? {}
+            : { commitment_fee_rate: encodeUintHex("commitmentFeeRate", commitmentFeeRate, UINT64_MAX) }),
+        external_channel_signer: encodeChannelOpenSignerMaterial(params.signerMaterial),
+    };
+}
+
+/**
+ * Writes the public signer material an open carries: the points bare, the nonces with their prefix.
+ * @param material The material.
+ * @returns The wire material.
+ */
+function encodeChannelOpenSignerMaterial(material: ChannelOpenSignerMaterial): ChannelOpenSignerMaterialWire {
+    const name = "signerMaterial";
+    if (!isPlainObject(material)) throw new TypeError(`${name} must be an object`);
+    const { channelAnnouncementNonce } = material;
+    return {
+        base_public_keys: {
+            funding_pubkey: encodeBareHexBytes(`${name}.fundingPubkey`, material.fundingPubkey, COMPRESSED_POINT_LENGTH),
+            tlc_base_key: encodeBareHexBytes(`${name}.tlcBaseKey`, material.tlcBaseKey, COMPRESSED_POINT_LENGTH),
+        },
+        first_commitment_point: encodeBareHexBytes(`${name}.firstCommitmentPoint`, material.firstCommitmentPoint, COMPRESSED_POINT_LENGTH),
+        second_commitment_point: encodeBareHexBytes(
+            `${name}.secondCommitmentPoint`,
+            material.secondCommitmentPoint,
+            COMPRESSED_POINT_LENGTH,
+        ),
+        commitment_nonce: encodeHexBytes(`${name}.commitmentNonce`, material.commitmentNonce, PUBLIC_NONCE_LENGTH),
+        next_commitment_nonce: encodeHexBytes(`${name}.nextCommitmentNonce`, material.nextCommitmentNonce, PUBLIC_NONCE_LENGTH),
+        revocation_nonce: encodeHexBytes(`${name}.revocationNonce`, material.revocationNonce, PUBLIC_NONCE_LENGTH),
+        ...(channelAnnouncementNonce === null
+            ? {}
+            : {
+                  channel_announcement_nonce: encodeHexBytes(
+                      `${name}.channelAnnouncementNonce`,
+                      channelAnnouncementNonce,
+                      PUBLIC_NONCE_LENGTH,
+                  ),
+              }),
+    };
+}
+
+/**
+ * Reads the result of `open_tenant_channel`.
+ * @param field The result field.
+ * @returns The final channel id, the unsigned funding transaction and the terms the node froze.
+ */
+export function decodeOpenTenantChannelResult(field: WireField): OpenTenantChannelResult {
+    const at = readObject<OpenTenantChannelResultWire>(field);
+    return {
+        ...decodeOpenChannelWithExternalFundingResult(field),
+        openingContext: decodeTenantChannelOpeningContext(at("opening_context")),
+    };
+}
+
+/**
+ * Reads the opening context of a tenant channel.
+ * @param field Field to read.
+ * @returns The context.
+ */
+function decodeTenantChannelOpeningContext(field: WireField): TenantChannelOpeningContext {
+    const at = readObject<TenantChannelOpeningContextWire>(field);
+    return {
+        remoteFundingKey: decodeBareHexBytes(at("remote_funding_key"), COMPRESSED_POINT_LENGTH),
+        remoteSettlementKey: decodeBareHexBytes(at("remote_settlement_key"), COMPRESSED_POINT_LENGTH),
+        remoteShutdownScript: decodeScript(at("remote_shutdown_script")),
+        commitmentDelayEpoch: decodeUintHex(at("commitment_delay_epoch"), UINT64_MAX),
+        commitmentFeeRate: decodeUintHex(at("commitment_fee_rate"), UINT64_MAX),
+        localAmountShannons: decodeRpcShannons(at("local_amount")),
+        remoteAmountShannons: decodeRpcShannons(at("remote_amount")),
+        localReservedCkbShannons: decodeUintHex(at("local_reserved_ckb_amount"), UINT64_MAX).toString(),
+        remoteReservedCkbShannons: decodeUintHex(at("remote_reserved_ckb_amount"), UINT64_MAX).toString(),
+    };
+}
+
+/**
+ * Writes the params of `shutdown_channel`, an absent option left out for the node's default.
+ * @param params The channel to close and the close's options.
+ * @returns The wire params.
+ */
+export function encodeShutdownChannelParams(params: ShutdownChannelParams): ShutdownChannelParamsWire {
+    const { closeScript, feeRate, force } = params;
+    assertWireHexBytes("channelId", params.channelId, HASH256_LENGTH);
+    if (closeScript !== undefined && !isPlainObject(closeScript)) throw new TypeError("closeScript must be an object");
+    if (force !== undefined) assertBoolean("force", force);
+    return {
+        channel_id: params.channelId,
+        ...(closeScript === undefined ? {} : { close_script: encodeScript("closeScript", closeScript) }),
+        ...(feeRate === undefined ? {} : { fee_rate: encodeUintHex("feeRate", feeRate, UINT64_MAX) }),
+        ...(force === undefined ? {} : { force }),
+    };
+}
+
+/**
+ * Reads the result of `shutdown_channel`, which is `null`.
+ * @param field The result field.
+ */
+export function decodeShutdownChannelResult(field: WireField): void {
+    decodeNull(field);
+}
+
+/**
  * Writes the params of `submit_signed_funding_tx`.
  * @param params The channel and its signed funding transaction.
  * @returns The wire params.
@@ -96,16 +236,6 @@ export function decodeSubmitSignedFundingTxResult(field: WireField): SubmitSigne
         channelId: requireHexBytes(at("channel_id"), HASH256_LENGTH),
         fundingTxHash: decodeHexBytes(at("funding_tx_hash"), HASH256_LENGTH),
     };
-}
-
-/**
- * Writes the params of `abandon_channel`.
- * @param params The channel to abandon.
- * @returns The wire params.
- */
-export function encodeAbandonChannelParams(params: AbandonChannelParams): RpcChannelIdParamsWire {
-    assertWireHexBytes("channelId", params.channelId, HASH256_LENGTH);
-    return { channel_id: params.channelId };
 }
 
 /**
