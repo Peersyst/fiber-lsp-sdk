@@ -11,6 +11,8 @@ on:
       - src/derivation/**
       - src/digest/**
       - src/invoice/**
+      - src/policy/**
+      - src/protocol/**
       - src/signer/**
       - src/wire/**
       - src/rpc/**
@@ -37,6 +39,7 @@ jobs:
       - run: cargo run --release --manifest-path interop/rust/Cargo.toml -- gen-vectors interop/vectors/vectors.json
       - run: cargo run --release --manifest-path interop/rust/Cargo.toml -- gen-rpc-vectors interop/vectors/rpc.json
       - run: cargo run --release --manifest-path interop/rust/Cargo.toml -- gen-invoice-vectors interop/vectors/invoice.json
+      - run: cargo run --release --manifest-path interop/rust/Cargo.toml -- gen-signing-vectors interop/vectors/signing.json
       # The committed vectors must be exactly what the harness produces: a diff here
       # means a derivation or a fixture changed without the vectors being regenerated,
       # or the other way round.
@@ -45,7 +48,9 @@ jobs:
       - run: echo "INTEROP_TS_OUT=$RUNNER_TEMP/ts-out.json" >> "$GITHUB_ENV"
       - run: echo "INTEROP_RPC_OUT=$RUNNER_TEMP/ts-rpc-out.json" >> "$GITHUB_ENV"
       - run: echo "INTEROP_INVOICE_OUT=$RUNNER_TEMP/ts-invoice-out.json" >> "$GITHUB_ENV"
+      - run: echo "INTEROP_SIGNING_OUT=$RUNNER_TEMP/ts-signing-out.json" >> "$GITHUB_ENV"
       - run: pnpm test
       - run: cargo run --release --manifest-path interop/rust/Cargo.toml -- verify-ts interop/vectors/vectors.json "$INTEROP_TS_OUT"
       - run: cargo run --release --manifest-path interop/rust/Cargo.toml -- verify-rpc-params interop/vectors/rpc.json "$INTEROP_RPC_OUT"
       - run: cargo run --release --manifest-path interop/rust/Cargo.toml -- verify-invoices interop/vectors/invoice.json "$INTEROP_INVOICE_OUT"
+      - run: cargo run --release --manifest-path interop/rust/Cargo.toml -- verify-signing interop/vectors/signing.json "$INTEROP_SIGNING_OUT"

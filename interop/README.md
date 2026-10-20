@@ -4,26 +4,28 @@ The key derivation in `src/derivation/` is a compatibility contract: the LSP nod
 fiber's Rust code, so a one-byte divergence makes every channel unusable. This folder holds the second implementation that contract
 is checked against, plus the vectors it produces. The `rpc` module has a contract of the same kind, fiber's JSON forms, and the
 same harness pins it in `vectors/rpc.json`: params and results serialized by fiber's own JSON types, and the envelopes as the
-jsonrpsee version fiber serves writes them. And the `invoice` module reads and writes fiber's invoice string, which the harness
-pins in `vectors/invoice.json` from fiber's own encoder and decoder.
+jsonrpsee version fiber serves writes them. The `invoice` module reads and writes fiber's invoice string, which the harness
+pins in `vectors/invoice.json` from fiber's own encoder and decoder. And the signer answers fiber's signing requests, which the
+harness pins in `vectors/signing.json`: one request per transition as a node writes it, with what the device must answer.
 
 `test/tests/derivation/interop-vectors.spec.ts` runs against `vectors/vectors.json` on every `pnpm test`, so the contract is
 checked without a Rust toolchain. Rust is only needed to regenerate the vectors and to verify, under fiber's own crates, the
-SDK's partial signature and the RPC params it encodes; the interop workflow does all of it on every pull request that touches
-the harness, the modules the vectors pin (`common`, `derivation`, `digest`, `invoice`, `signer`, `wire`, `rpc`), the tests or the
-lockfile.
+SDK's partial signatures and the RPC params it encodes; the interop workflow does all of it on every pull request that touches
+the harness, the modules the vectors pin (`common`, `derivation`, `digest`, `invoice`, `protocol`, `policy`, `signer`, `wire`,
+`rpc`), the tests or the lockfile.
 
 For the scheme those vectors pin, see [`docs/derivation.md`](../docs/derivation.md).
 
-## The five parts
+## The six parts
 
-| Part           | What it is                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
-| -------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `fiber_scheme` | Verbatim ports of the pure derivation functions of `nervosnetwork/fiber` @ `8db6a117`, the head of nervosnetwork/fiber#1623, `crates/fiber-types/src/channel.rs`; the derivation there is byte for byte that of `b71a61c3` (v0.9.0-rc7), which the regeneration proved                                                                                                                                                                                                                                                                                                                                                                             |
-| `sdk_scheme`   | The SDK-owned derivations (master seed path, wallet identity key, per-channel seed, musig2 nonce seed), written from their definition rather than ported, so the TypeScript side is checked against an independent implementation instead of against itself                                                                                                                                                                                                                                                                                                                                                                                        |
-| `digest`       | Fixture channels through the four digests, with per-case intermediates so a divergence localizes itself. The settlement witness, its hash, the transaction message, the lock layouts (`CommitmentContractFeatures`) and the check that a settlement is the one a commitment's lock args commit are `fiber-types`' own, pinned by git rev; what `fiber-lib` keeps private is ported and cited at its `file:line`: the TLC order and flip of `get_active_tlcs`, the lock args, the fee mocks, and the reserve `reserved_capacity` sizes over a shutdown script with `ckb-types`' own `occupied_capacity` (see [`docs/digest.md`](../docs/digest.md)) |
-| `rpc`          | Nothing ported: fiber's RPC forms for the eighteen methods the client speaks, built from fixed values and serialized by `fiber-json-types` (fiber's serde-only crate, pinned by git rev), plus the request, result and error envelopes as `jsonrpsee-types 0.25.1` writes them; and the other direction, the params the TS client encodes read back by fiber's own deserializers                                                                                                                                                                                                                                                                   |
-| `invoice`      | Nothing ported but the coder: invoices built from fixed values and written by `fiber-types`' own `CkbInvoice`, pinned by git rev, with each layer beside the string; the `arcode` coder, ported verbatim because fiber keeps it private, checked against those strings; UTF-8 as Rust reads it; variants of one invoice with fiber's verdict on each; and the other direction, fiber's decoder over the strings the TS encoder writes                                                                                                                                                                                                              |
+| Part           | What it is                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
+| -------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `fiber_scheme` | Verbatim ports of the pure derivation functions of `nervosnetwork/fiber` @ `8db6a117`, the head of nervosnetwork/fiber#1623, `crates/fiber-types/src/channel.rs`; the derivation there is byte for byte that of `b71a61c3` (v0.9.0-rc7), which the regeneration proved                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
+| `sdk_scheme`   | The SDK-owned derivations (master seed path, wallet identity key, per-channel seed, musig2 nonce seed), written from their definition rather than ported, so the TypeScript side is checked against an independent implementation instead of against itself                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
+| `digest`       | Fixture channels through the four digests, with per-case intermediates so a divergence localizes itself. The settlement witness, its hash, the transaction message, the lock layouts (`CommitmentContractFeatures`) and the check that a settlement is the one a commitment's lock args commit are `fiber-types`' own, pinned by git rev; what `fiber-lib` keeps private is ported and cited at its `file:line`: the TLC order and flip of `get_active_tlcs`, the lock args, the fee mocks, and the reserve `reserved_capacity` sizes over a shutdown script with `ckb-types`' own `occupied_capacity` (see [`docs/digest.md`](../docs/digest.md)). Each case carries the plaintext its digest is computed from, as a signing request hands it over, and each commitment case the settlement snapshot fiber's `to_rpc_signing_settlement` states for it |
+| `rpc`          | Nothing ported: fiber's RPC forms for the eighteen methods the client speaks, built from fixed values and serialized by `fiber-json-types` (fiber's serde-only crate, pinned by git rev), plus the request, result and error envelopes as `jsonrpsee-types 0.25.1` writes them; and the other direction, the params the TS client encodes read back by fiber's own deserializers                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
+| `invoice`      | Nothing ported but the coder: invoices built from fixed values and written by `fiber-types`' own `CkbInvoice`, pinned by git rev, with each layer beside the string; the `arcode` coder, ported verbatim because fiber keeps it private, checked against those strings; UTF-8 as Rust reads it; variants of one invoice with fiber's verdict on each; and the other direction, fiber's decoder over the strings the TS encoder writes                                                                                                                                                                                                                                                                                                                                                                                                                   |
+| `signing`      | Fiber's six signing requests on one channel, written by `fiber-json-types` and checked through `fiber-lsp-sdk`'s own JSON codec, fiber's client crate pinned by git rev: the plaintexts built by the `digest` section, the key contexts, nonces and the peer's partial signatures by fiber's `musig2` and `InMemorySigner`; ported, cited, only `to_rpc_signing_settlement`, which `fiber-lib` keeps private. Beside each request, what the device answers; and variants of one request with the verdict of fiber's codec                                                                                                                                                                                                                                                                                                                               |
 
 The master seed half needs BIP32, and the harness implements hardened derivation from the spec (`hmac` + `sha2`) rather than
 pulling a BIP32 crate: a second implementation is the whole point, and agreeing with `@scure/bip32` only means something if the
@@ -48,10 +50,11 @@ cd interop/rust
 cargo run --release -- gen-vectors ../vectors/vectors.json
 cargo run --release -- gen-rpc-vectors ../vectors/rpc.json
 cargo run --release -- gen-invoice-vectors ../vectors/invoice.json
+cargo run --release -- gen-signing-vectors ../vectors/signing.json
 cd ../.. && pnpm test
 ```
 
-Never hand-edit a file under `vectors/`: CI regenerates all three and fails on any diff, which is what turns "someone changed a
+Never hand-edit a file under `vectors/`: CI regenerates all four and fails on any diff, which is what turns "someone changed a
 derivation" or "someone changed a fixture" into a red build. `gen-rpc-vectors` refuses a debug build: fiber's
 `GetPaymentCommandResult` carries a field that exists only under `debug_assertions`, so the forms a release node writes are the
 ones pinned.
@@ -69,6 +72,18 @@ scripts crossing both floors. The `legacy` cases are the ones the vectors held b
 `full_payment_hash` case mirrors a legacy twin, with the reserve its layout fixes. The revoked commitment's 36-byte args
 know no layout, which is why a revocation case still carries one: its fee does.
 
+## The plaintexts
+
+A signing request carries the plaintext and the device computes the digest from it, so every digest case carries its
+plaintext beside the digest. A commitment or shutdown case carries `transaction`, the unsigned transaction in fiber's JSON
+(`ckb-jsonrpc-types`, `0x` hex), with no cell deps and no witnesses: `compute_tx_message` hashes the raw transaction with its
+cell deps emptied, so that form is the digest's whole input. A revocation case carries, bare hex, the three parts fiber's
+`Musig2SignableContent::Revocation` holds and hashes in this order: `output`, the molecule `CellOutput`; `output_data`, the
+molecule `Bytes` with its 4-byte length header (`00000000` for a CKB channel), since fiber's builders hand over
+`output_data.as_slice()` and hash it as it is; and `commitment_lock_script_args`, the revoked commitment's 36 bytes. A TLC
+carries what a signing snapshot does: `local_key_commitment_number`, the number the device's TLC key is derived at, and
+`remote_tlc_pubkey`, the peer's TLC key, both as fiber's `get_tlc_keys` derives them.
+
 ## The RPC forms
 
 `vectors/rpc.json` holds, per method, `params` and `results` cases of `{name, values, json}`: `values` is the fixed input in the
@@ -83,7 +98,8 @@ is the external-funding open with the signer's opening block (real musig2 public
 absent, the delay and fee rate options present and absent) and a result whose `opening_context` is pinned at ordinary values
 and at `u128::MAX` amounts, `u64::MAX` reserves and fee rate and an epoch with every field set; `shutdown_channel` by channel
 id alone and with the close script, fee rate and `force`, its result `null`; `get_channel_signing_status` and
-`get_watchtower_signing_status` with `NoSignatureRequired` only, until the signing task adds the `SignatureRequired` requests;
+`get_watchtower_signing_status` with `NoSignatureRequired` only, a channel's `SignatureRequired` requests being pinned whole
+in `vectors/signing.json` (see "The signing requests") and the watchtower's not yet;
 `submit_channel_signature` with and without `next_material` and `submit_watchtower_signature` with a recoverable signature,
 each with both outcomes, `Applied` and `AlreadyApplied`; and `lsp_get_tenant_registry_nonce` and `lsp_register_tenant`, the
 latter's `signature` the bare hex of the 64-byte compact form as fiber's own agent writes it, with a tenant under each runtime
@@ -133,17 +149,19 @@ interop workflow runs it.
 
 1. Diff `crates/fiber-types/src/channel.rs` between `8db6a117` and the new tag.
 2. Port any change into the `fiber scheme` section of `rust/src/main.rs` and bump `FIBER_REF`.
-3. Bump the `rev` of both fiber crates in `rust/Cargo.toml`. Read the `jsonrpsee-types` version in fiber's own `Cargo.lock`, and
+3. Bump the `rev` of the three fiber crates in `rust/Cargo.toml`. Read the `jsonrpsee-types` version in fiber's own `Cargo.lock`, and
    set it in `rust/Cargo.toml` and in `JSONRPSEE_VERSION` in `rust/src/rpc.rs`. The witness, the transaction message, the lock
    layouts and the settlement check follow the bump on their own, being the crate's; re-read the private pieces the `digest`
    section of `rust/src/main.rs` ports at the `file:line` each comment cites (`get_active_tlcs`, the lock args of
    `build_commitment_transaction_output`, `commitment_tx_size`, `occupied_capacity`). A lock args port that no longer commits
-   what the crate's witness says stops `gen-vectors` on the case's name.
+   what the crate's witness says stops `gen-vectors` on the case's name. Re-read, at the `file:line` `rust/src/signing.rs`
+   cites, `to_rpc_signing_settlement` (the one port there), the slot, counter and key order each request builder of
+   `channel.rs` gives its transition, and the peer's nonce derivations.
 4. Re-read the refused-token path at the `file:line` the comment on `UNAUTHORIZED_CODE` in `rust/src/rpc.rs` cites: its code and its
    messages are literals there, so a change reaches the vectors only through the harness.
 5. Diff `crates/fiber-types/src/invoice.rs` and `schema/invoice.mol`, and read the `arcode` and `bech32` versions in fiber's own
    `Cargo.lock`: the harness pins both crates and ports fiber's two coder functions verbatim into `rust/src/invoice.rs`.
-6. Regenerate the three vector files, then run `cargo test --release` and `pnpm test`.
+6. Regenerate the four vector files, then run `cargo test --release` and `pnpm test`.
 
 A green suite means upstream did not move. A red derivation is the decision point: fiber changed its scheme, and existing
 channels derived under the old one stay on it (`DERIVATION_SCHEME_VERSION` is additive only). A red RPC form, or a generation
@@ -178,6 +196,71 @@ invoice of the vectors encoded again by the SDK, and 64 invoices it generates fr
 vectors' strings unchanged and at least one string beyond them, and parses each string with fiber's decoder, which must read
 the values the SDK wrote it from and write the string back unchanged. `cargo test --release` pins each of those outcomes, and
 the interop workflow runs the verifier right after `pnpm test`.
+
+## The signing requests
+
+`vectors/signing.json` holds one channel between the device and a fiber node and, on it, one `SignatureRequired` request per
+`ChannelSigningTransition`, each the result of `get_channel_signing_status` as `fiber-json-types` writes it:
+
+- `device`: the SDK's master seed and the channel's index (a time of open in seconds), with the funding and TLC base public
+  keys they derive. `peer`: the node's seed, a fiber `InMemorySigner`, and its keys. `channel`: the channel in the harness's
+  own forms (bare hex, decimal strings): the terms a signer pins (the commitment fee rate, the peer's reserve, the liquid
+  capacity `to_local + to_remote`), the commitment lock and the funding lock's cell deps, the two close scripts, the shutdown
+  fee rates, and the three TLCs both commitments carry.
+- `cases[]`: `name`, `transition`, `result` in fiber's JSON, and `expected`, bare hex: `key_order` (whose key `key_agg_ctx`
+  aggregates first), `message`, the device's `public_nonce` and `partial_signature`, `next_material` for the slot's number
+  plus one (the commitment point and the commitment and revocation nonces) on the four transitions that advance a
+  commitment and `null` on the other two, and `signature`, the aggregated Schnorr signature, on `CompleteReceivedRevokeAndAck`
+  alone, the one whose evidence the device keeps.
+- `variants[]`: the `SendCommitmentSigned` result with `key_agg_ctx` or `agg_nonce` malformed, and the verdict of
+  `fiber-lsp-sdk`'s `musig2_from_rpc` on it: `accepted`, or refused with its message. fiber's codec takes a context with the
+  parity bit, a tweaked one and a three-key one as well formed: refusing them is the signer's job.
+
+| Transition                     | Slot                    | Counter  | Key order         | Plaintext                                           | Peer's partial signature |
+| ------------------------------ | ----------------------- | -------- | ----------------- | --------------------------------------------------- | ------------------------ |
+| `SendCommitmentSigned`         | `Commitment` 4          | `Local`  | ascending         | commitment, lock args at 4, snapshot for the remote | no                       |
+| `CompleteReceivedCommitment`   | `Commitment` 3          | `Local`  | ascending         | commitment, lock args at 2, snapshot for the local  | yes                      |
+| `SendRevokeAndAck`             | `Revocation` 3          | `Remote` | `[remote, local]` | revocation of 2, paying the peer's close script     | no                       |
+| `CompleteReceivedRevokeAndAck` | `Revocation` 4          | `Local`  | `[local, remote]` | revocation of 3, paying the device's close script   | yes                      |
+| `SendClosingSigned`            | `Commitment` 5          | `Local`  | ascending         | closing transaction                                 | no                       |
+| `SignChannelAnnouncement`      | `ChannelAnnouncement` 0 | none     | ascending         | unsigned announcement, molecule                     | no                       |
+
+The slots, counters and key orders are those fiber's channel actor gives each transition, cited in `rust/src/signing.rs`: the
+spends of the funding cell and the announcement sort the two funding keys ascending, each revocation keeps the role order of
+the lock it revokes. Every case is a snapshot of its own; no two share a slot, so no two share a device nonce. With this
+channel's keys the peer's funding key sorts first, so `SendRevokeAndAck`'s role order coincides with the ascending one, and
+only `CompleteReceivedRevokeAndAck` puts the device first.
+
+The device's nonce is the one the SDK's engine generates: BIP-327 `NonceGen` over the slot's nonce seed (`sdk_scheme`), with
+the funding key, its public key and an empty extra input, under the context of the slot's purpose; a close signs under
+`COMMITMENT` at its own number, fiber's nonce purposes having no close. The peer's nonce is the one a fiber node derives for
+the slot, and `agg_nonce` is `AggNonce::sum` of the two. The settlement snapshot is fiber's `to_rpc_signing_settlement`, the
+one port of the part (crates/fiber-lib/src/rpc/channel.rs:913-945): the balances with the reserves added and the pending TLCs
+taken out, `inbound` relative to the device.
+
+A case is written only after the generator has checked that fiber's `signing_message()` of its plaintext equals the digest
+the `digest` section's builders give it; that the result, read back through `fiber-lsp-sdk`'s `musig2_from_rpc`,
+`session_evidence_from_rpc` and `settlement_from_rpc`, returns what it was written from, and that fiber's
+`settlement_matches_commitment_tx` reads the snapshot in the commitment's lock args; that the aggregated key is the revoked
+lock's or the announced one; and that the device's and the peer's partial signatures verify and aggregate into a Schnorr
+signature valid under the aggregated key.
+
+## Verifying the signing requests
+
+```bash
+INTEROP_SIGNING_OUT=/tmp/ts-signing-out.json pnpm test -- test/tests/signer/interop-vectors.spec.ts
+cd interop/rust
+cargo run --release -- verify-signing ../vectors/signing.json /tmp/ts-signing-out.json
+```
+
+`INTEROP_SIGNING_OUT` makes `test/tests/signer/interop-vectors.spec.ts` write
+`{ "cases": [ { "name": "<case>", "public_nonce": "<hex>", "partial_signature": "<hex>" } ] }`, bare hex: the device's half
+of every case of `signing.json` as the SDK computes it, the announcement's included, which the dispatch refuses but the
+engine still signs. Unset, the spec writes nothing. `verify-signing` requires every case once and no other; the public nonce
+to be the device's half of the case's `agg_nonce`; fiber's musig2 crate to verify the partial signature (`verify_partial`);
+and the two halves, the peer's taken from the request or signed by the harness with the peer's nonce, to aggregate into a
+Schnorr signature valid under the case's aggregated key. `cargo test --release` pins each of those outcomes, and the interop
+workflow runs the verifier right after `pnpm test`.
 
 ## Verifying a partial signature
 

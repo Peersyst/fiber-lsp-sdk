@@ -1,9 +1,10 @@
 import { bytesToHex, hexToBytes } from "@noble/hashes/utils.js";
 import { deriveChannelSeed } from "../../../src/derivation/device-scheme";
 import { deriveChannelKeys, pubkeyOf } from "../../../src/derivation/fiber-scheme";
-import type { Script } from "../../../src/common";
-import type { ShutdownTxInput } from "../../../src/digest/digest.types";
-import { computeShutdownTxDigest } from "../../../src/digest/shutdown-tx";
+import type { CellOutput, Script, Transaction } from "../../../src/common";
+import type { ClosingTxInput, ShutdownTxInput } from "../../../src/digest/digest.types";
+import { computeClosingTxDigest, computeShutdownTxDigest, readClosingTx } from "../../../src/digest/shutdown-tx";
+import { computeTxMessage } from "../../../src/digest/tx-message";
 import { ckbBlake2b } from "../../../src/common/utils/ckb-hash.utils";
 import { compareBytes } from "../../../src/common/utils/bytes.utils";
 
@@ -62,8 +63,7 @@ describe("computeShutdownTxDigest", () => {
         expect(digestOf({ localCloseScript: REMOTE_CLOSE, remoteCloseScript: LOCAL_CLOSE })).not.toBe(baseDigest);
     });
 
-    // The funding pubkeys never appear in the shutdown tx; they only decide the output order. A remote key on the other
-    // side of ours must flip the outputs, and one on the same side must leave the digest byte-identical.
+    // The funding pubkeys are not in the tx: a remote key on the other side of ours flips the outputs, one on ours changes nothing.
     it("orders the outputs by the funding-pubkey sort alone", () => {
         const localPubkey = pubkeyOf(channelKeys.fundingKey);
         const localFirstInBase = compareBytes(localPubkey, remoteFundingPubkey) <= 0;
@@ -96,6 +96,230 @@ describe("computeShutdownTxDigest", () => {
         expect(() => digestOf({ toLocalShannons: -1n })).toThrow(RangeError);
         expect(() => digestOf({ remoteReservedCkbShannons: 1n << 64n })).toThrow(RangeError);
         expect(() => digestOf({ localCloseScript: { ...LOCAL_CLOSE, codeHash: new Uint8Array(31) } })).toThrow(TypeError);
-        expect(() => digestOf({ fundingOutPoint: { txHash: new Uint8Array(32), index: -1 } })).toThrow(RangeError);
+        expect(() => digestOf({ fundingOutPoint: { txHash: new Uint8Array(32), index: -1 } })).toThrow(
+            new RangeError("fundingOutPoint.index must be an integer between 0 and 4294967295, got -1"),
+        );
+    });
+});
+
+// BASE_INPUT's close as its tx states it: each side's total less the fee its own rate pays (540 and 1157 shannons).
+const CLOSING: ClosingTxInput = {
+    fundingOutPoint: { txHash: new Uint8Array(32).fill(0xf0), index: 0 },
+    remoteFundingPubkey,
+    localCloseScript: LOCAL_CLOSE,
+    remoteCloseScript: REMOTE_CLOSE,
+    localCapacityShannons: 66_199_999_460n,
+    remoteCapacityShannons: 24_799_998_843n,
+};
+
+function closingDigestOf(overrides: Partial<ClosingTxInput>): string {
+    return bytesToHex(computeClosingTxDigest(channelKeys, { ...CLOSING, ...overrides }));
+}
+
+describe("computeClosingTxDigest", () => {
+    it("is the digest of the close the fee rates build, for the same outputs", () => {
+        expect(computeClosingTxDigest(channelKeys, CLOSING)).toHaveLength(32);
+        expect(closingDigestOf({})).toBe(baseDigest);
+    });
+
+    it.each<[keyof ClosingTxInput, Partial<ClosingTxInput>]>([
+        ["fundingOutPoint", { fundingOutPoint: { txHash: new Uint8Array(32).fill(0xf1), index: 0 } }],
+        ["fundingOutPoint", { fundingOutPoint: { txHash: new Uint8Array(32).fill(0xf0), index: 1 } }],
+        ["localCloseScript", { localCloseScript: { ...LOCAL_CLOSE, args: hexToBytes("dd".repeat(21)) } }],
+        ["remoteCloseScript", { remoteCloseScript: { ...REMOTE_CLOSE, hashType: "type" } }],
+        ["localCapacityShannons", { localCapacityShannons: 66_199_999_461n }],
+        ["remoteCapacityShannons", { remoteCapacityShannons: 24_799_998_842n }],
+    ])("commits to %s", (_, overrides) => {
+        expect(closingDigestOf(overrides)).not.toBe(baseDigest);
+    });
+
+    it("commits to which side owns which close script and which capacity", () => {
+        expect(closingDigestOf({ localCloseScript: REMOTE_CLOSE, remoteCloseScript: LOCAL_CLOSE })).not.toBe(baseDigest);
+        expect(
+            closingDigestOf({
+                localCapacityShannons: CLOSING.remoteCapacityShannons,
+                remoteCapacityShannons: CLOSING.localCapacityShannons,
+            }),
+        ).not.toBe(baseDigest);
+    });
+
+    it("orders the outputs by the funding-pubkey sort alone", () => {
+        const localPubkey = pubkeyOf(channelKeys.fundingKey);
+        const localFirstInBase = compareBytes(localPubkey, remoteFundingPubkey) <= 0;
+        const candidates = Array.from({ length: 256 }, (_, at) => pubkeyOf(ckbBlake2b(Uint8Array.of(at))));
+        const sortsLikeBase = (candidate: Uint8Array): boolean => compareBytes(localPubkey, candidate) <= 0 === localFirstInBase;
+        const sameSide = candidates.find(sortsLikeBase) as Uint8Array;
+        const otherSide = candidates.find((candidate) => !sortsLikeBase(candidate)) as Uint8Array;
+        expect(closingDigestOf({ remoteFundingPubkey: sameSide })).toBe(baseDigest);
+        expect(closingDigestOf({ remoteFundingPubkey: otherSide })).not.toBe(baseDigest);
+    });
+
+    it("takes capacities up to a u64 and refuses the next", () => {
+        const max = (1n << 64n) - 1n;
+        expect(() => closingDigestOf({ localCapacityShannons: max, remoteCapacityShannons: 0n })).not.toThrow();
+        expect(() => closingDigestOf({ localCapacityShannons: max + 1n })).toThrow(
+            new RangeError(`localCapacityShannons must be a bigint between 0 and ${max}, got ${max + 1n}`),
+        );
+        expect(() => closingDigestOf({ remoteCapacityShannons: max + 1n })).toThrow(
+            new RangeError(`remoteCapacityShannons must be a bigint between 0 and ${max}, got ${max + 1n}`),
+        );
+    });
+
+    it("refuses malformed inputs, one field at a time", () => {
+        expect(() => closingDigestOf({ fundingOutPoint: undefined })).toThrow(new TypeError("fundingOutPoint must be an object"));
+        expect(() => closingDigestOf({ fundingOutPoint: { txHash: new Uint8Array(31), index: 0 } })).toThrow(
+            new TypeError("fundingOutPoint.txHash must be 32 bytes, got 31"),
+        );
+        expect(() => closingDigestOf({ fundingOutPoint: { txHash: new Uint8Array(32), index: -1 } })).toThrow(
+            new RangeError("fundingOutPoint.index must be an integer between 0 and 4294967295, got -1"),
+        );
+        expect(() => closingDigestOf({ remoteFundingPubkey: undefined })).toThrow(
+            new TypeError("remoteFundingPubkey must be a Uint8Array"),
+        );
+        expect(() => closingDigestOf({ remoteFundingPubkey: new Uint8Array(32) })).toThrow(
+            new TypeError("remoteFundingPubkey must be 33 bytes, got 32"),
+        );
+        expect(() => closingDigestOf({ localCloseScript: undefined })).toThrow(new TypeError("localCloseScript must be an object"));
+        expect(() => closingDigestOf({ localCloseScript: { ...LOCAL_CLOSE, codeHash: new Uint8Array(31) } })).toThrow(
+            new TypeError("localCloseScript.codeHash must be 32 bytes, got 31"),
+        );
+        expect(() => closingDigestOf({ remoteCloseScript: undefined })).toThrow(new TypeError("remoteCloseScript must be an object"));
+        expect(() => closingDigestOf({ remoteCloseScript: { ...REMOTE_CLOSE, args: "ff" as never } })).toThrow(
+            new TypeError("remoteCloseScript.args must be a Uint8Array"),
+        );
+        expect(() => closingDigestOf({ localCapacityShannons: undefined })).toThrow(RangeError);
+        expect(() => closingDigestOf({ localCapacityShannons: -1n })).toThrow(RangeError);
+        expect(() => closingDigestOf({ remoteCapacityShannons: undefined })).toThrow(RangeError);
+        expect(() => closingDigestOf({ remoteCapacityShannons: -1n })).toThrow(RangeError);
+    });
+});
+
+const LOCAL_OUTPUT: CellOutput = { capacityShannons: 66_199_999_460n, lock: LOCAL_CLOSE, type: null };
+const REMOTE_OUTPUT: CellOutput = { capacityShannons: 24_799_998_843n, lock: REMOTE_CLOSE, type: null };
+
+function closingTx(outputs: CellOutput[]): Transaction {
+    return {
+        version: 0,
+        cellDeps: [],
+        headerDeps: [],
+        inputs: [{ since: 0n, previousOutput: { txHash: new Uint8Array(32).fill(0xf0), index: 0 } }],
+        outputs,
+        outputsData: outputs.map(() => new Uint8Array(0)),
+        witnesses: [],
+    };
+}
+
+// One peer key on each side of the device's funding key, so both output orders are read.
+const localFundingPubkey = pubkeyOf(channelKeys.fundingKey);
+const peerKeys = Array.from({ length: 256 }, (_, at) => pubkeyOf(ckbBlake2b(Uint8Array.of(at))));
+const SORTS_AFTER_LOCAL = peerKeys.find((key) => compareBytes(localFundingPubkey, key) < 0) as Uint8Array;
+const SORTS_BEFORE_LOCAL = peerKeys.find((key) => compareBytes(localFundingPubkey, key) > 0) as Uint8Array;
+const LOCAL_FIRST_TX = closingTx([LOCAL_OUTPUT, REMOTE_OUTPUT]);
+
+describe("readClosingTx", () => {
+    it.each<[string, Uint8Array, Transaction]>([
+        ["first, its funding key sorting first", SORTS_AFTER_LOCAL, closingTx([LOCAL_OUTPUT, REMOTE_OUTPUT])],
+        ["second, the peer's funding key sorting first", SORTS_BEFORE_LOCAL, closingTx([REMOTE_OUTPUT, LOCAL_OUTPUT])],
+    ])("reads the device's output %s", (_, remoteFundingPubkey, tx) => {
+        const closing = readClosingTx(channelKeys, remoteFundingPubkey, tx);
+        expect(closing).toEqual({ ...CLOSING, remoteFundingPubkey });
+        expect(bytesToHex(computeClosingTxDigest(channelKeys, closing))).toBe(bytesToHex(computeTxMessage(tx)));
+    });
+
+    // The order alone says which output is whose: the pinned close script is what catches a swap, not the digest.
+    it("reads a tx in the other order with the sides swapped", () => {
+        const closing = readClosingTx(channelKeys, SORTS_AFTER_LOCAL, closingTx([REMOTE_OUTPUT, LOCAL_OUTPUT]));
+        expect(closing.localCloseScript).toEqual(REMOTE_CLOSE);
+        expect(closing.localCapacityShannons).toBe(24_799_998_843n);
+    });
+
+    it("leaves the cell deps, header deps, data and witnesses to the digest comparison", () => {
+        const tx: Transaction = {
+            ...LOCAL_FIRST_TX,
+            cellDeps: [{ outPoint: { txHash: new Uint8Array(32).fill(0x11), index: 0 }, depType: "code" }],
+            headerDeps: [new Uint8Array(32).fill(0x22)],
+            outputsData: [new Uint8Array(1), new Uint8Array(0)],
+            witnesses: [new Uint8Array(112)],
+        };
+        expect(readClosingTx(channelKeys, SORTS_AFTER_LOCAL, tx)).toEqual({ ...CLOSING, remoteFundingPubkey: SORTS_AFTER_LOCAL });
+    });
+
+    it("takes capacities up to a u64 and refuses the next", () => {
+        const max = (1n << 64n) - 1n;
+        const atMax = closingTx([{ ...LOCAL_OUTPUT, capacityShannons: max }, REMOTE_OUTPUT]);
+        expect(readClosingTx(channelKeys, SORTS_AFTER_LOCAL, atMax).localCapacityShannons).toBe(max);
+        expect(() =>
+            readClosingTx(channelKeys, SORTS_AFTER_LOCAL, closingTx([LOCAL_OUTPUT, { ...REMOTE_OUTPUT, capacityShannons: max + 1n }])),
+        ).toThrow(new RangeError(`closing tx outputs[1].capacityShannons must be a bigint between 0 and ${max}, got ${max + 1n}`));
+    });
+
+    it.each<[string, unknown, Error]>([
+        ["absent", undefined, new TypeError("remoteFundingPubkey must be a Uint8Array")],
+        ["32 bytes", new Uint8Array(32), new TypeError("remoteFundingPubkey must be 33 bytes, got 32")],
+    ])("refuses a peer funding key %s", (_, remoteFundingPubkey, error) => {
+        expect(() => readClosingTx(channelKeys, remoteFundingPubkey as never, LOCAL_FIRST_TX)).toThrow(error);
+    });
+
+    it.each<[string, unknown, Error]>([
+        ["absent", undefined, new TypeError("closing tx must be an object")],
+        ["an array", [], new TypeError("closing tx must be an object")],
+        ["without inputs", { ...LOCAL_FIRST_TX, inputs: undefined }, new TypeError("closing tx must have exactly 1 input, got none")],
+        ["with no input", { ...LOCAL_FIRST_TX, inputs: [] }, new TypeError("closing tx must have exactly 1 input, got 0")],
+        [
+            "with two inputs",
+            { ...LOCAL_FIRST_TX, inputs: [...LOCAL_FIRST_TX.inputs, ...LOCAL_FIRST_TX.inputs] },
+            new TypeError("closing tx must have exactly 1 input, got 2"),
+        ],
+        ["whose input is not one", { ...LOCAL_FIRST_TX, inputs: [null] }, new TypeError("closing tx inputs[0] must be an object")],
+        [
+            "whose input spends nothing",
+            { ...LOCAL_FIRST_TX, inputs: [{ since: 0n, previousOutput: undefined }] },
+            new TypeError("closing tx inputs[0].previousOutput must be an object"),
+        ],
+        [
+            "whose input spends a malformed out point",
+            { ...LOCAL_FIRST_TX, inputs: [{ since: 0n, previousOutput: { txHash: new Uint8Array(31), index: 0 } }] },
+            new TypeError("closing tx inputs[0].previousOutput.txHash must be 32 bytes, got 31"),
+        ],
+        ["without outputs", { ...LOCAL_FIRST_TX, outputs: undefined }, new TypeError("closing tx must have exactly 2 outputs, got none")],
+        ["with one output", closingTx([LOCAL_OUTPUT]), new TypeError("closing tx must have exactly 2 outputs, got 1")],
+        [
+            "with three outputs",
+            closingTx([LOCAL_OUTPUT, REMOTE_OUTPUT, REMOTE_OUTPUT]),
+            new TypeError("closing tx must have exactly 2 outputs, got 3"),
+        ],
+        ["whose output is not one", closingTx([LOCAL_OUTPUT, null as never]), new TypeError("closing tx outputs[1] must be an object")],
+        [
+            "whose output has no capacity",
+            closingTx([{ ...LOCAL_OUTPUT, capacityShannons: undefined as never }, REMOTE_OUTPUT]),
+            new RangeError("closing tx outputs[0].capacityShannons must be a bigint between 0 and 18446744073709551615, got undefined"),
+        ],
+        [
+            "whose output has no lock",
+            closingTx([LOCAL_OUTPUT, { ...REMOTE_OUTPUT, lock: undefined as never }]),
+            new TypeError("closing tx outputs[1].lock must be an object"),
+        ],
+        [
+            "whose output's lock is malformed",
+            closingTx([{ ...LOCAL_OUTPUT, lock: { ...LOCAL_CLOSE, hashType: "data3" as never } }, REMOTE_OUTPUT]),
+            new TypeError("closing tx outputs[0].lock.hashType must be one of data, type, data1, data2"),
+        ],
+        [
+            "whose first output carries a type script",
+            closingTx([{ ...LOCAL_OUTPUT, type: REMOTE_CLOSE }, REMOTE_OUTPUT]),
+            new TypeError("closing tx outputs[0] must carry no type script: a closing input is CKB only"),
+        ],
+        [
+            "whose second output carries a type script",
+            closingTx([LOCAL_OUTPUT, { ...REMOTE_OUTPUT, type: LOCAL_CLOSE }]),
+            new TypeError("closing tx outputs[1] must carry no type script: a closing input is CKB only"),
+        ],
+        [
+            "whose output leaves its type script out",
+            closingTx([LOCAL_OUTPUT, { ...REMOTE_OUTPUT, type: undefined as never }]),
+            new TypeError("closing tx outputs[1] must carry no type script: a closing input is CKB only"),
+        ],
+    ])("refuses a tx %s", (_, tx, error) => {
+        expect(() => readClosingTx(channelKeys, SORTS_AFTER_LOCAL, tx as never)).toThrow(error);
     });
 });

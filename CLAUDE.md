@@ -16,9 +16,9 @@ key derivation is byte for byte the one of `b71a61c3` (v0.9.0-rc7). The key deri
 
 - **Runtimes**: the SDK must run unmodified in Node, browsers, and React Native (Hermes). No platform APIs anywhere in `src/`
   (lint-enforced): no `node:*` imports, no globals like `process` or `window`. Every external effect is injected: `ISignerStorage`,
-  a WebSocket factory, `fetch`, a timer. `fetch` and the timer (`setTimeout`, `clearTimeout`) default to the runtime's globals,
-  read from `globalThis` once at construction, because all three runtimes have them; the storage and the socket have no global
-  every runtime shares. The clock is `Date.now`, which is the language's; no RNG is injected or drawn.
+  `fetch`, a timer. `fetch` and the timer (`setTimeout`, `clearTimeout`) default to the runtime's globals, read from
+  `globalThis` once at construction, because all three runtimes have them; the storage has no global every runtime shares.
+  The clock is `Date.now`, which is the language's; no RNG is injected or drawn.
 - **Dependencies**: runtime deps are exactly `@noble/curves`, `@noble/hashes`, `@scure/bip32`, `@scure/btc-signer`, declared as
   caret ranges (`^2.2.0`) so a host app on the same major converges on a single copy instead of installing a second one; a host
   still on v1 installs both lines until it upgrades, and pinning exactly would make that permanent.
@@ -26,11 +26,14 @@ key derivation is byte for byte the one of `b71a61c3` (v0.9.0-rc7). The key deri
   API the SDK actually uses. Dev dependencies stay pinned exactly.
 - **Determinism**: every derivation (channel seeds, keys, nonces) is a deterministic function of the master seed. The derivation
   scheme is versioned and additive-only: changing it breaks recoverability of existing channels.
-- **Secrets**: the master seed enters once via the constructor and stays in SDK memory. No API returns a private key, except the
-  scoped settlement-key delegation of the remote-signing protocol and `deriveMasterSeed`, a pure function that returns to the
-  host the seed the host itself will pass back in. No SDK instance ever holds anything above the master seed.
+- **Secrets**: the master seed enters once via the constructor and stays in SDK memory. No API returns a private key, except
+  `deriveMasterSeed`, a pure function that returns to the host the seed the host itself will pass back in. No SDK instance
+  ever holds anything above the master seed.
 - **Signing safety**: deterministic nonces + persisted sign-once store; never sign two different messages for the same
-  (channel, commitment number, context) slot. Policy checks run before every signature; no blind signing.
+  (channel, commitment number, context) slot. Policy checks run before every signature; no blind signing. The one exception
+  is the `nonceReuse: "allow"` mode, off by default, which serves a second session on a slot because Fiber's current nonce
+  lifecycle asks for one, and never a third: three signatures under one deterministic nonce solve for the funding key. It goes
+  when Fiber's nonces are strict.
 
 ## Layout
 
@@ -40,11 +43,10 @@ src/
   derivation/     Fiber key scheme port + SDK-owned derivations
   digest/         Rebuilds the four messages fiber signs (no-blind-signing); the transaction serializers
   invoice/        Fiber's invoice string, read and written bit for bit: bech32m, the arithmetic coder, the molecule, the signature
-  signer/         Signer-protocol dispatch, musig2 signing engine
+  signer/         The entry of a signing request over fiber's status, musig2 signing engine, the public material
   policy/         Policy engine + persisted per-channel records
-  session/        Signer session client: challenge auth, correlation, resume
   wire/           How fiber writes values in JSON, the readers that refuse anything else, and the writers that produce it
-  protocol/       Frames, methods and results of the remote signing protocol
+  protocol/       Fiber's signing status, read strictly: transitions, slots, plaintexts, the peer's evidence
   rpc/            Typed fiber JSON-RPC client
   sdk/            Public facade wiring the above
   index.ts        Public entrypoint; every export here is a published commitment
@@ -74,6 +76,7 @@ pnpm format        # prettier
 
 # Regenerate the cross-implementation vectors (needs a Rust toolchain; `pnpm test` does not)
 cargo run --release --manifest-path interop/rust/Cargo.toml -- gen-vectors interop/vectors/vectors.json
+# (rpc.json, invoice.json and signing.json have their own generators: see interop/README.md)
 ```
 
 ## Code style
@@ -100,17 +103,17 @@ concept's name with no suffix (`fiber-scheme.ts`, `device-scheme.ts`).
 
 Two modules never export the same name, not even from a file their barrel leaves out, so a name too generic to say where it
 belongs takes its module's prefix. The test is whether another module, built or planned, could export a different thing under
-it: `Channel`, `Field`, `CLOSE_REASONS` and `EmptyParamsWire` could, so they are `RpcChannel`, `WireField`,
-`SESSION_CLOSE_REASONS` and `ProtocolEmptyParamsWire`. The prefix goes where the noun starts: after a function's verb
-(`decodeRpcInvoice`), after a `MAX_` or a `DEFAULT_` (`DEFAULT_SESSION_CONNECT_TIMEOUT_MS`). Where it would say something
-false, the module's own word for the thing takes its place: `ErrorFrameWire`, since `ProtocolErrorWire` would read as the wire
-form of `ProtocolError`.
+it: `Channel`, `Field`, `SUBMISSION_RESULTS` and `ChannelIdParamsWire` could, so they are `RpcChannel`, `WireField`,
+`RPC_SUBMISSION_RESULTS` and `RpcChannelIdParamsWire`. The prefix goes where the noun starts: after a function's verb
+(`decodeRpcInvoice`), after a `MAX_` or a `DEFAULT_`. Where it would say something false, the module's own word for the
+thing takes its place: the wire form of an error frame would be `ErrorFrameWire`, since `ProtocolErrorWire` would read as
+the wire form of `ProtocolError`.
 
 Only those names take it. One that is already specific stays as it is, and most are: it carries the module's name
 (`PolicyVerdict`, `computeRevocationDigest`), or it is spelled from something no other module has, such as a method of fiber's
-RPC (`ListChannelsParams`), a frame of the signing protocol (`SignRequest`), a function of fiber's the module ports
-(`derivePrivateKey`), the runtime effect it stands in for (`IFetchLike`) or a concept of its own (`ReconnectPolicy`,
-`DEFAULT_HEARTBEAT_INTERVAL_MS`: only a session reconnects or has a heartbeat).
+RPC (`ListChannelsParams`), a value of fiber's signing protocol (`ChannelSigningStatus`), a function of fiber's the module
+ports (`derivePrivateKey`), the runtime effect it stands in for (`IFetchLike`) or a concept of its own (`ActivityPoller`,
+`DEFAULT_POLL_INTERVAL_MS`: only the facade polls).
 
 `common` exports bare names (`Script`, `assertHexBytes`): it holds what no module owns, so it is another module's form of one
 of them that carries the mark (`ScriptWire`, `assertWireHexBytes`). `wire` has the same room for its readers and writers alone,
@@ -119,16 +122,15 @@ serialization of the same value says which one it is (`moleculeScript`).
 
 A module's name inside a name is no proof of where it belongs: several are plain words too. The `Wire` suffix says a type is
 a wire form, whoever owns it: `RpcChannelWire` is `rpc`'s. `Signer` is also the device's name across the SDK: `ISignerStorage`
-is `policy`'s and `SignerSession` is `session`'s. And `session`, `policy` and `digest` name things other modules own:
-`SESSION_CHALLENGE_LABEL` and `sessionChallengeDigest` are `protocol`'s, `SignSession` is `policy`'s, `ReconnectPolicy` is
-`session`'s, `MESSAGE_DIGEST_LENGTH` is `common`'s.
+and `SignerStore` are `policy`'s. And `session` and `digest` name things other modules own: `SignSession` and
+`SESSION_COMMITMENT_LABEL` are `policy`'s, `SigningSessionEvidence` is `protocol`'s, `MESSAGE_DIGEST_LENGTH` is `common`'s.
 
 ### Barrels
 
 Every folder has an `index.ts`, and it is imported as the folder (`../common`), never as `../common/index`. Barrels re-export
 wholesale with `export *`. Five exceptions list their exports one by one: `src/derivation/index.ts`, `src/digest/index.ts` and
 `src/invoice/index.ts`, which keep the internals of their fiber ports out of reach of the other modules,
-`src/protocol/index.ts`, which keeps the decoders behind its two entry points out of reach of them too, and `src/index.ts`,
+`src/protocol/index.ts`, which keeps the decoders behind its entry point out of reach of them too, and `src/index.ts`,
 which is the published surface. Those lists are read as code, not pinned by a test: a test that restates a list of names only
 asks to be updated alongside it.
 
@@ -164,11 +166,11 @@ an upstream quirk, the reason a bound exists, an invariant a reader would otherw
   that grows behavior is never renamed; the export carries the precision (`InMemorySignerStorage` is a fake, a stub over `fetch`
   would be `FetchMock`). Every other shared helper goes in `test/utils/`. Neither is ever named `*.spec.ts`.
 - Flow specs are the one exception to the mirror: a `<name>.flow.spec.ts` sits next to the `<name>.spec.ts` of the surface it
-  drives and runs several modules together against the LSP double in `test/utils/signer-bridge.ts`, which is the peer end of
-  the injected socket rather than a double of it, so it lives with the helpers.
+  drives and runs several modules together against an LSP double in `test/utils/`, which is the peer end of an injected
+  effect rather than a double of it, so it lives with the helpers.
 - Fixtures are written out literally in the spec that uses them, never produced by a factory that fills in defaults: a factory
   that supplies the field a test meant to omit turns a refusal path green. The one exception is a helper that projects a
-  cross-implementation vector into a typed input or a wire object (`test/utils/digest-inputs.ts`, `test/utils/wire-requests.ts`):
+  cross-implementation vector into a typed input or a wire object (`test/utils/digest-inputs.ts`, `test/utils/signing-channel.ts`):
   every field comes from the vector, so nothing is defaulted, and a refusal path mutates what it returns rather than omitting
   at construction.
 - `test/` may use `node:*` imports and platform globals (it only ever runs under Node); `src/` may not, and lint enforces both

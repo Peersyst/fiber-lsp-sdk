@@ -13,6 +13,7 @@ import {
     assertScript,
     assertScriptTemplate,
     assertString,
+    assertPositiveInteger,
     assertTimerDelayMs,
     assertUnsignedBigInt,
     assertUnsignedInteger,
@@ -46,8 +47,7 @@ describe("assertBytes", () => {
         expect(() => assertBytes("seed", notBytes, 32)).toThrow(new TypeError("seed must be a Uint8Array"));
     });
 
-    // A Node host passing a Buffer is passing a Uint8Array subclass, and the guard is
-    // meant to catch miswiring, not to reject a valid byte array.
+    // A Buffer is a Uint8Array subclass: valid bytes.
     it("accepts a Buffer", () => {
         expect(() => assertBytes("seed", Buffer.alloc(32), 32)).not.toThrow();
     });
@@ -62,8 +62,7 @@ describe("assertUnsignedInteger", () => {
         expect(() => assertUnsignedInteger("index", value, 10)).toThrow(RangeError);
     });
 
-    // The guards exist because the host may be untyped JavaScript, so a value that is
-    // not a number at all has to be refused like any other out-of-range one.
+    // The host may be untyped JavaScript.
     it("rejects a value that is not a number", () => {
         expect(() => assertUnsignedInteger("index", "5" as unknown as number, 10)).toThrow(RangeError);
     });
@@ -71,6 +70,29 @@ describe("assertUnsignedInteger", () => {
     it("names the offending value in the message", () => {
         expect(() => assertUnsignedInteger("commitmentNumber", -1, 10)).toThrow(
             new RangeError("commitmentNumber must be an integer between 0 and 10, got -1"),
+        );
+    });
+});
+
+describe("assertPositiveInteger", () => {
+    it.each([1, 2, 10])("accepts %i within the range", (value) => {
+        expect(() => assertPositiveInteger("count", value, 10)).not.toThrow();
+    });
+
+    it.each<[unknown, string]>([
+        [0, "0"],
+        [-1, "-1"],
+        [11, "11"],
+        [1.5, "1.5"],
+        [Number.NaN, "NaN"],
+        [Infinity, "Infinity"],
+        ["5", "5"],
+        [5n, "5"],
+        [undefined, "undefined"],
+        [null, "null"],
+    ])("rejects %p, naming it", (value, shown) => {
+        expect(() => assertPositiveInteger("count", value, 10)).toThrow(
+            new RangeError(`count must be an integer between 1 and 10, got ${shown}`),
         );
     });
 });

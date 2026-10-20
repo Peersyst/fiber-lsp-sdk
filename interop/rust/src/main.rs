@@ -1,5 +1,6 @@
 mod invoice;
 mod rpc;
+mod signing;
 
 use musig2::{
     aggregate_partial_signatures, sign_partial, verify_partial, AggNonce, CompactSignature,
@@ -164,8 +165,7 @@ fn master_seed_path(account_index: u32) -> String {
     format!("m/{MASTER_SEED_PURPOSE}'/{MASTER_SEED_COIN_TYPE}'/{account_index}'")
 }
 
-/// Wallet identity key, used to answer the signer-session challenge. It identifies
-/// the master seed, not the handset.
+/// Wallet identity key: it identifies the master seed, not the handset.
 fn wallet_identity_key(master_seed: &[u8; 32]) -> [u8; 32] {
     ckb_blake2b(&[master_seed, b"wallet identity"])
 }
@@ -191,6 +191,7 @@ use ckb_types::packed::{
     Byte, Bytes as PackedBytes, BytesVec, CellDep, CellDepVec, CellInput, CellInputVec, CellOutput, CellOutputVec,
     OutPoint as PackedOutPoint, RawTransaction, Script as PackedScript, ScriptOpt, Transaction,
 };
+use ckb_jsonrpc_types::Transaction as JsonTransaction;
 use ckb_types::core::Capacity;
 use ckb_types::prelude::*;
 use fiber_types::{
@@ -295,12 +296,14 @@ struct TlcVector {
     amount: String,
     payment_hash: String,
     expiry_ms: String,
-    created_at_remote_commitment_number: u64,
-    remote_commitment_point: String,
+    /// The remote commitment number the TLC was created at, which the device's TLC key derives at.
+    local_key_commitment_number: u64,
+    /// The peer's TLC key, at the local number the TLC was created at (fiber `get_tlc_keys`).
+    remote_tlc_pubkey: String,
 }
 
 /// fiber `get_active_tlcs_for_settlement` (crates/fiber-lib/src/fiber/channel.rs:8667-8691) over `get_tlc_keys` (8588-8620).
-fn settlement_tlc(local: &FiberSigner, remote_tlc_base: &PublicKey, tlc: &TlcVector, for_remote: bool) -> SettlementTlc {
+fn settlement_tlc(local: &FiberSigner, tlc: &TlcVector, for_remote: bool) -> SettlementTlc {
     let id = match tlc.direction.as_str() {
         "offered" => TLCId::Offered(tlc.id),
         "received" => TLCId::Received(tlc.id),
@@ -312,7 +315,7 @@ fn settlement_tlc(local: &FiberSigner, remote_tlc_base: &PublicKey, tlc: &TlcVec
         other => panic!("unknown hash_algorithm {other}"),
     };
     let payment_hash: [u8; 32] = hex::decode(&tlc.payment_hash).unwrap().try_into().unwrap();
-    let point = PublicKey::from_slice(&hex::decode(&tlc.remote_commitment_point).unwrap()).unwrap();
+    let remote_key = PublicKey::from_slice(&hex::decode(&tlc.remote_tlc_pubkey).unwrap()).unwrap();
     SettlementTlc {
         // for_remote=false flips every TLC id (fiber's flip_mut in get_active_tlcs), which only shows up in the flag bit.
         tlc_id: if for_remote { id } else { id.flip() },
@@ -321,14 +324,14 @@ fn settlement_tlc(local: &FiberSigner, remote_tlc_base: &PublicKey, tlc: &TlcVec
         payment_hash: payment_hash.into(),
         expiry: tlc.expiry_ms.parse().unwrap(),
         local_key: None,
-        local_key_pubkey: Some(fiber_pubkey(&pubkey_of(&local.derive_tlc_key(tlc.created_at_remote_commitment_number)))),
-        local_key_commitment_number: Some(tlc.created_at_remote_commitment_number),
-        remote_key: fiber_pubkey(&derive_public_key(remote_tlc_base, &point)),
+        local_key_pubkey: Some(fiber_pubkey(&pubkey_of(&local.derive_tlc_key(tlc.local_key_commitment_number)))),
+        local_key_commitment_number: Some(tlc.local_key_commitment_number),
+        remote_key: fiber_pubkey(&remote_key),
     }
 }
 
 /// fiber `get_active_tlcs` ordering (crates/fiber-lib/src/fiber/channel.rs:8647-8665): two direction groups, ascending by id.
-fn ordered_tlcs<'a>(tlcs: &'a [TlcVector], for_remote: bool) -> Vec<&'a TlcVector> {
+fn ordered_tlcs(tlcs: &[TlcVector], for_remote: bool) -> Vec<&TlcVector> {
     let first_direction = if for_remote { "received" } else { "offered" };
     let mut first: Vec<&TlcVector> = tlcs.iter().filter(|tlc| tlc.direction == first_direction).collect();
     let mut second: Vec<&TlcVector> = tlcs.iter().filter(|tlc| tlc.direction != first_direction).collect();
@@ -340,7 +343,6 @@ fn ordered_tlcs<'a>(tlcs: &'a [TlcVector], for_remote: bool) -> Vec<&'a TlcVecto
 /// The settlement data of one commitment, in the shape fiber hands its own `settlement_data_to_witness`.
 fn settlement_data(
     local: &FiberSigner,
-    remote_tlc_base: &PublicKey,
     for_remote: bool,
     local_amount: u128,
     remote_amount: u128,
@@ -351,7 +353,7 @@ fn settlement_data(
         remote_amount,
         tlcs: ordered_tlcs(tlcs, for_remote)
             .into_iter()
-            .map(|tlc| settlement_tlc(local, remote_tlc_base, tlc, for_remote))
+            .map(|tlc| settlement_tlc(local, tlc, for_remote))
             .collect(),
     }
 }
@@ -369,7 +371,7 @@ fn mock_tx_size(cell_deps_count: usize, outputs: Vec<CellOutput>, outputs_data: 
         .outputs(CellOutputVec::new_builder().set(outputs).build())
         .outputs_data(BytesVec::new_builder().set(outputs_data).build())
         .build();
-    let witnesses = BytesVec::new_builder().set(vec![vec![0u8; FUNDING_CELL_WITNESS_LEN].pack()]).build();
+    let witnesses = BytesVec::new_builder().set(vec![[0u8; FUNDING_CELL_WITNESS_LEN].pack()]).build();
     let tx = Transaction::new_builder().raw(raw).witnesses(witnesses).build();
     // `serialized_size_in_block`: the molecule length plus the 4-byte offset a block entry costs.
     (tx.as_slice().len() + 4) as u64
@@ -519,6 +521,10 @@ struct CommitmentCaseVector {
     lock_args: String,
     tx_size: u64,
     fee: String,
+    /// The unsigned commitment as fiber's JSON writes it (`ckb-jsonrpc-types`).
+    transaction: JsonTransaction,
+    /// fiber's `to_rpc_signing_settlement` of this commitment.
+    settlement: Option<fiber_json_types::SigningSettlement>,
     digest: String,
 }
 
@@ -539,6 +545,8 @@ struct ShutdownCaseVector {
     tx_size: u64,
     local_fee: String,
     remote_fee: String,
+    /// The unsigned closing transaction as fiber's JSON writes it.
+    transaction: JsonTransaction,
     digest: String,
 }
 
@@ -558,6 +566,11 @@ struct RevocationCaseVector {
     local_reserved: String,
     remote_reserved: String,
     fee: String,
+    /// fiber's `Musig2SignableContent::Revocation`: the molecule `CellOutput`, its data as molecule `Bytes` (header
+    /// included) and the revoked commitment's 36-byte lock args, hashed in that order.
+    output: String,
+    output_data: String,
+    commitment_lock_script_args: String,
     digest: String,
 }
 
@@ -694,7 +707,8 @@ const COMMITMENT_NUMBERS: [u64; 9] = [
 /// formatted into a string, so both sides must agree at that boundary.
 const CHANNEL_INDICES: [u64; 6] = [0, 1, 2, 7, 1000, 9007199254740991];
 
-const NONCE_CONTEXTS: [&str; 4] = ["COMMITMENT", "REVOKE", "CLOSE", "ANNOUNCEMENT"];
+/// A cooperative close signs under the `COMMITMENT` context: fiber's `NoncePurpose` has no close of its own.
+const NONCE_CONTEXTS: [&str; 3] = ["COMMITMENT", "REVOKE", "ANNOUNCEMENT"];
 
 const SCHEME_VERSION: u32 = 1;
 const FIBER_REF: &str = "8db6a117";
@@ -712,12 +726,24 @@ fn remote_secnonce() -> SecNonce {
     SecNonceBuilder::new(REMOTE_SEED).build()
 }
 
-fn build_commitment_case(
+/// One commitment as fiber builds it (crates/fiber-lib/src/fiber/channel.rs:11319-11407), with the parts the vectors pin.
+struct CommitmentBuild {
+    tx: Transaction,
+    settlement: SettlementData,
+    local_settlement_key: fiber_types::Pubkey,
+    remote_settlement_key: fiber_types::Pubkey,
+    witness: Vec<u8>,
+    args: Vec<u8>,
+    tx_size: u64,
+    fee: u64,
+}
+
+fn build_commitment(
     local: &FiberSigner,
     remote: &FiberSigner,
     commitment_lock: &ScriptVector,
-    mut case: CommitmentCaseVector,
-) -> CommitmentCaseVector {
+    case: &CommitmentCaseVector,
+) -> CommitmentBuild {
     let features = lock_layout_features(&case.lock_layout);
     let local_pub = pubkey_of(&local.funding_key);
     let remote_pub = pubkey_of(&remote.funding_key);
@@ -738,7 +764,7 @@ fn build_commitment_case(
     let witness_local = if is_udt { settlement_local } else { settlement_local + u128::from(local_reserved) };
     let witness_remote = if is_udt { settlement_remote } else { settlement_remote + u128::from(remote_reserved) };
     let remote_tlc_base = pubkey_of(&remote.tlc_base_key);
-    let settlement = settlement_data(local, &remote_tlc_base, case.for_remote, witness_local, witness_remote, &case.tlcs);
+    let settlement = settlement_data(local, case.for_remote, witness_local, witness_remote, &case.tlcs);
     let (local_settlement_key, remote_settlement_key) = settlement_pubkeys(local, &remote_tlc_base);
     let witness = settlement_data_to_witness(&settlement, case.for_remote, features, local_settlement_key, remote_settlement_key);
     let args = commitment_lock_args(&xonly, case.delay_epoch.parse().unwrap(), case.commitment_number, &witness, features);
@@ -772,16 +798,40 @@ fn build_commitment_case(
         "{}: fiber does not read this settlement in the commitment lock args",
         case.name
     );
+    CommitmentBuild { tx, settlement, local_settlement_key, remote_settlement_key, witness, args, tx_size, fee }
+}
 
-    case.settlement_witness = hex::encode(&witness);
-    case.lock_args = hex::encode(&args);
-    case.tx_size = tx_size;
-    case.fee = fee.to_string();
-    case.digest = hex::encode(compute_tx_message(&tx));
+fn build_commitment_case(
+    local: &FiberSigner,
+    remote: &FiberSigner,
+    commitment_lock: &ScriptVector,
+    mut case: CommitmentCaseVector,
+) -> CommitmentCaseVector {
+    let built = build_commitment(local, remote, commitment_lock, &case);
+    case.settlement_witness = hex::encode(&built.witness);
+    case.lock_args = hex::encode(&built.args);
+    case.tx_size = built.tx_size;
+    case.fee = built.fee.to_string();
+    case.transaction = built.tx.clone().into();
+    case.settlement = Some(signing::to_rpc_signing_settlement(
+        &built.settlement,
+        built.local_settlement_key,
+        built.remote_settlement_key,
+        case.for_remote,
+    ));
+    case.digest = hex::encode(compute_tx_message(&built.tx));
     case
 }
 
-fn build_shutdown_case(local: &FiberSigner, remote: &FiberSigner, mut case: ShutdownCaseVector) -> ShutdownCaseVector {
+/// One closing transaction as fiber builds it, with its outputs' two fees.
+struct ShutdownBuild {
+    tx: Transaction,
+    tx_size: u64,
+    local_fee: u64,
+    remote_fee: u64,
+}
+
+fn build_shutdown(local: &FiberSigner, remote: &FiberSigner, case: &ShutdownCaseVector) -> ShutdownBuild {
     let tx_size = shutdown_tx_size(
         case.cell_deps_count as usize,
         &case.udt_type_script,
@@ -831,20 +881,33 @@ fn build_shutdown_case(local: &FiberSigner, remote: &FiberSigner, mut case: Shut
         .outputs(CellOutputVec::new_builder().set(outputs).build())
         .outputs_data(BytesVec::new_builder().set(outputs_data).build())
         .build();
+    ShutdownBuild { tx: Transaction::new_builder().raw(raw).build(), tx_size, local_fee, remote_fee }
+}
 
-    case.tx_size = tx_size;
-    case.local_fee = local_fee.to_string();
-    case.remote_fee = remote_fee.to_string();
-    case.digest = hex::encode(compute_tx_message(&Transaction::new_builder().raw(raw).build()));
+fn build_shutdown_case(local: &FiberSigner, remote: &FiberSigner, mut case: ShutdownCaseVector) -> ShutdownCaseVector {
+    let built = build_shutdown(local, remote, &case);
+    case.tx_size = built.tx_size;
+    case.local_fee = built.local_fee.to_string();
+    case.remote_fee = built.remote_fee.to_string();
+    case.transaction = built.tx.clone().into();
+    case.digest = hex::encode(compute_tx_message(&built.tx));
     case
 }
 
-fn build_revocation_case(
+/// One revocation's plaintext as fiber builds it (crates/fiber-lib/src/fiber/channel.rs:7945-8003 and 10140-10198).
+struct RevocationBuild {
+    output: CellOutput,
+    output_data: Vec<u8>,
+    args: Vec<u8>,
+    fee: u64,
+}
+
+fn build_revocation(
     local: &FiberSigner,
     remote: &FiberSigner,
     commitment_lock: &ScriptVector,
-    mut case: RevocationCaseVector,
-) -> RevocationCaseVector {
+    case: &RevocationCaseVector,
+) -> RevocationBuild {
     let local_pub = pubkey_of(&local.funding_key);
     let remote_pub = pubkey_of(&remote.funding_key);
     // Role order on purpose: the x-only key must match the revoked commitment cell's lock args.
@@ -886,13 +949,31 @@ fn build_revocation_case(
     args.extend(&blake2b_256(&xonly)[0..20]);
     args.extend((SINCE_RELATIVE_EPOCH_FLAGS | case.delay_epoch.parse::<u64>().unwrap()).to_le_bytes());
     args.extend(case.revoked_commitment_number.to_be_bytes());
+    // Molecule `Bytes`, header included: fiber hashes `output_data.as_slice()` as it is.
+    RevocationBuild { output, output_data: output_data.as_slice().to_vec(), args, fee }
+}
 
-    case.fee = fee.to_string();
-    case.digest = hex::encode(ckb_blake2b(&[output.as_slice(), output_data.as_slice(), &args]));
+fn build_revocation_case(
+    local: &FiberSigner,
+    remote: &FiberSigner,
+    commitment_lock: &ScriptVector,
+    mut case: RevocationCaseVector,
+) -> RevocationCaseVector {
+    let built = build_revocation(local, remote, commitment_lock, &case);
+    let digest = ckb_blake2b(&[built.output.as_slice(), &built.output_data, &built.args]);
+    case.fee = built.fee.to_string();
+    case.output = hex::encode(built.output.as_slice());
+    case.output_data = hex::encode(&built.output_data);
+    case.commitment_lock_script_args = hex::encode(&built.args);
+    case.digest = hex::encode(digest);
     case
 }
 
-fn build_announcement_case(local: &FiberSigner, remote: &FiberSigner, mut case: AnnouncementCaseVector) -> AnnouncementCaseVector {
+fn build_announcement(
+    local: &FiberSigner,
+    remote: &FiberSigner,
+    case: &AnnouncementCaseVector,
+) -> fiber_types::protocol::ChannelAnnouncement {
     let local_pub = pubkey_of(&local.funding_key);
     let remote_pub = pubkey_of(&remote.funding_key);
     let sorted_xonly = if local_pub.serialize() <= remote_pub.serialize() {
@@ -909,7 +990,7 @@ fn build_announcement_case(local: &FiberSigner, remote: &FiberSigner, mut case: 
     node_ids.sort();
     let chain_hash: [u8; 32] = hex::decode(&case.chain_hash).unwrap().try_into().unwrap();
 
-    let announcement = fiber_types::protocol::ChannelAnnouncement {
+    fiber_types::protocol::ChannelAnnouncement {
         node1_signature: None,
         node2_signature: None,
         ckb_signature: None,
@@ -921,8 +1002,11 @@ fn build_announcement_case(local: &FiberSigner, remote: &FiberSigner, mut case: 
         ckb_key: secp030::XOnlyPublicKey::from_slice(&sorted_xonly).unwrap(),
         capacity: case.capacity.parse().unwrap(),
         udt_type_script: case.udt_type_script.as_ref().map(packed_script),
-    };
-    case.digest = hex::encode(announcement.message_to_sign());
+    }
+}
+
+fn build_announcement_case(local: &FiberSigner, remote: &FiberSigner, mut case: AnnouncementCaseVector) -> AnnouncementCaseVector {
+    case.digest = hex::encode(build_announcement(local, remote, &case).message_to_sign());
     case
 }
 
@@ -1061,7 +1145,8 @@ fn digest_vectors(local: &FiberSigner) -> DigestVectors {
         args: hex::encode(blake2b_256(b"remote close args")),
     };
 
-    let point = |n: u64| hex::encode(remote.get_commitment_point(n).serialize());
+    let remote_tlc_base = pubkey_of(&remote.tlc_base_key);
+    let remote_tlc_key = |n: u64| hex::encode(derive_public_key(&remote_tlc_base, &remote.get_commitment_point(n)).serialize());
     let ckb_tlcs = vec![
         TlcVector {
             id: 7,
@@ -1070,8 +1155,8 @@ fn digest_vectors(local: &FiberSigner) -> DigestVectors {
             amount: "1500000000".to_string(),
             payment_hash: hex::encode(blake2b_256(b"payment one")),
             expiry_ms: "1723257890123".to_string(),
-            created_at_remote_commitment_number: 5,
-            remote_commitment_point: point(5),
+            local_key_commitment_number: 5,
+            remote_tlc_pubkey: remote_tlc_key(5),
         },
         TlcVector {
             id: 2,
@@ -1080,8 +1165,8 @@ fn digest_vectors(local: &FiberSigner) -> DigestVectors {
             amount: "2250000000".to_string(),
             payment_hash: hex::encode(blake2b_256(b"payment two")),
             expiry_ms: "1750000000000".to_string(),
-            created_at_remote_commitment_number: 0,
-            remote_commitment_point: point(1),
+            local_key_commitment_number: 0,
+            remote_tlc_pubkey: remote_tlc_key(1),
         },
         TlcVector {
             id: 5,
@@ -1090,8 +1175,8 @@ fn digest_vectors(local: &FiberSigner) -> DigestVectors {
             amount: "750000000".to_string(),
             payment_hash: hex::encode(blake2b_256(b"payment three")),
             expiry_ms: "1699999999999".to_string(),
-            created_at_remote_commitment_number: 1,
-            remote_commitment_point: point(2),
+            local_key_commitment_number: 1,
+            remote_tlc_pubkey: remote_tlc_key(2),
         },
     ];
     let udt_tlcs = vec![
@@ -1102,8 +1187,8 @@ fn digest_vectors(local: &FiberSigner) -> DigestVectors {
             amount: "100000000000000000000".to_string(),
             payment_hash: hex::encode(blake2b_256(b"udt payment one")),
             expiry_ms: "1731234567891".to_string(),
-            created_at_remote_commitment_number: 3,
-            remote_commitment_point: point(3),
+            local_key_commitment_number: 3,
+            remote_tlc_pubkey: remote_tlc_key(3),
         },
         TlcVector {
             id: 9,
@@ -1112,8 +1197,8 @@ fn digest_vectors(local: &FiberSigner) -> DigestVectors {
             amount: "50000000000000000000".to_string(),
             payment_hash: hex::encode(blake2b_256(b"udt payment two")),
             expiry_ms: "1745678901234".to_string(),
-            created_at_remote_commitment_number: 8,
-            remote_commitment_point: point(8),
+            local_key_commitment_number: 8,
+            remote_tlc_pubkey: remote_tlc_key(8),
         },
     ];
 
@@ -1143,6 +1228,8 @@ fn digest_vectors(local: &FiberSigner) -> DigestVectors {
         lock_args: String::new(),
         tx_size: 0,
         fee: String::new(),
+        transaction: JsonTransaction::default(),
+        settlement: None,
         digest: String::new(),
     };
 
@@ -1241,6 +1328,7 @@ fn digest_vectors(local: &FiberSigner) -> DigestVectors {
         tx_size: 0,
         local_fee: String::new(),
         remote_fee: String::new(),
+        transaction: JsonTransaction::default(),
         digest: String::new(),
     };
     let shutdown_cases = vec![
@@ -1271,6 +1359,9 @@ fn digest_vectors(local: &FiberSigner) -> DigestVectors {
             local_reserved: local_reserved(features),
             remote_reserved: "6300000000".to_string(),
             fee: String::new(),
+            output: String::new(),
+            output_data: String::new(),
+            commitment_lock_script_args: String::new(),
             digest: String::new(),
         }
     };
@@ -1384,8 +1475,7 @@ fn verify_ts(vectors_path: &str, ts_out_path: &str) {
     .unwrap();
     let message = hex::decode(&vectors.musig.message).unwrap();
 
-    // The fixed order of this vector's slot; the engine signs whatever list it is handed
-    // (fiber sorts funding-cell spends and keeps role order for revocations, see the digest section).
+    // This vector's fixed order; the engine signs whatever list it is handed.
     let key_agg_ctx = KeyAggContext::new(vec![local_pk, remote_pk]).unwrap();
 
     let local_pubnonce = PubNonce::from_bytes(&hex::decode(&ts.local_pubnonce).unwrap()).unwrap();
@@ -1439,9 +1529,11 @@ fn main() {
         Some("verify-rpc-params") => rpc::verify_rpc_params(&args[2], &args[3]),
         Some("gen-invoice-vectors") => invoice::gen_invoice_vectors(&args[2]),
         Some("verify-invoices") => invoice::verify_invoices(&args[2], &args[3]),
+        Some("gen-signing-vectors") => signing::gen_signing_vectors(&args[2]),
+        Some("verify-signing") => signing::verify_signing(&args[2], &args[3]),
         _ => {
             eprintln!(
-                "usage: gen-vectors <out.json> | verify-ts <vectors.json> <ts-out.json> | gen-rpc-vectors <out.json> | verify-rpc-params <rpc.json> <ts-rpc-out.json> | gen-invoice-vectors <out.json> | verify-invoices <invoice.json> <ts-invoice-out.json>"
+                "usage: gen-vectors <out.json> | verify-ts <vectors.json> <ts-out.json> | gen-rpc-vectors <out.json> | verify-rpc-params <rpc.json> <ts-rpc-out.json> | gen-invoice-vectors <out.json> | verify-invoices <invoice.json> <ts-invoice-out.json> | gen-signing-vectors <out.json> | verify-signing <signing.json> <ts-signing-out.json>"
             );
             std::process::exit(1);
         }

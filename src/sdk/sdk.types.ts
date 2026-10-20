@@ -1,8 +1,7 @@
-import type { ScriptTemplate } from "../common";
+import type { ITimer, ScriptTemplate } from "../common";
 import type { InvoiceCurrency } from "../invoice";
 import type { IAsyncSignerStorage, ISignerStorage, PolicyEngine } from "../policy";
 import type { FiberRpcClient, IFetchLike, RpcChannelStateName, RpcInvoiceStatus, RpcPaymentStatus } from "../rpc";
-import type { ITimer, SessionOptions, SessionState, SignerSession, WebSocketFactory } from "../session";
 import type { SignerDispatch } from "../signer";
 import type { ActivityTracker } from "./activity";
 import type { IndexAllocator } from "./allocator";
@@ -22,31 +21,22 @@ export type SdkNetworkName = (typeof SDK_NETWORK_NAMES)[number];
 export type SdkNetworkConfig = {
     commitmentLock: ScriptTemplate;
     invoiceCurrency: InvoiceCurrency;
+    /**
+     * Fiber counts these into the commitment fee although the commitment tx carries none.
+     */
+    fundingLockCellDepsCount: number;
 };
 
-/**
- * A chain by name, or by its two constants for a development chain.
- */
 export type SdkNetwork = SdkNetworkName | SdkNetworkConfig;
-
-/**
- * The session's timings; its backoff jitter stays `Math.random`, since no RNG is injected.
- */
-export type SdkSessionOptions = Pick<SessionOptions, "connectTimeoutMs" | "heartbeatIntervalMs" | "heartbeatTimeoutMs" | "reconnect">;
 
 export type FiberLspSdkOptions = {
     network: SdkNetwork;
     storage: ISignerStorage | IAsyncSignerStorage;
-    webSocketFactory: WebSocketFactory;
     rpcUrl: string;
-    signerSessionUrl: string;
     /**
      * Omitted when the node's RPC has no auth, as a development chain's may.
      */
     biscuitToken?: string;
-    /**
-     * The peer every channel opens to, as a compressed point.
-     */
     lspPubkey: Uint8Array;
     /**
      * Defaults to the runtime's global `fetch`.
@@ -61,14 +51,12 @@ export type FiberLspSdkOptions = {
      */
     now?: () => number;
     pollIntervalMs?: number;
-    session?: SdkSessionOptions;
 };
 
 export type SdkEventType = (typeof SDK_EVENT_TYPES)[number];
 
 // Keyed by every event type, so one added to `SDK_EVENT_TYPES` alone fails to compile.
 type SdkEventPayloads = {
-    SESSION: { state: SessionState };
     CHANNEL_READY: { channelId: string };
     CHANNEL_CLOSED: { channelId: string };
     PAYMENT_SENT: { paymentHashHex: string };
@@ -78,9 +66,6 @@ type SdkEventPayloads = {
     PAYMENT_FAILED: { paymentHashHex: string; reason: string };
     PAYMENT_PENDING: { paymentHashHex: string };
     PAYMENT_RECEIVED: { paymentHashHex: string };
-    /**
-     * A session error, fatal ones included, or a failed poll step.
-     */
     ERROR: { error: SdkError };
 };
 
@@ -121,7 +106,6 @@ export type SdkContext = {
     rpc: FiberRpcClient;
     policy: PolicyEngine;
     dispatch: SignerDispatch;
-    session: SignerSession;
     allocator: IndexAllocator;
     activity: ActivityTracker;
     poller: ActivityPoller;

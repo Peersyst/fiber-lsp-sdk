@@ -17,13 +17,19 @@ const PAYMENT_HASH = "11".repeat(32);
 const PREIMAGE_KEY = `fiber-lsp-sdk:preimage:${PAYMENT_HASH}`;
 const PREIMAGE = "22".repeat(32);
 
+function counters(commitment: number): ChannelPolicyRecord["lastSignedCommitmentNumbers"] {
+    return { "COMMITMENT:local": commitment, "REVOKE:remote": 4 };
+}
+
 function record(overrides: Partial<ChannelPolicyRecord> = {}): ChannelPolicyRecord {
     return {
         version: 1,
         channelId: CHANNEL_ID,
-        lastSignedCommitmentNumbers: { COMMITMENT: 5, REVOKE: 4 },
+        lastSignedCommitmentNumbers: counters(5),
         signedSessions: { "COMMITMENT:5": "ab".repeat(32) },
-        lastStateVersion: 7,
+        nonceReuse: {},
+        commitmentHashes: { remote: { commitmentNumber: 5, txHash: "34".repeat(32) } },
+        revocations: [{ version: 3, forRemote: true, signature: "56".repeat(64) }],
         pins: {
             fundedShannons: "5000000100",
             localCloseScript: "ab".repeat(53),
@@ -58,9 +64,9 @@ function requireRecord(current: ChannelPolicyRecord | null): ChannelPolicyRecord
     return current;
 }
 
-function bumpStateVersion(current: ChannelPolicyRecord | null): ChannelPolicyRecord {
+function bumpCommitmentCounter(current: ChannelPolicyRecord | null): ChannelPolicyRecord {
     const existing = requireRecord(current);
-    return { ...existing, lastStateVersion: existing.lastStateVersion + 1 };
+    return { ...existing, lastSignedCommitmentNumbers: counters((existing.lastSignedCommitmentNumbers["COMMITMENT:local"] ?? 0) + 1) };
 }
 
 describe("channel aliases", () => {
@@ -246,7 +252,7 @@ describe("channel records", () => {
 
     it("refuses to write a record with the wrong shape", async () => {
         const store = new SignerStore(new InMemorySignerStorage());
-        const corrupt = record({ lastStateVersion: -1 });
+        const corrupt = record({ lastSignedCommitmentNumbers: { "COMMITMENT:local": -1 } });
         await expect(store.setChannelRecord(CHANNEL_INDEX, corrupt)).rejects.toThrow(
             new TypeError("record is not a valid channel policy record"),
         );
@@ -282,7 +288,6 @@ describe("channel records", () => {
     });
 
     // Hand-written v1 payload: must parse forever. Never update it to pass; a failure means the format needs a new version.
-    // Rewritten while unpublished, with no device holding a record; once released, a change is a new version.
     it("reads a v1 record written by any past version of the SDK", async () => {
         const v1Json =
             '{"views":{"local":{"creditedShannons":{"' +
@@ -294,12 +299,21 @@ describe("channel records", () => {
             "88".repeat(20) +
             '","fullPaymentHash":"' +
             "88".repeat(32) +
-            '","hashAlgorithm":"sha256","direction":"offered"}],"exposureShannons":"122706789"}},"lastStateVersion":42,' +
+            '","hashAlgorithm":"sha256","direction":"offered"}],"exposureShannons":"122706789"}},' +
+            '"revocations":[{"signature":"' +
+            "56".repeat(64) +
+            '","forRemote":true,"version":8}],"commitmentHashes":{"local":{"txHash":"' +
+            "34".repeat(32) +
+            '","commitmentNumber":7}},"nonceReuse":{"REVOKE:9":{"message":"' +
+            "12".repeat(32) +
+            '","sessionCommitment":"' +
+            "ab".repeat(32) +
+            '"}},' +
             '"signedSessions":{"REVOKE:9":"' +
             "cd".repeat(32) +
             '","COMMITMENT:10":"' +
             "ef".repeat(32) +
-            '"},"lastSignedCommitmentNumbers":{"REVOKE":9,"COMMITMENT":10},' +
+            '"},"lastSignedCommitmentNumbers":{"REVOKE:local":9,"REVOKE:remote":6,"COMMITMENT:local":10},' +
             '"pins":{"lockLayout":"fullPaymentHash","remoteReservedCkbShannons":"6300000000",' +
             '"localReservedCkbShannons":{"fullPaymentHash":"10000000000","legacy":"9900000000"},' +
             '"commitmentFeeRate":"1000","commitmentDelayEpoch":"1099511627777","remoteTlcBasePubkey":"03' +
@@ -318,9 +332,11 @@ describe("channel records", () => {
         await expect(new SignerStore(storage).getChannelRecord(CHANNEL_INDEX)).resolves.toEqual({
             version: 1,
             channelId: CHANNEL_ID,
-            lastSignedCommitmentNumbers: { COMMITMENT: 10, REVOKE: 9 },
+            lastSignedCommitmentNumbers: { "COMMITMENT:local": 10, "REVOKE:local": 9, "REVOKE:remote": 6 },
             signedSessions: { "COMMITMENT:10": "ef".repeat(32), "REVOKE:9": "cd".repeat(32) },
-            lastStateVersion: 42,
+            nonceReuse: { "REVOKE:9": { sessionCommitment: "ab".repeat(32), message: "12".repeat(32) } },
+            commitmentHashes: { local: { commitmentNumber: 7, txHash: "34".repeat(32) } },
+            revocations: [{ version: 8, forRemote: true, signature: "56".repeat(64) }],
             pins: {
                 fundedShannons: "128456789",
                 localCloseScript: "ab".repeat(53),
@@ -374,14 +390,29 @@ describe("channel records", () => {
 
     it("round-trips a record at every boundary at once", async () => {
         const boundary = record({
-            lastSignedCommitmentNumbers: { COMMITMENT: 2 ** 48 - 1, REVOKE: 2 ** 48 - 1, CLOSE: 0, ANNOUNCEMENT: 0 },
+            lastSignedCommitmentNumbers: {
+                "COMMITMENT:local": 2 ** 48 - 1,
+                "REVOKE:local": 2 ** 48 - 1,
+                "REVOKE:remote": 0,
+                ANNOUNCEMENT: 0,
+            },
             signedSessions: {
                 [`COMMITMENT:${2 ** 48 - 1}`]: "ff".repeat(32),
                 "REVOKE:0": "00".repeat(32),
-                "CLOSE:0": "0f".repeat(32),
                 "ANNOUNCEMENT:0": "f0".repeat(32),
             },
-            lastStateVersion: Number.MAX_SAFE_INTEGER,
+            nonceReuse: {
+                [`COMMITMENT:${2 ** 48 - 1}`]: { sessionCommitment: "00".repeat(32), message: "ff".repeat(32) },
+                "REVOKE:0": { sessionCommitment: "ff".repeat(32), message: "00".repeat(32) },
+            },
+            commitmentHashes: {
+                remote: { commitmentNumber: 2 ** 48 - 1, txHash: "ff".repeat(32) },
+                local: { commitmentNumber: 0, txHash: "00".repeat(32) },
+            },
+            revocations: [
+                { version: 0, forRemote: true, signature: "00".repeat(64) },
+                { version: 2 ** 48 - 2, forRemote: true, signature: "ff".repeat(64) },
+            ],
             pins: {
                 fundedShannons: "18446744073709551615",
                 localCloseScript: "00",
@@ -433,7 +464,9 @@ describe("channel records", () => {
         const storage = new InMemorySignerStorage();
         const store = new SignerStore(storage);
         await store.setChannelRecord(CHANNEL_INDEX, record());
-        await expect(store.setChannelRecord(CHANNEL_INDEX, record({ lastStateVersion: -1 }))).rejects.toThrow(TypeError);
+        await expect(
+            store.setChannelRecord(CHANNEL_INDEX, record({ lastSignedCommitmentNumbers: { "COMMITMENT:local": -1 } })),
+        ).rejects.toThrow(TypeError);
         expect(storage.map.get(CHANNEL_KEY)).toBe(JSON.stringify(record()));
     });
 
@@ -485,9 +518,11 @@ describe("channel records", () => {
 describe("updateChannelRecord", () => {
     it("reads, updates and writes in one step", async () => {
         const store = new SignerStore(new InMemorySignerStorage());
-        await store.setChannelRecord(CHANNEL_INDEX, record({ lastStateVersion: 7 }));
-        await expect(store.updateChannelRecord(CHANNEL_INDEX, bumpStateVersion)).resolves.toEqual(record({ lastStateVersion: 8 }));
-        await expect(store.getChannelRecord(CHANNEL_INDEX)).resolves.toEqual(record({ lastStateVersion: 8 }));
+        await store.setChannelRecord(CHANNEL_INDEX, record({ lastSignedCommitmentNumbers: counters(7) }));
+        await expect(store.updateChannelRecord(CHANNEL_INDEX, bumpCommitmentCounter)).resolves.toEqual(
+            record({ lastSignedCommitmentNumbers: counters(8) }),
+        );
+        await expect(store.getChannelRecord(CHANNEL_INDEX)).resolves.toEqual(record({ lastSignedCommitmentNumbers: counters(8) }));
     });
 
     it("passes null to the updater for an index that was never registered", async () => {
@@ -532,7 +567,10 @@ describe("updateChannelRecord", () => {
         await store.setChannelRecord(CHANNEL_INDEX, record());
         storage.ops.length = 0;
         await expect(
-            store.updateChannelRecord(CHANNEL_INDEX, (current) => ({ ...requireRecord(current), lastStateVersion: -1 })),
+            store.updateChannelRecord(CHANNEL_INDEX, (current) => ({
+                ...requireRecord(current),
+                lastSignedCommitmentNumbers: { "COMMITMENT:local": -1 },
+            })),
         ).rejects.toThrow(new TypeError("updated record is not a valid channel policy record"));
         expect(storage.ops).toEqual([`get ${CHANNEL_KEY}`]);
         expect(storage.map.get(CHANNEL_KEY)).toBe(JSON.stringify(record()));
@@ -568,16 +606,16 @@ describe("concurrency", () => {
     it("serializes concurrent updates on one channel instead of losing one", async () => {
         const storage = new AsyncInMemorySignerStorage();
         const store = new SignerStore(storage);
-        await store.setChannelRecord(CHANNEL_INDEX, record({ lastStateVersion: 0 }));
+        await store.setChannelRecord(CHANNEL_INDEX, record({ lastSignedCommitmentNumbers: counters(0) }));
         storage.ops.length = 0;
 
         await Promise.all([
-            store.updateChannelRecord(CHANNEL_INDEX, bumpStateVersion),
-            store.updateChannelRecord(CHANNEL_INDEX, bumpStateVersion),
+            store.updateChannelRecord(CHANNEL_INDEX, bumpCommitmentCounter),
+            store.updateChannelRecord(CHANNEL_INDEX, bumpCommitmentCounter),
         ]);
 
         expect(storage.ops).toEqual([`get ${CHANNEL_KEY}`, `set ${CHANNEL_KEY}`, `get ${CHANNEL_KEY}`, `set ${CHANNEL_KEY}`]);
-        await expect(store.getChannelRecord(CHANNEL_INDEX)).resolves.toMatchObject({ lastStateVersion: 2 });
+        await expect(store.getChannelRecord(CHANNEL_INDEX)).resolves.toMatchObject({ lastSignedCommitmentNumbers: counters(2) });
     });
 
     it("lets only one of two concurrent claims take a sign-once slot", async () => {
@@ -602,13 +640,13 @@ describe("concurrency", () => {
     it("serializes an operation that arrives while an earlier one is still queued", async () => {
         const storage = new AsyncInMemorySignerStorage();
         const store = new SignerStore(storage);
-        await store.setChannelRecord(CHANNEL_INDEX, record({ lastStateVersion: 0 }));
+        await store.setChannelRecord(CHANNEL_INDEX, record({ lastSignedCommitmentNumbers: counters(0) }));
         storage.ops.length = 0;
 
-        const first = store.updateChannelRecord(CHANNEL_INDEX, bumpStateVersion);
-        const second = store.updateChannelRecord(CHANNEL_INDEX, bumpStateVersion);
+        const first = store.updateChannelRecord(CHANNEL_INDEX, bumpCommitmentCounter);
+        const second = store.updateChannelRecord(CHANNEL_INDEX, bumpCommitmentCounter);
         // Enqueued the instant the first settles, while the second is still in flight.
-        const third = first.then(() => store.updateChannelRecord(CHANNEL_INDEX, bumpStateVersion));
+        const third = first.then(() => store.updateChannelRecord(CHANNEL_INDEX, bumpCommitmentCounter));
         await Promise.all([first, second, third]);
 
         expect(storage.ops).toEqual([
@@ -619,7 +657,7 @@ describe("concurrency", () => {
             `get ${CHANNEL_KEY}`,
             `set ${CHANNEL_KEY}`,
         ]);
-        await expect(store.getChannelRecord(CHANNEL_INDEX)).resolves.toMatchObject({ lastStateVersion: 3 });
+        await expect(store.getChannelRecord(CHANNEL_INDEX)).resolves.toMatchObject({ lastSignedCommitmentNumbers: counters(3) });
     });
 
     it("does not serialize two channels against each other", async () => {
@@ -642,44 +680,44 @@ describe("concurrency", () => {
     it("keeps a bare write from landing inside an update", async () => {
         const storage = new AsyncInMemorySignerStorage();
         const store = new SignerStore(storage);
-        await store.setChannelRecord(CHANNEL_INDEX, record({ lastStateVersion: 1 }));
+        await store.setChannelRecord(CHANNEL_INDEX, record({ lastSignedCommitmentNumbers: counters(1) }));
         storage.ops.length = 0;
         const seen: (ChannelPolicyRecord | null)[] = [];
 
         const update = store.updateChannelRecord(CHANNEL_INDEX, (current) => {
             seen.push(current);
-            return bumpStateVersion(current);
+            return bumpCommitmentCounter(current);
         });
-        const write = store.setChannelRecord(CHANNEL_INDEX, record({ lastStateVersion: 9 }));
+        const write = store.setChannelRecord(CHANNEL_INDEX, record({ lastSignedCommitmentNumbers: counters(9) }));
         await Promise.all([update, write]);
 
-        expect(seen).toEqual([record({ lastStateVersion: 1 })]);
+        expect(seen).toEqual([record({ lastSignedCommitmentNumbers: counters(1) })]);
         expect(storage.ops).toEqual([`get ${CHANNEL_KEY}`, `set ${CHANNEL_KEY}`, `set ${CHANNEL_KEY}`]);
-        await expect(store.getChannelRecord(CHANNEL_INDEX)).resolves.toMatchObject({ lastStateVersion: 9 });
+        await expect(store.getChannelRecord(CHANNEL_INDEX)).resolves.toMatchObject({ lastSignedCommitmentNumbers: counters(9) });
     });
 
     it("serves a read issued behind a pending update the updated record", async () => {
         const store = new SignerStore(new AsyncInMemorySignerStorage());
-        await store.setChannelRecord(CHANNEL_INDEX, record({ lastStateVersion: 1 }));
+        await store.setChannelRecord(CHANNEL_INDEX, record({ lastSignedCommitmentNumbers: counters(1) }));
 
-        const update = store.updateChannelRecord(CHANNEL_INDEX, bumpStateVersion);
+        const update = store.updateChannelRecord(CHANNEL_INDEX, bumpCommitmentCounter);
         const read = store.getChannelRecord(CHANNEL_INDEX);
 
-        await expect(update).resolves.toMatchObject({ lastStateVersion: 2 });
-        await expect(read).resolves.toMatchObject({ lastStateVersion: 2 });
+        await expect(update).resolves.toMatchObject({ lastSignedCommitmentNumbers: counters(2) });
+        await expect(read).resolves.toMatchObject({ lastSignedCommitmentNumbers: counters(2) });
     });
 
     it("keeps the key usable after an updater refuses", async () => {
         const store = new SignerStore(new AsyncInMemorySignerStorage());
-        await store.setChannelRecord(CHANNEL_INDEX, record({ lastStateVersion: 1 }));
+        await store.setChannelRecord(CHANNEL_INDEX, record({ lastSignedCommitmentNumbers: counters(1) }));
 
         const refused = store.updateChannelRecord(CHANNEL_INDEX, () => {
             throw new Error("policy refusal");
         });
-        const next = store.updateChannelRecord(CHANNEL_INDEX, bumpStateVersion);
+        const next = store.updateChannelRecord(CHANNEL_INDEX, bumpCommitmentCounter);
 
         await expect(refused).rejects.toThrow(new Error("policy refusal"));
-        await expect(next).resolves.toMatchObject({ lastStateVersion: 2 });
+        await expect(next).resolves.toMatchObject({ lastSignedCommitmentNumbers: counters(2) });
     });
 
     it("keeps the key usable after a storage failure", async () => {
@@ -690,17 +728,17 @@ describe("concurrency", () => {
                     failNextRead = false;
                     throw new Error("storage unavailable");
                 }
-                return JSON.stringify(record({ lastStateVersion: 1 }));
+                return JSON.stringify(record({ lastSignedCommitmentNumbers: counters(1) }));
             },
             set: () => Promise.resolve(),
         };
         const store = new SignerStore(storage);
 
-        const failed = store.updateChannelRecord(CHANNEL_INDEX, bumpStateVersion);
-        const next = store.updateChannelRecord(CHANNEL_INDEX, bumpStateVersion);
+        const failed = store.updateChannelRecord(CHANNEL_INDEX, bumpCommitmentCounter);
+        const next = store.updateChannelRecord(CHANNEL_INDEX, bumpCommitmentCounter);
 
         await expect(failed).rejects.toThrow(new Error("storage unavailable"));
-        await expect(next).resolves.toMatchObject({ lastStateVersion: 2 });
+        await expect(next).resolves.toMatchObject({ lastSignedCommitmentNumbers: counters(2) });
     });
 
     it("applies writes on one payment hash in call order, even when the first one is slower", async () => {

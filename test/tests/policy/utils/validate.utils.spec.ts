@@ -14,9 +14,14 @@ describe("isChannelPolicyRecord", () => {
         return {
             version: 1,
             channelId: "0x1f".padEnd(66, "a"),
-            lastSignedCommitmentNumbers: { COMMITMENT: 5, REVOKE: 4 },
-            signedSessions: { "COMMITMENT:5": "ab".repeat(32) },
-            lastStateVersion: 7,
+            lastSignedCommitmentNumbers: { "COMMITMENT:local": 5, "REVOKE:remote": 4 },
+            signedSessions: { "COMMITMENT:5": "ab".repeat(32), "REVOKE:4": "cd".repeat(32) },
+            nonceReuse: { "COMMITMENT:5": { sessionCommitment: "ef".repeat(32), message: "12".repeat(32) } },
+            commitmentHashes: { remote: { commitmentNumber: 5, txHash: "34".repeat(32) } },
+            revocations: [
+                { version: 2, forRemote: true, signature: "56".repeat(64) },
+                { version: 3, forRemote: true, signature: "78".repeat(64) },
+            ],
             pins: pins(),
             views: { remote: snapshot(), local: snapshot() },
         };
@@ -80,6 +85,9 @@ describe("isChannelPolicyRecord", () => {
                 ...record(),
                 lastSignedCommitmentNumbers: {},
                 signedSessions: {},
+                nonceReuse: {},
+                commitmentHashes: {},
+                revocations: [],
                 pins: {
                     fundedShannons: "0",
                     localCloseScript: pins().localCloseScript,
@@ -98,8 +106,11 @@ describe("isChannelPolicyRecord", () => {
         expect(
             isChannelPolicyRecord({
                 ...record(),
-                lastSignedCommitmentNumbers: { COMMITMENT: MAX_COMMITMENT_NUMBER },
+                lastSignedCommitmentNumbers: { "COMMITMENT:local": MAX_COMMITMENT_NUMBER },
                 signedSessions: { [`COMMITMENT:${MAX_COMMITMENT_NUMBER}`]: "ab".repeat(32) },
+                nonceReuse: { [`COMMITMENT:${MAX_COMMITMENT_NUMBER}`]: { sessionCommitment: "ef".repeat(32), message: "12".repeat(32) } },
+                commitmentHashes: { local: { commitmentNumber: MAX_COMMITMENT_NUMBER, txHash: "34".repeat(32) } },
+                revocations: [{ version: MAX_COMMITMENT_NUMBER - 1, forRemote: true, signature: "56".repeat(64) }],
             }),
         ).toBe(true);
     });
@@ -135,9 +146,13 @@ describe("isChannelPolicyRecord", () => {
         ["an empty channel id", { channelId: "" }],
         ["a numeric channel id", { channelId: 3 }],
         ["counters that are not an object", { lastSignedCommitmentNumbers: [] }],
-        ["a counter for an unknown context", { lastSignedCommitmentNumbers: { SETTLEMENT: 1 } }],
-        ["a counter above the commitment cap", { lastSignedCommitmentNumbers: { COMMITMENT: MAX_COMMITMENT_NUMBER + 1 } }],
-        ["a negative counter", { lastSignedCommitmentNumbers: { COMMITMENT: -1 } }],
+        ["a counter for an unknown lane", { lastSignedCommitmentNumbers: { SETTLEMENT: 1 } }],
+        // The form before the lanes: one counter per context.
+        ["a counter keyed by its context alone", { lastSignedCommitmentNumbers: { COMMITMENT: 1 } }],
+        ["a commitment counter on the remote lane", { lastSignedCommitmentNumbers: { "COMMITMENT:remote": 1 } }],
+        ["a counter above the commitment cap", { lastSignedCommitmentNumbers: { "COMMITMENT:local": MAX_COMMITMENT_NUMBER + 1 } }],
+        ["a negative counter", { lastSignedCommitmentNumbers: { "REVOKE:local": -1 } }],
+        ["a fractional counter", { lastSignedCommitmentNumbers: { ANNOUNCEMENT: 0.5 } }],
         ["digests that are not an object", { signedSessions: [] }],
         ["a slot without a number", { signedSessions: { COMMITMENT: "ab".repeat(32) } }],
         ["a slot with an unknown context", { signedSessions: { "SETTLEMENT:1": "ab".repeat(32) } }],
@@ -145,8 +160,75 @@ describe("isChannelPolicyRecord", () => {
         ["a slot above the commitment cap", { signedSessions: { [`COMMITMENT:${MAX_COMMITMENT_NUMBER + 1}`]: "ab".repeat(32) } }],
         ["a digest that is not 32 bytes", { signedSessions: { "COMMITMENT:5": "ab".repeat(31) } }],
         ["an uppercase digest", { signedSessions: { "COMMITMENT:5": "AB".repeat(32) } }],
-        ["a negative state version", { lastStateVersion: -1 }],
-        ["a fractional state version", { lastStateVersion: 0.5 }],
+        ["a slot of the retired close context", { signedSessions: { "CLOSE:5": "ab".repeat(32) } }],
+        ["a reuse log that is not an object", { nonceReuse: [] }],
+        ["a reuse entry that is not an object", { nonceReuse: { "COMMITMENT:5": "ef".repeat(32) } }],
+        [
+            "a reuse entry on a malformed slot",
+            { nonceReuse: { "COMMITMENT:05": { sessionCommitment: "ef".repeat(32), message: "12".repeat(32) } } },
+        ],
+        // Only a served slot can serve a second session.
+        [
+            "a reuse entry on a slot that served nothing",
+            { nonceReuse: { "COMMITMENT:6": { sessionCommitment: "ef".repeat(32), message: "12".repeat(32) } } },
+        ],
+        [
+            "a reuse entry repeating the slot's first session",
+            { nonceReuse: { "COMMITMENT:5": { sessionCommitment: "ab".repeat(32), message: "12".repeat(32) } } },
+        ],
+        ["a reuse entry without its session", { nonceReuse: { "COMMITMENT:5": { message: "12".repeat(32) } } }],
+        ["a reuse entry without its message", { nonceReuse: { "COMMITMENT:5": { sessionCommitment: "ef".repeat(32) } } }],
+        [
+            "a reuse entry with a short session",
+            { nonceReuse: { "COMMITMENT:5": { sessionCommitment: "ef".repeat(31), message: "12".repeat(32) } } },
+        ],
+        [
+            "a reuse entry with an uppercase message",
+            { nonceReuse: { "COMMITMENT:5": { sessionCommitment: "ef".repeat(32), message: "AB".repeat(32) } } },
+        ],
+        ["commitment hashes that are not an object", { commitmentHashes: [] }],
+        ["a commitment hash under an unknown view", { commitmentHashes: { forRemote: { commitmentNumber: 5, txHash: "34".repeat(32) } } }],
+        ["a commitment hash that is not an object", { commitmentHashes: { remote: "34".repeat(32) } }],
+        ["a commitment hash without its number", { commitmentHashes: { remote: { txHash: "34".repeat(32) } } }],
+        [
+            "a commitment hash above the commitment cap",
+            { commitmentHashes: { remote: { commitmentNumber: MAX_COMMITMENT_NUMBER + 1, txHash: "34".repeat(32) } } },
+        ],
+        ["a commitment hash with a negative number", { commitmentHashes: { local: { commitmentNumber: -1, txHash: "34".repeat(32) } } }],
+        ["a commitment hash without its hash", { commitmentHashes: { remote: { commitmentNumber: 5 } } }],
+        ["a commitment hash of 31 bytes", { commitmentHashes: { remote: { commitmentNumber: 5, txHash: "34".repeat(31) } } }],
+        ["a commitment hash in uppercase", { commitmentHashes: { remote: { commitmentNumber: 5, txHash: "AB".repeat(32) } } }],
+        ["revocations that are not an array", { revocations: {} }],
+        ["a revocation that is not an object", { revocations: ["56".repeat(64)] }],
+        ["a revocation without its version", { revocations: [{ forRemote: true, signature: "56".repeat(64) }] }],
+        ["a revocation with a negative version", { revocations: [{ version: -1, forRemote: true, signature: "56".repeat(64) }] }],
+        // Its revocation would claim the slot one above the chain's last number.
+        [
+            "a revocation of the chain's last commitment number",
+            { revocations: [{ version: MAX_COMMITMENT_NUMBER, forRemote: true, signature: "56".repeat(64) }] },
+        ],
+        ["a revocation of the device's own commitment", { revocations: [{ version: 2, forRemote: false, signature: "56".repeat(64) }] }],
+        ["a revocation without its direction", { revocations: [{ version: 2, signature: "56".repeat(64) }] }],
+        ["a revocation with a partial signature", { revocations: [{ version: 2, forRemote: true, signature: "56".repeat(32) }] }],
+        ["a revocation with an uppercase signature", { revocations: [{ version: 2, forRemote: true, signature: "AB".repeat(64) }] }],
+        [
+            "two revocations of one version",
+            {
+                revocations: [
+                    { version: 2, forRemote: true, signature: "56".repeat(64) },
+                    { version: 2, forRemote: true, signature: "78".repeat(64) },
+                ],
+            },
+        ],
+        [
+            "revocations out of order",
+            {
+                revocations: [
+                    { version: 3, forRemote: true, signature: "56".repeat(64) },
+                    { version: 2, forRemote: true, signature: "78".repeat(64) },
+                ],
+            },
+        ],
         ["views that are not an object", { views: [] }],
         ["one view only", { views: { remote: snapshot() } }],
         ["a view that is not an object", { views: { remote: snapshot(), local: "snapshot" } }],

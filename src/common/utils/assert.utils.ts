@@ -4,7 +4,7 @@ import { isCompressedPoint, isDecimalShannons, isHexBytes, isNonEmptyString, isP
 
 /**
  * Asserts that a value is a byte array, of any length.
- * @param name Name of the value, used in the error message.
+ * @param name Name for the error message.
  * @param value Value to check.
  */
 export function assertAnyBytes(name: string, value: unknown): asserts value is Uint8Array {
@@ -15,9 +15,9 @@ export function assertAnyBytes(name: string, value: unknown): asserts value is U
 
 /**
  * Asserts that a value is a byte array of an exact length.
- * @param name Name of the value, used in the error message.
+ * @param name Name for the error message.
  * @param value Value to check.
- * @param length Exact length the value must have, in bytes.
+ * @param length Exact length in bytes.
  */
 export function assertBytes(name: string, value: unknown, length: number): asserts value is Uint8Array {
     assertAnyBytes(name, value);
@@ -28,7 +28,7 @@ export function assertBytes(name: string, value: unknown, length: number): asser
 
 /**
  * Asserts that a value is a compressed secp256k1 point.
- * @param name Name of the value, used in the error message.
+ * @param name Name for the error message.
  * @param value Value to check.
  */
 export function assertCompressedPoint(name: string, value: unknown): asserts value is Uint8Array {
@@ -38,9 +38,9 @@ export function assertCompressedPoint(name: string, value: unknown): asserts val
 
 /**
  * Asserts that a value is an integer within `[0, max]`.
- * @param name Name of the value, used in the error message.
- * @param value Value to check, which an optional field may leave absent.
- * @param max Highest accepted value, inclusive.
+ * @param name Name for the error message.
+ * @param value Value to check.
+ * @param max Highest accepted value.
  */
 export function assertUnsignedInteger(name: string, value: unknown, max: number): asserts value is number {
     if (!isUnsignedInteger(value, max)) {
@@ -49,10 +49,22 @@ export function assertUnsignedInteger(name: string, value: unknown, max: number)
 }
 
 /**
- * Asserts that a value is a bigint within `[0, max]`.
- * @param name Name of the value, used in the error message.
+ * Asserts that a value is an integer within `[1, max]`.
+ * @param name Name for the error message.
  * @param value Value to check.
- * @param max Highest accepted value, inclusive.
+ * @param max Highest accepted value.
+ */
+export function assertPositiveInteger(name: string, value: unknown, max: number): asserts value is number {
+    if (!isUnsignedInteger(value, max) || value === 0) {
+        throw new RangeError(`${name} must be an integer between 1 and ${max}, got ${String(value)}`);
+    }
+}
+
+/**
+ * Asserts that a value is a bigint within `[0, max]`.
+ * @param name Name for the error message.
+ * @param value Value to check.
+ * @param max Highest accepted value.
  */
 export function assertUnsignedBigInt(name: string, value: bigint, max: bigint): void {
     if (typeof value !== "bigint" || value < 0n || value > max) {
@@ -62,9 +74,9 @@ export function assertUnsignedBigInt(name: string, value: bigint, max: bigint): 
 
 /**
  * Asserts that a value is lowercase hex encoding exactly `byteLength` bytes.
- * @param name Name of the value, used in the error message.
+ * @param name Name for the error message.
  * @param value Value to check.
- * @param byteLength Exact number of bytes the hex must encode.
+ * @param byteLength Exact length in bytes.
  */
 export function assertHexBytes(name: string, value: string, byteLength: number): void {
     if (!isHexBytes(value, byteLength)) {
@@ -75,7 +87,7 @@ export function assertHexBytes(name: string, value: string, byteLength: number):
 
 /**
  * Asserts that a value is a function.
- * @param name Name of the value, used in the error message.
+ * @param name Name for the error message.
  * @param value Value to check.
  */
 export function assertFunction(name: string, value: unknown): asserts value is (...args: never[]) => unknown {
@@ -84,7 +96,7 @@ export function assertFunction(name: string, value: unknown): asserts value is (
 
 /**
  * Asserts that a value is a string, empty included.
- * @param name Name of the value, used in the error message.
+ * @param name Name for the error message.
  * @param value Value to check.
  */
 export function assertString(name: string, value: unknown): asserts value is string {
@@ -95,7 +107,7 @@ export function assertString(name: string, value: unknown): asserts value is str
 
 /**
  * Asserts that a value is a non-empty string.
- * @param name Name of the value, used in the error message.
+ * @param name Name for the error message.
  * @param value Value to check.
  */
 export function assertNonEmptyString(name: string, value: string): void {
@@ -106,7 +118,7 @@ export function assertNonEmptyString(name: string, value: string): void {
 
 /**
  * Asserts that a value is an amount in decimal shannons.
- * @param name Name of the value, used in the error message.
+ * @param name Name for the error message.
  * @param value Value to check.
  */
 export function assertDecimalShannons(name: string, value: string): void {
@@ -117,7 +129,7 @@ export function assertDecimalShannons(name: string, value: string): void {
 
 /**
  * Asserts that a value is a boolean.
- * @param name Name of the value, used in the error message.
+ * @param name Name for the error message.
  * @param value Value to check.
  */
 export function assertBoolean(name: string, value: unknown): asserts value is boolean {
@@ -128,9 +140,9 @@ export function assertBoolean(name: string, value: unknown): asserts value is bo
 
 /**
  * Asserts that a value is one of a closed set of string values.
- * @param name Name of the value, used in the error message.
+ * @param name Name for the error message.
  * @param value Value to check.
- * @param values The accepted values.
+ * @param values Accepted values.
  */
 export function assertOneOf<Values extends readonly string[]>(
     name: string,
@@ -145,7 +157,7 @@ export function assertOneOf<Values extends readonly string[]>(
 
 /**
  * Asserts that a value is a script: a 32-byte code hash, a hash type CKB defines, and args of any length.
- * @param name Name of the value, used in the error messages.
+ * @param name Name for the error message.
  * @param value Value to check.
  */
 export function assertScript(name: string, value: unknown): asserts value is Script {
@@ -155,7 +167,7 @@ export function assertScript(name: string, value: unknown): asserts value is Scr
 
 /**
  * Asserts that a value is a script template: a code hash and a hash type, no args.
- * @param name Name of the value, used in the error messages.
+ * @param name Name for the error message.
  * @param value Value to check.
  */
 export function assertScriptTemplate(name: string, value: unknown): asserts value is ScriptTemplate {
@@ -166,9 +178,9 @@ export function assertScriptTemplate(name: string, value: unknown): asserts valu
 
 /**
  * Asserts that a timing option is a whole number of milliseconds a timer can take.
- * @param name Name of the option, used in the error message.
+ * @param name Name for the error message.
  * @param value Value to check.
- * @param min Lowest accepted value, inclusive.
+ * @param min Lowest accepted value.
  */
 export function assertTimerDelayMs(name: string, value: number, min: number): void {
     if (!isUnsignedInteger(value, MAX_TIMER_DELAY_MS) || value < min) {
@@ -178,7 +190,7 @@ export function assertTimerDelayMs(name: string, value: number, min: number): vo
 
 /**
  * Asserts that a value is an out point: a 32-byte tx hash and an index that fits in a u32.
- * @param name Name of the value, used in the error messages.
+ * @param name Name for the error message.
  * @param value Value to check.
  */
 export function assertOutPoint(name: string, value: unknown): asserts value is OutPoint {

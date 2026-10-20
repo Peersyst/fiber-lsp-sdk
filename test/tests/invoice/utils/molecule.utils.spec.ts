@@ -31,28 +31,13 @@ describe("readInvoiceMoleculeTable", () => {
         expect(hexes(readInvoiceMoleculeTable(hexToBytes("0f0000000c0000000d000000aabbcc"), 2, "t"))).toEqual(["aa", "bbcc"]);
     });
 
-    it("reads a field that is empty, its offset equal to the next one", () => {
-        expect(hexes(readInvoiceMoleculeTable(hexToBytes("0d0000000c0000000c000000aa"), 2, "t"))).toEqual(["", "aa"]);
-    });
-
-    it.each([
-        ["shorter than its size", "100000000c0000000d000000aabbcc", "must be exactly as long as its size says"],
-        ["longer than its size", "0e0000000c0000000d000000aabbcc", "must be exactly as long as its size says"],
-        ["shorter than a size", "0f0000", "must be exactly as long as its size says"],
-        ["a size and no offsets", "04000000", "must have exactly 2 fields"],
-        ["a size and half an offset", "060000000c00", "must have a whole header"],
-        ["a first offset that is not a multiple of four", "0d0000000900000000aabbccdd", "must have a whole header"],
-        ["a first offset inside the size", "0800000004000000", "must have a whole header"],
-        ["a first offset past the end", "080000000c000000", "must have a whole header"],
-        ["one field more", "13000000100000001100000012000000aabbcc", "must have exactly 2 fields"],
-        ["offsets out of order", "0e0000000c0000000b000000aabb", "must have offsets in order"],
-    ])("refuses a table %s", (_, hex, reason) => {
-        expect(invoiceRefusal(() => readInvoiceMoleculeTable(hexToBytes(hex), 2, "data"))).toEqual(new InvoiceError("data", reason));
-    });
-
-    it("says one field when a table has one", () => {
-        expect(invoiceRefusal(() => readInvoiceMoleculeTable(hexToBytes("0f0000000c0000000d000000aabbcc"), 1, "data")).reason).toBe(
-            "must have exactly 1 field",
+    // The faults themselves are the common reader's: what is the invoice's is the error and the path it names.
+    it("refuses a broken table with an InvoiceError at its path, in the reader's words", () => {
+        expect(invoiceRefusal(() => readInvoiceMoleculeTable(hexToBytes("100000000c0000000d000000aabbcc"), 2, "data"))).toEqual(
+            new InvoiceError("data", "must be exactly as long as its size says"),
+        );
+        expect(invoiceRefusal(() => readInvoiceMoleculeTable(hexToBytes("0f0000000c0000000d000000aabbcc"), 3, "data"))).toEqual(
+            new InvoiceError("data", "must have exactly 3 fields"),
         );
     });
 });

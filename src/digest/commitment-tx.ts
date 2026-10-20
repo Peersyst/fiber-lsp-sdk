@@ -3,14 +3,14 @@ import type { Script } from "../common";
 import {
     COMPRESSED_POINT_LENGTH,
     MAX_AMOUNT_SHANNONS,
+    UINT64_LENGTH,
     assertAnyBytes,
     assertBytes,
     assertOneOf,
+    assertOutPoint,
     assertUnsignedBigInt,
     assertUnsignedInteger,
     blake160,
-    ckbBlake2b,
-    uint128Le,
     uint64Le,
 } from "../common";
 import type { FiberChannelKeys } from "../derivation";
@@ -21,20 +21,26 @@ import {
     FULL_PAYMENT_HASH_FEATURE_BYTE,
     MAX_CAPACITY_SHANNONS,
     MAX_SINCE_PAYLOAD,
+    REVOCATION_LOCK_ARGS_LENGTH,
     SINCE_RELATIVE_EPOCH_FLAGS,
 } from "./digest.constants";
 import type { CommitmentLockLayout, CommitmentTxInput } from "./digest.types";
 import { calculateCommitmentTxFee } from "./fee";
 import { buildSettlementWitness } from "./settlement-witness";
-import { aggregateXOnlyPubkey, moleculeCellInput, moleculeCellOutput, moleculeRawTransaction, subtractTxFee, uint64Be } from "./utils";
+import { computeTxMessage } from "./tx-message";
+import { aggregateXOnlyPubkey, commitmentCellValue, uint64Be } from "./utils";
+
+// Both fields sit after the 20-byte key hash, at the same offsets in a commitment's args and in a revocation's.
+const LOCK_ARGS_DELAY_OFFSET = 20;
+const LOCK_ARGS_VERSION_OFFSET = LOCK_ARGS_DELAY_OFFSET + UINT64_LENGTH;
 
 /**
- * Builds the commitment lock args: key hash, delay, version, settlement hash, trailing zero, and the feature byte under `fullPaymentHash`.
- * @param xonlyAggregatedPubkey The 32-byte x-only aggregate of the funding pubkeys in role order.
- * @param commitmentDelayEpoch The negotiated delay as an `EpochNumberWithFraction` full value.
- * @param commitmentNumber The commitment number this lock versions.
- * @param settlementWitness The settlement witness the args commit to.
- * @param lockLayout The layout the args are written under.
+ * Key hash, delay, version, settlement hash, trailing zero, and the feature byte under `fullPaymentHash`.
+ * @param xonlyAggregatedPubkey The x-only aggregate of the funding pubkeys in role order.
+ * @param commitmentDelayEpoch The full `EpochNumberWithFraction` value.
+ * @param commitmentNumber The version.
+ * @param settlementWitness The witness the args commit to.
+ * @param lockLayout The layout.
  * @returns The 57 bytes under `legacy`, 58 under `fullPaymentHash`.
  */
 export function buildCommitmentLockArgs(
@@ -59,8 +65,8 @@ export function buildCommitmentLockArgs(
 }
 
 /**
- * Port of fiber's `CommitmentContractFeatures::from_lock_args`: the layout a commitment lock's args were written under.
- * @param args The commitment lock args as the node attached them.
+ * Port of fiber's `CommitmentContractFeatures::from_lock_args`.
+ * @param args The commitment lock args.
  * @returns The layout.
  */
 export function readCommitmentLockLayout(args: Uint8Array): CommitmentLockLayout {
@@ -81,15 +87,59 @@ export function readCommitmentLockLayout(args: Uint8Array): CommitmentLockLayout
 }
 
 /**
- * Recomputes the digest of a commitment tx: what fiber's `compute_tx_message` produces over `build_commitment_tx_and_settlement_data`.
- * @param keys The channel's four secrets.
- * @param input Everything the tx is a function of, as the node attached it.
- * @returns The 32-byte digest a compliant signing request must carry.
+ * Reads the delay out of a commitment lock's args or a revoked cell's.
+ * @param args The 36, 57 or 58 bytes.
+ * @returns The full `EpochNumberWithFraction` value, flags stripped.
+ */
+export function readCommitmentLockDelay(args: Uint8Array): bigint {
+    const since = readLockArgsField(args, LOCK_ARGS_DELAY_OFFSET, true);
+    if ((since & ~MAX_SINCE_PAYLOAD) !== SINCE_RELATIVE_EPOCH_FLAGS) {
+        throw new TypeError(`commitment lock args must carry a relative epoch delay, got the since 0x${since.toString(16)}`);
+    }
+    return since & MAX_SINCE_PAYLOAD;
+}
+
+/**
+ * Reads the version out of a commitment lock's args or a revoked cell's.
+ * @param args The 36, 57 or 58 bytes.
+ * @returns The commitment number.
+ */
+export function readCommitmentLockVersion(args: Uint8Array): number {
+    const version = readLockArgsField(args, LOCK_ARGS_VERSION_OFFSET, false);
+    if (version > BigInt(MAX_COMMITMENT_NUMBER)) {
+        throw new RangeError(`commitment lock args must carry a version of at most ${MAX_COMMITMENT_NUMBER}, got ${version}`);
+    }
+    return Number(version);
+}
+
+/**
+ * Reads one u64 of the 36 bytes a commitment's args and a revocation's share, after checking the length.
+ * @param args The args.
+ * @param offset Where the u64 starts.
+ * @param littleEndian The delay is little-endian, the version big-endian.
+ * @returns The value.
+ */
+function readLockArgsField(args: Uint8Array, offset: number, littleEndian: boolean): bigint {
+    assertAnyBytes("commitment lock args", args);
+    const { legacy, fullPaymentHash } = COMMITMENT_LOCK_ARGS_LENGTHS;
+    if (args.length !== REVOCATION_LOCK_ARGS_LENGTH && args.length !== legacy && args.length !== fullPaymentHash) {
+        throw new TypeError(
+            `commitment lock args must be ${REVOCATION_LOCK_ARGS_LENGTH}, ${legacy} or ${fullPaymentHash} bytes, got ${args.length}`,
+        );
+    }
+    return new DataView(args.buffer, args.byteOffset, args.byteLength).getBigUint64(offset, littleEndian);
+}
+
+/**
+ * Fiber's `compute_tx_message` over `build_commitment_tx_and_settlement_data`.
+ * @param keys The channel's secrets.
+ * @param input What the tx is a function of.
+ * @returns The 32-byte digest.
  */
 export function computeCommitmentTxDigest(keys: FiberChannelKeys, input: CommitmentTxInput): Uint8Array {
+    assertOutPoint("fundingOutPoint", input.fundingOutPoint);
     assertBytes("remoteFundingPubkey", input.remoteFundingPubkey, COMPRESSED_POINT_LENGTH);
-    assertUnsignedBigInt("toLocalShannons", input.toLocalShannons, MAX_AMOUNT_SHANNONS);
-    assertUnsignedBigInt("toRemoteShannons", input.toRemoteShannons, MAX_AMOUNT_SHANNONS);
+    assertUnsignedBigInt("liquidCapacityShannons", input.liquidCapacityShannons, MAX_AMOUNT_SHANNONS);
     assertUnsignedBigInt("localReservedCkbShannons", input.localReservedCkbShannons, MAX_CAPACITY_SHANNONS);
     assertUnsignedBigInt("remoteReservedCkbShannons", input.remoteReservedCkbShannons, MAX_CAPACITY_SHANNONS);
     assertUnsignedBigInt("settlementLocalShannons", input.settlementLocalShannons, MAX_AMOUNT_SHANNONS);
@@ -118,20 +168,14 @@ export function computeCommitmentTxDigest(keys: FiberChannelKeys, input: Commitm
     );
     const lock: Script = { ...input.commitmentLock, args: lockArgs };
 
-    const fee = calculateCommitmentTxFee(input);
-    const liquidCapacity = input.toLocalShannons + input.toRemoteShannons;
-    assertUnsignedBigInt("liquid capacity", liquidCapacity, MAX_AMOUNT_SHANNONS);
-    const totalReserved = input.localReservedCkbShannons + input.remoteReservedCkbShannons;
-    const capacity = subtractTxFee(isUdt ? totalReserved : liquidCapacity + totalReserved, fee);
-    const outputData = isUdt ? uint128Le(liquidCapacity) : new Uint8Array(0);
-
-    const raw = moleculeRawTransaction({
+    const { capacityShannons, data } = commitmentCellValue(input, calculateCommitmentTxFee(input));
+    return computeTxMessage({
         version: 0,
         cellDeps: [],
         headerDeps: [],
-        inputs: [moleculeCellInput(0n, input.fundingOutPoint)],
-        outputs: [moleculeCellOutput(capacity, lock, input.udtTypeScript)],
-        outputsData: [outputData],
+        inputs: [{ since: 0n, previousOutput: input.fundingOutPoint }],
+        outputs: [{ capacityShannons, lock, type: input.udtTypeScript }],
+        outputsData: [data],
+        witnesses: [],
     });
-    return ckbBlake2b(raw);
 }

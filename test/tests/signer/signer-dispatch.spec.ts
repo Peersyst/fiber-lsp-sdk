@@ -1,738 +1,980 @@
-import { schnorr } from "@noble/curves/secp256k1.js";
 import { bytesToHex, hexToBytes } from "@noble/hashes/utils.js";
-import { Session, keyAggExport, keyAggregate, nonceAggregate, nonceGen } from "@scure/btc-signer/musig2.js";
-import type { NonceContext } from "../../../src/derivation";
-import {
-    deriveChannelKeys,
-    deriveChannelSeed,
-    deriveNonceSeed,
-    deriveTlcKey,
-    deriveWalletIdentityKey,
-    pubkeyOf,
-} from "../../../src/derivation";
-import { COMMITMENT_LOCK_MAINNET, COMMITMENT_LOCK_TESTNET, computeCommitmentTxDigest } from "../../../src/digest";
-import type { ISignerStorage } from "../../../src/policy";
-import {
-    ANNOUNCEMENT_SLOT_NUMBER,
-    CHANNEL_ALIAS_KEY_PREFIX,
-    CHANNEL_RECORD_KEY_PREFIX,
-    PolicyEngine,
-    PolicyRefusalError,
-    SignerStore,
-} from "../../../src/policy";
-import type { SignError, SignRequest, SignResult, SignatureMethod, SignerMethod } from "../../../src/protocol";
-import { ProtocolError, SIGNER_METHODS, decodeSignParams } from "../../../src/protocol";
-import type { DispatchOutcome, PendingChannelRegistration } from "../../../src/signer";
-import { SignerDispatch, getBasePublicKeys, getChannelCommitmentPoint, getPublicNonce } from "../../../src/signer";
+import { Session } from "@scure/btc-signer/musig2.js";
+import type { Script } from "../../../src/common";
+import { moleculeScript, moleculeScriptOpt, moleculeTable, uint64Le } from "../../../src/common";
+import { deriveChannelKeys, deriveChannelSeed, deriveNonceSeed, deriveTlcKey, pubkeyOf } from "../../../src/derivation";
+import type { ChannelPolicyRecord, ISignerStorage } from "../../../src/policy";
+import { CHANNEL_ALIAS_KEY_PREFIX, CHANNEL_RECORD_KEY_PREFIX, PolicyEngine, SignerStore } from "../../../src/policy";
+import type { ChannelSigningTransition } from "../../../src/protocol";
+import type { DispatchOutcome, SignerRefusal } from "../../../src/signer";
+import { SignerDispatch, buildChannelOpenMaterial, getPublicNonce } from "../../../src/signer";
+import * as musig2Engine from "../../../src/signer/musig2-engine";
+import type { WireField } from "../../../src/wire";
 import { InMemorySignerStorage } from "../../mocks/policy";
-import { fundedShannonsOf } from "../../utils/channel-opening";
-import { toCommitmentTxInput, toScript } from "../../utils/digest-inputs";
-import type { CommitmentCaseVector } from "../../utils/interop-vectors";
-import { caseOf, loadInteropVectors } from "../../utils/interop-vectors";
-import { SHUTDOWN_NONCE_NUMBER, revocationNonceNumber } from "../../utils/nonce-numbers";
-import { standInAggregatedNonce } from "../../utils/stand-in-nonce";
-import {
-    toCommitmentNumberParamsWire,
-    toPartialSignChannelAnnouncementParamsWire,
-    toPartialSignClosingTxParamsWire,
-    toPartialSignCommitmentTxParamsWire,
-    toPartialSignRevocationParamsWire,
-    toSignSessionWire,
-} from "../../utils/wire-requests";
+import { toScript } from "../../utils/digest-inputs";
+import { resignPeerHalf } from "../../utils/peer-musig";
+import type { SigningChannel } from "../../utils/signing-channel";
+import { openSigningChannel, signingDeviceKeys, signingPeerKeys, signingViewTlcs } from "../../utils/signing-channel";
+import type { SigningCaseVector } from "../../utils/signing-vectors";
+import { loadSigningVectors, signingCaseOf, signingStatusField } from "../../utils/signing-vectors";
 import { withField } from "../../utils/with-field";
 
-const vectors = loadInteropVectors();
-const digest = vectors.digest;
-const REMOTE = digest.remote;
-const MASTER_SEED = hexToBytes(vectors.sdk_scheme.master_seed);
-const CHANNEL_INDEX = vectors.sdk_scheme.channel.channel_index;
-const OTHER_CHANNEL_INDEX = CHANNEL_INDEX + 1;
-const KEYS = deriveChannelKeys(hexToBytes(vectors.sdk_scheme.channel.seed));
-const LOCAL_FUNDING_PUBKEY = pubkeyOf(KEYS.fundingKey);
-const OTHER_KEYS = deriveChannelKeys(deriveChannelSeed(MASTER_SEED, OTHER_CHANNEL_INDEX));
-const REMOTE_KEYS = deriveChannelKeys(hexToBytes(REMOTE.seed));
-const REMOTE_FUNDING_PUBKEY = hexToBytes(REMOTE.funding_pubkey);
-const PEER_NONCE_RAND = new Uint8Array(32).fill(0x07);
+const vectors = loadSigningVectors();
+const KEYS = signingDeviceKeys(vectors);
+const PEER_KEYS = signingPeerKeys(vectors);
+const MASTER_SEED = hexToBytes(vectors.device.master_seed);
+const CHANNEL_INDEX = vectors.device.channel_index;
+const DEVICE_FUNDING_PUBKEY = hexToBytes(vectors.device.funding_pubkey);
+const PEER_FUNDING_PUBKEY = hexToBytes(vectors.peer.funding_pubkey);
+const COMMITMENT_LOCK = { codeHash: hexToBytes(vectors.channel.commitment_lock.code_hash), hashType: "type" } as const;
+const LOCAL_CLOSE_SCRIPT = toScript(vectors.channel.local_close_script);
+const PEER_CLOSE_SCRIPT = toScript(vectors.channel.remote_close_script);
+const FUNDED = "72000000000";
+const UNKNOWN_CHANNEL_ID = `0x${"2e".repeat(32)}`;
+const TYPE_SCRIPT: Script = { codeHash: new Uint8Array(32).fill(0x91), hashType: "type", args: new Uint8Array(32).fill(0x86) };
 
-const CHANNEL_ID = `0x${"1f".repeat(32)}`;
-const OTHER_CHANNEL_ID = `0x${"2e".repeat(32)}`;
-const REQUEST_ID = "0x2a";
-const STATE_VERSION = 7;
-
-const THREE_TLCS = caseOf(digest.commitment_cases, "ckb, three tlcs, for remote");
-const THREE_TLCS_FOR_LOCAL = caseOf(digest.commitment_cases, "ckb, three tlcs, for local");
-const CKB_SHUTDOWN = caseOf(digest.shutdown_cases, "ckb");
-const SEND_SIDE_REVOCATION = caseOf(digest.revocation_cases, "ckb, send side");
-const CKB_ANNOUNCEMENT = caseOf(digest.announcement_cases, "ckb");
-
-const REVOCATION_NONCE_NUMBER = revocationNonceNumber(SEND_SIDE_REVOCATION);
-
-// Opens the three-TLC case's channel, which the commitment requests sign on.
-const OPENING = caseOf(digest.commitment_cases, "ckb, three tlcs channel, opening, for remote");
-const FUNDED = fundedShannonsOf(THREE_TLCS);
-const CLOSE_SCRIPT = toScript(CKB_SHUTDOWN.local_close_script);
-
-// Fiber sorts the keys of a funding spend and the announcement (local first here), and a send-side revocation puts remote first.
-const ORDERED_PUBLIC_KEYS: Record<SignatureMethod, [Uint8Array, Uint8Array]> = {
-    partial_sign_commitment_tx: [LOCAL_FUNDING_PUBKEY, REMOTE_FUNDING_PUBKEY],
-    partial_sign_closing_tx: [LOCAL_FUNDING_PUBKEY, REMOTE_FUNDING_PUBKEY],
-    partial_sign_revocation: [REMOTE_FUNDING_PUBKEY, LOCAL_FUNDING_PUBKEY],
-    partial_sign_channel_announcement: [LOCAL_FUNDING_PUBKEY, REMOTE_FUNDING_PUBKEY],
-};
-
-const AGGREGATED_NONCE = standInAggregatedNonce(0x01);
-const OTHER_AGGREGATED_NONCE = standInAggregatedNonce(0x02);
-
-type SigningCase = {
-    method: SignatureMethod;
-    published: SignerMethod;
-    nonceNumber: number | undefined;
-    context: NonceContext;
-    digest: string;
-};
-
-const SIGNING_CASES: SigningCase[] = [
-    {
-        method: "partial_sign_commitment_tx",
-        published: "get_commitment_pub_nonce",
-        nonceNumber: THREE_TLCS.commitment_number,
-        context: "COMMITMENT",
-        digest: THREE_TLCS.digest,
-    },
-    {
-        method: "partial_sign_closing_tx",
-        published: "get_commitment_pub_nonce",
-        nonceNumber: SHUTDOWN_NONCE_NUMBER,
-        context: "COMMITMENT",
-        digest: CKB_SHUTDOWN.digest,
-    },
-    {
-        method: "partial_sign_revocation",
-        published: "get_revocation_pub_nonce",
-        nonceNumber: REVOCATION_NONCE_NUMBER,
-        context: "REVOKE",
-        digest: SEND_SIDE_REVOCATION.digest,
-    },
-    {
-        method: "partial_sign_channel_announcement",
-        published: "get_channel_announcement_pub_nonce",
-        nonceNumber: undefined,
-        context: "ANNOUNCEMENT",
-        digest: CKB_ANNOUNCEMENT.digest,
-    },
+const SIGNED: readonly ChannelSigningTransition[] = [
+    "SendCommitmentSigned",
+    "CompleteReceivedCommitment",
+    "SendRevokeAndAck",
+    "CompleteReceivedRevokeAndAck",
+    "SendClosingSigned",
 ];
 
-// Regenerated per use: scure zeroes a secret nonce buffer once it signs.
-function peerNonces() {
-    return nonceGen(REMOTE_FUNDING_PUBKEY, REMOTE_KEYS.fundingKey, undefined, undefined, undefined, PEER_NONCE_RAND);
+function caseOf(transition: ChannelSigningTransition): SigningCaseVector {
+    return signingCaseOf(vectors, transition);
 }
 
-function sessionWire(method: SignatureMethod, aggregatedNonce: Uint8Array, messageHex: string) {
-    const [firstKey, secondKey] = ORDERED_PUBLIC_KEYS[method];
-    return toSignSessionWire([bytesToHex(firstKey), bytesToHex(secondKey)], bytesToHex(aggregatedNonce), messageHex);
+function statusOf(transition: ChannelSigningTransition): WireField {
+    return signingStatusField(caseOf(transition));
 }
 
-function commitmentParams(kase: CommitmentCaseVector, aggregatedNonce: Uint8Array): Record<string, unknown> {
-    const session = sessionWire("partial_sign_commitment_tx", aggregatedNonce, kase.digest);
-    return toPartialSignCommitmentTxParamsWire(kase, REMOTE, session, kase.commitment_number);
+function mutated(status: WireField, path: string, replacement: unknown): WireField {
+    return { value: withField(status.value, path, replacement), path: status.path };
 }
 
-function signingParams(method: SignatureMethod, aggregatedNonce: Uint8Array): Record<string, unknown> {
-    switch (method) {
-        case "partial_sign_commitment_tx":
-            return commitmentParams(THREE_TLCS, aggregatedNonce);
-        case "partial_sign_closing_tx": {
-            const session = sessionWire(method, aggregatedNonce, CKB_SHUTDOWN.digest);
-            return toPartialSignClosingTxParamsWire(CKB_SHUTDOWN, REMOTE, session, SHUTDOWN_NONCE_NUMBER);
-        }
-        case "partial_sign_revocation": {
-            const session = sessionWire(method, aggregatedNonce, SEND_SIDE_REVOCATION.digest);
-            return toPartialSignRevocationParamsWire(SEND_SIDE_REVOCATION, REMOTE, session, REVOCATION_NONCE_NUMBER);
-        }
-        case "partial_sign_channel_announcement": {
-            const session = sessionWire(method, aggregatedNonce, CKB_ANNOUNCEMENT.digest);
-            return toPartialSignChannelAnnouncementParamsWire(CKB_ANNOUNCEMENT, REMOTE, session);
-        }
-    }
+// The status as it now stands, its peer half signed again over it: what a node that changed the request would send.
+function resigned(status: WireField, randByte = 0x51): WireField {
+    return resignPeerHalf(status, KEYS, PEER_KEYS.fundingKey, randByte);
 }
 
-function paramsFor(method: SignerMethod): Record<string, unknown> {
-    switch (method) {
-        case "get_base_public_keys":
-        case "get_channel_announcement_pub_nonce":
-            return {};
-        case "get_commitment_point":
-        case "get_commitment_pub_nonce":
-        case "get_revocation_pub_nonce":
-        case "get_settlement_keys":
-            return { commitment_number: "0x5" };
-        default:
-            return signingParams(method, AGGREGATED_NONCE);
-    }
+function keyAggContextWire(first: Uint8Array, second: Uint8Array): string {
+    return `0x0000000002${bytesToHex(first)}${bytesToHex(second)}`;
 }
 
-function request(method: SignerMethod, params: Record<string, unknown>, overrides: Partial<SignRequest> = {}): SignRequest {
-    return { requestId: REQUEST_ID, channelId: CHANNEL_ID, method, params, stateVersion: STATE_VERSION, ...overrides };
+// A revocation's output in molecule hex, fiber's `EntityHex`.
+function revocationOutputWire(capacityShannons: bigint, lock: Script, type: Script | null): string {
+    return `0x${bytesToHex(moleculeTable([uint64Le(capacityShannons), moleculeScript(lock), moleculeScriptOpt(type)]))}`;
 }
 
-type Harness = { dispatch: SignerDispatch; policy: PolicyEngine; store: SignerStore; storage: InMemorySignerStorage };
+// The capacity both vector revocations pay: the funding cell less the commitment fee.
+const REVOCATION_CAPACITY = 0x1689bac637n;
 
-function newDispatch(commitmentLock = COMMITMENT_LOCK_TESTNET, storage = new InMemorySignerStorage()): Harness {
-    const store = new SignerStore(storage);
-    const policy = new PolicyEngine(store);
-    return { dispatch: new SignerDispatch({ masterSeed: MASTER_SEED, commitmentLock, policy }), policy, store, storage };
+function signedOf(outcome: DispatchOutcome): Extract<DispatchOutcome, { kind: "signed" }> {
+    if (outcome.kind !== "signed") throw new Error(`expected a signature, got ${JSON.stringify(outcome)}`);
+    return outcome;
 }
 
-// Approves the payments of the vectors' offered TLCs, without which none of their commitments signs.
-async function registered(commitmentLock = COMMITMENT_LOCK_TESTNET): Promise<Harness> {
-    const harness = newDispatch(commitmentLock);
-    await harness.dispatch.channelRegistered(CHANNEL_ID, harness.dispatch.prepareChannelRegistration(CHANNEL_INDEX, FUNDED, CLOSE_SCRIPT));
-    await recordOfferedIntents(harness.policy);
-    return harness;
-}
-
-async function opened(): Promise<Harness> {
-    const harness = await registered();
-    await openChannel(harness.dispatch);
-    return harness;
-}
-
-async function openChannel(dispatch: SignerDispatch): Promise<void> {
-    partialSignatureOf(await dispatch.handle(request("partial_sign_commitment_tx", commitmentParams(OPENING, AGGREGATED_NONCE))));
-}
-
-// OPENING at another number: a state fiber's vectors do not hold.
-function renumbered(commitmentNumber: number): CommitmentCaseVector {
-    const kase = { ...OPENING, commitment_number: commitmentNumber };
-    return { ...kase, digest: bytesToHex(computeCommitmentTxDigest(KEYS, toCommitmentTxInput(kase, REMOTE))) };
-}
-
-async function recordOfferedIntents(policy: PolicyEngine): Promise<void> {
-    for (const tlc of THREE_TLCS.tlcs) {
-        if (tlc.direction === "offered") await policy.recordDebitIntent(tlc.payment_hash, tlc.amount);
-    }
-}
-
-function resultOf(outcome: DispatchOutcome): SignResult {
-    if (outcome.kind !== "result") throw new Error(`expected a result, got ${JSON.stringify(outcome)}`);
-    return outcome.result;
-}
-
-function refusalOf(outcome: DispatchOutcome): SignError {
-    if (outcome.kind !== "refusal") throw new Error(`expected a refusal, got ${JSON.stringify(outcome)}`);
-    return outcome.error;
+function refusedOf(outcome: DispatchOutcome): Extract<DispatchOutcome, { kind: "refused" }> {
+    if (outcome.kind !== "refused") throw new Error(`expected a refusal, got ${outcome.kind}`);
+    return outcome;
 }
 
 function faultOf(outcome: DispatchOutcome): unknown {
-    if (outcome.kind !== "fault") throw new Error(`expected a fault, got ${JSON.stringify(outcome)}`);
+    if (outcome.kind !== "fault") throw new Error(`expected a fault, got ${outcome.kind}`);
     return outcome.cause;
 }
 
-function pubNonceOf(outcome: DispatchOutcome): Uint8Array {
-    const result = resultOf(outcome);
-    if (result.kind !== "pub_nonce") throw new Error(`expected a public nonce, got ${result.kind}`);
-    return result.pubNonce;
-}
-
-function partialSignatureOf(outcome: DispatchOutcome): Uint8Array {
-    const result = resultOf(outcome);
-    if (result.kind !== "partial_signature") throw new Error(`expected a partial signature, got ${result.kind}`);
-    return result.partialSignature;
-}
-
-function writes(storage: InMemorySignerStorage): string[] {
+function writesOf(storage: InMemorySignerStorage): string[] {
     return storage.ops.filter((op) => op.startsWith("set "));
+}
+
+// Handles a status that must be refused before the claim: nothing is written, nor is the record changed.
+async function refusedUnclaimed(channel: SigningChannel, status: WireField, channelId = channel.channelId): Promise<SignerRefusal> {
+    const before = [...channel.storage.map.entries()];
+    channel.storage.ops.length = 0;
+    const outcome = refusedOf(await channel.dispatch.handle(channelId, status));
+    expect(writesOf(channel.storage)).toEqual([]);
+    expect([...channel.storage.map.entries()]).toEqual(before);
+    return outcome.error;
+}
+
+async function recordOf(channel: SigningChannel): Promise<ChannelPolicyRecord> {
+    const record = await channel.store.getChannelRecord(channel.channelIndex);
+    if (record === null) throw new Error("the channel holds no record");
+    return record;
+}
+
+async function updateRecord(channel: SigningChannel, update: (record: ChannelPolicyRecord) => ChannelPolicyRecord): Promise<void> {
+    await channel.store.updateChannelRecord(channel.channelIndex, (current) => {
+        if (current === null) throw new Error("the channel holds no record");
+        return update(current);
+    });
+}
+
+function partialSignatureVerifies(signed: Extract<DispatchOutcome, { kind: "signed" }>, status: WireField): boolean {
+    const content = (status.value as { content: { key_agg_ctx: string; agg_nonce: string } }).content;
+    const evidence = (status.value as { session_evidence: { peer_public_nonce: string } }).session_evidence;
+    const keyAgg = hexToBytes(content.key_agg_ctx.slice(2));
+    const keys = [keyAgg.slice(5, 38), keyAgg.slice(38)];
+    const deviceIndex = bytesToHex(keys[0] ?? new Uint8Array()) === vectors.device.funding_pubkey ? 0 : 1;
+    const deviceNonce = getPublicNonce(KEYS, signed.slot.commitmentNumber, signed.slot.context);
+    const peerNonce = hexToBytes(evidence.peer_public_nonce.slice(2));
+    const nonces = deviceIndex === 0 ? [deviceNonce, peerNonce] : [peerNonce, deviceNonce];
+    const message = hexToBytes(caseOf(signed.transition).expected.message);
+    const session = new Session(hexToBytes(content.agg_nonce.slice(2)), keys, message);
+    return session.partialSigVerify(signed.partialSignature, nonces, deviceIndex);
 }
 
 describe("constructor", () => {
     it.each([31, 33])("rejects a master seed of %i bytes", (length) => {
-        const { policy } = newDispatch();
-        expect(() => new SignerDispatch({ masterSeed: new Uint8Array(length), commitmentLock: COMMITMENT_LOCK_TESTNET, policy })).toThrow(
+        const policy = new PolicyEngine(new SignerStore(new InMemorySignerStorage()));
+        expect(
+            () =>
+                new SignerDispatch({
+                    masterSeed: new Uint8Array(length),
+                    commitmentLock: COMMITMENT_LOCK,
+                    fundingLockCellDepsCount: 2,
+                    policy,
+                }),
+        ).toThrow(TypeError);
+    });
+
+    it("rejects a commitment lock that is not a script template", () => {
+        const policy = new PolicyEngine(new SignerStore(new InMemorySignerStorage()));
+        const commitmentLock = { codeHash: new Uint8Array(31), hashType: "type" as const };
+        expect(() => new SignerDispatch({ masterSeed: MASTER_SEED, commitmentLock, fundingLockCellDepsCount: 2, policy })).toThrow(
             TypeError,
         );
     });
 
-    it("keeps its own copy of the seed, so the host may discard its buffer", () => {
-        const { policy } = newDispatch();
-        const seed = Uint8Array.from(MASTER_SEED);
-        const dispatch = new SignerDispatch({ masterSeed: seed, commitmentLock: COMMITMENT_LOCK_TESTNET, policy });
-        seed.fill(0);
-        expect(dispatch.prepareChannelRegistration(CHANNEL_INDEX, FUNDED, CLOSE_SCRIPT).registration.fundingPubkey).toEqual(
-            LOCAL_FUNDING_PUBKEY,
-        );
+    it.each([1, 255])("takes a funding lock cell deps count of %p, the bounds included", (fundingLockCellDepsCount) => {
+        const policy = new PolicyEngine(new SignerStore(new InMemorySignerStorage()));
+        expect(
+            () => new SignerDispatch({ masterSeed: MASTER_SEED, commitmentLock: COMMITMENT_LOCK, fundingLockCellDepsCount, policy }),
+        ).not.toThrow();
     });
 
-    it("re-derives the same channel on a fresh instance over the same storage", async () => {
-        const first = await registered();
-        const second = new SignerDispatch({
-            masterSeed: Uint8Array.from(MASTER_SEED),
-            commitmentLock: COMMITMENT_LOCK_TESTNET,
-            policy: first.policy,
+    // Fiber's funding lock has cell deps, and the commitment fee is sized over them: none is no network.
+    it.each([0, -1, 1.5, 256])("rejects a funding lock cell deps count of %p", (fundingLockCellDepsCount) => {
+        const policy = new PolicyEngine(new SignerStore(new InMemorySignerStorage()));
+        expect(
+            () => new SignerDispatch({ masterSeed: MASTER_SEED, commitmentLock: COMMITMENT_LOCK, fundingLockCellDepsCount, policy }),
+        ).toThrow(new RangeError(`fundingLockCellDepsCount must be an integer between 1 and 255, got ${fundingLockCellDepsCount}`));
+    });
+
+    it("keeps its own copy of the seed, so the host may discard its buffer", async () => {
+        const channel = await openSigningChannel(vectors, caseOf("SendCommitmentSigned"));
+        const masterSeed = Uint8Array.from(MASTER_SEED);
+        const dispatch = new SignerDispatch({
+            masterSeed,
+            commitmentLock: COMMITMENT_LOCK,
+            fundingLockCellDepsCount: 2,
+            policy: channel.policy,
         });
-        const envelope = request("get_base_public_keys", {});
-        await expect(second.handle(envelope)).resolves.toEqual(await first.dispatch.handle(envelope));
+        masterSeed.fill(0);
+        const signed = signedOf(await dispatch.handle(channel.channelId, statusOf("SendCommitmentSigned")));
+        expect(bytesToHex(signed.partialSignature)).toBe(caseOf("SendCommitmentSigned").expected.partial_signature);
     });
 });
 
-describe("prepareChannelRegistration", () => {
-    it("derives the base public keys and the delegated settlement key of the index", () => {
-        const { dispatch } = newDispatch();
-        expect(dispatch.prepareChannelRegistration(CHANNEL_INDEX, FUNDED, CLOSE_SCRIPT)).toEqual<PendingChannelRegistration>({
-            channelIndex: CHANNEL_INDEX,
-            fundedShannons: FUNDED,
-            localCloseScript: CLOSE_SCRIPT,
-            registration: {
-                fundingPubkey: LOCAL_FUNDING_PUBKEY,
-                tlcBasePubkey: pubkeyOf(KEYS.tlcBaseKey),
-                localSettlementKey: KEYS.tlcBaseKey,
-            },
-        });
+describe("prepareChannelOpen", () => {
+    const policy = new PolicyEngine(new SignerStore(new InMemorySignerStorage()));
+    const dispatch = new SignerDispatch({ masterSeed: MASTER_SEED, commitmentLock: COMMITMENT_LOCK, fundingLockCellDepsCount: 2, policy });
+
+    it("derives the opening material of the index, the one the channel signs under later", () => {
+        const pending = dispatch.prepareChannelOpen(CHANNEL_INDEX, FUNDED, LOCAL_CLOSE_SCRIPT);
+        expect(pending.material).toEqual(buildChannelOpenMaterial(KEYS));
+        expect(bytesToHex(pending.material.fundingPubkey)).toBe(vectors.device.funding_pubkey);
+        expect(pending.material.channelAnnouncementNonce).toBeNull();
     });
 
-    it("never hands out the funding key", () => {
-        const { registration } = newDispatch().dispatch.prepareChannelRegistration(CHANNEL_INDEX, FUNDED, CLOSE_SCRIPT);
-        for (const value of Object.values(registration)) expect(bytesToHex(value)).not.toBe(bytesToHex(KEYS.fundingKey));
+    it("never hands out a secret", () => {
+        const pending = dispatch.prepareChannelOpen(CHANNEL_INDEX, FUNDED, LOCAL_CLOSE_SCRIPT);
+        const published = Object.values(pending.material).flatMap((value) => (value instanceof Uint8Array ? [bytesToHex(value)] : []));
+        const secrets = [MASTER_SEED, KEYS.fundingKey, KEYS.tlcBaseKey, KEYS.musig2BaseNonce, KEYS.commitmentSeed].map(bytesToHex);
+        for (const value of published) for (const secret of secrets) expect(value).not.toContain(secret);
     });
 
-    it("derives the channel of any index, and keeps that index", () => {
-        const { dispatch } = newDispatch();
-        expect(dispatch.prepareChannelRegistration(OTHER_CHANNEL_INDEX, "9900000000", CLOSE_SCRIPT)).toEqual<PendingChannelRegistration>({
-            channelIndex: OTHER_CHANNEL_INDEX,
-            fundedShannons: "9900000000",
-            localCloseScript: CLOSE_SCRIPT,
-            registration: { ...getBasePublicKeys(OTHER_KEYS), localSettlementKey: OTHER_KEYS.tlcBaseKey },
-        });
+    it("derives each index's own channel, and keeps the index and the funded amount", () => {
+        const pending = dispatch.prepareChannelOpen(CHANNEL_INDEX + 1, FUNDED, LOCAL_CLOSE_SCRIPT);
+        const other = deriveChannelKeys(deriveChannelSeed(MASTER_SEED, CHANNEL_INDEX + 1));
+        expect(pending.material).toEqual(buildChannelOpenMaterial(other));
+        expect(pending.channelIndex).toBe(CHANNEL_INDEX + 1);
+        expect(pending.fundedShannons).toBe(FUNDED);
     });
 
-    it.each(["", "01", "1.5", "-1", "1e3", "abc"])("rejects the funded amount %p at preparation, ahead of any round trip", (funded) => {
-        expect(() => newDispatch().dispatch.prepareChannelRegistration(CHANNEL_INDEX, funded, CLOSE_SCRIPT)).toThrow(TypeError);
+    it("keeps a copy of the close script, which the caller's later writes do not reach", () => {
+        const script = toScript(vectors.channel.local_close_script);
+        const pending = dispatch.prepareChannelOpen(CHANNEL_INDEX, FUNDED, script);
+        script.args.fill(0);
+        script.codeHash.fill(0);
+        expect(pending.localCloseScript).toEqual(LOCAL_CLOSE_SCRIPT);
     });
 
-    it.each([
-        ["a short code hash", { ...CLOSE_SCRIPT, codeHash: new Uint8Array(31) }],
-        ["an unknown hash type", { ...CLOSE_SCRIPT, hashType: "data3" as never }],
-        ["args that are not bytes", { ...CLOSE_SCRIPT, args: "00" as never }],
-    ])("rejects a close script with %s at preparation, naming it", (_, closeScript) => {
-        expect(() => newDispatch().dispatch.prepareChannelRegistration(CHANNEL_INDEX, FUNDED, closeScript)).toThrow(/^localCloseScript\./);
-    });
-
-    // Otherwise the node would open a channel the registration then refuses.
-    it("rejects a funded amount below the reserve over the close script at preparation", () => {
-        expect(() => newDispatch().dispatch.prepareChannelRegistration(CHANNEL_INDEX, "9899999999", CLOSE_SCRIPT)).toThrow(
-            new RangeError("fundedShannons 9899999999 is below the 9900000000 the device's reserve takes over that close script"),
-        );
-    });
-
-    it("files a copy of the close script, which the caller's later writes do not reach", async () => {
-        const { dispatch, store } = newDispatch();
-        const closeScript = { ...CLOSE_SCRIPT, codeHash: CLOSE_SCRIPT.codeHash.slice(), args: CLOSE_SCRIPT.args.slice() };
-        const pending = dispatch.prepareChannelRegistration(CHANNEL_INDEX, FUNDED, closeScript);
-        closeScript.codeHash.fill(0xff);
-        closeScript.args.fill(0xff);
-        expect(pending.localCloseScript).toEqual(CLOSE_SCRIPT);
-
-        await dispatch.channelRegistered(CHANNEL_ID, pending);
-        const registered = newDispatch();
-        await registered.dispatch.channelRegistered(
-            CHANNEL_ID,
-            registered.dispatch.prepareChannelRegistration(CHANNEL_INDEX, FUNDED, CLOSE_SCRIPT),
-        );
-        await expect(store.getChannelRecord(CHANNEL_INDEX)).resolves.toEqual(await registered.store.getChannelRecord(CHANNEL_INDEX));
-    });
-
-    // Buffer's slice shares memory, so the copy must not use it.
-    it("files a copy of a close script held in Buffers", () => {
-        const closeScript = { ...CLOSE_SCRIPT, codeHash: Buffer.from(CLOSE_SCRIPT.codeHash), args: Buffer.from(CLOSE_SCRIPT.args) };
-        const pending = newDispatch().dispatch.prepareChannelRegistration(CHANNEL_INDEX, FUNDED, closeScript);
-        closeScript.codeHash.fill(0xff);
-        closeScript.args.fill(0xff);
-        expect(pending.localCloseScript).toEqual(CLOSE_SCRIPT);
+    // The device's reserve over this script is 99 CKB under the lower layout, so that is the least it may fund.
+    it("refuses a funding fiber would not open, ahead of any round trip", () => {
+        expect(dispatch.prepareChannelOpen(CHANNEL_INDEX, "9900000000", LOCAL_CLOSE_SCRIPT).fundedShannons).toBe("9900000000");
+        expect(() => dispatch.prepareChannelOpen(CHANNEL_INDEX, "9899999999", LOCAL_CLOSE_SCRIPT)).toThrow(RangeError);
+        expect(() => dispatch.prepareChannelOpen(CHANNEL_INDEX, "1e10", LOCAL_CLOSE_SCRIPT)).toThrow(TypeError);
     });
 
     it.each([-1, 1.5, Number.MAX_SAFE_INTEGER + 1])("rejects the channel index %p", (channelIndex) => {
-        expect(() => newDispatch().dispatch.prepareChannelRegistration(channelIndex, FUNDED, CLOSE_SCRIPT)).toThrow(RangeError);
+        expect(() => dispatch.prepareChannelOpen(channelIndex, FUNDED, LOCAL_CLOSE_SCRIPT)).toThrow(RangeError);
     });
 });
 
-describe("channelRegistered", () => {
-    it("files the channel under the node's name with the funded amount and close script prepared, after which its requests resolve", async () => {
-        const { dispatch, store } = newDispatch();
-        await expect(dispatch.handle(request("get_base_public_keys", {}))).resolves.toMatchObject({ kind: "refusal" });
+describe("each transition", () => {
+    // The number the message carries and the view: a commitment's version, a revocation's revoked number and the view it revokes.
+    const REPORTED: Record<string, { commitmentNumber: number | null; view: "remote" | "local" | null }> = {
+        SendCommitmentSigned: { commitmentNumber: 4, view: "remote" },
+        CompleteReceivedCommitment: { commitmentNumber: 2, view: "local" },
+        SendRevokeAndAck: { commitmentNumber: 2, view: "local" },
+        CompleteReceivedRevokeAndAck: { commitmentNumber: 3, view: "remote" },
+        SendClosingSigned: { commitmentNumber: null, view: null },
+    };
 
-        await dispatch.channelRegistered(CHANNEL_ID, dispatch.prepareChannelRegistration(CHANNEL_INDEX, FUNDED, CLOSE_SCRIPT));
+    it.each(SIGNED)("signs %s to the byte fiber expects, with the material it expects", async (transition) => {
+        const kase = caseOf(transition);
+        const channel = await openSigningChannel(vectors, kase);
+        const signed = signedOf(await channel.dispatch.handle(channel.channelId, statusOf(transition)));
+        const status = kase.result.status as { request_id: string; content: { slot: { commitment_number: string } } };
 
-        await expect(store.getChannelRecord(CHANNEL_INDEX)).resolves.toMatchObject({
-            channelId: CHANNEL_ID,
-            pins: {
-                fundedShannons: "71900000000",
-                localCloseScript:
-                    "4900000010000000300000003100000074d3f63a22681bdb6ff6512866db95264338cfaee12f71e28b9f23c414990c9c0114000000da694932ba803b4c07f6e3a9b6b2ea3f9c6c66c7",
-                localReservedCkbShannons: { legacy: "9900000000", fullPaymentHash: "10000000000" },
-                udtTypeScript: null,
-            },
-            views: {
-                remote: { exposureShannons: "71900000000", tlcs: [], chargedShannons: {}, creditedShannons: {} },
-                local: { exposureShannons: "71900000000", tlcs: [], chargedShannons: {}, creditedShannons: {} },
-            },
-            signedSessions: {},
-        });
-        await expect(dispatch.handle(request("get_base_public_keys", {}))).resolves.toEqual({
-            kind: "result",
-            result: { kind: "base_public_keys", ...getBasePublicKeys(KEYS) },
-        });
+        expect(bytesToHex(signed.partialSignature)).toBe(kase.expected.partial_signature);
+        expect(signed.status).toBe("fresh");
+        expect(signed.warnings).toEqual([]);
+        expect(signed.transition).toBe(transition);
+        expect(bytesToHex(signed.requestId)).toBe(status.request_id.slice(2));
+        expect(signed.slot.commitmentNumber).toBe(Number(status.content.slot.commitment_number));
+        expect({ commitmentNumber: signed.commitmentNumber, view: signed.view }).toEqual(REPORTED[transition]);
+        const material = signed.nextMaterial;
+        expect(
+            material === null
+                ? null
+                : {
+                      next_commitment_point: bytesToHex(material.nextCommitmentPoint),
+                      next_commitment_nonce: bytesToHex(material.nextCommitmentNonce),
+                      next_revocation_nonce: bytesToHex(material.nextRevocationNonce),
+                  },
+        ).toEqual(kase.expected.next_material);
     });
 
-    it("propagates a host error, such as naming a record that has already served", async () => {
-        const { dispatch } = await opened();
-        partialSignatureOf(await dispatch.handle(request("partial_sign_commitment_tx", paramsFor("partial_sign_commitment_tx"))));
-
-        await expect(
-            dispatch.channelRegistered(OTHER_CHANNEL_ID, dispatch.prepareChannelRegistration(CHANNEL_INDEX, FUNDED, CLOSE_SCRIPT)),
-        ).rejects.toThrow(TypeError);
-    });
-});
-
-describe("two channels on one dispatch", () => {
-    // The other channel goes first, so neither a fixed index nor keys kept from the first derivation can pass.
-    async function twoChannels(): Promise<Harness> {
-        const harness = newDispatch();
-        await harness.dispatch.channelRegistered(
-            OTHER_CHANNEL_ID,
-            harness.dispatch.prepareChannelRegistration(OTHER_CHANNEL_INDEX, FUNDED, CLOSE_SCRIPT),
-        );
-        await harness.dispatch.channelRegistered(
-            CHANNEL_ID,
-            harness.dispatch.prepareChannelRegistration(CHANNEL_INDEX, FUNDED, CLOSE_SCRIPT),
-        );
-        return harness;
-    }
-
-    it("files each channel under its own index", async () => {
-        const { store } = await twoChannels();
-        await expect(store.resolveChannelIndex(OTHER_CHANNEL_ID)).resolves.toBe(OTHER_CHANNEL_INDEX);
-        await expect(store.resolveChannelIndex(CHANNEL_ID)).resolves.toBe(CHANNEL_INDEX);
-        await expect(store.getChannelRecord(OTHER_CHANNEL_INDEX)).resolves.toMatchObject({ channelId: OTHER_CHANNEL_ID });
-        await expect(store.getChannelRecord(CHANNEL_INDEX)).resolves.toMatchObject({ channelId: CHANNEL_ID });
+    it.each(SIGNED)("answers %s with a half the node verifies under the nonce the device published for the slot", async (transition) => {
+        const channel = await openSigningChannel(vectors, caseOf(transition));
+        const signed = signedOf(await channel.dispatch.handle(channel.channelId, statusOf(transition)));
+        expect(partialSignatureVerifies(signed, statusOf(transition))).toBe(true);
     });
 
-    it("answers each channel from its own keys, so the two never share a nonce", async () => {
-        const { dispatch } = await twoChannels();
-        const params = { commitment_number: "0x5" };
-
-        await expect(dispatch.handle(request("get_base_public_keys", {}, { channelId: OTHER_CHANNEL_ID }))).resolves.toEqual({
-            kind: "result",
-            result: { kind: "base_public_keys", ...getBasePublicKeys(OTHER_KEYS) },
-        });
-        const otherNonce = pubNonceOf(await dispatch.handle(request("get_commitment_pub_nonce", params, { channelId: OTHER_CHANNEL_ID })));
-        const nonce = pubNonceOf(await dispatch.handle(request("get_commitment_pub_nonce", params)));
-
-        expect(otherNonce).toEqual(getPublicNonce(OTHER_KEYS, 5, "COMMITMENT"));
-        expect(nonce).toEqual(getPublicNonce(KEYS, 5, "COMMITMENT"));
-        expect(bytesToHex(otherNonce)).not.toBe(bytesToHex(nonce));
-    });
-});
-
-describe("the public data methods", () => {
-    it("answers the base public keys", async () => {
-        const { dispatch } = await registered();
-        await expect(dispatch.handle(request("get_base_public_keys", {}))).resolves.toEqual({
-            kind: "result",
-            result: { kind: "base_public_keys", ...getBasePublicKeys(KEYS) },
-        });
+    it.each(SIGNED)("claims the slot %s signs at, before anything is signed", async (transition) => {
+        const channel = await openSigningChannel(vectors, caseOf(transition));
+        const signed = signedOf(await channel.dispatch.handle(channel.channelId, statusOf(transition)));
+        const record = await recordOf(channel);
+        expect(Object.keys(record.signedSessions)).toEqual([`${signed.slot.context}:${signed.slot.commitmentNumber}`]);
     });
 
-    it("answers the commitment point of the number asked", async () => {
-        const { dispatch } = await registered();
-        await expect(dispatch.handle(request("get_commitment_point", { commitment_number: "0x5" }))).resolves.toEqual({
-            kind: "result",
-            result: { kind: "commitment_point", commitmentPoint: getChannelCommitmentPoint(KEYS, 5) },
-        });
-    });
+    it.each(["SendCommitmentSigned", "CompleteReceivedCommitment"] as const)(
+        "records the commitment %s signs under its view, hashed as fiber's message",
+        async (transition) => {
+            const channel = await openSigningChannel(vectors, caseOf(transition));
+            const signed = signedOf(await channel.dispatch.handle(channel.channelId, statusOf(transition)));
+            const view = signed.view ?? "remote";
+            expect((await recordOf(channel)).commitmentHashes[view]).toEqual({
+                commitmentNumber: signed.commitmentNumber,
+                txHash: caseOf(transition).expected.message,
+            });
+        },
+    );
 
-    it("answers the commitment nonce of the number asked", async () => {
-        const { dispatch } = await registered();
-        await expect(dispatch.handle(request("get_commitment_pub_nonce", { commitment_number: "0x5" }))).resolves.toEqual({
-            kind: "result",
-            result: { kind: "pub_nonce", pubNonce: getPublicNonce(KEYS, 5, "COMMITMENT") },
-        });
-    });
-
-    it("answers the revocation nonce of the number asked", async () => {
-        const { dispatch } = await registered();
-        await expect(dispatch.handle(request("get_revocation_pub_nonce", { commitment_number: "0x5" }))).resolves.toEqual({
-            kind: "result",
-            result: { kind: "pub_nonce", pubNonce: getPublicNonce(KEYS, 5, "REVOKE") },
-        });
-    });
-
-    it("answers the announcement nonce at the fixed slot, whatever number the request carries", async () => {
-        const { dispatch } = await registered();
-        await expect(dispatch.handle(request("get_channel_announcement_pub_nonce", { commitment_number: "0x9" }))).resolves.toEqual({
-            kind: "result",
-            result: { kind: "pub_nonce", pubNonce: getPublicNonce(KEYS, ANNOUNCEMENT_SLOT_NUMBER, "ANNOUNCEMENT") },
-        });
-    });
-
-    it("answers the settlement keys of the number asked: the TLC base key and the TLC key, never the funding key", async () => {
-        const { dispatch } = await registered();
-        const result = resultOf(await dispatch.handle(request("get_settlement_keys", { commitment_number: "0x5" })));
-        expect(result).toEqual({ kind: "settlement_keys", localSettlementKey: KEYS.tlcBaseKey, tlcKey: deriveTlcKey(KEYS, 5) });
-        for (const value of Object.values(result)) {
-            if (value instanceof Uint8Array) expect(bytesToHex(value)).not.toBe(bytesToHex(KEYS.fundingKey));
-        }
-    });
-
-    it("reads the commitment number up to the top of the chain", async () => {
-        const { dispatch } = await registered();
-        await expect(dispatch.handle(request("get_commitment_point", { commitment_number: "0xffffffffffff" }))).resolves.toEqual({
-            kind: "result",
-            result: { kind: "commitment_point", commitmentPoint: getChannelCommitmentPoint(KEYS, 2 ** 48 - 1) },
-        });
-    });
-
-    it("answers whatever the state version, since nothing is claimed", async () => {
-        const { dispatch, storage } = await opened();
-        partialSignatureOf(await dispatch.handle(request("partial_sign_commitment_tx", paramsFor("partial_sign_commitment_tx"))));
-        storage.ops.length = 0;
-
-        const outcome = await dispatch.handle(request("get_commitment_point", { commitment_number: "0x5" }, { stateVersion: 1 }));
-
-        expect(outcome.kind).toBe("result");
-        expect(writes(storage)).toEqual([]);
-    });
-});
-
-describe("the signing methods", () => {
-    // The other methods' cases pin other constants than the opened channel's.
-    async function openedFor(method: SignatureMethod): Promise<Harness> {
-        return method === "partial_sign_commitment_tx" ? opened() : registered();
-    }
-
-    it.each(SIGNING_CASES)("signs $method under the nonce $published published, verifiable by the node", async (kase) => {
-        const { dispatch } = await openedFor(kase.method);
-        const publishedParams = kase.nonceNumber === undefined ? {} : toCommitmentNumberParamsWire(kase.nonceNumber);
-        const pubNonce = pubNonceOf(await dispatch.handle(request(kase.published, publishedParams)));
-        const orderedPublicKeys = ORDERED_PUBLIC_KEYS[kase.method];
-        const localIndex = orderedPublicKeys.indexOf(LOCAL_FUNDING_PUBKEY);
-        const pubNonces = orderedPublicKeys.map((key) => (key === LOCAL_FUNDING_PUBKEY ? pubNonce : peerNonces().public));
-        const aggregatedNonce = nonceAggregate(pubNonces);
-
-        const partialSignature = partialSignatureOf(
-            await dispatch.handle(request(kase.method, signingParams(kase.method, aggregatedNonce))),
-        );
-
-        const session = new Session(aggregatedNonce, orderedPublicKeys, hexToBytes(kase.digest));
-        expect(session.partialSigVerify(partialSignature, pubNonces, localIndex)).toBe(true);
-    });
-
-    it.each(SIGNING_CASES)("claims the slot $context:$nonceNumber it signs $method with", async (kase) => {
-        const { dispatch, store } = await openedFor(kase.method);
-        const before = Object.keys((await store.getChannelRecord(CHANNEL_INDEX))?.signedSessions ?? {});
-        partialSignatureOf(await dispatch.handle(request(kase.method, signingParams(kase.method, AGGREGATED_NONCE))));
-        const record = await store.getChannelRecord(CHANNEL_INDEX);
-        expect(Object.keys(record?.signedSessions ?? {}).filter((slot) => !before.includes(slot))).toEqual([
-            `${kase.context}:${kase.nonceNumber ?? ANNOUNCEMENT_SLOT_NUMBER}`,
+    it("keeps the complete revocation signature of the peer's commitment it receives the revocation of", async () => {
+        const channel = await openSigningChannel(vectors, caseOf("CompleteReceivedRevokeAndAck"));
+        signedOf(await channel.dispatch.handle(channel.channelId, statusOf("CompleteReceivedRevokeAndAck")));
+        expect((await recordOf(channel)).revocations).toEqual([
+            { version: 3, forRemote: true, signature: caseOf("CompleteReceivedRevokeAndAck").expected.signature },
         ]);
     });
 
-    it("aggregates with the peer's half into a valid schnorr signature under the 2-of-2 key", async () => {
-        const { dispatch } = await opened();
-        const pubNonce = pubNonceOf(
-            await dispatch.handle(request("get_commitment_pub_nonce", toCommitmentNumberParamsWire(THREE_TLCS.commitment_number))),
-        );
-        const peer = peerNonces();
-        const aggregatedNonce = nonceAggregate([pubNonce, peer.public]);
-        const partialSignature = partialSignatureOf(
-            await dispatch.handle(request("partial_sign_commitment_tx", signingParams("partial_sign_commitment_tx", aggregatedNonce))),
+    it.each(["SendCommitmentSigned", "CompleteReceivedCommitment", "SendRevokeAndAck", "SendClosingSigned"] as const)(
+        "keeps no revocation evidence after %s",
+        async (transition) => {
+            const channel = await openSigningChannel(vectors, caseOf(transition));
+            signedOf(await channel.dispatch.handle(channel.channelId, statusOf(transition)));
+            expect((await recordOf(channel)).revocations).toEqual([]);
+        },
+    );
+});
+
+describe("no request", () => {
+    it("is idle, reading nothing, even for a channel the device never registered", async () => {
+        const channel = await openSigningChannel(vectors, caseOf("SendClosingSigned"));
+        channel.storage.ops.length = 0;
+        const status: WireField = { value: { type: "NoSignatureRequired" }, path: "response.result.status" };
+        expect(await channel.dispatch.handle(UNKNOWN_CHANNEL_ID, status)).toEqual({ kind: "idle" });
+        expect(channel.storage.ops).toEqual([]);
+    });
+});
+
+describe("refusals, in the order of the steps", () => {
+    describe("1. the decode", () => {
+        it("refuses what the decoder refuses as malformed, with no request id to name", async () => {
+            const channel = await openSigningChannel(vectors, caseOf("SendCommitmentSigned"));
+            const outcome = refusedOf(
+                await channel.dispatch.handle(
+                    channel.channelId,
+                    mutated(statusOf("SendCommitmentSigned"), "content.commitment_counter", "Remote"),
+                ),
+            );
+            expect(outcome.requestId).toBeNull();
+            expect(outcome.transition).toBeNull();
+            expect(outcome.error.code).toBe("malformed");
+            expect(outcome.error.message).toBe("response.result.status.content.commitment_counter must be Local for SendCommitmentSigned");
+        });
+
+        // Fiber's codec takes some of these as well formed: refusing them is the signer's job.
+        it.each(vectors.variants.map((variant) => [variant.name, variant] as const))("refuses the variant with %s", async (_, variant) => {
+            const channel = await openSigningChannel(vectors, caseOf("SendCommitmentSigned"));
+            expect((await refusedUnclaimed(channel, signingStatusField(variant))).code).toBe("malformed");
+        });
+
+        it.each(["CompleteReceivedCommitment", "CompleteReceivedRevokeAndAck"] as const)(
+            "refuses %s without the peer's partial signature",
+            async (transition) => {
+                const channel = await openSigningChannel(vectors, caseOf(transition));
+                const status = mutated(statusOf(transition), "session_evidence.peer_partial_signature", null);
+                expect(await refusedUnclaimed(channel, status)).toEqual({
+                    code: "malformed",
+                    message: `response.result.status.session_evidence.peer_partial_signature must be present for ${transition}`,
+                });
+            },
         );
 
-        const message = hexToBytes(THREE_TLCS.digest);
-        const orderedPublicKeys = ORDERED_PUBLIC_KEYS.partial_sign_commitment_tx;
-        const session = new Session(aggregatedNonce, orderedPublicKeys, message);
-        const peerPartialSignature = session.sign(peer.secret, REMOTE_KEYS.fundingKey);
-        const signature = session.partialSigAgg([partialSignature, peerPartialSignature]);
-        expect(schnorr.verify(signature, message, keyAggExport(keyAggregate(orderedPublicKeys)))).toBe(true);
+        it("refuses a malformed status as malformed even for a channel the device never registered", async () => {
+            const channel = await openSigningChannel(vectors, caseOf("SendCommitmentSigned"));
+            const status = mutated(statusOf("SendCommitmentSigned"), "request_id", "0x00");
+            expect((await refusedUnclaimed(channel, status, UNKNOWN_CHANNEL_ID)).code).toBe("malformed");
+        });
+
+        it("refuses a status that is not one", async () => {
+            const channel = await openSigningChannel(vectors, caseOf("SendCommitmentSigned"));
+            expect((await refusedUnclaimed(channel, { value: undefined, path: "response.result.status" })).code).toBe("malformed");
+        });
     });
 
-    it("signs the offered TLCs the user's intents cover, and records what the view now shows", async () => {
-        const { dispatch, store } = await opened();
+    describe("2. the channel", () => {
+        it.each([...SIGNED, "SignChannelAnnouncement"] as const)(
+            "refuses %s for a channel the device never registered, naming the request",
+            async (transition) => {
+                const channel = await openSigningChannel(vectors, caseOf(transition));
+                channel.storage.ops.length = 0;
+                const outcome = refusedOf(await channel.dispatch.handle(UNKNOWN_CHANNEL_ID, statusOf(transition)));
+                expect(outcome.error).toEqual({
+                    code: "unknown_channel",
+                    message: `channel ${UNKNOWN_CHANNEL_ID} is not registered on this device`,
+                });
+                expect(outcome.transition).toBe(transition);
+                expect(bytesToHex(outcome.requestId ?? new Uint8Array())).toBe(
+                    (caseOf(transition).result.status as { request_id: string }).request_id.slice(2),
+                );
+                expect(writesOf(channel.storage)).toEqual([]);
+            },
+        );
+    });
 
-        partialSignatureOf(await dispatch.handle(request("partial_sign_commitment_tx", paramsFor("partial_sign_commitment_tx"))));
+    describe("3. the announcement", () => {
+        it("refuses to sign a channel announcement: every channel of the device is private", async () => {
+            const channel = await openSigningChannel(vectors, caseOf("SignChannelAnnouncement"));
+            expect(await refusedUnclaimed(channel, statusOf("SignChannelAnnouncement"))).toEqual({
+                code: "policy_refusal",
+                message: "a channel announcement is never signed: every channel of this device is private",
+            });
+        });
 
-        await expect(store.getChannelRecord(CHANNEL_INDEX)).resolves.toMatchObject({
-            views: { remote: { exposureShannons: "69650000000" } },
+        it("refuses the announcement ahead of its key order", async () => {
+            const channel = await openSigningChannel(vectors, caseOf("SignChannelAnnouncement"));
+            const status = mutated(
+                statusOf("SignChannelAnnouncement"),
+                "content.key_agg_ctx",
+                keyAggContextWire(DEVICE_FUNDING_PUBKEY, PEER_FUNDING_PUBKEY),
+            );
+            expect((await refusedUnclaimed(channel, status)).code).toBe("policy_refusal");
+        });
+    });
+
+    describe("4. the key order", () => {
+        // With the vectors' keys the peer sorts first, so the sorted transitions take [peer, device] and the received revocation [device, peer].
+        it.each(["SendCommitmentSigned", "CompleteReceivedCommitment", "SendClosingSigned"] as const)(
+            "refuses %s with the keys out of ascending order",
+            async (transition) => {
+                const channel = await openSigningChannel(vectors, caseOf(transition));
+                const status = mutated(
+                    statusOf(transition),
+                    "content.key_agg_ctx",
+                    keyAggContextWire(DEVICE_FUNDING_PUBKEY, PEER_FUNDING_PUBKEY),
+                );
+                expect(await refusedUnclaimed(channel, status)).toEqual({
+                    code: "malformed",
+                    message: `the key aggregation is not in the ascending order ${transition} aggregates under`,
+                });
+            },
+        );
+
+        it("refuses SendRevokeAndAck with the device's key first", async () => {
+            const channel = await openSigningChannel(vectors, caseOf("SendRevokeAndAck"));
+            const status = mutated(
+                statusOf("SendRevokeAndAck"),
+                "content.key_agg_ctx",
+                keyAggContextWire(DEVICE_FUNDING_PUBKEY, PEER_FUNDING_PUBKEY),
+            );
+            expect(await refusedUnclaimed(channel, status)).toEqual({
+                code: "malformed",
+                message: "the key aggregation is not in the peer-first order SendRevokeAndAck aggregates under",
+            });
+        });
+
+        it("refuses CompleteReceivedRevokeAndAck with the keys sorted, the peer's first", async () => {
+            const channel = await openSigningChannel(vectors, caseOf("CompleteReceivedRevokeAndAck"));
+            const status = mutated(
+                statusOf("CompleteReceivedRevokeAndAck"),
+                "content.key_agg_ctx",
+                keyAggContextWire(PEER_FUNDING_PUBKEY, DEVICE_FUNDING_PUBKEY),
+            );
+            expect(await refusedUnclaimed(channel, status)).toEqual({
+                code: "malformed",
+                message: "the key aggregation is not in the device-first order CompleteReceivedRevokeAndAck aggregates under",
+            });
+        });
+
+        it.each(SIGNED)("refuses %s aggregating a key in place of the device's", async (transition) => {
+            const channel = await openSigningChannel(vectors, caseOf(transition));
+            const stranger = pubkeyOf(PEER_KEYS.tlcBaseKey);
+            const status = mutated(statusOf(transition), "content.key_agg_ctx", keyAggContextWire(PEER_FUNDING_PUBKEY, stranger));
+            expect(await refusedUnclaimed(channel, status)).toEqual({
+                code: "malformed",
+                message: "the key aggregation does not include the channel's funding key",
+            });
+        });
+
+        it("refuses the key order ahead of the aggregated nonce", async () => {
+            const channel = await openSigningChannel(vectors, caseOf("SendCommitmentSigned"));
+            let status = mutated(
+                statusOf("SendCommitmentSigned"),
+                "content.key_agg_ctx",
+                keyAggContextWire(DEVICE_FUNDING_PUBKEY, PEER_FUNDING_PUBKEY),
+            );
+            status = mutated(status, "session_evidence.peer_public_nonce", caseOfPeerNonce("SendClosingSigned"));
+            expect((await refusedUnclaimed(channel, status)).message).toContain("key aggregation");
+        });
+    });
+
+    describe("5. the aggregated nonce", () => {
+        it.each(SIGNED)("refuses %s whose aggregate sums another peer nonce than the one it names", async (transition) => {
+            const channel = await openSigningChannel(vectors, caseOf(transition));
+            const other = transition === "SendClosingSigned" ? "SendCommitmentSigned" : "SendClosingSigned";
+            const status = mutated(statusOf(transition), "session_evidence.peer_public_nonce", caseOfPeerNonce(other));
+            const slot = (caseOf(transition).result.status as { content: { slot: { purpose: string; commitment_number: string } } }).content
+                .slot;
+            const context = slot.purpose === "Commitment" ? "COMMITMENT" : "REVOKE";
+            expect(await refusedUnclaimed(channel, status)).toEqual({
+                code: "malformed",
+                message: `the aggregated nonce is not the sum of this device's nonce at ${context}:${Number(slot.commitment_number)} and the peer's`,
+            });
+        });
+
+        it("refuses an aggregate over the device's nonce of another slot", async () => {
+            const channel = await openSigningChannel(vectors, caseOf("SendCommitmentSigned"));
+            const status = mutated(statusOf("SendCommitmentSigned"), "content.slot.commitment_number", "0x5");
+            expect((await refusedUnclaimed(channel, status)).message).toBe(
+                "the aggregated nonce is not the sum of this device's nonce at COMMITMENT:5 and the peer's",
+            );
+        });
+
+        it("refuses the aggregate ahead of the peer's signature", async () => {
+            const channel = await openSigningChannel(vectors, caseOf("CompleteReceivedRevokeAndAck"));
+            let status = mutated(statusOf("CompleteReceivedRevokeAndAck"), "content.slot.commitment_number", "0x5");
+            status = mutated(status, "session_evidence.peer_partial_signature", `0x${"11".repeat(32)}`);
+            expect((await refusedUnclaimed(channel, status)).message).toContain("aggregated nonce");
+        });
+    });
+
+    describe("7. the peer's partial signature", () => {
+        it.each(["CompleteReceivedCommitment", "CompleteReceivedRevokeAndAck"] as const)(
+            "refuses %s whose peer signature is not over its message",
+            async (transition) => {
+                const channel = await openSigningChannel(vectors, caseOf(transition));
+                const status = mutated(statusOf(transition), "session_evidence.peer_partial_signature", `0x${"11".repeat(32)}`);
+                expect(await refusedUnclaimed(channel, status)).toEqual({
+                    code: "malformed",
+                    message: `the peer's partial signature does not verify over the message ${transition} carries`,
+                });
+            },
+        );
+
+        it("refuses a received commitment the node changed after the peer signed it", async () => {
+            const channel = await openSigningChannel(vectors, caseOf("CompleteReceivedCommitment"));
+            const status = mutated(
+                statusOf("CompleteReceivedCommitment"),
+                "content.content.transaction.outputs[0].capacity",
+                "0x1689bac638",
+            );
+            expect((await refusedUnclaimed(channel, status)).message).toBe(
+                "the peer's partial signature does not verify over the message CompleteReceivedCommitment carries",
+            );
+        });
+
+        it("refuses the peer's signature of the right message under another aggregate", async () => {
+            const channel = await openSigningChannel(vectors, caseOf("CompleteReceivedRevokeAndAck"));
+            const genuine = resigned(statusOf("CompleteReceivedRevokeAndAck"), 0x61);
+            const other = resigned(statusOf("CompleteReceivedRevokeAndAck"), 0x62);
+            const status = mutated(
+                genuine,
+                "session_evidence.peer_partial_signature",
+                (other.value as { session_evidence: { peer_partial_signature: string } }).session_evidence.peer_partial_signature,
+            );
+            expect((await refusedUnclaimed(channel, status)).message).toContain("peer's partial signature");
+        });
+
+        // Unreachable through the decoder, which sizes every value first: the mapping is what keeps it the node's.
+        it("refuses as malformed a peer half whose verification throws a type error", async () => {
+            const channel = await openSigningChannel(vectors, caseOf("CompleteReceivedCommitment"));
+            const verify = jest.spyOn(musig2Engine, "verifyPeerPartialSignature").mockImplementation(() => {
+                throw new TypeError("peerPublicNonce must be 66 bytes, got 65");
+            });
+            try {
+                expect(await refusedUnclaimed(channel, statusOf("CompleteReceivedCommitment"))).toEqual({
+                    code: "malformed",
+                    message: "peerPublicNonce must be 66 bytes, got 65",
+                });
+            } finally {
+                verify.mockRestore();
+            }
+        });
+
+        it("signs a received commitment whose peer half was signed again over it", async () => {
+            const channel = await openSigningChannel(vectors, caseOf("CompleteReceivedCommitment"));
+            expect(
+                signedOf(await channel.dispatch.handle(channel.channelId, resigned(statusOf("CompleteReceivedCommitment")))).status,
+            ).toBe("fresh");
+        });
+    });
+
+    describe("8. the operation's input", () => {
+        it("refuses a snapshot whose settlement key is not the device's", async () => {
+            const channel = await openSigningChannel(vectors, caseOf("SendCommitmentSigned"));
+            const status = mutated(statusOf("SendCommitmentSigned"), "settlement.local_settlement_pubkey", vectors.peer.tlc_base_pubkey);
+            expect(await refusedUnclaimed(channel, status)).toEqual({
+                code: "malformed",
+                message: "settlement.localSettlementPubkey is not this device's TLC base key",
+            });
+        });
+
+        it("refuses a snapshot TLC whose key is not the device's at its number", async () => {
+            const channel = await openSigningChannel(vectors, caseOf("SendCommitmentSigned"));
+            const status = mutated(statusOf("SendCommitmentSigned"), "settlement.tlcs[0].local_key_pubkey", vectors.device.tlc_base_pubkey);
+            expect(await refusedUnclaimed(channel, status)).toEqual({
+                code: "malformed",
+                message: "settlement.tlcs[0].localKeyPubkey is not this device's TLC key at commitment number 2",
+            });
+        });
+
+        it.each([
+            ["0x5", 5],
+            ["0x3", 3],
+        ])("refuses the commitment it sends at slot %s carrying version 4", async (number, slot) => {
+            const channel = await openSigningChannel(vectors, caseOf("SendCommitmentSigned"));
+            const status = resigned(mutated(statusOf("SendCommitmentSigned"), "content.slot.commitment_number", number));
+            expect(await refusedUnclaimed(channel, status)).toEqual({
+                code: "malformed",
+                message: `the commitment sent at slot ${slot} must carry that version, not 4`,
+            });
+        });
+
+        it("refuses a commitment cell with a type script", async () => {
+            const channel = await openSigningChannel(vectors, caseOf("SendCommitmentSigned"));
+            const type = { code_hash: `0x${"91".repeat(32)}`, hash_type: "type", args: `0x${"86".repeat(32)}` };
+            const status = mutated(statusOf("SendCommitmentSigned"), "content.content.transaction.outputs[0].type", type);
+            expect(await refusedUnclaimed(channel, status)).toEqual({
+                code: "malformed",
+                message: "the commitment cell must carry no type script: the channel is a CKB channel",
+            });
+        });
+
+        it.each([
+            ["SendRevokeAndAck", "0x4", 4, 2],
+            ["SendRevokeAndAck", "0x2", 2, 2],
+            ["CompleteReceivedRevokeAndAck", "0x5", 5, 3],
+            ["CompleteReceivedRevokeAndAck", "0x3", 3, 3],
+        ] as const)("refuses %s at slot %s (%i), which carries the revocation of %i", async (transition, number, slot, revoked) => {
+            const channel = await openSigningChannel(vectors, caseOf(transition));
+            const status = resigned(mutated(statusOf(transition), "content.slot.commitment_number", number));
+            expect(await refusedUnclaimed(channel, status)).toEqual({
+                code: "malformed",
+                message: `the revocation at slot ${slot} must revoke version ${slot - 1}, not ${revoked}`,
+            });
+        });
+
+        it("refuses a received revocation that pays another script than the channel's close script", async () => {
+            const channel = await openSigningChannel(vectors, caseOf("CompleteReceivedRevokeAndAck"));
+            const output = revocationOutputWire(REVOCATION_CAPACITY, PEER_CLOSE_SCRIPT, null);
+            const status = resigned(mutated(statusOf("CompleteReceivedRevokeAndAck"), "content.content.output", output));
+            expect(await refusedUnclaimed(channel, status)).toEqual({
+                code: "malformed",
+                message: "a revocation the device receives must pay the channel's close script",
+            });
+        });
+
+        it.each(["SendRevokeAndAck", "CompleteReceivedRevokeAndAck"] as const)(
+            "refuses %s whose output has a type script",
+            async (transition) => {
+                const channel = await openSigningChannel(vectors, caseOf(transition));
+                const lock = transition === "SendRevokeAndAck" ? PEER_CLOSE_SCRIPT : LOCAL_CLOSE_SCRIPT;
+                const output = revocationOutputWire(REVOCATION_CAPACITY, lock, TYPE_SCRIPT);
+                const status = resigned(mutated(statusOf(transition), "content.content.output", output));
+                expect(await refusedUnclaimed(channel, status)).toEqual({
+                    code: "malformed",
+                    message: "the revocation output must carry no type script: the channel is a CKB channel",
+                });
+            },
+        );
+
+        it("rebuilds the vectors' revocation output to the byte, so the refusals above change only what they name", () => {
+            const status = caseOf("CompleteReceivedRevokeAndAck").result.status as { content: { content: { output: string } } };
+            expect(revocationOutputWire(REVOCATION_CAPACITY, LOCAL_CLOSE_SCRIPT, null)).toBe(status.content.content.output);
+        });
+
+        it.each(["liquidCapacityShannons", "commitmentFeeRate", "remoteReservedCkbShannons"] as const)(
+            "refuses a commitment and a revocation while the host has not pinned %s, and still signs a close",
+            async (field) => {
+                for (const transition of ["SendCommitmentSigned", "CompleteReceivedRevokeAndAck"] as const) {
+                    const channel = await openSigningChannel(vectors, caseOf(transition));
+                    await updateRecord(channel, (record) => {
+                        const pins = { ...record.pins };
+                        delete pins[field];
+                        return { ...record, pins };
+                    });
+                    expect(await refusedUnclaimed(channel, statusOf(transition))).toEqual({
+                        code: "policy_refusal",
+                        message: `the message is a function of ${field}, which the host has not pinned for the channel yet`,
+                    });
+                }
+                const close = await openSigningChannel(vectors, caseOf("SendClosingSigned"));
+                await updateRecord(close, (record) => {
+                    const pins = { ...record.pins };
+                    delete pins[field];
+                    return { ...record, pins };
+                });
+                expect(signedOf(await close.dispatch.handle(close.channelId, statusOf("SendClosingSigned"))).status).toBe("fresh");
+            },
+        );
+
+        it("refuses a revocation while no commitment has pinned the lock layout", async () => {
+            const channel = await openSigningChannel(vectors, caseOf("SendRevokeAndAck"));
+            await updateRecord(channel, (record) => {
+                const pins = { ...record.pins };
+                delete pins.lockLayout;
+                return { ...record, pins };
+            });
+            expect(await refusedUnclaimed(channel, statusOf("SendRevokeAndAck"))).toEqual({
+                code: "policy_refusal",
+                message: "a revocation is sized under the lock layout, which no commitment of the channel has pinned yet",
+            });
+        });
+    });
+
+    describe("9. the gate", () => {
+        it("refuses a commitment whose snapshot does not rebuild its tx", async () => {
+            const channel = await openSigningChannel(vectors, caseOf("SendCommitmentSigned"));
+            const status = mutated(statusOf("SendCommitmentSigned"), "settlement.local_amount", "0x103d6c8981");
+            expect(await refusedUnclaimed(channel, status)).toEqual({
+                code: "malformed",
+                message: "the message does not match the attached channel state",
+            });
+        });
+
+        it("refuses a commitment tx the snapshot does not rebuild, its peer half signed over it", async () => {
+            const channel = await openSigningChannel(vectors, caseOf("CompleteReceivedCommitment"));
+            const status = resigned(
+                mutated(statusOf("CompleteReceivedCommitment"), "content.content.transaction.outputs[0].capacity", "0x1689bac638"),
+            );
+            expect((await refusedUnclaimed(channel, status)).message).toBe("the message does not match the attached channel state");
+        });
+
+        it("refuses a revocation output the channel's terms do not rebuild", async () => {
+            const channel = await openSigningChannel(vectors, caseOf("SendRevokeAndAck"));
+            const output = revocationOutputWire(REVOCATION_CAPACITY + 1n, PEER_CLOSE_SCRIPT, null);
+            const status = mutated(statusOf("SendRevokeAndAck"), "content.content.output", output);
+            expect((await refusedUnclaimed(channel, status)).message).toBe("the message does not match the attached channel state");
+        });
+
+        it("refuses a revocation whose data is not the empty data a CKB channel's is", async () => {
+            const channel = await openSigningChannel(vectors, caseOf("SendRevokeAndAck"));
+            const status = mutated(statusOf("SendRevokeAndAck"), "content.content.output_data", "0x0100000000");
+            expect((await refusedUnclaimed(channel, status)).message).toBe("the message does not match the attached channel state");
+        });
+
+        it("refuses a close whose tx says more than its outputs: an input with a since", async () => {
+            const channel = await openSigningChannel(vectors, caseOf("SendClosingSigned"));
+            const status = mutated(statusOf("SendClosingSigned"), "content.content.transaction.inputs[0].since", "0x1");
+            expect((await refusedUnclaimed(channel, status)).message).toBe("the message does not match the attached channel state");
+        });
+
+        it("refuses a commitment below its lane as stale_state", async () => {
+            const channel = await openSigningChannel(vectors, caseOf("SendCommitmentSigned"));
+            await updateRecord(channel, (record) => ({ ...record, lastSignedCommitmentNumbers: { "COMMITMENT:local": 4 } }));
+            expect(await refusedUnclaimed(channel, statusOf("SendCommitmentSigned"))).toEqual({
+                code: "stale_state",
+                message: "commitment number 4 is not above the last COMMITMENT:local signed, 4",
+            });
+        });
+
+        // The vectors' sent revocation at 3 follows the device's own commitment at 3, the received one at 4 the peer's at 4.
+        it.each([
+            ["SendRevokeAndAck", "local", 3],
+            ["CompleteReceivedRevokeAndAck", "remote", 4],
+        ] as const)(
+            "signs %s with its replacement, the %s commitment at the slot's number, as its view's last",
+            async (transition, view, slot) => {
+                const channel = await openSigningChannel(vectors, caseOf(transition));
+                const { commitmentHashes } = await recordOf(channel);
+                expect(Object.keys(commitmentHashes)).toEqual([view]);
+                expect(commitmentHashes[view]?.commitmentNumber).toBe(slot);
+                expect(signedOf(await channel.dispatch.handle(channel.channelId, statusOf(transition))).status).toBe("fresh");
+                expect((await recordOf(channel)).commitmentHashes).toEqual(commitmentHashes);
+            },
+        );
+
+        it.each([
+            ["SendRevokeAndAck", "local", 3, null, "no local commitment has been signed"],
+            ["SendRevokeAndAck", "local", 3, 2, "the last one signed is version 2"],
+            ["SendRevokeAndAck", "local", 3, 4, "the last one signed is version 4"],
+            ["CompleteReceivedRevokeAndAck", "remote", 4, null, "no remote commitment has been signed"],
+            ["CompleteReceivedRevokeAndAck", "remote", 4, 3, "the last one signed is version 3"],
+            ["CompleteReceivedRevokeAndAck", "remote", 4, 5, "the last one signed is version 5"],
+        ] as const)(
+            "refuses %s as stale_state while the %s view's last commitment is not the one at %p but %p",
+            async (transition, view, slot, last, tail) => {
+                const channel = await openSigningChannel(vectors, caseOf(transition));
+                await updateRecord(channel, (record) => {
+                    const replacement = record.commitmentHashes[view];
+                    if (replacement === undefined) throw new Error("the case holds no replacement");
+                    return { ...record, commitmentHashes: last === null ? {} : { [view]: { ...replacement, commitmentNumber: last } } };
+                });
+                expect(await refusedUnclaimed(channel, statusOf(transition))).toEqual({
+                    code: "stale_state",
+                    message: `the revocation at slot ${slot} must follow its replacement, the ${view} commitment at version ${slot}, and ${tail}`,
+                });
+            },
+        );
+
+        it("refuses a peer funding key other than the one the channel pinned", async () => {
+            const channel = await openSigningChannel(vectors, caseOf("SendRevokeAndAck"));
+            const pinned = bytesToHex(pubkeyOf(PEER_KEYS.tlcBaseKey));
+            await updateRecord(channel, (record) => ({ ...record, pins: { ...record.pins, remoteFundingPubkey: pinned } }));
+            expect(await refusedUnclaimed(channel, statusOf("SendRevokeAndAck"))).toEqual({
+                code: "policy_refusal",
+                message: `the request states remoteFundingPubkey ${vectors.peer.funding_pubkey}, but the channel pinned ${pinned}`,
+            });
+        });
+
+        it("refuses offered TLCs no debit intent covers", async () => {
+            const channel = await openSigningChannel(vectors, caseOf("SendCommitmentSigned"));
+            await updateRecord(channel, (record) => ({
+                ...record,
+                views: { ...record.views, remote: { exposureShannons: FUNDED, tlcs: [], chargedShannons: {}, creditedShannons: {} } },
+            }));
+            const refusal = await refusedUnclaimed(channel, statusOf("SendCommitmentSigned"));
+            expect(refusal.code).toBe("policy_refusal");
+            expect(refusal.message).toContain("which no debit intent covers");
+        });
+
+        it("refuses a close that pays the device less than its commitments by more than the close fee", async () => {
+            const channel = await openSigningChannel(vectors, caseOf("SendClosingSigned"));
+            // Both views pay the device 72000000000 and the close fee may take 1 CKB of it: one shannon below 71900000000.
+            const status = mutated(statusOf("SendClosingSigned"), "content.content.transaction.outputs[1].capacity", "0x10bd92eeff");
+            const refusal = await refusedUnclaimed(channel, status);
+            expect(refusal.code).toBe("policy_refusal");
+            expect(refusal.message).toContain("by more than the 100000000 its fee may take");
         });
     });
 });
 
 describe("re-delivery", () => {
-    it("answers a re-delivered request with the identical partial signature, writing nothing", async () => {
-        const { dispatch, store, storage } = await opened();
-        const envelope = request("partial_sign_commitment_tx", paramsFor("partial_sign_commitment_tx"));
-        const first = partialSignatureOf(await dispatch.handle(envelope));
-        const afterFirst = await store.getChannelRecord(CHANNEL_INDEX);
-        storage.ops.length = 0;
+    it.each(SIGNED)("answers %s delivered twice with the same bytes, the second as already signed", async (transition) => {
+        const channel = await openSigningChannel(vectors, caseOf(transition));
+        const first = signedOf(await channel.dispatch.handle(channel.channelId, statusOf(transition)));
+        const recorded = [...channel.storage.map.entries()];
+        const second = signedOf(await channel.dispatch.handle(channel.channelId, statusOf(transition)));
+        expect(second).toEqual({ ...first, status: "already-signed" });
+        expect([...channel.storage.map.entries()]).toEqual(recorded);
+    });
 
-        const second = partialSignatureOf(await dispatch.handle(envelope));
+    it("writes nothing when a commitment is delivered again", async () => {
+        const channel = await openSigningChannel(vectors, caseOf("SendCommitmentSigned"));
+        signedOf(await channel.dispatch.handle(channel.channelId, statusOf("SendCommitmentSigned")));
+        channel.storage.ops.length = 0;
+        signedOf(await channel.dispatch.handle(channel.channelId, statusOf("SendCommitmentSigned")));
+        expect(writesOf(channel.storage)).toEqual([]);
+    });
 
-        expect(bytesToHex(second)).toBe(bytesToHex(first));
-        expect(writes(storage)).toEqual([]);
-        await expect(store.getChannelRecord(CHANNEL_INDEX)).resolves.toEqual(afterFirst);
+    it("writes the revocation evidence again on the delivery after it was lost", async () => {
+        const channel = await openSigningChannel(vectors, caseOf("CompleteReceivedRevokeAndAck"));
+        signedOf(await channel.dispatch.handle(channel.channelId, statusOf("CompleteReceivedRevokeAndAck")));
+        await updateRecord(channel, (record) => ({ ...record, revocations: [] }));
+        const again = signedOf(await channel.dispatch.handle(channel.channelId, statusOf("CompleteReceivedRevokeAndAck")));
+        expect(again.status).toBe("already-signed");
+        expect((await recordOf(channel)).revocations).toEqual([
+            { version: 3, forRemote: true, signature: caseOf("CompleteReceivedRevokeAndAck").expected.signature },
+        ]);
+    });
+
+    it("heals a crash between the claim and the evidence on the next delivery", async () => {
+        const channel = await openSigningChannel(vectors, caseOf("CompleteReceivedRevokeAndAck"));
+        const recordKey = `${CHANNEL_RECORD_KEY_PREFIX}${CHANNEL_INDEX}`;
+        let recordWrites = 0;
+        const crashing: ISignerStorage = {
+            get: (key) => channel.storage.get(key),
+            set: (key, value) => {
+                // The claim is the first write of the record, the evidence the second.
+                if (key === recordKey && ++recordWrites === 2) throw new Error("the device lost power");
+                channel.storage.set(key, value);
+            },
+        };
+        const dispatch = new SignerDispatch({
+            masterSeed: MASTER_SEED,
+            commitmentLock: COMMITMENT_LOCK,
+            fundingLockCellDepsCount: 2,
+            policy: new PolicyEngine(new SignerStore(crashing)),
+        });
+        expect(faultOf(await dispatch.handle(channel.channelId, statusOf("CompleteReceivedRevokeAndAck")))).toEqual(
+            new Error("the device lost power"),
+        );
+        expect((await recordOf(channel)).revocations).toEqual([]);
+        expect(Object.keys((await recordOf(channel)).signedSessions)).toEqual(["REVOKE:4"]);
+
+        const healed = signedOf(await dispatch.handle(channel.channelId, statusOf("CompleteReceivedRevokeAndAck")));
+        expect(healed.status).toBe("already-signed");
+        expect(bytesToHex(healed.partialSignature)).toBe(caseOf("CompleteReceivedRevokeAndAck").expected.partial_signature);
+        expect((await recordOf(channel)).revocations).toEqual([
+            { version: 3, forRemote: true, signature: caseOf("CompleteReceivedRevokeAndAck").expected.signature },
+        ]);
     });
 });
 
-describe("refusals", () => {
-    it.each(SIGNER_METHODS)("refuses %s for a channel this device never registered, claiming nothing", async (method) => {
-        const { dispatch, storage } = newDispatch();
-        await expect(dispatch.handle(request(method, paramsFor(method)))).resolves.toEqual({
-            kind: "refusal",
-            error: { code: "unknown_channel", message: expect.any(String) },
-        });
-        expect(writes(storage)).toEqual([]);
-    });
+describe("a second session on a served slot", () => {
+    // Fiber's open lands both commitment transitions on one slot: the received commitment, moved onto the sent one's slot.
+    function secondSession(randByte = 0x71): WireField {
+        return resigned(mutated(statusOf("CompleteReceivedCommitment"), "content.slot.commitment_number", "0x4"), randByte);
+    }
 
-    it("refuses a field the wire cannot read as malformed, naming the field and never the value", async () => {
-        const { dispatch } = await registered();
-        const params = withField(paramsFor("partial_sign_commitment_tx"), "commitment_tx.to_local", "0X1");
+    async function servedChannel(nonceReuse: "refuse" | "allow"): Promise<SigningChannel> {
+        const channel = await openSigningChannel(vectors, caseOf("SendCommitmentSigned"), { nonceReuse });
+        const settlement = (caseOf("CompleteReceivedCommitment").result.status as { settlement: { local_amount: string } }).settlement;
+        await updateRecord(channel, (record) => ({
+            ...record,
+            views: {
+                ...record.views,
+                local: {
+                    exposureShannons: BigInt(settlement.local_amount).toString(),
+                    tlcs: signingViewTlcs(vectors),
+                    chargedShannons: {},
+                    creditedShannons: {},
+                },
+            },
+        }));
+        signedOf(await channel.dispatch.handle(channel.channelId, statusOf("SendCommitmentSigned")));
+        return channel;
+    }
 
-        const error = refusalOf(await dispatch.handle(request("partial_sign_commitment_tx", params)));
-
-        expect(error.code).toBe("malformed");
-        expect(error.message).toContain("sign_request.params.commitment_tx.to_local");
-        expect(error.message).not.toContain("0X1");
-    });
-
-    it("refuses what the codecs refuse as malformed ahead of the channel lookup", async () => {
-        const { dispatch } = newDispatch();
-        const params = withField(paramsFor("partial_sign_commitment_tx"), "commitment_tx.to_local", "0X1");
-        expect(refusalOf(await dispatch.handle(request("partial_sign_commitment_tx", params))).code).toBe("malformed");
-    });
-
-    it.each([
-        ["an aggregated nonce off the curve", "session.aggregated_nonce", `0x${"03".repeat(66)}`],
-        ["a message the attached state does not rebuild", "session.message", `0x${"00".repeat(32)}`],
-    ])("refuses %s behind the channel lookup, as unknown_channel for a channel never registered", async (_, path, value) => {
-        const { dispatch } = newDispatch();
-        const params = withField(paramsFor("partial_sign_commitment_tx"), path, value);
-        expect(refusalOf(await dispatch.handle(request("partial_sign_commitment_tx", params))).code).toBe("unknown_channel");
-    });
-
-    it("refuses a message the attached state does not rebuild as malformed", async () => {
-        const { dispatch } = await registered();
-        const params = withField(paramsFor("partial_sign_commitment_tx"), "session.message", `0x${"00".repeat(32)}`);
-        const error = refusalOf(await dispatch.handle(request("partial_sign_commitment_tx", params)));
-        expect(error.code).toBe("malformed");
-        expect(error.message).toContain("does not match");
-    });
-
-    it("refuses a session that does not aggregate this channel's funding key as malformed", async () => {
-        const { dispatch } = await registered();
-        const foreign = [`0x${REMOTE.funding_pubkey}`, `0x${bytesToHex(pubkeyOf(REMOTE_KEYS.tlcBaseKey))}`];
-        const params = withField(paramsFor("partial_sign_commitment_tx"), "session.ordered_pubkeys", foreign);
-        expect(refusalOf(await dispatch.handle(request("partial_sign_commitment_tx", params))).code).toBe("malformed");
-    });
-
-    it.each([
-        ["an aggregated nonce", "session.aggregated_nonce", `0x${"03".repeat(66)}`],
-        ["a public key", "session.ordered_pubkeys", [`0x${bytesToHex(LOCAL_FUNDING_PUBKEY)}`, `0x${"03".repeat(33)}`]],
-    ])("refuses %s off the curve as malformed before the claim, so the corrected request still signs", async (_, path, value) => {
-        const { dispatch, storage } = await opened();
-        storage.ops.length = 0;
-
-        const outcome = await dispatch.handle(
-            request("partial_sign_commitment_tx", withField(paramsFor("partial_sign_commitment_tx"), path, value)),
-        );
-
-        expect(refusalOf(outcome).code).toBe("malformed");
-        expect(writes(storage)).toEqual([]);
-        partialSignatureOf(await dispatch.handle(request("partial_sign_commitment_tx", paramsFor("partial_sign_commitment_tx"))));
-    });
-
-    it("refuses a second session on a served slot as policy_refusal", async () => {
-        const { dispatch } = await opened();
-        partialSignatureOf(await dispatch.handle(request("partial_sign_commitment_tx", paramsFor("partial_sign_commitment_tx"))));
-
-        const outcome = await dispatch.handle(request("partial_sign_commitment_tx", commitmentParams(THREE_TLCS, OTHER_AGGREGATED_NONCE)));
-
-        expect(refusalOf(outcome).code).toBe("policy_refusal");
-    });
-
-    it("refuses an offered TLC no debit intent covers as policy_refusal, claiming nothing", async () => {
-        const { dispatch, storage } = newDispatch();
-        await dispatch.channelRegistered(CHANNEL_ID, dispatch.prepareChannelRegistration(CHANNEL_INDEX, FUNDED, CLOSE_SCRIPT));
-        await openChannel(dispatch);
-        storage.ops.length = 0;
-
-        const outcome = await dispatch.handle(request("partial_sign_commitment_tx", paramsFor("partial_sign_commitment_tx")));
-
-        expect(refusalOf(outcome).code).toBe("policy_refusal");
-        expect(writes(storage)).toEqual([]);
-    });
-
-    it("refuses a commitment number that does not advance its context as stale_state", async () => {
-        const { dispatch } = await opened();
-        partialSignatureOf(await dispatch.handle(request("partial_sign_commitment_tx", paramsFor("partial_sign_commitment_tx"))));
-
-        const outcome = await dispatch.handle(request("partial_sign_commitment_tx", commitmentParams(renumbered(5), AGGREGATED_NONCE)));
-
-        expect(refusalOf(outcome).code).toBe("stale_state");
-    });
-
-    it("refuses a state version below the last one seen as stale_state", async () => {
-        const { dispatch } = await opened();
-        partialSignatureOf(await dispatch.handle(request("partial_sign_commitment_tx", paramsFor("partial_sign_commitment_tx"))));
-
-        const outcome = await dispatch.handle(
-            request("partial_sign_commitment_tx", commitmentParams(THREE_TLCS_FOR_LOCAL, AGGREGATED_NONCE), { stateVersion: 1 }),
-        );
-
-        expect(refusalOf(outcome).code).toBe("stale_state");
-    });
-
-    it("writes a codec refusal as exactly its code and the message the codec threw", async () => {
-        const { dispatch } = await registered();
-        const envelope = request(
-            "partial_sign_commitment_tx",
-            withField(paramsFor("partial_sign_commitment_tx"), "commitment_tx.to_local", "0X1"),
-        );
-        let thrown: unknown;
-        try {
-            decodeSignParams(envelope, COMMITMENT_LOCK_TESTNET);
-        } catch (error) {
-            thrown = error;
-        }
-        if (!(thrown instanceof ProtocolError)) throw new Error("expected a codec refusal");
-
-        expect(refusalOf(await dispatch.handle(envelope))).toStrictEqual({ code: "malformed", message: thrown.message });
-    });
-
-    it("writes a gate refusal as exactly its code and the message the gate threw", async () => {
-        const { dispatch, policy } = newDispatch();
-        const thrown = await policy.requireChannelIndex(CHANNEL_ID).catch((error: unknown) => error);
-        if (!(thrown instanceof PolicyRefusalError)) throw new Error("expected a gate refusal");
-
-        expect(refusalOf(await dispatch.handle(request("get_base_public_keys", {})))).toStrictEqual({
-            code: "unknown_channel",
-            message: thrown.message,
+    it("is refused by default, claiming nothing", async () => {
+        const channel = await servedChannel("refuse");
+        expect(await refusedUnclaimed(channel, secondSession())).toEqual({
+            code: "policy_refusal",
+            message: "slot COMMITMENT:4 has already served a different signing session",
         });
     });
-});
 
-describe("the commitment lock", () => {
-    // Only the commitment tx tells the two locks apart: the revocation digest sizes a fee over the lock, not its bytes.
-    it("rebuilds the commitment tx under the lock the dispatch holds, so the mainnet lock refuses the testnet vectors", async () => {
-        const testnet = await opened();
-        // Unopened: the vectors' opening digest is the testnet lock's, and the digest check runs first.
-        const mainnet = await registered(COMMITMENT_LOCK_MAINNET);
-        const params = paramsFor("partial_sign_commitment_tx");
+    it("is signed under allow, reported as reused with its warning", async () => {
+        const channel = await servedChannel("allow");
+        const status = secondSession();
+        const signed = signedOf(await channel.dispatch.handle(channel.channelId, status));
+        expect(signed.status).toBe("reused");
+        expect(signed.warnings).toEqual([{ kind: "nonce-reused", slot: "COMMITMENT:4" }]);
+        expect(signed.view).toBe("local");
+        expect(signed.commitmentNumber).toBe(2);
+        expect(Object.keys((await recordOf(channel)).nonceReuse)).toEqual(["COMMITMENT:4"]);
+        const value = status.value as { content: { agg_nonce: string }; session_evidence: { peer_public_nonce: string } };
+        const session = new Session(
+            hexToBytes(value.content.agg_nonce.slice(2)),
+            [PEER_FUNDING_PUBKEY, DEVICE_FUNDING_PUBKEY],
+            hexToBytes(caseOf("CompleteReceivedCommitment").expected.message),
+        );
+        const nonces = [hexToBytes(value.session_evidence.peer_public_nonce.slice(2)), getPublicNonce(KEYS, 4, "COMMITMENT")];
+        expect(session.partialSigVerify(signed.partialSignature, nonces, 1)).toBe(true);
+    });
 
-        expect((await testnet.dispatch.handle(request("partial_sign_commitment_tx", params))).kind).toBe("result");
-        expect(refusalOf(await mainnet.dispatch.handle(request("partial_sign_commitment_tx", params))).code).toBe("malformed");
+    it("refuses a third session under allow: three equations solve for the funding key", async () => {
+        const channel = await servedChannel("allow");
+        signedOf(await channel.dispatch.handle(channel.channelId, secondSession()));
+        const third = resigned(statusOf("SendCommitmentSigned"), 0x72);
+        expect(await refusedUnclaimed(channel, third)).toEqual({
+            code: "policy_refusal",
+            message: "slot COMMITMENT:4 has already served two signing sessions, the most one nonce can",
+        });
+    });
+
+    it("answers each served session again with its bytes, the reused one with its warning every time", async () => {
+        const channel = await servedChannel("allow");
+        const second = signedOf(await channel.dispatch.handle(channel.channelId, secondSession()));
+        channel.storage.ops.length = 0;
+        const secondAgain = signedOf(await channel.dispatch.handle(channel.channelId, secondSession()));
+        expect(secondAgain).toEqual(second);
+        const firstAgain = signedOf(await channel.dispatch.handle(channel.channelId, statusOf("SendCommitmentSigned")));
+        expect(firstAgain.status).toBe("already-signed");
+        expect(firstAgain.warnings).toEqual([]);
+        expect(bytesToHex(firstAgain.partialSignature)).toBe(caseOf("SendCommitmentSigned").expected.partial_signature);
+        expect(writesOf(channel.storage)).toEqual([]);
+    });
+
+    it("keeps the complete revocation signature of a received revocation reused under allow", async () => {
+        const channel = await openSigningChannel(vectors, caseOf("CompleteReceivedRevokeAndAck"), { nonceReuse: "allow" });
+        // Both revocations land on REVOKE:4: the device's own moves onto it with its revoked version, after its local replacement.
+        const local = { commitmentNumber: 4, txHash: caseOf("CompleteReceivedCommitment").expected.message };
+        await updateRecord(channel, (record) => ({ ...record, commitmentHashes: { ...record.commitmentHashes, local } }));
+        const args = (statusOf("SendRevokeAndAck").value as { content: { content: { commitment_lock_script_args: string } } }).content
+            .content.commitment_lock_script_args;
+        const moved = mutated(statusOf("SendRevokeAndAck"), "content.slot.commitment_number", "0x4");
+        const sent = resigned(mutated(moved, "content.content.commitment_lock_script_args", `${args.slice(0, -2)}03`), 0x73);
+        expect(signedOf(await channel.dispatch.handle(channel.channelId, sent)).status).toBe("fresh");
+        expect((await recordOf(channel)).revocations).toEqual([]);
+
+        const received = statusOf("CompleteReceivedRevokeAndAck");
+        const signed = signedOf(await channel.dispatch.handle(channel.channelId, received));
+        expect(signed.status).toBe("reused");
+        expect(signed.warnings).toEqual([{ kind: "nonce-reused", slot: "REVOKE:4" }]);
+        expect((await recordOf(channel)).revocations).toEqual([
+            { version: 3, forRemote: true, signature: caseOf("CompleteReceivedRevokeAndAck").expected.signature },
+        ]);
     });
 });
 
 describe("faults", () => {
-    it("leaves a request whose storage throws unanswered as a fault carrying the cause, even a cause with a code", async () => {
+    // The aggregated nonce was checked at the request's slot, so a claim of another one is the device's own bug.
+    it.each([
+        ["another context", { context: "COMMITMENT" as const }, "COMMITMENT:3"],
+        ["another number", { commitmentNumber: 4 }, "REVOKE:4"],
+    ])("leaves a verdict for %s than the request's slot a fault, signing nothing", async (_, skew, claimed) => {
+        const channel = await openSigningChannel(vectors, caseOf("SendRevokeAndAck"));
+        const claim = channel.policy.checkAndClaim.bind(channel.policy);
+        channel.policy.checkAndClaim = async (keys, request) => ({ ...(await claim(keys, request)), ...skew });
+        const sign = jest.spyOn(musig2Engine, "partialSign");
+        try {
+            const cause = faultOf(await channel.dispatch.handle(channel.channelId, statusOf("SendRevokeAndAck")));
+            expect(cause).toEqual(new Error(`the gate claimed ${claimed}, not the slot REVOKE:3 the nonce was checked at`));
+            expect(sign).not.toHaveBeenCalled();
+        } finally {
+            sign.mockRestore();
+        }
+    });
+
+    it("leaves a status whose storage throws unanswered, carrying the cause", async () => {
         const failure = Object.assign(new Error("no space left on device"), { code: "ENOSPC" });
         const storage: ISignerStorage = {
             get() {
@@ -742,74 +984,59 @@ describe("faults", () => {
                 throw failure;
             },
         };
-        const policy = new PolicyEngine(new SignerStore(storage));
-        const dispatch = new SignerDispatch({ masterSeed: MASTER_SEED, commitmentLock: COMMITMENT_LOCK_TESTNET, policy });
-
-        await expect(dispatch.handle(request("partial_sign_commitment_tx", paramsFor("partial_sign_commitment_tx")))).resolves.toEqual({
+        const dispatch = new SignerDispatch({
+            masterSeed: MASTER_SEED,
+            commitmentLock: COMMITMENT_LOCK,
+            fundingLockCellDepsCount: 2,
+            policy: new PolicyEngine(new SignerStore(storage)),
+        });
+        expect(await dispatch.handle(vectors.channel.channel_id, statusOf("SendCommitmentSigned"))).toEqual({
             kind: "fault",
             cause: failure,
         });
     });
 
-    it("reports a corrupt record as a fault that claims nothing, and answers once the record is back", async () => {
-        const { dispatch, storage } = await opened();
+    it("reports a corrupt record as a fault that claims nothing, and signs once the record is back", async () => {
+        const channel = await openSigningChannel(vectors, caseOf("SendCommitmentSigned"));
         const key = `${CHANNEL_RECORD_KEY_PREFIX}${CHANNEL_INDEX}`;
-        const record = storage.map.get(key) ?? "";
-        storage.map.set(key, "garbage");
-        storage.ops.length = 0;
-        const envelope = request("partial_sign_commitment_tx", paramsFor("partial_sign_commitment_tx"));
-
-        expect(faultOf(await dispatch.handle(envelope))).toBeInstanceOf(TypeError);
-        expect(writes(storage)).toEqual([]);
-
-        storage.map.set(key, record);
-        partialSignatureOf(await dispatch.handle(envelope));
+        const record = channel.storage.map.get(key) ?? "";
+        channel.storage.map.set(key, "garbage");
+        channel.storage.ops.length = 0;
+        expect(faultOf(await channel.dispatch.handle(channel.channelId, statusOf("SendCommitmentSigned")))).toBeInstanceOf(TypeError);
+        expect(writesOf(channel.storage)).toEqual([]);
+        channel.storage.map.set(key, record);
+        expect(signedOf(await channel.dispatch.handle(channel.channelId, statusOf("SendCommitmentSigned"))).status).toBe("fresh");
     });
 
-    it("reports a name that resolves to an index holding no record as a fault that claims nothing, until it is registered", async () => {
-        const { dispatch, policy, storage } = newDispatch();
-        await recordOfferedIntents(policy);
-        storage.ops.length = 0;
-        storage.map.set(`${CHANNEL_ALIAS_KEY_PREFIX}${CHANNEL_ID}`, String(CHANNEL_INDEX));
-        const envelope = request("partial_sign_commitment_tx", paramsFor("partial_sign_commitment_tx"));
-
-        expect(faultOf(await dispatch.handle(envelope))).toBeInstanceOf(TypeError);
-        expect(writes(storage)).toEqual([]);
-
-        await dispatch.channelRegistered(CHANNEL_ID, dispatch.prepareChannelRegistration(CHANNEL_INDEX, FUNDED, CLOSE_SCRIPT));
-        await openChannel(dispatch);
-        partialSignatureOf(await dispatch.handle(envelope));
-    });
-
-    it("answers once the storage is back, since a fault claims nothing", async () => {
-        const inner = await opened();
-        inner.storage.ops.length = 0;
-        let failures = 1;
-        const storage: ISignerStorage = {
-            get(key) {
-                if (failures > 0) {
-                    failures -= 1;
-                    throw new Error("storage unavailable");
-                }
-                return inner.storage.get(key);
+    it("leaves a status that fails to read for a reason no codec names as a fault, not a refusal", async () => {
+        const channel = await openSigningChannel(vectors, caseOf("SendCommitmentSigned"));
+        const failure = new Error("the host handed over a value whose fields throw");
+        const value = Object.defineProperty({}, "type", {
+            enumerable: true,
+            get() {
+                throw failure;
             },
-            set(key, value) {
-                inner.storage.set(key, value);
-            },
-        };
-        const policy = new PolicyEngine(new SignerStore(storage));
-        const dispatch = new SignerDispatch({ masterSeed: MASTER_SEED, commitmentLock: COMMITMENT_LOCK_TESTNET, policy });
-        const envelope = request("partial_sign_commitment_tx", paramsFor("partial_sign_commitment_tx"));
-
-        expect((await dispatch.handle(envelope)).kind).toBe("fault");
-        expect(writes(inner.storage)).toHaveLength(0);
-        expect((await dispatch.handle(envelope)).kind).toBe("result");
+        });
+        channel.storage.ops.length = 0;
+        expect(await channel.dispatch.handle(channel.channelId, { value, path: "response.result.status" })).toEqual({
+            kind: "fault",
+            cause: failure,
+        });
+        expect(channel.storage.ops).toEqual([]);
     });
 
-    it("never throws, whatever the request", async () => {
-        const { dispatch } = await registered();
-        const outcome = await dispatch.handle(request("no_such_method" as SignerMethod, {}));
-        expect(outcome.kind).toBe("fault");
+    // The record's absence is the storage's failure, never the node's: it is not answered as malformed.
+    it("reports a name that resolves to an index holding no record as a fault", async () => {
+        const storage = new InMemorySignerStorage();
+        storage.map.set(`${CHANNEL_ALIAS_KEY_PREFIX}${vectors.channel.channel_id}`, String(CHANNEL_INDEX));
+        const dispatch = new SignerDispatch({
+            masterSeed: MASTER_SEED,
+            commitmentLock: COMMITMENT_LOCK,
+            fundingLockCellDepsCount: 2,
+            policy: new PolicyEngine(new SignerStore(storage)),
+        });
+        expect(faultOf(await dispatch.handle(vectors.channel.channel_id, statusOf("SendCommitmentSigned")))).toBeInstanceOf(TypeError);
+        expect(writesOf(storage)).toEqual([]);
     });
 });
 
@@ -817,46 +1044,43 @@ describe("secret hygiene", () => {
     it("names no key material in any refusal", async () => {
         const secrets = [
             MASTER_SEED,
-            deriveWalletIdentityKey(MASTER_SEED),
             KEYS.fundingKey,
             KEYS.tlcBaseKey,
             KEYS.musig2BaseNonce,
             KEYS.commitmentSeed,
-            deriveNonceSeed(KEYS, THREE_TLCS.commitment_number, "COMMITMENT"),
-            deriveTlcKey(KEYS, THREE_TLCS.commitment_number),
+            deriveNonceSeed(KEYS, 4, "COMMITMENT"),
+            deriveNonceSeed(KEYS, 4, "REVOKE"),
+            deriveTlcKey(KEYS, 2),
         ].map(bytesToHex);
-        const unregistered = newDispatch().dispatch;
-        const served = await opened();
-        partialSignatureOf(await served.dispatch.handle(request("partial_sign_commitment_tx", paramsFor("partial_sign_commitment_tx"))));
-        const exposed = newDispatch();
-        await exposed.dispatch.channelRegistered(
-            CHANNEL_ID,
-            exposed.dispatch.prepareChannelRegistration(CHANNEL_INDEX, FUNDED, CLOSE_SCRIPT),
+        const refusals: SignerRefusal[] = [];
+        const refuse = async (transition: ChannelSigningTransition, status: WireField, channelId?: string) => {
+            const channel = await openSigningChannel(vectors, caseOf(transition));
+            refusals.push(refusedOf(await channel.dispatch.handle(channelId ?? channel.channelId, status)).error);
+        };
+        await refuse("SendCommitmentSigned", mutated(statusOf("SendCommitmentSigned"), "request_id", "0x00"));
+        await refuse("SendCommitmentSigned", statusOf("SendCommitmentSigned"), UNKNOWN_CHANNEL_ID);
+        await refuse("SignChannelAnnouncement", statusOf("SignChannelAnnouncement"));
+        await refuse(
+            "SendCommitmentSigned",
+            mutated(statusOf("SendCommitmentSigned"), "content.key_agg_ctx", keyAggContextWire(DEVICE_FUNDING_PUBKEY, PEER_FUNDING_PUBKEY)),
         );
-        const outcomes = await Promise.all([
-            unregistered.handle(request("get_base_public_keys", {})),
-            served.dispatch.handle(
-                request("partial_sign_commitment_tx", withField(paramsFor("partial_sign_commitment_tx"), "commitment_tx.to_local", "0X1")),
-            ),
-            served.dispatch.handle(
-                request(
-                    "partial_sign_commitment_tx",
-                    withField(paramsFor("partial_sign_commitment_tx"), "session.message", `0x${"00".repeat(32)}`),
-                ),
-            ),
-            served.dispatch.handle(request("partial_sign_commitment_tx", commitmentParams(THREE_TLCS, OTHER_AGGREGATED_NONCE))),
-            served.dispatch.handle(request("partial_sign_commitment_tx", commitmentParams(renumbered(5), AGGREGATED_NONCE))),
-            served.dispatch.handle(
-                request("partial_sign_commitment_tx", commitmentParams(THREE_TLCS_FOR_LOCAL, AGGREGATED_NONCE), { stateVersion: 1 }),
-            ),
-            exposed.dispatch.handle(request("partial_sign_commitment_tx", paramsFor("partial_sign_commitment_tx"))),
-        ]);
-
-        const messages = outcomes.map((outcome) => refusalOf(outcome).message);
-
-        expect(new Set(outcomes.map((outcome) => refusalOf(outcome).code))).toEqual(
-            new Set(["unknown_channel", "malformed", "policy_refusal", "stale_state"]),
+        await refuse("SendCommitmentSigned", mutated(statusOf("SendCommitmentSigned"), "content.slot.commitment_number", "0x5"));
+        await refuse(
+            "CompleteReceivedRevokeAndAck",
+            mutated(statusOf("CompleteReceivedRevokeAndAck"), "session_evidence.peer_partial_signature", `0x${"11".repeat(32)}`),
         );
-        for (const message of messages) for (const secret of secrets) expect(message).not.toContain(secret);
+        await refuse(
+            "SendCommitmentSigned",
+            mutated(statusOf("SendCommitmentSigned"), "settlement.tlcs[0].local_key_pubkey", vectors.device.tlc_base_pubkey),
+        );
+        await refuse("SendCommitmentSigned", mutated(statusOf("SendCommitmentSigned"), "settlement.local_amount", "0x103d6c8981"));
+        await refuse("SendRevokeAndAck", resigned(mutated(statusOf("SendRevokeAndAck"), "content.slot.commitment_number", "0x4")));
+
+        expect(new Set(refusals.map((refusal) => refusal.code))).toEqual(new Set(["malformed", "unknown_channel", "policy_refusal"]));
+        for (const { message } of refusals) for (const secret of secrets) expect(message).not.toContain(secret);
     });
 });
+
+function caseOfPeerNonce(transition: ChannelSigningTransition): string {
+    return (caseOf(transition).result.status as { session_evidence: { peer_public_nonce: string } }).session_evidence.peer_public_nonce;
+}

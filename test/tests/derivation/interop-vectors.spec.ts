@@ -14,6 +14,7 @@ import {
 import { deriveMasterSeed } from "../../../src/derivation/master-seed";
 import { ckbBlake2b } from "../../../src/common/utils/ckb-hash.utils";
 import { loadInteropVectors, type ChannelKeysVector } from "../../utils/interop-vectors";
+import { loadSigningVectors } from "../../utils/signing-vectors";
 
 function expectChannelKeys(keys: FiberChannelKeys, expected: ChannelKeysVector): void {
     expect(bytesToHex(keys.fundingKey)).toBe(expected.funding_key);
@@ -116,6 +117,13 @@ describe("cross-implementation vectors", () => {
                     expect(bytesToHex(deriveNonceSeed(keys, entry.commitment_number, entry.context))).toBe(entry.seed);
                 });
             }
+        });
+
+        it("derives the device of the signing vectors from its master seed and channel index", () => {
+            const { device } = loadSigningVectors();
+            const deviceKeys = deriveChannelKeys(deriveChannelSeed(hexToBytes(device.master_seed), device.channel_index));
+            expect(bytesToHex(pubkeyOf(deviceKeys.fundingKey))).toBe(device.funding_pubkey);
+            expect(bytesToHex(pubkeyOf(deviceKeys.tlcBaseKey))).toBe(device.tlc_base_pubkey);
         });
     });
 });

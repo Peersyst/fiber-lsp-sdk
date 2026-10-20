@@ -1,5 +1,5 @@
-import { calculateCommitmentTxFee, calculateShutdownTxFee } from "../digest";
-import { MAX_COMMITMENT_FEE_SHANNONS, MAX_SHUTDOWN_FEE_SHANNONS } from "./policy.constants";
+import { calculateCommitmentTxFee } from "../digest";
+import { MAX_COMMITMENT_FEE_SHANNONS } from "./policy.constants";
 import { refusePolicyRequest } from "./policy.error";
 import type { SignOperation } from "./policy.types";
 
@@ -17,7 +17,7 @@ export function judgeCapacityBounds(operation: SignOperation): void {
                 (sum, tlc) => sum + tlc.amountShannons,
                 input.settlementLocalShannons + input.settlementRemoteShannons,
             );
-            const liquid = input.toLocalShannons + input.toRemoteShannons;
+            const liquid = input.liquidCapacityShannons;
             if (paid > liquid) {
                 refusePolicyRequest(
                     "policy_refusal",
@@ -29,16 +29,8 @@ export function judgeCapacityBounds(operation: SignOperation): void {
         case "revocation":
             assertCommitmentFee(calculateCommitmentTxFee(operation.input));
             return;
-        case "shutdown_tx": {
-            const fee = calculateShutdownTxFee(operation.input.localFeeRate, operation.input);
-            if (fee > MAX_SHUTDOWN_FEE_SHANNONS) {
-                refusePolicyRequest(
-                    "policy_refusal",
-                    `the close takes a local fee of ${fee} shannons, above the ${MAX_SHUTDOWN_FEE_SHANNONS} the reserve keeps for it`,
-                );
-            }
-            return;
-        }
+        // A close states no fee rate: the balance rule bounds its fee on the payout.
+        case "closing_tx":
         case "channel_announcement":
             return;
     }

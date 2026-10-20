@@ -1,13 +1,14 @@
 import { equalBytes } from "@noble/curves/utils.js";
 import { bytesToHex, utf8ToBytes } from "@noble/hashes/utils.js";
 import {
-    COMPRESSED_POINT_LENGTH,
     MESSAGE_DIGEST_LENGTH,
-    MUSIG_PARTICIPANTS,
     PUBLIC_NONCE_LENGTH,
     assertBytes,
+    assertTwoDistinctKeys,
     ckbBlake2b,
+    isAggregatedNonceHalf,
     isCompressedPoint,
+    nonceHalves,
 } from "../../common";
 import type { FiberChannelKeys } from "../../derivation";
 import { pubkeyOf } from "../../derivation";
@@ -16,26 +17,16 @@ import type { SignSession } from "../policy.types";
 
 const LABEL = utf8ToBytes(SESSION_COMMITMENT_LABEL);
 
-const INFINITY = new Uint8Array(COMPRESSED_POINT_LENGTH);
-
 /**
  * Asserts that a session has the shape a partial signature needs, and hands back its two public keys narrowed.
  * @param session Session to check.
  * @returns The two validated 33-byte public keys, in the order the node sent them.
  */
 export function assertSignSessionShape(session: SignSession): [Uint8Array, Uint8Array] {
-    if (!Array.isArray(session.orderedPublicKeys) || session.orderedPublicKeys.length !== MUSIG_PARTICIPANTS) {
-        throw new TypeError(`session.orderedPublicKeys must be exactly ${MUSIG_PARTICIPANTS} public keys`);
-    }
-    const [firstKey, secondKey] = session.orderedPublicKeys;
-    assertBytes("session.orderedPublicKeys[0]", firstKey, COMPRESSED_POINT_LENGTH);
-    assertBytes("session.orderedPublicKeys[1]", secondKey, COMPRESSED_POINT_LENGTH);
+    const publicKeys = assertTwoDistinctKeys("session.orderedPublicKeys", session.orderedPublicKeys);
     assertBytes("session.aggregatedNonce", session.aggregatedNonce, PUBLIC_NONCE_LENGTH);
     assertBytes("session.message", session.message, MESSAGE_DIGEST_LENGTH);
-    if (equalBytes(firstKey, secondKey)) {
-        throw new TypeError("session.orderedPublicKeys must be two distinct public keys");
-    }
-    return [firstKey, secondKey];
+    return publicKeys;
 }
 
 /**
@@ -53,11 +44,7 @@ export function assertSignSession(keys: FiberChannelKeys, session: SignSession):
     if (!publicKeys.every(isCompressedPoint)) {
         throw new TypeError("session.orderedPublicKeys must be points on the curve");
     }
-    const nonceHalves = [
-        session.aggregatedNonce.subarray(0, COMPRESSED_POINT_LENGTH),
-        session.aggregatedNonce.subarray(COMPRESSED_POINT_LENGTH),
-    ];
-    if (!nonceHalves.every((half) => equalBytes(half, INFINITY) || isCompressedPoint(half))) {
+    if (!nonceHalves(session.aggregatedNonce).every(isAggregatedNonceHalf)) {
         throw new TypeError("session.aggregatedNonce must be two points on the curve or at infinity");
     }
 }

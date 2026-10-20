@@ -1,6 +1,6 @@
 import { assertOneOf, isNonEmptyString, isPlainObject, isUnsignedInteger } from "../common";
 import { WireError } from "./wire.error";
-import type { WireField, WireFieldReader } from "./wire.types";
+import type { WireField, WireFieldReader, WireTagged } from "./wire.types";
 
 /**
  * Refuses a field, ending the decode wherever it is.
@@ -32,6 +32,17 @@ export function readObject<Wire extends object>(field: WireField): WireFieldRead
 }
 
 /**
+ * Reads a field as one variant of a union fiber tags with `type`, serde's internally tagged form.
+ * @param field Field to read.
+ * @param variants Accepted tags.
+ * @returns The tag, and a reader of the variant's other members.
+ */
+export function readTagged<Wire extends { type: string }>(field: WireField, variants: readonly Wire["type"][]): WireTagged<Wire> {
+    const at: WireFieldReader<Record<string, unknown>> = readObject(field);
+    return { tag: decodeEnum(at("type"), variants), at } as WireTagged<Wire>;
+}
+
+/**
  * Reads a field as an array, of an exact length when the wire fixes one.
  * @param field Field to read.
  * @param length Exact number of items, or `undefined` for any number.
@@ -41,7 +52,7 @@ export function readArray(field: WireField, length?: number): WireField[] {
     if (!Array.isArray(field.value)) malformedWireField(field, "must be an array");
     const items: unknown[] = field.value;
     if (length !== undefined && items.length !== length) malformedWireField(field, `must have exactly ${length} items`);
-    // Array.from visits holes too, which map skips: a sparse array cannot come from JSON, but an item must never go unread.
+    // Array.from visits holes, which map skips: no item goes unread.
     return Array.from(items, (value, index) => ({ value, path: `${field.path}[${index}]` }));
 }
 
@@ -88,7 +99,7 @@ export function decodeNonEmptyString(field: WireField): string {
 /**
  * Reads a field as one of a closed set of string values.
  * @param field Field to read.
- * @param values The accepted values.
+ * @param values Accepted values.
  * @returns The value, narrowed to the set.
  */
 export function decodeEnum<Values extends readonly string[]>(field: WireField, values: Values): Values[number] {
@@ -112,7 +123,7 @@ export function decodeMapped<Spellings extends Record<string, string>>(field: Wi
 
 /**
  * Writes an SDK spelling as the wire spelling a map pairs it with.
- * @param name Name of the value, used in the error message.
+ * @param name Name for the error message.
  * @param value SDK spelling to write.
  * @param spellings Wire spelling to SDK spelling.
  * @returns The wire spelling.
@@ -129,7 +140,7 @@ export function encodeMapped<Spellings extends Record<string, string>>(
 /**
  * Reads a field as a JSON number that is an integer within `[0, max]`.
  * @param field Field to read.
- * @param max Highest accepted value, inclusive.
+ * @param max Highest accepted value.
  * @returns The integer.
  */
 export function decodeUnsignedInteger(field: WireField, max: number): number {

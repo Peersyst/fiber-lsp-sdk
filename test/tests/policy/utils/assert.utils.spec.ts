@@ -9,9 +9,11 @@ function record(): ChannelPolicyRecord {
     return {
         version: 1,
         channelId: "0x1f".padEnd(66, "a"),
-        lastSignedCommitmentNumbers: { COMMITMENT: 5, REVOKE: 4 },
+        lastSignedCommitmentNumbers: { "COMMITMENT:local": 5, "REVOKE:remote": 4 },
         signedSessions: { "COMMITMENT:5": "ab".repeat(32) },
-        lastStateVersion: 7,
+        nonceReuse: {},
+        commitmentHashes: {},
+        revocations: [],
         pins: {
             fundedShannons: "5000000000",
             localCloseScript: "ab".repeat(53),

@@ -1,12 +1,21 @@
-import { schnorr } from "@noble/curves/secp256k1.js";
+import { schnorr, secp256k1 } from "@noble/curves/secp256k1.js";
+import { bytesToNumberBE, equalBytes } from "@noble/curves/utils.js";
 import { bytesToHex } from "@noble/hashes/utils.js";
 import { Session, keyAggExport, keyAggregate, nonceAggregate, nonceGen } from "@scure/btc-signer/musig2.js";
 import { NONCE_CONTEXTS } from "../../../src/derivation/derivation.constants";
 import type { NonceContext } from "../../../src/derivation/derivation.types";
 import { deriveChannelSeed, deriveNonceSeed } from "../../../src/derivation/device-scheme";
 import { deriveChannelKeys, getCommitmentPoint, pubkeyOf } from "../../../src/derivation/fiber-scheme";
-import { getBasePublicKeys, getChannelCommitmentPoint, getPublicNonce, partialSign } from "../../../src/signer/musig2-engine";
-import type { PartialSignRequest } from "../../../src/signer/signer.types";
+import {
+    aggregatePartialSignatures,
+    aggregatePublicNonces,
+    getBasePublicKeys,
+    getChannelCommitmentPoint,
+    getPublicNonce,
+    partialSign,
+    verifyPeerPartialSignature,
+} from "../../../src/signer/musig2-engine";
+import type { CosignSession, PartialSignRequest } from "../../../src/signer/signer.types";
 
 const MASTER_SEED = new Uint8Array(32).fill(0x24);
 const channelKeys = deriveChannelKeys(deriveChannelSeed(MASTER_SEED, 0));
@@ -153,7 +162,7 @@ describe("partialSign", () => {
                 partialSign(channelKeys, REQUEST),
                 partialSign(channelKeys, { ...REQUEST, message: new Uint8Array(32).fill(0xac) }),
                 partialSign(channelKeys, { ...REQUEST, commitmentNumber: 1 }),
-                partialSign(channelKeys, { ...REQUEST, context: "CLOSE" }),
+                partialSign(channelKeys, { ...REQUEST, context: "REVOKE" }),
             ].map(bytesToHex),
         );
         expect(partials.size).toBe(4);
@@ -192,10 +201,8 @@ describe("partialSign", () => {
         expect(() => partialSign({ ...channelKeys, musig2BaseNonce: new Uint8Array(31) }, REQUEST)).toThrow(TypeError);
     });
 
-    // The engine cannot tell whether the aggregate includes the nonce it published, so it signs regardless, and the result is
-    // both unusable to the node and dangerous to the device: same slot and same message as REQUEST means the same secret nonce,
-    // now answering a second challenge. Three of these recover the funding key (docs/signing.md), which is why the claim the
-    // policy layer holds on a slot has to cover the whole session and not just the message.
+    // The engine cannot see whether the aggregate holds its nonce: the same secret nonce answers a second challenge, and three
+    // recover the funding key (docs/signing.md), so the policy's claim on a slot covers the whole session.
     it("resigns a slot under a foreign aggregated nonce, reusing the slot's secret nonce across two sessions", () => {
         const otherSlotNonce = getPublicNonce(channelKeys, 1, "COMMITMENT");
         const foreignAggregate = nonceAggregate([otherSlotNonce, peerNonces().public]);
@@ -245,5 +252,224 @@ describe("engine v1 outputs", () => {
 
     it("produces the pinned partial signature for the literal request", () => {
         expect(bytesToHex(partialSign(channelKeys, REQUEST))).toBe("37c8b87b10ff19ff826227383ed478f0fe69624d03180f57b519784edadb8887");
+    });
+});
+
+// The peer's half of REQUEST, signed by the peer itself.
+function peerPartialSignature(session: { orderedPublicKeys: Uint8Array[]; aggregatedNonce: Uint8Array; message: Uint8Array }) {
+    return new Session(session.aggregatedNonce, session.orderedPublicKeys, session.message).sign(peerNonces().secret, PEER_SECRET_KEY);
+}
+
+const COSIGN: CosignSession = {
+    orderedPublicKeys: [localPubkey, peerPubkey],
+    aggregatedNonce,
+    message: MESSAGE,
+    devicePublicNonce: localPubNonce,
+    peerPublicNonce: peerNonces().public,
+};
+
+describe("aggregatePublicNonces", () => {
+    it("sums the two nonces into the aggregate the session signs under, in either order", () => {
+        expect(bytesToHex(aggregatePublicNonces(localPubNonce, peerNonces().public))).toBe(bytesToHex(aggregatedNonce));
+        expect(bytesToHex(aggregatePublicNonces(peerNonces().public, localPubNonce))).toBe(bytesToHex(aggregatedNonce));
+    });
+
+    it("tells apart a nonce the device did not publish for the slot", () => {
+        const otherSlot = getPublicNonce(channelKeys, 1, "COMMITMENT");
+        expect(bytesToHex(aggregatePublicNonces(otherSlot, peerNonces().public))).not.toBe(bytesToHex(aggregatedNonce));
+    });
+
+    it.each([
+        ["a 65-byte device nonce", new Uint8Array(65), peerNonces().public],
+        ["a 67-byte device nonce", new Uint8Array(67), peerNonces().public],
+        ["a 65-byte peer nonce", localPubNonce, new Uint8Array(65)],
+        ["a peer nonce that is not bytes", localPubNonce, "02" as unknown as Uint8Array],
+    ])("rejects %s", (_, device, peer) => {
+        expect(() => aggregatePublicNonces(device, peer)).toThrow(TypeError);
+    });
+});
+
+describe("verifyPeerPartialSignature", () => {
+    it("accepts the peer's half with the device first in the key list", () => {
+        expect(verifyPeerPartialSignature(channelKeys, COSIGN, peerPartialSignature(COSIGN))).toBe(true);
+    });
+
+    it("accepts the peer's half with the peer first, its nonce placed by its key's position", () => {
+        const swapped = { ...COSIGN, orderedPublicKeys: [peerPubkey, localPubkey] };
+        expect(verifyPeerPartialSignature(channelKeys, swapped, peerPartialSignature(swapped))).toBe(true);
+    });
+
+    it("refuses the peer's half of another message", () => {
+        const other = peerPartialSignature({ ...COSIGN, message: new Uint8Array(32).fill(0xac) });
+        expect(verifyPeerPartialSignature(channelKeys, COSIGN, other)).toBe(false);
+    });
+
+    it("refuses the peer's half under another key order", () => {
+        const swapped = peerPartialSignature({ ...COSIGN, orderedPublicKeys: [peerPubkey, localPubkey] });
+        expect(verifyPeerPartialSignature(channelKeys, COSIGN, swapped)).toBe(false);
+    });
+
+    it("refuses the device's own half passed off as the peer's", () => {
+        expect(verifyPeerPartialSignature(channelKeys, COSIGN, partialSign(channelKeys, REQUEST))).toBe(false);
+    });
+
+    it("refuses a half signed under nonces that do not sum to the aggregated nonce", () => {
+        const otherPeerNonce = nonceGen(peerPubkey, PEER_SECRET_KEY, undefined, undefined, undefined, new Uint8Array(32).fill(0x08)).public;
+        expect(verifyPeerPartialSignature(channelKeys, { ...COSIGN, peerPublicNonce: otherPeerNonce }, peerPartialSignature(COSIGN))).toBe(
+            false,
+        );
+        const otherDeviceNonce = getPublicNonce(channelKeys, 1, "COMMITMENT");
+        expect(
+            verifyPeerPartialSignature(channelKeys, { ...COSIGN, devicePublicNonce: otherDeviceNonce }, peerPartialSignature(COSIGN)),
+        ).toBe(false);
+    });
+
+    it("refuses a half one off the right scalar, and the zero scalar", () => {
+        const half = peerPartialSignature(COSIGN);
+        const offByOne = secp256k1.Point.Fn.toBytes(secp256k1.Point.Fn.add(bytesToNumberBE(half), 1n));
+        expect(verifyPeerPartialSignature(channelKeys, COSIGN, offByOne)).toBe(false);
+        expect(verifyPeerPartialSignature(channelKeys, COSIGN, new Uint8Array(32))).toBe(false);
+    });
+
+    it.each([
+        ["a key list without the funding key", { ...COSIGN, orderedPublicKeys: [peerPubkey, pubkeyOf(new Uint8Array(32).fill(3))] }],
+        ["a single key", { ...COSIGN, orderedPublicKeys: [localPubkey] }],
+        ["duplicate keys", { ...COSIGN, orderedPublicKeys: [localPubkey, localPubkey] }],
+        ["a 65-byte aggregated nonce", { ...COSIGN, aggregatedNonce: new Uint8Array(65) }],
+        ["a 31-byte message", { ...COSIGN, message: new Uint8Array(31) }],
+        ["a 65-byte device nonce", { ...COSIGN, devicePublicNonce: new Uint8Array(65) }],
+        ["a 67-byte peer nonce", { ...COSIGN, peerPublicNonce: new Uint8Array(67) }],
+    ])("rejects %s", (_, session) => {
+        expect(() => verifyPeerPartialSignature(channelKeys, session, peerPartialSignature(COSIGN))).toThrow(TypeError);
+    });
+
+    it.each([31, 33])("rejects a %i-byte partial signature", (length) => {
+        expect(() => verifyPeerPartialSignature(channelKeys, COSIGN, new Uint8Array(length))).toThrow(TypeError);
+    });
+});
+
+describe("aggregatePartialSignatures", () => {
+    const aggregateKey = keyAggExport(keyAggregate([localPubkey, peerPubkey]));
+
+    it("aggregates both halves into the schnorr signature the 2-of-2 key accepts, in either order", () => {
+        const own = partialSign(channelKeys, REQUEST);
+        const peer = peerPartialSignature(REQUEST);
+        const signature = aggregatePartialSignatures(REQUEST, [peer, own]);
+        expect(signature).toHaveLength(64);
+        expect(schnorr.verify(signature, MESSAGE, aggregateKey)).toBe(true);
+        expect(bytesToHex(aggregatePartialSignatures(REQUEST, [own, peer]))).toBe(bytesToHex(signature));
+    });
+
+    it("refuses halves that do not aggregate into a valid signature", () => {
+        const own = partialSign(channelKeys, REQUEST);
+        const foreign = peerPartialSignature({ ...REQUEST, message: new Uint8Array(32).fill(0xac) });
+        expect(() => aggregatePartialSignatures(REQUEST, [foreign, own])).toThrow(TypeError);
+        expect(() => aggregatePartialSignatures(REQUEST, [own, own])).toThrow(TypeError);
+    });
+
+    it.each([
+        ["one partial signature", [new Uint8Array(32)]],
+        ["three partial signatures", [new Uint8Array(32), new Uint8Array(32), new Uint8Array(32)]],
+        ["a 31-byte partial signature", [new Uint8Array(32), new Uint8Array(31)]],
+        ["a list that is not an array", new Uint8Array(64) as unknown as Uint8Array[]],
+    ])("rejects %s", (_, partials) => {
+        expect(() => aggregatePartialSignatures(REQUEST, partials)).toThrow(TypeError);
+    });
+
+    it.each([
+        ["a single key", { ...REQUEST, orderedPublicKeys: [localPubkey] }],
+        ["duplicate keys", { ...REQUEST, orderedPublicKeys: [localPubkey, localPubkey] }],
+        ["a 65-byte aggregated nonce", { ...REQUEST, aggregatedNonce: new Uint8Array(65) }],
+        ["a 33-byte message", { ...REQUEST, message: new Uint8Array(33) }],
+    ])("rejects a session with %s", (_, session) => {
+        const halves = [partialSign(channelKeys, REQUEST), peerPartialSignature(REQUEST)];
+        expect(() => aggregatePartialSignatures(session, halves)).toThrow(TypeError);
+    });
+});
+
+// BIP-327 signs `s = σ·(k1 + b·k2) + e·a·g·d` over the slot's two secret nonces `k1`, `k2` and the funding key `d`, with
+// `σ` the sign R's parity gives the nonces, `g` the one Q's parity gives the key, and everything else public: the node
+// computes `b`, `R`, `e` from what it sent. Under a deterministic nonce every session on one slot is one more linear
+// equation in the same three unknowns, which is why the policy serves a slot at most two sessions (docs/signing.md).
+describe("three sessions over one slot", () => {
+    const { Fn } = secp256k1.Point;
+    const keyList = [localPubkey, peerPubkey];
+    const messages = [0xa1, 0xa2, 0xa3].map((byte) => new Uint8Array(32).fill(byte));
+
+    function taggedScalar(tag: string, ...parts: Uint8Array[]): bigint {
+        return Fn.create(bytesToNumberBE(schnorr.utils.taggedHash(tag, ...parts)));
+    }
+
+    // The equation a node reads off one partial signature: its coefficients on k1, k2 and d.
+    function equationOf(message: Uint8Array): { k1: bigint; k2: bigint; d: bigint; s: bigint } {
+        const Q = keyAggregate(keyList).aggPublicKey;
+        const qBytes = Q.toBytes(true).subarray(1);
+        const b = taggedScalar("MuSig/noncecoef", aggregatedNonce, qBytes, message);
+        const R1 = secp256k1.Point.fromBytes(aggregatedNonce.subarray(0, 33));
+        const R2 = secp256k1.Point.fromBytes(aggregatedNonce.subarray(33));
+        const R = R1.add(R2.multiply(b));
+        const e = taggedScalar("BIP0340/challenge", R.toBytes(true).subarray(1), qBytes, message);
+        const list = schnorr.utils.taggedHash("KeyAgg list", ...keyList);
+        // BIP-327 gives the second distinct key of the list the coefficient 1; the device is first here.
+        const a = taggedScalar("KeyAgg coefficient", list, localPubkey);
+        const g = Q.toAffine().y % 2n === 0n ? 1n : Fn.neg(1n);
+        const sigma = R.toAffine().y % 2n === 0n ? 1n : Fn.neg(1n);
+        const s = bytesToNumberBE(partialSign(channelKeys, { ...REQUEST, message }));
+        return { k1: sigma, k2: Fn.mul(sigma, b), d: Fn.mul(Fn.mul(e, a), g), s };
+    }
+
+    function det3(rows: { k1: bigint; k2: bigint; d: bigint }[]): bigint {
+        const [r0, r1, r2] = rows as [(typeof rows)[0], (typeof rows)[0], (typeof rows)[0]];
+        const minor = (p: bigint, q: bigint, r: bigint, t: bigint) => Fn.sub(Fn.mul(p, t), Fn.mul(q, r));
+        return Fn.add(
+            Fn.sub(Fn.mul(r0.k1, minor(r1.k2, r1.d, r2.k2, r2.d)), Fn.mul(r0.k2, minor(r1.k1, r1.d, r2.k1, r2.d))),
+            Fn.mul(r0.d, minor(r1.k1, r1.k2, r2.k1, r2.k2)),
+        );
+    }
+
+    it("reads the equations right: they hold at the device's own nonces and key", () => {
+        const nonceSecret = nonceGen(
+            localPubkey,
+            channelKeys.fundingKey,
+            undefined,
+            undefined,
+            undefined,
+            deriveNonceSeed(channelKeys, 0, "COMMITMENT"),
+        ).secret;
+        const k1 = bytesToNumberBE(nonceSecret.subarray(0, 32));
+        const k2 = bytesToNumberBE(nonceSecret.subarray(32, 64));
+        const d = bytesToNumberBE(channelKeys.fundingKey);
+        for (const message of messages) {
+            const { k1: c1, k2: c2, d: c3, s } = equationOf(message);
+            expect(Fn.add(Fn.add(Fn.mul(c1, k1), Fn.mul(c2, k2)), Fn.mul(c3, d))).toBe(s);
+        }
+    });
+
+    it("leaves the key free under two sessions: every candidate key has nonces that answer both", () => {
+        const [first, second] = messages.slice(0, 2).map(equationOf) as [ReturnType<typeof equationOf>, ReturnType<typeof equationOf>];
+        // Nonzero, so for any d the two equations fix k1 and k2: nothing in them singles out the funding key.
+        const nonceDeterminant = Fn.sub(Fn.mul(first.k1, second.k2), Fn.mul(first.k2, second.k1));
+        expect(nonceDeterminant).not.toBe(0n);
+        const wrongKey = bytesToNumberBE(new Uint8Array(32).fill(0x09));
+        const rhs1 = Fn.sub(first.s, Fn.mul(first.d, wrongKey));
+        const rhs2 = Fn.sub(second.s, Fn.mul(second.d, wrongKey));
+        const inverse = Fn.inv(nonceDeterminant);
+        const k1 = Fn.mul(Fn.sub(Fn.mul(rhs1, second.k2), Fn.mul(first.k2, rhs2)), inverse);
+        const k2 = Fn.mul(Fn.sub(Fn.mul(first.k1, rhs2), Fn.mul(rhs1, second.k1)), inverse);
+        for (const row of [first, second]) {
+            expect(Fn.add(Fn.add(Fn.mul(row.k1, k1), Fn.mul(row.k2, k2)), Fn.mul(row.d, wrongKey))).toBe(row.s);
+        }
+    });
+
+    it("recovers the funding key from a third session's partial signature", () => {
+        const rows = messages.map(equationOf);
+        const determinant = det3(rows);
+        expect(determinant).not.toBe(0n);
+        // Cramer's rule for d: the determinant with the d column replaced by the partial signatures.
+        const withS = rows.map((row) => ({ k1: row.k1, k2: row.k2, d: row.s }));
+        const recovered = Fn.mul(det3(withS), Fn.inv(determinant));
+        const recoveredKey = Fn.toBytes(recovered);
+        expect(bytesToHex(recoveredKey)).toBe(bytesToHex(channelKeys.fundingKey));
+        expect(equalBytes(pubkeyOf(recoveredKey), localPubkey)).toBe(true);
     });
 });

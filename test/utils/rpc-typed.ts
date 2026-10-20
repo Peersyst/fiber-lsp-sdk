@@ -86,7 +86,7 @@ import type {
     TenantRegistryNonceResultVector,
     TransactionVector,
 } from "./rpc-vectors";
-import { HASH_ALGORITHM_WIRE, wireHex } from "./wire-requests";
+import { HASH_ALGORITHM_WIRE, wireHex } from "./wire-spellings";
 
 const HASH_ALGORITHMS = Object.fromEntries(Object.entries(HASH_ALGORITHM_WIRE).map(([sdk, wire]) => [wire, sdk])) as Record<
     string,

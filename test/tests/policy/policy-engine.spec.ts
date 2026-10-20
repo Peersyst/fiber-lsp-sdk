@@ -4,26 +4,39 @@ import type { FiberChannelKeys } from "../../../src/derivation";
 import { deriveChannelKeys, pubkeyOf } from "../../../src/derivation";
 import {
     computeChannelAnnouncementDigest,
+    computeClosingTxDigest,
     computeCommitmentTxDigest,
     computeRevocationDigest,
-    computeShutdownTxDigest,
+    computeTxMessage,
+    readClosingTx,
 } from "../../../src/digest";
 import type {
     ChannelPins,
     ChannelPolicyRecord,
     DebitIntentRecord,
     HoldInvoicePolicyRecord,
+    NonceCounter,
+    PolicyChannelTerms,
+    PolicyEngineOptions,
     PolicySignRequest,
+    PolicyView,
     SignOperation,
     SignSession,
 } from "../../../src/policy";
-import { DebitIntentError, FundingCellError, HoldInvoiceError, PolicyEngine, PolicyRefusalError, SignerStore } from "../../../src/policy";
+import { ChannelPinError, DebitIntentError, HoldInvoiceError, PolicyEngine, PolicyRefusalError, SignerStore } from "../../../src/policy";
 import { buildSessionCommitment } from "../../../src/policy/utils";
 import { AsyncInMemorySignerStorage, InMemorySignerStorage } from "../../mocks/policy";
 import { fundedShannonsOf } from "../../utils/channel-opening";
-import { toChannelAnnouncementInput, toCommitmentTxInput, toRevocationInput, toShutdownTxInput, toTlc } from "../../utils/digest-inputs";
+import {
+    toChannelAnnouncementInput,
+    toClosingTxInput,
+    toCommitmentTxInput,
+    toRevocationInput,
+    toTlc,
+    toTransaction,
+} from "../../utils/digest-inputs";
 import { caseOf, loadInteropVectors } from "../../utils/interop-vectors";
-import { SHUTDOWN_NONCE_NUMBER, revocationNonceNumber } from "../../utils/nonce-numbers";
+import { SHUTDOWN_NONCE_NUMBER, revocationCounter, revocationNonceNumber } from "../../utils/nonce-numbers";
 
 const vectors = loadInteropVectors();
 const digest = vectors.digest;
@@ -53,7 +66,16 @@ const OPENING_SETTLEMENT = "62000000000";
 const THREE_TLC_SETTLEMENT = "59750000000";
 // The "ckb" cases' opening settlement plus their local reserve.
 const FUNDED = "71900000000";
-const CLOSE_SCRIPT = toShutdownTxInput(caseOf(digest.shutdown_cases, "ckb"), digest.remote).localCloseScript;
+const CLOSE_SCRIPT = toClosingTxInput(caseOf(digest.shutdown_cases, "ckb"), digest.remote).localCloseScript;
+// What the "ckb" close pays the device: its settlement and reserve, less its 540-shannon fee.
+const CLOSE_LOCAL_CAPACITY = "71899999460";
+
+// The "ckb" cases' terms, which no request states: the host pins them from the node's opening context.
+const TERMS: PolicyChannelTerms = {
+    commitmentFeeRate: 1000n,
+    remoteReservedCkbShannons: "6300000000",
+    liquidCapacityShannons: "80500000000",
+};
 
 const OFFERED_HASH = "6844f645bb03ff9d1c9c48ee5e9e971be09bf34a3612c81b20c2a5a1bff2a6b6";
 const OFFERED_AMOUNT = "1500000000";
@@ -74,7 +96,14 @@ const REGISTERED_PINS: ChannelPins = {
     udtTypeScript: null,
 };
 
-// What the "ckb" cases state.
+const TERMS_PINNED_PINS: ChannelPins = {
+    ...REGISTERED_PINS,
+    liquidCapacityShannons: "80500000000",
+    commitmentFeeRate: "1000",
+    remoteReservedCkbShannons: "6300000000",
+};
+
+// The terms and what the "ckb" cases state.
 const OPENED_PINS: ChannelPins = {
     ...REGISTERED_PINS,
     fundingOutPoint: "6f4ea49726c322dbedceb12a09d013a0256ea697dc362cc8865f8bbcdd17684e:0",
@@ -110,22 +139,20 @@ function commitmentRequest(name: string, overrides: Partial<PolicySignRequest> =
     const kase = caseOf(digest.commitment_cases, name);
     return {
         channelId: CHANNEL_ID,
-        stateVersion: 1,
-        nonceCommitmentNumber: kase.commitment_number,
+        slot: { commitmentNumber: kase.commitment_number, counter: "local" },
         session: session(hexToBytes(kase.digest)),
         operation: { kind: "commitment_tx", input: toCommitmentTxInput(kase, digest.remote) },
         ...overrides,
     };
 }
 
-function shutdownRequest(name: string, overrides: Partial<PolicySignRequest> = {}): PolicySignRequest {
+function closingRequest(name: string, overrides: Partial<PolicySignRequest> = {}): PolicySignRequest {
     const kase = caseOf(digest.shutdown_cases, name);
     return {
         channelId: CHANNEL_ID,
-        stateVersion: 1,
-        nonceCommitmentNumber: SHUTDOWN_NONCE_NUMBER,
+        slot: { commitmentNumber: SHUTDOWN_NONCE_NUMBER, counter: "local" },
         session: session(hexToBytes(kase.digest)),
-        operation: { kind: "shutdown_tx", input: toShutdownTxInput(kase, digest.remote) },
+        operation: { kind: "closing_tx", input: toClosingTxInput(kase, digest.remote) },
         ...overrides,
     };
 }
@@ -154,10 +181,7 @@ function customCommitmentRequest(custom: CustomCommitment, channel: Channel = { 
         commitmentNumber: custom.commitmentNumber,
         settlementLocalShannons,
         settlementRemoteShannons:
-            base.toLocalShannons +
-            base.toRemoteShannons -
-            settlementLocalShannons -
-            tlcs.reduce((sum, tlc) => sum + tlc.amountShannons, 0n),
+            base.liquidCapacityShannons - settlementLocalShannons - tlcs.reduce((sum, tlc) => sum + tlc.amountShannons, 0n),
         tlcs,
     };
     return signedRequest({ kind: "commitment_tx", input }, custom.commitmentNumber, channel);
@@ -167,8 +191,8 @@ function ckbCommitment(): Extract<SignOperation, { kind: "commitment_tx" }>["inp
     return { ...toCommitmentTxInput(caseOf(digest.commitment_cases, "ckb, no tlcs, for remote"), digest.remote), commitmentNumber: 11 };
 }
 
-function ckbShutdown(): Extract<SignOperation, { kind: "shutdown_tx" }>["input"] {
-    return toShutdownTxInput(caseOf(digest.shutdown_cases, "ckb"), digest.remote);
+function ckbClose(): Extract<SignOperation, { kind: "closing_tx" }>["input"] {
+    return toClosingTxInput(caseOf(digest.shutdown_cases, "ckb"), digest.remote);
 }
 
 function ckbRevocation(): Extract<SignOperation, { kind: "revocation" }>["input"] {
@@ -179,15 +203,21 @@ function ckbAnnouncement(): Extract<SignOperation, { kind: "channel_announcement
     return toChannelAnnouncementInput(caseOf(digest.announcement_cases, "ckb"), digest.remote);
 }
 
+// The counter fiber reads each operation's slot from.
+function counterOf(operation: SignOperation): NonceCounter | null {
+    if (operation.kind === "channel_announcement") return null;
+    if (operation.kind === "revocation") return operation.input.forRemote ? "local" : "remote";
+    return "local";
+}
+
 function signedRequest(
     operation: SignOperation,
-    nonceCommitmentNumber: number,
+    commitmentNumber: number,
     channel: Channel = { keys: KEYS, channelId: CHANNEL_ID },
 ): PolicySignRequest {
     return {
         channelId: channel.channelId,
-        stateVersion: 1,
-        nonceCommitmentNumber,
+        slot: { commitmentNumber, counter: counterOf(operation) },
         session: session(digestOf(channel.keys, operation), {
             orderedPublicKeys: [pubkeyOf(channel.keys.fundingKey), REMOTE_FUNDING_PUBKEY],
         }),
@@ -199,8 +229,8 @@ function digestOf(keys: FiberChannelKeys, operation: SignOperation): Uint8Array 
     switch (operation.kind) {
         case "commitment_tx":
             return computeCommitmentTxDigest(keys, operation.input);
-        case "shutdown_tx":
-            return computeShutdownTxDigest(keys, operation.input);
+        case "closing_tx":
+            return computeClosingTxDigest(keys, operation.input);
         case "revocation":
             return computeRevocationDigest(keys, operation.input);
         case "channel_announcement":
@@ -208,7 +238,6 @@ function digestOf(keys: FiberChannelKeys, operation: SignOperation): Uint8Array 
     }
 }
 
-// The three-TLC case on the "ckb" channel.
 function threeTlcRequest(overrides: Partial<PolicySignRequest> = {}): PolicySignRequest {
     return {
         ...customCommitmentRequest({
@@ -237,48 +266,88 @@ function revocationRequest(name: string, overrides: Partial<PolicySignRequest> =
     const kase = caseOf(digest.revocation_cases, name);
     return {
         channelId: CHANNEL_ID,
-        stateVersion: 1,
-        nonceCommitmentNumber: revocationNonceNumber(kase),
+        slot: { commitmentNumber: revocationNonceNumber(kase), counter: revocationCounter(kase) },
         session: session(hexToBytes(kase.digest)),
         operation: { kind: "revocation", input: toRevocationInput(kase, digest.remote) },
         ...overrides,
     };
 }
 
+// The revocation of the peer's commitment one below the slot, sweeping to the device's script, the digest the SDK's.
+function receivedRevocation(slot: number, channel: Channel = { keys: KEYS, channelId: CHANNEL_ID }): PolicySignRequest {
+    const input = { ...ckbRevocation(), forRemote: true, payoutScript: CLOSE_SCRIPT, revokedCommitmentNumber: slot - 1 };
+    return signedRequest({ kind: "revocation", input }, slot, channel);
+}
+
+// The revocation of the device's own commitment one below the slot.
+function sentRevocation(slot: number): PolicySignRequest {
+    return signedRequest({ kind: "revocation", input: { ...ckbRevocation(), revokedCommitmentNumber: slot - 1 } }, slot);
+}
+
+// Never read by the revocation rule, which holds the replacement's version; the hash only records what was signed.
+const REPLACEMENT_TX_HASH = "5e".repeat(32);
+
+async function holdLastCommitment(store: SignerStore, view: PolicyView, commitmentNumber: number): Promise<void> {
+    await store.updateChannelRecord(CHANNEL_INDEX, (current) => {
+        if (current === null) throw new Error("the channel holds no record");
+        const last = { commitmentNumber, txHash: REPLACEMENT_TX_HASH };
+        return { ...current, commitmentHashes: { ...current.commitmentHashes, [view]: last } };
+    });
+}
+
+// A revocation follows its replacement, the commitment at the slot's number, as the last one signed in the revoked one's
+// view. Any other request passes untouched.
+async function holdingReplacement(store: SignerStore, request: PolicySignRequest): Promise<PolicySignRequest> {
+    const { operation, slot } = request;
+    if (operation.kind === "revocation") {
+        await holdLastCommitment(store, operation.input.forRemote ? "remote" : "local", slot.commitmentNumber);
+    }
+    return request;
+}
+
 function announcementRequest(name: string, overrides: Partial<PolicySignRequest> = {}): PolicySignRequest {
     const kase = caseOf(digest.announcement_cases, name);
     return {
         channelId: CHANNEL_ID,
-        stateVersion: 1,
-        // Deliberately not zero: the announcement slot must not follow the request.
-        nonceCommitmentNumber: 7,
+        slot: { commitmentNumber: 0, counter: null },
         session: session(hexToBytes(kase.digest)),
         operation: { kind: "channel_announcement", input: toChannelAnnouncementInput(kase, digest.remote) },
         ...overrides,
     };
 }
 
-function newEngine(storage: InMemorySignerStorage | AsyncInMemorySignerStorage = new InMemorySignerStorage()): {
+type Storage = InMemorySignerStorage | AsyncInMemorySignerStorage;
+
+function newEngine(
+    storage: Storage = new InMemorySignerStorage(),
+    options?: PolicyEngineOptions,
+): {
     engine: PolicyEngine;
     store: SignerStore;
-    storage: InMemorySignerStorage | AsyncInMemorySignerStorage;
+    storage: Storage;
 } {
     const store = new SignerStore(storage);
-    return { engine: new PolicyEngine(store), store, storage };
+    return { engine: new PolicyEngine(store, options), store, storage };
 }
 
-async function registeredEngine(
-    storage: InMemorySignerStorage | AsyncInMemorySignerStorage = new InMemorySignerStorage(),
-): Promise<ReturnType<typeof newEngine>> {
-    const context = newEngine(storage);
+// As the host registers it: terms pinned from the open's context before anything is signed.
+async function registeredEngine(storage: Storage = new InMemorySignerStorage(), options?: PolicyEngineOptions) {
+    const context = newEngine(storage, options);
     await context.engine.registerChannel(CHANNEL_ID, CHANNEL_INDEX, FUNDED, CLOSE_SCRIPT);
+    await context.engine.pinChannelTerms(CHANNEL_ID, TERMS);
     return context;
 }
 
-async function openedEngine(): Promise<ReturnType<typeof newEngine>> {
-    const context = await registeredEngine();
+async function openedEngine(storage: Storage = new InMemorySignerStorage(), options?: PolicyEngineOptions) {
+    const context = await registeredEngine(storage, options);
     await openChannel(context.engine);
     return context;
+}
+
+async function addOtherChannel(engine: PolicyEngine): Promise<void> {
+    await engine.registerChannel(OTHER_CHANNEL_ID, OTHER_CHANNEL_INDEX, FUNDED, CLOSE_SCRIPT);
+    await engine.pinChannelTerms(OTHER_CHANNEL_ID, TERMS);
+    await openChannel(engine, OTHER_CHANNEL);
 }
 
 function tamper(message: Uint8Array): Uint8Array {
@@ -306,7 +375,9 @@ describe("registerChannel", () => {
             channelId: CHANNEL_ID,
             lastSignedCommitmentNumbers: {},
             signedSessions: {},
-            lastStateVersion: 0,
+            nonceReuse: {},
+            commitmentHashes: {},
+            revocations: [],
             pins: REGISTERED_PINS,
             views: { remote: OPENING_VIEW, local: OPENING_VIEW },
         });
@@ -383,6 +454,7 @@ describe("registerChannel", () => {
     it("rejects a new name on an index whose record has served a slot", async () => {
         const { engine, store } = newEngine();
         await engine.registerChannel("temporary-id", CHANNEL_INDEX, FUNDED, CLOSE_SCRIPT);
+        await engine.pinChannelTerms("temporary-id", TERMS);
         await engine.checkAndClaim(KEYS, commitmentRequest("ckb, no tlcs, for remote", { channelId: "temporary-id" }));
 
         await expect(engine.registerChannel(CHANNEL_ID, CHANNEL_INDEX, FUNDED, CLOSE_SCRIPT)).rejects.toThrow(TypeError);
@@ -396,9 +468,11 @@ describe("registerChannel", () => {
         await store.setChannelRecord(CHANNEL_INDEX, {
             version: 1,
             channelId: "temporary-id",
-            lastSignedCommitmentNumbers: { COMMITMENT: 0 },
+            lastSignedCommitmentNumbers: { "COMMITMENT:local": 0 },
             signedSessions: {},
-            lastStateVersion: 1,
+            nonceReuse: {},
+            commitmentHashes: {},
+            revocations: [],
             pins: REGISTERED_PINS,
             views: { remote: OPENING_VIEW, local: OPENING_VIEW },
         });
@@ -455,9 +529,11 @@ describe("pinFundingCell", () => {
     it("pins the funding cell the host signed, which the opening commitment then has to state", async () => {
         const { engine, store } = await registeredEngine();
         await engine.pinFundingCell(CHANNEL_ID, FUNDING_OUT_POINT, "96700000000");
-        await expect(store.getChannelRecord(CHANNEL_INDEX)).resolves.toMatchObject({
-            pins: { ...REGISTERED_PINS, fundingOutPoint: `${FUNDING_TX_HASH}:0`, fundingCapacityShannons: "96700000000" },
-        });
+        await expect(store.getChannelRecord(CHANNEL_INDEX)).resolves.toEqual(
+            expect.objectContaining({
+                pins: { ...TERMS_PINNED_PINS, fundingOutPoint: `${FUNDING_TX_HASH}:0`, fundingCapacityShannons: "96700000000" },
+            }),
+        );
         await openChannel(engine);
         await expect(store.getChannelRecord(CHANNEL_INDEX)).resolves.toMatchObject({ pins: OPENED_PINS });
     });
@@ -509,24 +585,24 @@ describe("pinFundingCell", () => {
             { field: "fundingOutPoint", pinned: `${FUNDING_TX_HASH}:0`, stated: `${FUNDING_TX_HASH}:1` },
         ],
         ["another capacity", FUNDING_OUT_POINT, "1", { field: "fundingCapacityShannons", pinned: "96700000000", stated: "1" }],
-    ])("throws a FundingCellError on %s once the node pinned the cell, naming both values", async (_, outPoint, capacity, conflict) => {
+    ])("throws a ChannelPinError on %s once the node pinned the cell, naming both values", async (_, outPoint, capacity, conflict) => {
         const { engine, storage } = await openedEngine();
         const stored = new Map(storage.map);
         const error: unknown = await engine.pinFundingCell(CHANNEL_ID, outPoint, capacity).catch((caught: unknown) => caught);
-        expect(error).toBeInstanceOf(FundingCellError);
+        expect(error).toBeInstanceOf(ChannelPinError);
         expect(error).toMatchObject({
-            name: "FundingCellError",
+            name: "ChannelPinError",
             message: `channel ${CHANNEL_ID} already pins ${conflict.field} to ${conflict.pinned}, not ${conflict.stated}`,
             conflict,
         });
         expect(storage.map).toEqual(stored);
     });
 
-    it("throws a FundingCellError on another cell than an earlier host pin", async () => {
+    it("throws a ChannelPinError on another cell than an earlier host pin", async () => {
         const { engine, storage } = await registeredEngine();
         await engine.pinFundingCell(CHANNEL_ID, FUNDING_OUT_POINT, "96700000000");
         const stored = new Map(storage.map);
-        await expect(engine.pinFundingCell(CHANNEL_ID, FUNDING_OUT_POINT, "96700000001")).rejects.toThrow(FundingCellError);
+        await expect(engine.pinFundingCell(CHANNEL_ID, FUNDING_OUT_POINT, "96700000001")).rejects.toThrow(ChannelPinError);
         expect(storage.map).toEqual(stored);
     });
 
@@ -611,15 +687,324 @@ describe("pinFundingCell", () => {
             }),
         );
         await engine.registerChannel(CHANNEL_ID, CHANNEL_INDEX, FUNDED, CLOSE_SCRIPT);
+        await engine.pinChannelTerms(CHANNEL_ID, TERMS);
         armed = true;
 
         await openChannel(engine);
         expect(pin).not.toBeNull();
-        await expect(pin).rejects.toBeInstanceOf(FundingCellError);
+        await expect(pin).rejects.toBeInstanceOf(ChannelPinError);
         await expect(pin).rejects.toThrow(
             `channel ${CHANNEL_ID} already pins fundingOutPoint to ${FUNDING_TX_HASH}:0, not ${FUNDING_TX_HASH}:1`,
         );
         await expect(new SignerStore(inner).getChannelRecord(CHANNEL_INDEX)).resolves.toMatchObject({ pins: OPENED_PINS });
+    });
+});
+
+describe("pinChannelTerms", () => {
+    async function bare(storage: Storage = new InMemorySignerStorage()) {
+        const context = newEngine(storage);
+        await context.engine.registerChannel(CHANNEL_ID, CHANNEL_INDEX, FUNDED, CLOSE_SCRIPT);
+        return context;
+    }
+
+    it("pins the three terms no request states, beside the registration's pins", async () => {
+        const { engine, store } = await bare();
+        await engine.pinChannelTerms(CHANNEL_ID, TERMS);
+        expect((await store.getChannelRecord(CHANNEL_INDEX))?.pins).toEqual(TERMS_PINNED_PINS);
+    });
+
+    it("pins u64's maximum in each", async () => {
+        const { engine, store } = await bare();
+        await engine.pinChannelTerms(CHANNEL_ID, {
+            commitmentFeeRate: 18446744073709551615n,
+            remoteReservedCkbShannons: "18446744073709551615",
+            liquidCapacityShannons: "18446744073709551615",
+        });
+        await expect(store.getChannelRecord(CHANNEL_INDEX)).resolves.toMatchObject({
+            pins: {
+                commitmentFeeRate: "18446744073709551615",
+                remoteReservedCkbShannons: "18446744073709551615",
+                liquidCapacityShannons: "18446744073709551615",
+            },
+        });
+    });
+
+    it("writes nothing when the same terms are pinned again, under either name, before or after the opening", async () => {
+        const { engine, storage } = await bare();
+        await engine.registerChannel("temporary-id", CHANNEL_INDEX, FUNDED, CLOSE_SCRIPT);
+        await engine.pinChannelTerms("temporary-id", TERMS);
+        storage.ops.length = 0;
+        await engine.pinChannelTerms(CHANNEL_ID, TERMS);
+        expect(storage.ops.filter((operation) => operation.startsWith("set"))).toEqual([]);
+        await openChannel(engine);
+        storage.ops.length = 0;
+        await engine.pinChannelTerms(CHANNEL_ID, { ...TERMS });
+        expect(storage.ops.filter((operation) => operation.startsWith("set"))).toEqual([]);
+    });
+
+    it.each([
+        ["another fee rate", { commitmentFeeRate: 1001n }, { field: "commitmentFeeRate", pinned: "1000", stated: "1001" }],
+        [
+            "another peer reserve",
+            { remoteReservedCkbShannons: "6299999999" },
+            { field: "remoteReservedCkbShannons", pinned: "6300000000", stated: "6299999999" },
+        ],
+        [
+            "another liquid capacity",
+            { liquidCapacityShannons: "80500000001" },
+            { field: "liquidCapacityShannons", pinned: "80500000000", stated: "80500000001" },
+        ],
+    ])("throws a ChannelPinError on %s than pinned, naming both values, writing nothing", async (_, override, conflict) => {
+        const { engine, storage } = await registeredEngine();
+        const stored = new Map(storage.map);
+        const error: unknown = await engine.pinChannelTerms(CHANNEL_ID, { ...TERMS, ...override }).catch((caught: unknown) => caught);
+        expect(error).toBeInstanceOf(ChannelPinError);
+        expect(error).toMatchObject({
+            name: "ChannelPinError",
+            message: `channel ${CHANNEL_ID} already pins ${conflict.field} to ${conflict.pinned}, not ${conflict.stated}`,
+            conflict,
+        });
+        expect(storage.map).toEqual(stored);
+    });
+
+    it.each([
+        ["a terms argument that is no object", null as unknown as PolicyChannelTerms, new TypeError("terms must be an object")],
+        [
+            "a negative fee rate",
+            { ...TERMS, commitmentFeeRate: -1n },
+            new RangeError("terms.commitmentFeeRate must be a bigint between 0 and 18446744073709551615, got -1"),
+        ],
+        [
+            "a fee rate above u64",
+            { ...TERMS, commitmentFeeRate: 18446744073709551616n },
+            new RangeError("terms.commitmentFeeRate must be a bigint between 0 and 18446744073709551615, got 18446744073709551616"),
+        ],
+        [
+            "a fee rate that is a number",
+            { ...TERMS, commitmentFeeRate: 1000 as unknown as bigint },
+            new RangeError("terms.commitmentFeeRate must be a bigint between 0 and 18446744073709551615, got 1000"),
+        ],
+        [
+            "a peer reserve in hex",
+            { ...TERMS, remoteReservedCkbShannons: "0x1" },
+            new TypeError("terms.remoteReservedCkbShannons must be an amount in decimal shannons"),
+        ],
+        [
+            "a peer reserve above u64",
+            { ...TERMS, remoteReservedCkbShannons: "18446744073709551616" },
+            new RangeError("terms.remoteReservedCkbShannons must be at most 18446744073709551615, the most a CKB cell's capacity holds"),
+        ],
+        [
+            "an absent liquid capacity",
+            { ...TERMS, liquidCapacityShannons: undefined as unknown as string },
+            new TypeError("terms.liquidCapacityShannons must be an amount in decimal shannons"),
+        ],
+        [
+            "a liquid capacity with a leading zero",
+            { ...TERMS, liquidCapacityShannons: "080500000000" },
+            new TypeError("terms.liquidCapacityShannons must be an amount in decimal shannons"),
+        ],
+        [
+            "a liquid capacity above u64",
+            { ...TERMS, liquidCapacityShannons: "18446744073709551616" },
+            new RangeError("terms.liquidCapacityShannons must be at most 18446744073709551615, the most a CKB cell's capacity holds"),
+        ],
+    ])("rejects %s, writing nothing", async (_, terms, error) => {
+        const { engine, storage } = await bare();
+        const stored = new Map(storage.map);
+        await expect(engine.pinChannelTerms(CHANNEL_ID, terms)).rejects.toThrow(error);
+        expect(storage.map).toEqual(stored);
+    });
+
+    it("throws on a channel this device never registered", async () => {
+        const { engine } = newEngine();
+        await expect(engine.pinChannelTerms(CHANNEL_ID, TERMS)).rejects.toThrow(
+            new TypeError(`channel ${CHANNEL_ID} is not registered on this device`),
+        );
+    });
+
+    it("throws when the channel's name resolves to an index holding no record", async () => {
+        const { engine, store } = newEngine();
+        await store.claimChannelAlias(CHANNEL_ID, CHANNEL_INDEX);
+        await expect(engine.pinChannelTerms(CHANNEL_ID, TERMS)).rejects.toThrow(
+            new TypeError(`channel ${CHANNEL_ID} resolves to channel index ${CHANNEL_INDEX}, which holds no record`),
+        );
+    });
+
+    // A message is no evidence of a term: the node would state whatever rate and reserve it wants pinned.
+    it.each([
+        ["a commitment", () => commitmentRequest("ckb, no tlcs, for remote")],
+        ["a revocation it sends", () => revocationRequest("ckb, send side")],
+        ["a revocation it receives", () => receivedRevocation(5)],
+        ["an announcement", () => announcementRequest("ckb")],
+    ])("refuses %s on a channel whose terms the host has not pinned, writing nothing", async (_, request) => {
+        const { engine, store, storage } = await bare();
+        const held = await holdingReplacement(store, request());
+        const stored = new Map(storage.map);
+        const refusal = await refusalOf(engine.checkAndClaim(KEYS, held));
+        expect(refusal.code).toBe("policy_refusal");
+        expect(refusal.message).toBe("the request states liquidCapacityShannons, which the host has not pinned for the channel yet");
+        expect(storage.map).toEqual(stored);
+    });
+
+    it.each([
+        ["the fee rate", { liquidCapacityShannons: "80500000000" }, "commitmentFeeRate"],
+        ["the peer's reserve", { liquidCapacityShannons: "80500000000", commitmentFeeRate: "1000" }, "remoteReservedCkbShannons"],
+    ])("names %s when only it is left unpinned", async (_, pinned, missing) => {
+        const { engine, store } = await bare();
+        const record = (await store.getChannelRecord(CHANNEL_INDEX)) as ChannelPolicyRecord;
+        await store.setChannelRecord(CHANNEL_INDEX, { ...record, pins: { ...record.pins, ...pinned } });
+        const refusal = await refusalOf(engine.checkAndClaim(KEYS, commitmentRequest("ckb, no tlcs, for remote")));
+        expect(refusal.message).toBe(`the request states ${missing}, which the host has not pinned for the channel yet`);
+    });
+
+    // It states none of them: its outputs are what both fees left.
+    it("signs a close on a channel whose terms the host has not pinned", async () => {
+        const { engine, store } = await bare();
+        await expect(engine.checkAndClaim(KEYS, closingRequest("ckb"))).resolves.toMatchObject({ status: "fresh" });
+        expect((await store.getChannelRecord(CHANNEL_INDEX))?.pins.commitmentFeeRate).toBeUndefined();
+    });
+
+    it("refuses a commitment once the terms are pinned to other values than it states", async () => {
+        const { engine } = await bare();
+        await engine.pinChannelTerms(CHANNEL_ID, { ...TERMS, commitmentFeeRate: 1537n });
+        const refusal = await refusalOf(engine.checkAndClaim(KEYS, commitmentRequest("ckb, no tlcs, for remote")));
+        expect(refusal.message).toBe("the request states commitmentFeeRate 1000, but the channel pinned 1537");
+    });
+});
+
+describe("recordRevocation", () => {
+    const SIGNATURE = Uint8Array.from({ length: 64 }, (_, index) => index);
+    const OTHER_SIGNATURE = Uint8Array.from({ length: 64 }, (_, index) => 255 - index);
+
+    it("keeps the complete signature of a revoked peer commitment the device signed for", async () => {
+        const { engine, store } = await registeredEngine();
+        await engine.checkAndClaim(KEYS, await holdingReplacement(store, receivedRevocation(5)));
+        await engine.recordRevocation(CHANNEL_ID, { version: 4, signature: SIGNATURE });
+        await expect(store.getChannelRecord(CHANNEL_INDEX)).resolves.toMatchObject({
+            revocations: [{ version: 4, forRemote: true, signature: bytesToHex(SIGNATURE) }],
+        });
+    });
+
+    // A crash between signing and recording is healed by the already-signed path, which records again.
+    it("writes nothing when the same evidence is recorded again, under either name", async () => {
+        const { engine, store, storage } = await registeredEngine();
+        await engine.registerChannel("temporary-id", CHANNEL_INDEX, FUNDED, CLOSE_SCRIPT);
+        await engine.checkAndClaim(KEYS, await holdingReplacement(store, receivedRevocation(5)));
+        await engine.recordRevocation("temporary-id", { version: 4, signature: SIGNATURE });
+        storage.ops.length = 0;
+        await engine.recordRevocation(CHANNEL_ID, { version: 4, signature: Uint8Array.from(SIGNATURE) });
+        expect(storage.ops.filter((operation) => operation.startsWith("set"))).toEqual([]);
+    });
+
+    it("replaces the evidence of a version with another signature of it, keeping one entry per version", async () => {
+        const { engine, store } = await registeredEngine();
+        await engine.checkAndClaim(KEYS, await holdingReplacement(store, receivedRevocation(5)));
+        await engine.recordRevocation(CHANNEL_ID, { version: 4, signature: SIGNATURE });
+        await engine.recordRevocation(CHANNEL_ID, { version: 4, signature: OTHER_SIGNATURE });
+        await expect(store.getChannelRecord(CHANNEL_INDEX)).resolves.toMatchObject({
+            revocations: [{ version: 4, forRemote: true, signature: bytesToHex(OTHER_SIGNATURE) }],
+        });
+    });
+
+    it("keeps one entry per update, in ascending version order whatever the order recorded", async () => {
+        const { engine, store } = await registeredEngine();
+        await engine.checkAndClaim(KEYS, await holdingReplacement(store, receivedRevocation(5)));
+        await engine.checkAndClaim(KEYS, await holdingReplacement(store, receivedRevocation(8)));
+        await engine.checkAndClaim(KEYS, await holdingReplacement(store, receivedRevocation(9)));
+        await engine.recordRevocation(CHANNEL_ID, { version: 8, signature: SIGNATURE });
+        await engine.recordRevocation(CHANNEL_ID, { version: 4, signature: OTHER_SIGNATURE });
+        await engine.recordRevocation(CHANNEL_ID, { version: 7, signature: SIGNATURE });
+        const record = await store.getChannelRecord(CHANNEL_INDEX);
+        expect(record?.revocations.map((revocation) => revocation.version)).toEqual([4, 7, 8]);
+    });
+
+    it("leaves the claims the record holds untouched", async () => {
+        const { engine, store } = await registeredEngine();
+        await engine.checkAndClaim(KEYS, await holdingReplacement(store, receivedRevocation(5)));
+        const before = (await store.getChannelRecord(CHANNEL_INDEX)) as ChannelPolicyRecord;
+        await engine.recordRevocation(CHANNEL_ID, { version: 4, signature: SIGNATURE });
+        await expect(store.getChannelRecord(CHANNEL_INDEX)).resolves.toEqual({
+            ...before,
+            revocations: [{ version: 4, forRemote: true, signature: bytesToHex(SIGNATURE) }],
+        });
+    });
+
+    // A caller bug: evidence of a revocation this device never signed would be no evidence.
+    it.each([
+        ["the slot above was never served", 3],
+        ["only the slot of the version itself was served", 5],
+    ])("throws when %s, writing nothing", async (_, version) => {
+        const { engine, store, storage } = await registeredEngine();
+        await engine.checkAndClaim(KEYS, await holdingReplacement(store, receivedRevocation(5)));
+        const stored = new Map(storage.map);
+        await expect(engine.recordRevocation(CHANNEL_ID, { version, signature: SIGNATURE })).rejects.toThrow(
+            new TypeError(`channel ${CHANNEL_ID} never signed the revocation of version ${version}, at slot REVOKE:${version + 1}`),
+        );
+        expect(storage.map).toEqual(stored);
+    });
+
+    it("records the highest version whose revocation slot the chain holds", async () => {
+        const { engine, store } = await registeredEngine();
+        const top = 2 ** 48 - 1;
+        await engine.checkAndClaim(KEYS, await holdingReplacement(store, receivedRevocation(top)));
+        await engine.recordRevocation(CHANNEL_ID, { version: top - 1, signature: SIGNATURE });
+        await expect(store.getChannelRecord(CHANNEL_INDEX)).resolves.toMatchObject({ revocations: [{ version: top - 1 }] });
+    });
+
+    it.each([
+        ["evidence that is no object", null as never, new TypeError("evidence must be an object")],
+        [
+            "a negative version",
+            { version: -1, signature: SIGNATURE },
+            new RangeError(`evidence.version must be an integer between 0 and ${2 ** 48 - 2}, got -1`),
+        ],
+        [
+            "a fractional version",
+            { version: 4.5, signature: SIGNATURE },
+            new RangeError(`evidence.version must be an integer between 0 and ${2 ** 48 - 2}, got 4.5`),
+        ],
+        [
+            "a version whose revocation slot is past the chain",
+            { version: 2 ** 48 - 1, signature: SIGNATURE },
+            new RangeError(`evidence.version must be an integer between 0 and ${2 ** 48 - 2}, got ${2 ** 48 - 1}`),
+        ],
+        [
+            "a partial signature",
+            { version: 4, signature: SIGNATURE.slice(0, 32) },
+            new TypeError("evidence.signature must be 64 bytes, got 32"),
+        ],
+        [
+            "a signature one byte short",
+            { version: 4, signature: SIGNATURE.slice(1) },
+            new TypeError("evidence.signature must be 64 bytes, got 63"),
+        ],
+        [
+            "a signature in hex",
+            { version: 4, signature: bytesToHex(SIGNATURE) as never },
+            new TypeError("evidence.signature must be a Uint8Array"),
+        ],
+    ])("rejects %s, writing nothing", async (_, evidence, error) => {
+        const { engine, store, storage } = await registeredEngine();
+        await engine.checkAndClaim(KEYS, await holdingReplacement(store, receivedRevocation(5)));
+        const stored = new Map(storage.map);
+        await expect(engine.recordRevocation(CHANNEL_ID, evidence)).rejects.toThrow(error);
+        expect(storage.map).toEqual(stored);
+    });
+
+    it("throws on a channel this device never registered", async () => {
+        const { engine } = newEngine();
+        await expect(engine.recordRevocation(CHANNEL_ID, { version: 4, signature: SIGNATURE })).rejects.toThrow(
+            new TypeError(`channel ${CHANNEL_ID} is not registered on this device`),
+        );
+    });
+
+    it("throws when the channel's name resolves to an index holding no record", async () => {
+        const { engine, store } = newEngine();
+        await store.claimChannelAlias(CHANNEL_ID, CHANNEL_INDEX);
+        await expect(engine.recordRevocation(CHANNEL_ID, { version: 4, signature: SIGNATURE })).rejects.toThrow(
+            new TypeError(`channel ${CHANNEL_ID} resolves to channel index ${CHANNEL_INDEX}, which holds no record`),
+        );
     });
 });
 
@@ -633,6 +1018,46 @@ describe("requireChannelIndex", () => {
     it("refuses a channel this device never registered", async () => {
         const { engine } = newEngine();
         expect((await refusalOf(engine.requireChannelIndex(CHANNEL_ID))).code).toBe("unknown_channel");
+    });
+});
+
+describe("readChannelPins", () => {
+    it("reads the pins of the registration, then the host's terms, then what the first message stated", async () => {
+        const { engine } = newEngine();
+        await engine.registerChannel(CHANNEL_ID, CHANNEL_INDEX, FUNDED, CLOSE_SCRIPT);
+        await expect(engine.readChannelPins(CHANNEL_ID)).resolves.toEqual(REGISTERED_PINS);
+        await engine.pinChannelTerms(CHANNEL_ID, TERMS);
+        await expect(engine.readChannelPins(CHANNEL_ID)).resolves.toEqual(TERMS_PINNED_PINS);
+        await openChannel(engine);
+        await expect(engine.readChannelPins(CHANNEL_ID)).resolves.toEqual(OPENED_PINS);
+    });
+
+    it("reads them under any name the channel was registered under", async () => {
+        const { engine } = newEngine();
+        await engine.registerChannel("temporary-id", CHANNEL_INDEX, FUNDED, CLOSE_SCRIPT);
+        await engine.registerChannel(CHANNEL_ID, CHANNEL_INDEX, FUNDED, CLOSE_SCRIPT);
+        await expect(engine.readChannelPins("temporary-id")).resolves.toEqual(REGISTERED_PINS);
+    });
+
+    it("hands out a copy, which the caller's writes do not reach", async () => {
+        const { engine } = await registeredEngine();
+        const pins = await engine.readChannelPins(CHANNEL_ID);
+        pins.localReservedCkbShannons.legacy = "0";
+        pins.commitmentFeeRate = "1";
+        await expect(engine.readChannelPins(CHANNEL_ID)).resolves.toEqual(TERMS_PINNED_PINS);
+    });
+
+    it("refuses a channel this device never registered", async () => {
+        const { engine } = newEngine();
+        expect((await refusalOf(engine.readChannelPins(CHANNEL_ID))).code).toBe("unknown_channel");
+    });
+
+    it("throws for a name that resolves to an index holding no record", async () => {
+        const { engine, storage } = newEngine();
+        storage.map.set(`fiber-lsp-sdk:alias:${CHANNEL_ID}`, String(CHANNEL_INDEX));
+        await expect(engine.readChannelPins(CHANNEL_ID)).rejects.toThrow(
+            new TypeError(`channel ${CHANNEL_ID} resolves to channel index ${CHANNEL_INDEX}, which holds no record`),
+        );
     });
 });
 
@@ -898,21 +1323,23 @@ describe("hold invoices", () => {
 });
 
 describe("checkAndClaim", () => {
-    async function registered(storage: InMemorySignerStorage | AsyncInMemorySignerStorage = new InMemorySignerStorage(), funded = FUNDED) {
+    async function registered(storage: Storage = new InMemorySignerStorage(), funded = FUNDED, terms = TERMS) {
         const context = newEngine(storage);
         await context.engine.registerChannel(CHANNEL_ID, CHANNEL_INDEX, funded, CLOSE_SCRIPT);
+        await context.engine.pinChannelTerms(CHANNEL_ID, terms);
         return context;
     }
 
-    async function opened(storage: InMemorySignerStorage | AsyncInMemorySignerStorage = new InMemorySignerStorage()) {
+    async function opened(storage: Storage = new InMemorySignerStorage()) {
         const context = await registered(storage);
         await openChannel(context.engine);
         return context;
     }
 
     describe("the served path", () => {
-        it("claims the commitment slot and records the session", async () => {
+        it("claims the commitment slot, records the session, and keeps the hash of the tx signed in its view", async () => {
             const { engine, store } = await registered();
+            const kase = caseOf(digest.commitment_cases, "ckb, no tlcs, for remote");
             const request = commitmentRequest("ckb, no tlcs, for remote");
 
             await expect(engine.checkAndClaim(KEYS, request)).resolves.toEqual({
@@ -923,38 +1350,55 @@ describe("checkAndClaim", () => {
             await expect(store.getChannelRecord(CHANNEL_INDEX)).resolves.toEqual<ChannelPolicyRecord>({
                 version: 1,
                 channelId: CHANNEL_ID,
-                lastSignedCommitmentNumbers: { COMMITMENT: 0 },
+                lastSignedCommitmentNumbers: { "COMMITMENT:local": 0 },
                 signedSessions: { "COMMITMENT:0": buildSessionCommitment(request.session) },
-                lastStateVersion: 1,
+                nonceReuse: {},
+                commitmentHashes: { remote: { commitmentNumber: 0, txHash: kase.digest } },
+                revocations: [],
                 pins: OPENED_PINS,
                 views: { remote: OPENING_VIEW, local: OPENING_VIEW },
             });
         });
 
-        it("claims the commitment slot for a cooperative close", async () => {
-            const { engine } = await registered();
-            await expect(engine.checkAndClaim(KEYS, shutdownRequest("ckb"))).resolves.toEqual({
+        // The digest is fiber's `compute_tx_message` of the tx it rebuilt, which is the tx the node sent once they match.
+        it.each(["ckb, three tlcs, for local", "ckb, no tlcs, for remote, full payment hash"])(
+            "keeps as the hash of the %s commitment the message of the tx fiber built",
+            (name) => {
+                const kase = caseOf(digest.commitment_cases, name);
+                expect(bytesToHex(computeTxMessage(toTransaction(kase.transaction)))).toBe(kase.digest);
+            },
+        );
+
+        it("claims the commitment slot for a cooperative close, and keeps no commitment hash", async () => {
+            const { engine, store } = await registered();
+            await expect(engine.checkAndClaim(KEYS, closingRequest("ckb"))).resolves.toEqual({
                 status: "fresh",
                 context: "COMMITMENT",
                 commitmentNumber: SHUTDOWN_NONCE_NUMBER,
+            });
+            await expect(store.getChannelRecord(CHANNEL_INDEX)).resolves.toMatchObject({
+                lastSignedCommitmentNumbers: { "COMMITMENT:local": SHUTDOWN_NONCE_NUMBER },
+                commitmentHashes: {},
             });
         });
 
         it("claims the revocation slot at the nonce number while the message commits to the previous one", async () => {
             const { engine, store } = await registered();
-            const request = revocationRequest("ckb, send side");
+            const request = await holdingReplacement(store, revocationRequest("ckb, send side"));
 
             await expect(engine.checkAndClaim(KEYS, request)).resolves.toEqual({
                 status: "fresh",
                 context: "REVOKE",
                 commitmentNumber: 5,
             });
+            // The replacement stays the view's last: a revocation signs no commitment.
             await expect(store.getChannelRecord(CHANNEL_INDEX)).resolves.toMatchObject({
-                lastSignedCommitmentNumbers: { REVOKE: 5 },
+                lastSignedCommitmentNumbers: { "REVOKE:remote": 5 },
+                commitmentHashes: { local: { commitmentNumber: 5, txHash: REPLACEMENT_TX_HASH } },
             });
         });
 
-        it("claims the fixed announcement slot whatever number the request carries", async () => {
+        it("claims the fixed announcement slot", async () => {
             const { engine, store } = await registered();
 
             await expect(engine.checkAndClaim(KEYS, announcementRequest("ckb"))).resolves.toEqual({
@@ -967,22 +1411,15 @@ describe("checkAndClaim", () => {
             });
         });
 
-        it("keeps counters per context", async () => {
+        it("keeps counters per lane", async () => {
             const { engine, store } = await opened();
             await recordThreeTlcIntents(engine);
-            await engine.checkAndClaim(KEYS, threeTlcRequest({ stateVersion: 3 }));
-            await engine.checkAndClaim(KEYS, revocationRequest("ckb, send side", { stateVersion: 3 }));
+            await engine.checkAndClaim(KEYS, threeTlcRequest());
+            await engine.checkAndClaim(KEYS, await holdingReplacement(store, revocationRequest("ckb, send side")));
+            await engine.checkAndClaim(KEYS, await holdingReplacement(store, receivedRevocation(3)));
 
             await expect(store.getChannelRecord(CHANNEL_INDEX)).resolves.toMatchObject({
-                lastSignedCommitmentNumbers: { COMMITMENT: 11, REVOKE: 5 },
-            });
-        });
-
-        it("accepts a state version equal to the last one seen", async () => {
-            const { engine } = await registered();
-            await engine.checkAndClaim(KEYS, commitmentRequest("ckb, no tlcs, for remote", { stateVersion: 4 }));
-            await expect(engine.checkAndClaim(KEYS, announcementRequest("ckb", { stateVersion: 4 }))).resolves.toMatchObject({
-                status: "fresh",
+                lastSignedCommitmentNumbers: { "COMMITMENT:local": 11, "REVOKE:remote": 5, "REVOKE:local": 3 },
             });
         });
     });
@@ -1005,25 +1442,61 @@ describe("checkAndClaim", () => {
             expect(storage.ops.filter((operation) => operation.startsWith("set"))).toEqual([]);
         });
 
-        // It leaves at the sign-once check, so the counters it would trip never run.
-        it("answers a repeat that a stale state version would otherwise refuse", async () => {
-            const { engine } = await registered();
-            await engine.checkAndClaim(KEYS, commitmentRequest("ckb, no tlcs, for remote", { stateVersion: 9 }));
+        // It leaves at the sign-once check, so the lane and the view's version it would trip never run.
+        it("answers a repeat that its lane and its view's version would otherwise refuse", async () => {
+            const { engine } = await opened();
+            await engine.checkAndClaim(
+                KEYS,
+                customCommitmentRequest({ forRemote: true, commitmentNumber: 11, settlementLocalShannons: OPENING_SETTLEMENT, tlcIds: [] }),
+            );
+            await expect(engine.checkAndClaim(KEYS, commitmentRequest("ckb, no tlcs, for remote"))).resolves.toMatchObject({
+                status: "already-signed",
+            });
+        });
+
+        it("answers a repeat of a revocation, whatever the other lane signed since", async () => {
+            const { engine, store } = await registered();
+            await engine.checkAndClaim(KEYS, await holdingReplacement(store, revocationRequest("ckb, send side")));
+            await engine.checkAndClaim(KEYS, await holdingReplacement(store, receivedRevocation(9)));
             await expect(
-                engine.checkAndClaim(KEYS, commitmentRequest("ckb, no tlcs, for remote", { stateVersion: 9 })),
-            ).resolves.toMatchObject({ status: "already-signed" });
+                engine.checkAndClaim(KEYS, await holdingReplacement(store, revocationRequest("ckb, send side"))),
+            ).resolves.toMatchObject({
+                status: "already-signed",
+                commitmentNumber: 5,
+            });
         });
     });
 
     describe("check 0: the shape of the request", () => {
         it.each([
             ["an empty channelId", commitmentRequest("ckb, no tlcs, for remote", { channelId: "" })],
-            ["a negative state version", commitmentRequest("ckb, no tlcs, for remote", { stateVersion: -1 })],
-            ["a fractional state version", commitmentRequest("ckb, no tlcs, for remote", { stateVersion: 1.5 })],
-            ["a commitment number above the chain", commitmentRequest("ckb, no tlcs, for remote", { nonceCommitmentNumber: 2 ** 48 })],
-            ["no nonce number on a commitment tx", commitmentRequest("ckb, no tlcs, for remote", { nonceCommitmentNumber: undefined })],
-            ["no nonce number on a close", shutdownRequest("ckb", { nonceCommitmentNumber: undefined })],
-            ["no nonce number on a revocation", revocationRequest("ckb, send side", { nonceCommitmentNumber: undefined })],
+            [
+                "a commitment number above the chain",
+                commitmentRequest("ckb, no tlcs, for remote", { slot: { commitmentNumber: 2 ** 48, counter: "local" } }),
+            ],
+            [
+                "a fractional commitment number",
+                commitmentRequest("ckb, no tlcs, for remote", { slot: { commitmentNumber: 0.5, counter: "local" } }),
+            ],
+            ["no slot", commitmentRequest("ckb, no tlcs, for remote", { slot: undefined as never })],
+            [
+                "a commitment read from the remote counter",
+                commitmentRequest("ckb, no tlcs, for remote", { slot: { commitmentNumber: 0, counter: "remote" } }),
+            ],
+            ["a close read from no counter", closingRequest("ckb", { slot: { commitmentNumber: SHUTDOWN_NONCE_NUMBER, counter: null } })],
+            [
+                "a sent revocation read from the local counter",
+                revocationRequest("ckb, send side", { slot: { commitmentNumber: 5, counter: "local" } }),
+            ],
+            [
+                "a received revocation read from the remote counter",
+                revocationRequest("udt, receive side", { slot: { commitmentNumber: 10, counter: "remote" } }),
+            ],
+            [
+                "an announcement read from the local counter",
+                announcementRequest("ckb", { slot: { commitmentNumber: 0, counter: "local" } }),
+            ],
+            ["an announcement at another slot than 0", announcementRequest("ckb", { slot: { commitmentNumber: 7, counter: null } })],
             [
                 "one public key",
                 commitmentRequest("ckb, no tlcs, for remote", {
@@ -1099,7 +1572,7 @@ describe("checkAndClaim", () => {
 
         it("refuses a malformed request for an unregistered channel as malformed", async () => {
             const { engine } = newEngine();
-            const request = commitmentRequest("ckb, no tlcs, for remote", { stateVersion: -1 });
+            const request = commitmentRequest("ckb, no tlcs, for remote", { slot: { commitmentNumber: 0, counter: "remote" } });
             expect((await refusalOf(engine.checkAndClaim(KEYS, request))).code).toBe("malformed");
         });
     });
@@ -1116,6 +1589,7 @@ describe("checkAndClaim", () => {
             const { engine } = newEngine();
             await engine.registerChannel("temporary-id", CHANNEL_INDEX, FUNDED, CLOSE_SCRIPT);
             await engine.registerChannel(CHANNEL_ID, CHANNEL_INDEX, FUNDED, CLOSE_SCRIPT);
+            await engine.pinChannelTerms(CHANNEL_ID, TERMS);
             await expect(
                 engine.checkAndClaim(KEYS, commitmentRequest("ckb, no tlcs, for remote", { channelId: "temporary-id" })),
             ).resolves.toMatchObject({ status: "fresh" });
@@ -1155,17 +1629,16 @@ describe("checkAndClaim", () => {
             expect((await refusalOf(engine.checkAndClaim(KEYS, request))).code).toBe("malformed");
         });
 
-        // A close can precede any pin; the record guard would otherwise throw on the capacity.
-        it("refuses a close whose sides together exceed a u64, writing nothing", async () => {
+        it("refuses a close whose output holds more than a cell's capacity, writing nothing", async () => {
             const { engine, storage } = await registered();
-            const request = shutdownRequest("ckb");
+            const request = closingRequest("ckb");
             const operation = request.operation;
-            if (operation.kind !== "shutdown_tx") throw new Error("expected a shutdown request");
-            operation.input.toRemoteShannons = (1n << 64n) - 1n - operation.input.remoteReservedCkbShannons;
+            if (operation.kind !== "closing_tx") throw new Error("expected a close request");
+            operation.input.localCapacityShannons = 1n << 64n;
             const stored = new Map(storage.map);
             const refusal = await refusalOf(engine.checkAndClaim(KEYS, request));
             expect(refusal.code).toBe("malformed");
-            expect(refusal.message).toContain("funding capacity must be a bigint between 0 and 18446744073709551615");
+            expect(refusal.message).toContain("localCapacityShannons must be a bigint between 0 and 18446744073709551615");
             expect(storage.map).toEqual(stored);
         });
 
@@ -1204,8 +1677,8 @@ describe("checkAndClaim", () => {
         it("refuses a different message on a served slot", async () => {
             const { engine } = await opened();
             await recordThreeTlcIntents(engine);
-            await engine.checkAndClaim(KEYS, threeTlcRequest({ stateVersion: 1 }));
-            const other = commitmentRequest("udt, two tlcs, for remote", { stateVersion: 1 });
+            await engine.checkAndClaim(KEYS, threeTlcRequest());
+            const other = commitmentRequest("udt, two tlcs, for remote");
             expect((await refusalOf(engine.checkAndClaim(KEYS, other))).code).toBe("policy_refusal");
         });
 
@@ -1234,13 +1707,13 @@ describe("checkAndClaim", () => {
             const { engine } = await opened();
             await recordThreeTlcIntents(engine);
             await engine.checkAndClaim(KEYS, threeTlcRequest());
-            const close = shutdownRequest("ckb", { nonceCommitmentNumber: 11 });
+            const close = closingRequest("ckb", { slot: { commitmentNumber: 11, counter: "local" } });
             expect((await refusalOf(engine.checkAndClaim(KEYS, close))).code).toBe("policy_refusal");
         });
 
         it("refuses a commitment on a slot a cooperative close already served", async () => {
             const { engine } = await registered();
-            await engine.checkAndClaim(KEYS, shutdownRequest("ckb", { nonceCommitmentNumber: 11 }));
+            await engine.checkAndClaim(KEYS, closingRequest("ckb", { slot: { commitmentNumber: 11, counter: "local" } }));
             const commitment = threeTlcRequest();
             expect((await refusalOf(engine.checkAndClaim(KEYS, commitment))).code).toBe("policy_refusal");
         });
@@ -1250,6 +1723,7 @@ describe("checkAndClaim", () => {
             const { engine } = newEngine();
             await engine.registerChannel("temporary-id", CHANNEL_INDEX, FUNDED, CLOSE_SCRIPT);
             await engine.registerChannel(CHANNEL_ID, CHANNEL_INDEX, FUNDED, CLOSE_SCRIPT);
+            await engine.pinChannelTerms(CHANNEL_ID, TERMS);
             const kase = caseOf(digest.commitment_cases, "ckb, no tlcs, for remote");
             await engine.checkAndClaim(KEYS, commitmentRequest("ckb, no tlcs, for remote", { channelId: "temporary-id" }));
 
@@ -1263,6 +1737,7 @@ describe("checkAndClaim", () => {
             const { engine } = newEngine();
             await engine.registerChannel("temporary-id", CHANNEL_INDEX, FUNDED, CLOSE_SCRIPT);
             await engine.registerChannel(CHANNEL_ID, CHANNEL_INDEX, FUNDED, CLOSE_SCRIPT);
+            await engine.pinChannelTerms(CHANNEL_ID, TERMS);
             await engine.checkAndClaim(KEYS, commitmentRequest("ckb, no tlcs, for remote", { channelId: "temporary-id" }));
 
             await expect(engine.checkAndClaim(KEYS, commitmentRequest("ckb, no tlcs, for remote"))).resolves.toMatchObject({
@@ -1277,39 +1752,432 @@ describe("checkAndClaim", () => {
         });
     });
 
-    describe("check 4: monotonicity", () => {
-        it("refuses a commitment number below the last signed for its context", async () => {
-            const { engine } = await opened();
+    describe("check 4: the lanes and the views' versions", () => {
+        it("refuses a commitment number below the last signed in its lane", async () => {
+            const { engine, storage } = await opened();
             await recordThreeTlcIntents(engine);
             await engine.checkAndClaim(KEYS, threeTlcRequest());
+            const stored = new Map(storage.map);
             const older = customCommitmentRequest({
                 forRemote: true,
                 commitmentNumber: 10,
                 settlementLocalShannons: OPENING_SETTLEMENT,
                 tlcIds: [],
             });
-            expect((await refusalOf(engine.checkAndClaim(KEYS, older))).code).toBe("stale_state");
+            const refusal = await refusalOf(engine.checkAndClaim(KEYS, older));
+            expect(refusal.code).toBe("stale_state");
+            expect(refusal.message).toBe("commitment number 10 is not above the last COMMITMENT:local signed, 11");
+            expect(storage.map).toEqual(stored);
         });
 
         it("refuses a commitment number equal to the last signed when its slot is missing from the registry", async () => {
             const { engine, store } = await registered();
-            await store.setChannelRecord(CHANNEL_INDEX, {
+            const record = (await store.getChannelRecord(CHANNEL_INDEX)) as ChannelPolicyRecord;
+            await store.setChannelRecord(CHANNEL_INDEX, { ...record, lastSignedCommitmentNumbers: { "COMMITMENT:local": 0 } });
+            const refusal = await refusalOf(engine.checkAndClaim(KEYS, commitmentRequest("ckb, no tlcs, for remote")));
+            expect(refusal.code).toBe("stale_state");
+            expect(refusal.message).toBe("commitment number 0 is not above the last COMMITMENT:local signed, 0");
+        });
+
+        it("orders a close on the commitment lane", async () => {
+            const { engine } = await opened();
+            await engine.checkAndClaim(
+                KEYS,
+                customCommitmentRequest({ forRemote: true, commitmentNumber: 11, settlementLocalShannons: OPENING_SETTLEMENT, tlcIds: [] }),
+            );
+            const refusal = await refusalOf(
+                engine.checkAndClaim(KEYS, closingRequest("ckb", { slot: { commitmentNumber: 10, counter: "local" } })),
+            );
+            expect(refusal.message).toBe("commitment number 10 is not above the last COMMITMENT:local signed, 11");
+        });
+
+        // The two lanes advance on different events: a SendRevokeAndAck and a CompleteReceivedRevokeAndAck.
+        it("refuses a revocation below the last of its own lane", async () => {
+            const { engine, store } = await registered();
+            await engine.checkAndClaim(KEYS, await holdingReplacement(store, sentRevocation(5)));
+            await engine.checkAndClaim(KEYS, await holdingReplacement(store, receivedRevocation(8)));
+            expect((await refusalOf(engine.checkAndClaim(KEYS, sentRevocation(4)))).message).toBe(
+                "commitment number 4 is not above the last REVOKE:remote signed, 5",
+            );
+            expect((await refusalOf(engine.checkAndClaim(KEYS, receivedRevocation(7)))).message).toBe(
+                "commitment number 7 is not above the last REVOKE:local signed, 8",
+            );
+        });
+
+        it("accepts a revocation below the last of the other lane", async () => {
+            const { engine, store } = await registered();
+            await engine.checkAndClaim(KEYS, await holdingReplacement(store, sentRevocation(9)));
+            await expect(engine.checkAndClaim(KEYS, await holdingReplacement(store, receivedRevocation(3)))).resolves.toMatchObject({
+                status: "fresh",
+                commitmentNumber: 3,
+            });
+            await expect(engine.checkAndClaim(KEYS, await holdingReplacement(store, sentRevocation(10)))).resolves.toMatchObject({
+                status: "fresh",
+            });
+            await expect(store.getChannelRecord(CHANNEL_INDEX)).resolves.toMatchObject({
+                lastSignedCommitmentNumbers: { "REVOKE:remote": 10, "REVOKE:local": 3 },
+            });
+        });
+
+        // One nonce per slot whatever the lane: the second side of one revocation round is a second session.
+        it("refuses the other lane's revocation on a slot one lane served", async () => {
+            const { engine, store } = await registered();
+            await engine.checkAndClaim(KEYS, await holdingReplacement(store, sentRevocation(5)));
+            const refusal = await refusalOf(engine.checkAndClaim(KEYS, receivedRevocation(5)));
+            expect(refusal.code).toBe("policy_refusal");
+            expect(refusal.message).toBe("slot REVOKE:5 has already served a different signing session");
+        });
+
+        // Fiber's device SDK refuses the same way (`fiber-lsp-sdk/src/commitment.rs:671-689`): a commitment is revoked only
+        // once the one replacing it is signed, and before anything is signed after it.
+        describe.each<[string, (slot: number) => PolicySignRequest, PolicyView, PolicyView]>([
+            ["a sent revocation", sentRevocation, "local", "remote"],
+            ["a received revocation", receivedRevocation, "remote", "local"],
+        ])("the replacement of %s", (_, revocation, view, otherView) => {
+            it("signs it once the view's last commitment is the replacement, at the slot's number", async () => {
+                const { engine, store } = await registered();
+                await holdLastCommitment(store, view, 5);
+                await expect(engine.checkAndClaim(KEYS, revocation(5))).resolves.toEqual({
+                    status: "fresh",
+                    context: "REVOKE",
+                    commitmentNumber: 5,
+                });
+            });
+
+            it.each<[string, number | null, string]>([
+                ["no commitment signed in the view", null, `no ${view} commitment has been signed`],
+                ["the view's last commitment one below the replacement", 4, "the last one signed is version 4"],
+                ["the view's last commitment one above the replacement", 6, "the last one signed is version 6"],
+            ])("refuses it as stale with %s, writing nothing", async (_, last, tail) => {
+                const { engine, store, storage } = await registered();
+                if (last !== null) await holdLastCommitment(store, view, last);
+                const stored = new Map(storage.map);
+                const refusal = await refusalOf(engine.checkAndClaim(KEYS, revocation(5)));
+                expect(refusal.code).toBe("stale_state");
+                expect(refusal.message).toBe(
+                    `the revocation at slot 5 must follow its replacement, the ${view} commitment at version 5, and ${tail}`,
+                );
+                expect(storage.map).toEqual(stored);
+            });
+
+            it("refuses it when only the other view's last commitment is at the slot's number", async () => {
+                const { engine, store } = await registered();
+                await holdLastCommitment(store, otherView, 5);
+                const refusal = await refusalOf(engine.checkAndClaim(KEYS, revocation(5)));
+                expect(refusal.message).toBe(
+                    `the revocation at slot 5 must follow its replacement, the ${view} commitment at version 5, and no ${view} commitment has been signed`,
+                );
+            });
+
+            // The repeat leaves at sign-once, ahead of the view it would trip.
+            it("answers its repeat once the view has moved past the replacement", async () => {
+                const { engine, store } = await registered();
+                await holdLastCommitment(store, view, 5);
+                await engine.checkAndClaim(KEYS, revocation(5));
+                await holdLastCommitment(store, view, 6);
+                await expect(engine.checkAndClaim(KEYS, revocation(5))).resolves.toMatchObject({ status: "already-signed" });
+            });
+        });
+
+        it("keeps the announcement on a lane of its own", async () => {
+            const { engine, store } = await opened();
+            await engine.checkAndClaim(KEYS, announcementRequest("ckb"));
+            await engine.checkAndClaim(KEYS, await holdingReplacement(store, sentRevocation(1)));
+            await expect(store.getChannelRecord(CHANNEL_INDEX)).resolves.toMatchObject({
+                lastSignedCommitmentNumbers: { "COMMITMENT:local": 0, ANNOUNCEMENT: 0, "REVOKE:remote": 1 },
+            });
+        });
+
+        it.each([
+            ["equal to", 11],
+            ["below", 10],
+        ])("refuses a commitment whose version is %s the last its view signed, writing nothing", async (_, version) => {
+            const { engine, storage } = await opened();
+            await engine.checkAndClaim(
+                KEYS,
+                customCommitmentRequest({ forRemote: true, commitmentNumber: 11, settlementLocalShannons: OPENING_SETTLEMENT, tlcIds: [] }),
+            );
+            const stored = new Map(storage.map);
+            const { input } = customCommitmentRequest({
+                forRemote: true,
+                commitmentNumber: version,
+                settlementLocalShannons: OPENING_SETTLEMENT,
+                tlcIds: [],
+            }).operation as Extract<SignOperation, { kind: "commitment_tx" }>;
+            const refusal = await refusalOf(engine.checkAndClaim(KEYS, signedRequest({ kind: "commitment_tx", input }, 12)));
+            expect(refusal.code).toBe("stale_state");
+            expect(refusal.message).toBe(`the remote commitment's version ${version} is not above the last one signed in its view, 11`);
+            expect(storage.map).toEqual(stored);
+        });
+
+        // The device's own commitment carries the peer's number, which neither the lane nor the other view orders.
+        it("holds each view to its own versions, apart from the slot and the other view", async () => {
+            const { engine, store } = await opened();
+            await engine.checkAndClaim(
+                KEYS,
+                customCommitmentRequest({ forRemote: true, commitmentNumber: 11, settlementLocalShannons: OPENING_SETTLEMENT, tlcIds: [] }),
+            );
+            const local = (version: number, slot: number): PolicySignRequest => {
+                const { input } = customCommitmentRequest({
+                    forRemote: false,
+                    commitmentNumber: version,
+                    settlementLocalShannons: OPENING_SETTLEMENT,
+                    tlcIds: [],
+                }).operation as Extract<SignOperation, { kind: "commitment_tx" }>;
+                return signedRequest({ kind: "commitment_tx", input }, slot);
+            };
+            await expect(engine.checkAndClaim(KEYS, local(2, 12))).resolves.toMatchObject({ status: "fresh", commitmentNumber: 12 });
+            expect((await refusalOf(engine.checkAndClaim(KEYS, local(2, 13)))).message).toBe(
+                "the local commitment's version 2 is not above the last one signed in its view, 2",
+            );
+            await expect(engine.checkAndClaim(KEYS, local(3, 13))).resolves.toMatchObject({ status: "fresh" });
+            const record = await store.getChannelRecord(CHANNEL_INDEX);
+            expect(record?.commitmentHashes).toEqual({
+                remote: {
+                    commitmentNumber: 11,
+                    txHash: bytesToHex(
+                        customCommitmentRequest({
+                            forRemote: true,
+                            commitmentNumber: 11,
+                            settlementLocalShannons: OPENING_SETTLEMENT,
+                            tlcIds: [],
+                        }).session.message,
+                    ),
+                },
+                local: { commitmentNumber: 3, txHash: bytesToHex(local(3, 13).session.message) },
+            });
+        });
+    });
+
+    // Fiber's lifecycle signs more than one message per slot until it fixes its nonces; two sessions leave the key unsolvable.
+    describe("nonce reuse under allow", () => {
+        const ALLOW: PolicyEngineOptions = { nonceReuse: "allow" };
+
+        // The opening on the peer's commitment, then fiber's second message on its slot: the device's own opening.
+        function ownOpening(): PolicySignRequest {
+            return customCommitmentRequest({
+                forRemote: false,
+                commitmentNumber: 0,
+                settlementLocalShannons: OPENING_SETTLEMENT,
+                tlcIds: [],
+            });
+        }
+
+        function thirdSession(): PolicySignRequest {
+            const kase = caseOf(digest.commitment_cases, "ckb, no tlcs, for remote");
+            return commitmentRequest("ckb, no tlcs, for remote", {
+                session: session(hexToBytes(kase.digest), { aggregatedNonce: OTHER_AGGREGATED_NONCE }),
+            });
+        }
+
+        it("serves a second session on a served slot, logs it, and reports it as reused", async () => {
+            const { engine, store } = await registeredEngine(new InMemorySignerStorage(), ALLOW);
+            const first = commitmentRequest("ckb, no tlcs, for remote");
+            await engine.checkAndClaim(KEYS, first);
+            const second = ownOpening();
+
+            await expect(engine.checkAndClaim(KEYS, second)).resolves.toEqual({
+                status: "reused",
+                context: "COMMITMENT",
+                commitmentNumber: 0,
+            });
+            await expect(store.getChannelRecord(CHANNEL_INDEX)).resolves.toEqual<ChannelPolicyRecord>({
                 version: 1,
                 channelId: CHANNEL_ID,
-                lastSignedCommitmentNumbers: { COMMITMENT: 0 },
-                signedSessions: {},
-                lastStateVersion: 1,
+                lastSignedCommitmentNumbers: { "COMMITMENT:local": 0 },
+                signedSessions: { "COMMITMENT:0": buildSessionCommitment(first.session) },
+                nonceReuse: {
+                    "COMMITMENT:0": {
+                        sessionCommitment: buildSessionCommitment(second.session),
+                        message: bytesToHex(second.session.message),
+                    },
+                },
+                commitmentHashes: {
+                    remote: { commitmentNumber: 0, txHash: bytesToHex(first.session.message) },
+                    local: { commitmentNumber: 0, txHash: bytesToHex(second.session.message) },
+                },
+                revocations: [],
                 pins: OPENED_PINS,
                 views: { remote: OPENING_VIEW, local: OPENING_VIEW },
             });
-            expect((await refusalOf(engine.checkAndClaim(KEYS, commitmentRequest("ckb, no tlcs, for remote")))).code).toBe("stale_state");
         });
 
-        it("refuses a state version below the last one seen", async () => {
-            const { engine } = await registered();
-            await engine.checkAndClaim(KEYS, commitmentRequest("ckb, no tlcs, for remote", { stateVersion: 5 }));
-            const rolledBack = announcementRequest("ckb", { stateVersion: 4 });
-            expect((await refusalOf(engine.checkAndClaim(KEYS, rolledBack))).code).toBe("stale_state");
+        it("refuses the same second session under the default mode, writing nothing", async () => {
+            const { engine, storage } = await registeredEngine();
+            await engine.checkAndClaim(KEYS, commitmentRequest("ckb, no tlcs, for remote"));
+            const stored = new Map(storage.map);
+            const refusal = await refusalOf(engine.checkAndClaim(KEYS, ownOpening()));
+            expect(refusal.code).toBe("policy_refusal");
+            expect(refusal.message).toBe("slot COMMITMENT:0 has already served a different signing session");
+            expect(storage.map).toEqual(stored);
+        });
+
+        // Three partial signatures under one deterministic nonce are three equations that solve for the funding key.
+        it("refuses a third session on the slot, whatever it signs, writing nothing", async () => {
+            const { engine, storage } = await registeredEngine(new InMemorySignerStorage(), ALLOW);
+            await engine.checkAndClaim(KEYS, commitmentRequest("ckb, no tlcs, for remote"));
+            await engine.checkAndClaim(KEYS, ownOpening());
+            const stored = new Map(storage.map);
+            const refusal = await refusalOf(engine.checkAndClaim(KEYS, thirdSession()));
+            expect(refusal.code).toBe("policy_refusal");
+            expect(refusal.message).toBe("slot COMMITMENT:0 has already served two signing sessions, the most one nonce can");
+            expect(storage.map).toEqual(stored);
+        });
+
+        it("answers a byte-identical repeat of the first session as already signed, and of the second as reused, writing nothing", async () => {
+            const { engine, storage } = await registeredEngine(new InMemorySignerStorage(), ALLOW);
+            await engine.checkAndClaim(KEYS, commitmentRequest("ckb, no tlcs, for remote"));
+            await engine.checkAndClaim(KEYS, ownOpening());
+            storage.ops.length = 0;
+            await expect(engine.checkAndClaim(KEYS, commitmentRequest("ckb, no tlcs, for remote"))).resolves.toMatchObject({
+                status: "already-signed",
+            });
+            await expect(engine.checkAndClaim(KEYS, ownOpening())).resolves.toEqual({
+                status: "reused",
+                context: "COMMITMENT",
+                commitmentNumber: 0,
+            });
+            expect(storage.ops.filter((operation) => operation.startsWith("set"))).toEqual([]);
+        });
+
+        // A host that turns the mode off keeps what was served: the repeat reveals nothing new, a third session would.
+        it("keeps answering a logged session's repeat as reused once the mode is off, and refuses a third", async () => {
+            const storage = new InMemorySignerStorage();
+            const allowed = await registeredEngine(storage, ALLOW);
+            await allowed.engine.checkAndClaim(KEYS, commitmentRequest("ckb, no tlcs, for remote"));
+            await allowed.engine.checkAndClaim(KEYS, ownOpening());
+            const { engine } = newEngine(storage);
+            await expect(engine.checkAndClaim(KEYS, ownOpening())).resolves.toMatchObject({ status: "reused" });
+            expect((await refusalOf(engine.checkAndClaim(KEYS, thirdSession()))).message).toBe(
+                "slot COMMITMENT:0 has already served two signing sessions, the most one nonce can",
+            );
+        });
+
+        // The lockstep round: both sides of one revocation use the nonce at one number, each on its own lane.
+        it("serves the other lane's revocation on the slot one lane served, moving neither lane", async () => {
+            const { engine, store } = await registeredEngine(new InMemorySignerStorage(), ALLOW);
+            await engine.checkAndClaim(KEYS, await holdingReplacement(store, sentRevocation(5)));
+            await expect(engine.checkAndClaim(KEYS, await holdingReplacement(store, receivedRevocation(5)))).resolves.toMatchObject({
+                status: "reused",
+                context: "REVOKE",
+            });
+            await expect(store.getChannelRecord(CHANNEL_INDEX)).resolves.toMatchObject({
+                lastSignedCommitmentNumbers: { "REVOKE:remote": 5 },
+            });
+            // The local lane never took 5, so a lower slot of its own is still fresh.
+            await expect(engine.checkAndClaim(KEYS, await holdingReplacement(store, receivedRevocation(4)))).resolves.toMatchObject({
+                status: "fresh",
+            });
+        });
+
+        it("holds a second session on a revocation slot to its own replacement, logging nothing", async () => {
+            const { engine, store, storage } = await registeredEngine(new InMemorySignerStorage(), ALLOW);
+            await engine.checkAndClaim(KEYS, await holdingReplacement(store, sentRevocation(5)));
+            const stored = new Map(storage.map);
+            const refusal = await refusalOf(engine.checkAndClaim(KEYS, receivedRevocation(5)));
+            expect(refusal.code).toBe("stale_state");
+            expect(refusal.message).toBe(
+                "the revocation at slot 5 must follow its replacement, the remote commitment at version 5, and no remote commitment has been signed",
+            );
+            expect(storage.map).toEqual(stored);
+        });
+
+        it("serves a second session at its lane's last number", async () => {
+            const { engine } = await openedEngine(new InMemorySignerStorage(), ALLOW);
+            await engine.checkAndClaim(
+                KEYS,
+                customCommitmentRequest({ forRemote: true, commitmentNumber: 11, settlementLocalShannons: OPENING_SETTLEMENT, tlcIds: [] }),
+            );
+            const own = customCommitmentRequest({
+                forRemote: false,
+                commitmentNumber: 11,
+                settlementLocalShannons: OPENING_SETTLEMENT,
+                tlcIds: [],
+            });
+            await expect(engine.checkAndClaim(KEYS, own)).resolves.toMatchObject({ status: "reused", commitmentNumber: 11 });
+        });
+
+        // Reuse answers fiber's current lifecycle, never a rollback to a slot the lane has left.
+        it("refuses a second session below its lane's last number as stale, writing nothing", async () => {
+            const { engine, storage } = await openedEngine(new InMemorySignerStorage(), ALLOW);
+            await engine.checkAndClaim(
+                KEYS,
+                customCommitmentRequest({ forRemote: true, commitmentNumber: 11, settlementLocalShannons: OPENING_SETTLEMENT, tlcIds: [] }),
+            );
+            const stored = new Map(storage.map);
+            const refusal = await refusalOf(engine.checkAndClaim(KEYS, ownOpening()));
+            expect(refusal.code).toBe("stale_state");
+            expect(refusal.message).toBe("commitment number 0 is below the last COMMITMENT:local signed, 11");
+            expect(storage.map).toEqual(stored);
+        });
+
+        it.each([
+            // The same message under another aggregated nonce: a second session over the view's last version.
+            [
+                "its view's version",
+                thirdSession,
+                "stale_state",
+                "the remote commitment's version 0 is not above the last one signed in its view, 0",
+            ],
+            [
+                "the pins",
+                () =>
+                    signedRequest(
+                        {
+                            kind: "commitment_tx",
+                            input: { ...ckbCommitment(), forRemote: false, commitmentNumber: 0, commitmentFeeRate: 1001n },
+                        },
+                        0,
+                    ),
+                "policy_refusal",
+                "the request states commitmentFeeRate 1001, but the channel pinned 1000",
+            ],
+            [
+                "the balance rule",
+                () =>
+                    customCommitmentRequest({ forRemote: false, commitmentNumber: 0, settlementLocalShannons: "61999999999", tlcIds: [] }),
+                "policy_refusal",
+                "the local commitment lowers the holdings by 1 shannons, which no offered TLC took",
+            ],
+            [
+                "the close rule",
+                () => signedRequest({ kind: "closing_tx", input: { ...ckbClose(), localCapacityShannons: 71_799_999_999n } }, 0),
+                "policy_refusal",
+                `the close pays the device 71799999999 shannons, below the ${FUNDED} of the remote commitment by more than the 100000000 its fee may take`,
+            ],
+        ])("holds a second session to %s, as a first one, writing nothing", async (_, request, code, message) => {
+            const { engine, storage } = await registeredEngine(new InMemorySignerStorage(), ALLOW);
+            await engine.checkAndClaim(KEYS, commitmentRequest("ckb, no tlcs, for remote"));
+            const stored = new Map(storage.map);
+            const refusal = await refusalOf(engine.checkAndClaim(KEYS, request()));
+            expect(refusal.code).toBe(code);
+            expect(refusal.message).toBe(message);
+            expect(storage.map).toEqual(stored);
+        });
+
+        it("files the channel on the intents a reused commitment shows, as a fresh one does", async () => {
+            const { engine, store } = await openedEngine(new InMemorySignerStorage(), ALLOW);
+            await engine.recordDebitIntent(OFFERED_HASH, OFFERED_AMOUNT);
+            await engine.checkAndClaim(
+                KEYS,
+                customCommitmentRequest({ forRemote: true, commitmentNumber: 11, settlementLocalShannons: OPENING_SETTLEMENT, tlcIds: [] }),
+            );
+            const own = customCommitmentRequest({
+                forRemote: false,
+                commitmentNumber: 11,
+                settlementLocalShannons: "60500000000",
+                tlcIds: [OFFERED_TLC_ID],
+            });
+            await expect(engine.checkAndClaim(KEYS, own)).resolves.toMatchObject({ status: "reused" });
+            await expect(store.getDebitIntent(OFFERED_HASH.slice(0, 40))).resolves.toMatchObject({ channelIndexes: [CHANNEL_INDEX] });
+            expect((await store.getChannelRecord(CHANNEL_INDEX))?.views.local.tlcs).toHaveLength(1);
+        });
+
+        it.each([
+            ["an unknown mode", { nonceReuse: "warn" as never }, new TypeError("options.nonceReuse must be one of refuse, allow")],
+            ["options that are no object", null as never, new TypeError("options must be an object")],
+        ])("rejects %s", (_, options, error) => {
+            expect(() => new PolicyEngine(new SignerStore(new InMemorySignerStorage()), options)).toThrow(error);
         });
     });
 
@@ -1345,7 +2213,7 @@ describe("checkAndClaim", () => {
             ],
             [
                 "a commitment over more liquid capacity",
-                () => signedRequest({ kind: "commitment_tx", input: { ...ckbCommitment(), toRemoteShannons: 18_500_000_001n } }, 11),
+                () => signedRequest({ kind: "commitment_tx", input: { ...ckbCommitment(), liquidCapacityShannons: 80_500_000_001n } }, 11),
                 "liquidCapacityShannons",
                 "80500000001",
                 "80500000000",
@@ -1431,8 +2299,8 @@ describe("checkAndClaim", () => {
                 () =>
                     signedRequest(
                         {
-                            kind: "shutdown_tx",
-                            input: { ...ckbShutdown(), fundingOutPoint: { txHash: hexToBytes(FUNDING_TX_HASH), index: 1 } },
+                            kind: "closing_tx",
+                            input: { ...ckbClose(), fundingOutPoint: { txHash: hexToBytes(FUNDING_TX_HASH), index: 1 } },
                         },
                         11,
                     ),
@@ -1441,15 +2309,8 @@ describe("checkAndClaim", () => {
                 `${FUNDING_TX_HASH}:0`,
             ],
             [
-                "a close over more liquid capacity",
-                () => signedRequest({ kind: "shutdown_tx", input: { ...ckbShutdown(), toLocalShannons: 62_000_000_001n } }, 11),
-                "liquidCapacityShannons",
-                "80500000001",
-                "80500000000",
-            ],
-            [
                 "a close under another peer funding key",
-                () => signedRequest({ kind: "shutdown_tx", input: { ...ckbShutdown(), remoteFundingPubkey: OTHER_FUNDING_PUBKEY } }, 11),
+                () => signedRequest({ kind: "closing_tx", input: { ...ckbClose(), remoteFundingPubkey: OTHER_FUNDING_PUBKEY } }, 11),
                 "remoteFundingPubkey",
                 bytesToHex(OTHER_FUNDING_PUBKEY),
                 digest.remote.funding_pubkey,
@@ -1459,8 +2320,8 @@ describe("checkAndClaim", () => {
                 () =>
                     signedRequest(
                         {
-                            kind: "shutdown_tx",
-                            input: { ...ckbShutdown(), localCloseScript: { ...CLOSE_SCRIPT, args: new Uint8Array(20) } },
+                            kind: "closing_tx",
+                            input: { ...ckbClose(), localCloseScript: { ...CLOSE_SCRIPT, args: new Uint8Array(20) } },
                         },
                         11,
                     ),
@@ -1469,22 +2330,20 @@ describe("checkAndClaim", () => {
                     "00".repeat(20),
                 REGISTERED_PINS.localCloseScript,
             ],
+            // Read by position, the swapped tx gives the device the peer's output, and its digest still matches.
             [
-                "a close of a UDT channel",
-                () =>
-                    signedRequest(
-                        {
-                            kind: "shutdown_tx",
-                            input: {
-                                ...ckbShutdown(),
-                                udtTypeScript: toShutdownTxInput(caseOf(digest.shutdown_cases, "udt"), digest.remote).udtTypeScript,
-                            },
-                        },
-                        11,
-                    ),
-                "udtTypeScript",
-                UDT_SCRIPT_PIN,
-                "null",
+                "a close whose two outputs the node swapped",
+                () => {
+                    const tx = toTransaction(caseOf(digest.shutdown_cases, "ckb").transaction);
+                    const swapped = { ...tx, outputs: [...tx.outputs].reverse(), outputsData: [...tx.outputsData].reverse() };
+                    const input = readClosingTx(KEYS, REMOTE_FUNDING_PUBKEY, swapped);
+                    const request = signedRequest({ kind: "closing_tx", input }, 11);
+                    expect(request.session.message).toEqual(computeTxMessage(swapped));
+                    return request;
+                },
+                "localCloseScript",
+                REMOTE_CLOSE_SCRIPT_PIN,
+                REGISTERED_PINS.localCloseScript,
             ],
             [
                 "a revocation of a UDT channel",
@@ -1513,7 +2372,7 @@ describe("checkAndClaim", () => {
             ],
             [
                 "a revocation over more liquid capacity",
-                () => signedRequest({ kind: "revocation", input: { ...ckbRevocation(), toLocalShannons: 62_000_000_001n } }, 5),
+                () => signedRequest({ kind: "revocation", input: { ...ckbRevocation(), liquidCapacityShannons: 80_500_000_001n } }, 5),
                 "liquidCapacityShannons",
                 "80500000001",
                 "80500000000",
@@ -1566,9 +2425,10 @@ describe("checkAndClaim", () => {
                 digest.remote.funding_pubkey,
             ],
         ])("refuses %s than the channel pinned, and moves nothing", async (_, request, field, stated, pinned) => {
-            const { engine, storage } = await opened();
+            const { engine, store, storage } = await opened();
+            const held = await holdingReplacement(store, request());
             const stored = new Map(storage.map);
-            const refusal = await refusalOf(engine.checkAndClaim(KEYS, request()));
+            const refusal = await refusalOf(engine.checkAndClaim(KEYS, held));
             expect(refusal.code).toBe("policy_refusal");
             expect(refusal.message).toBe(`the request states ${field} ${stated}, but the channel pinned ${pinned}`);
             expect(storage.map).toEqual(stored);
@@ -1580,7 +2440,6 @@ describe("checkAndClaim", () => {
             const input = {
                 ...ckbCommitment(),
                 commitmentNumber: 0,
-                toLocalShannons: 0n,
                 settlementLocalShannons: 0n,
                 localReservedCkbShannons: 71_900_000_000n,
             };
@@ -1592,28 +2451,24 @@ describe("checkAndClaim", () => {
 
         it.each([
             ["a revocation it sends, whose payout is the peer's", () => signedRequest({ kind: "revocation", input: ckbRevocation() }, 5)],
-            [
-                "a revocation it receives, sweeping to its own script",
-                () => signedRequest({ kind: "revocation", input: { ...ckbRevocation(), forRemote: true, payoutScript: CLOSE_SCRIPT } }, 5),
-            ],
-            ["a close to its own script", () => signedRequest({ kind: "shutdown_tx", input: ckbShutdown() }, 11)],
+            ["a revocation it receives, sweeping to its own script", () => receivedRevocation(5)],
+            ["a close to its own script", () => signedRequest({ kind: "closing_tx", input: ckbClose() }, 11)],
             ["an announcement", () => signedRequest({ kind: "channel_announcement", input: ckbAnnouncement() }, 0)],
         ])("signs %s that states every pinned value as pinned", async (_, request) => {
             const { engine, store } = await opened();
-            await expect(engine.checkAndClaim(KEYS, request())).resolves.toMatchObject({ status: "fresh" });
+            await expect(engine.checkAndClaim(KEYS, await holdingReplacement(store, request()))).resolves.toMatchObject({
+                status: "fresh",
+            });
             await expect(store.getChannelRecord(CHANNEL_INDEX)).resolves.toMatchObject({ pins: OPENED_PINS });
         });
 
         it.each<[string, () => PolicySignRequest, Partial<ChannelPins>]>([
             [
                 "a close",
-                () => shutdownRequest("ckb"),
+                () => closingRequest("ckb"),
                 {
                     fundingOutPoint: OPENED_PINS.fundingOutPoint,
-                    fundingCapacityShannons: OPENED_PINS.fundingCapacityShannons,
-                    liquidCapacityShannons: OPENED_PINS.liquidCapacityShannons,
                     remoteFundingPubkey: OPENED_PINS.remoteFundingPubkey,
-                    remoteReservedCkbShannons: OPENED_PINS.remoteReservedCkbShannons,
                 },
             ],
             [
@@ -1621,11 +2476,8 @@ describe("checkAndClaim", () => {
                 () => revocationRequest("ckb, send side"),
                 {
                     fundingCapacityShannons: OPENED_PINS.fundingCapacityShannons,
-                    liquidCapacityShannons: OPENED_PINS.liquidCapacityShannons,
                     remoteFundingPubkey: OPENED_PINS.remoteFundingPubkey,
                     commitmentDelayEpoch: OPENED_PINS.commitmentDelayEpoch,
-                    commitmentFeeRate: OPENED_PINS.commitmentFeeRate,
-                    remoteReservedCkbShannons: OPENED_PINS.remoteReservedCkbShannons,
                     lockLayout: "legacy",
                 },
             ],
@@ -1634,41 +2486,42 @@ describe("checkAndClaim", () => {
                 () => announcementRequest("ckb"),
                 {
                     fundingOutPoint: OPENED_PINS.fundingOutPoint,
-                    liquidCapacityShannons: OPENED_PINS.liquidCapacityShannons,
                     remoteFundingPubkey: OPENED_PINS.remoteFundingPubkey,
                 },
             ],
         ])("pins what %s states, when it is the channel's first message", async (_, request, pinned) => {
             const { engine, store } = await registered();
-            await engine.checkAndClaim(KEYS, request());
+            await engine.checkAndClaim(KEYS, await holdingReplacement(store, request()));
             const record = await store.getChannelRecord(CHANNEL_INDEX);
-            expect(record?.pins).toEqual({ ...REGISTERED_PINS, ...pinned });
+            expect(record?.pins).toEqual({ ...TERMS_PINNED_PINS, ...pinned });
         });
 
         it.each([
             ["a commitment", () => commitmentRequest("udt, two tlcs, for remote")],
-            ["a close", () => shutdownRequest("udt")],
             ["a revocation", () => revocationRequest("udt, receive side")],
             ["an announcement", () => announcementRequest("udt")],
         ])("refuses %s of a UDT channel, the asset being fixed at registration", async (_, request) => {
-            const { engine, storage } = await registered();
+            const { engine, store, storage } = await registered();
+            const held = await holdingReplacement(store, request());
             const stored = new Map(storage.map);
-            const refusal = await refusalOf(engine.checkAndClaim(KEYS, request()));
+            const refusal = await refusalOf(engine.checkAndClaim(KEYS, held));
             expect(refusal.message).toBe(`the request states udtTypeScript ${UDT_SCRIPT_PIN}, but the channel pinned null`);
             expect(storage.map).toEqual(stored);
         });
 
         it("signs a commitment fee of exactly half the reserve's margin", async () => {
-            const { engine, store } = await registered();
+            const { engine } = await registered(new InMemorySignerStorage(), FUNDED, { ...TERMS, commitmentFeeRate: 109_649_124n });
             const input = { ...ckbCommitment(), commitmentNumber: 0, commitmentFeeRate: 109_649_124n };
             await expect(engine.checkAndClaim(KEYS, signedRequest({ kind: "commitment_tx", input }, 0))).resolves.toMatchObject({
                 status: "fresh",
             });
-            await expect(store.getChannelRecord(CHANNEL_INDEX)).resolves.toMatchObject({ pins: { commitmentFeeRate: "109649124" } });
         });
 
-        it("refuses a commitment fee one shannon past it, pinning nothing", async () => {
-            const { engine, storage } = await registered();
+        it("refuses a commitment fee one shannon past it, even at the rate the host pinned, writing nothing", async () => {
+            const { engine, storage } = await registered(new InMemorySignerStorage(), FUNDED, {
+                ...TERMS,
+                commitmentFeeRate: 109_649_125n,
+            });
             const stored = new Map(storage.map);
             const input = { ...ckbCommitment(), commitmentNumber: 0, commitmentFeeRate: 109_649_125n };
             const refusal = await refusalOf(engine.checkAndClaim(KEYS, signedRequest({ kind: "commitment_tx", input }, 0)));
@@ -1696,26 +2549,39 @@ describe("checkAndClaim", () => {
                     ),
             ],
         ])("refuses %s whose cell deps alone push the pinned rate's fee past the bound", async (_, request) => {
-            const { engine } = await registered();
+            const { engine, store } = await registered(new InMemorySignerStorage(), FUNDED, { ...TERMS, commitmentFeeRate: 109_649_124n });
             const opening = { ...ckbCommitment(), commitmentNumber: 0, commitmentFeeRate: 109_649_124n };
             await engine.checkAndClaim(KEYS, signedRequest({ kind: "commitment_tx", input: opening }, 0));
-            const refusal = await refusalOf(engine.checkAndClaim(KEYS, request()));
+            const refusal = await refusalOf(engine.checkAndClaim(KEYS, await holdingReplacement(store, request())));
             expect(refusal.message).toBe("the commitment fee is 54057018 shannons, above the 50000000 the reserve keeps for it");
         });
 
-        it("signs a close whose local fee is the 1 CKB the reserve keeps for it", async () => {
+        // The tx states no fee rate: the 1 CKB the reserve keeps for the close fee is read off what the close pays the device.
+        it("signs a close paying the device its exposure less the 1 CKB its fee may take", async () => {
             const { engine } = await opened();
-            const request = signedRequest({ kind: "shutdown_tx", input: { ...ckbShutdown(), localFeeRate: 185_185_187n } }, 11);
+            const request = signedRequest({ kind: "closing_tx", input: { ...ckbClose(), localCapacityShannons: 71_800_000_000n } }, 11);
             await expect(engine.checkAndClaim(KEYS, request)).resolves.toMatchObject({ status: "fresh" });
         });
 
-        it("refuses a close whose local fee is one shannon more, whatever the peer pays", async () => {
-            const { engine } = await opened();
-            const request = signedRequest({ kind: "shutdown_tx", input: { ...ckbShutdown(), localFeeRate: 185_185_188n } }, 11);
+        it("refuses a close paying the device one shannon less, whatever the peer is paid, writing nothing", async () => {
+            const { engine, storage } = await opened();
+            const stored = new Map(storage.map);
+            const request = signedRequest(
+                { kind: "closing_tx", input: { ...ckbClose(), localCapacityShannons: 71_799_999_999n, remoteCapacityShannons: 0n } },
+                11,
+            );
             const refusal = await refusalOf(engine.checkAndClaim(KEYS, request));
-            expect(refusal.message).toBe("the close takes a local fee of 100000001 shannons, above the 100000000 the reserve keeps for it");
-            const peerPays = signedRequest({ kind: "shutdown_tx", input: { ...ckbShutdown(), remoteFeeRate: 185_185_188n } }, 11);
-            await expect(engine.checkAndClaim(KEYS, peerPays)).resolves.toMatchObject({ status: "fresh" });
+            expect(refusal.code).toBe("policy_refusal");
+            expect(refusal.message).toBe(
+                `the close pays the device 71799999999 shannons, below the ${FUNDED} of the remote commitment by more than the 100000000 its fee may take`,
+            );
+            expect(storage.map).toEqual(stored);
+        });
+
+        it("leaves the peer's output to the peer", async () => {
+            const { engine } = await opened();
+            const request = signedRequest({ kind: "closing_tx", input: { ...ckbClose(), remoteCapacityShannons: 0n } }, 11);
+            await expect(engine.checkAndClaim(KEYS, request)).resolves.toMatchObject({ status: "fresh" });
         });
 
         it("refuses a commitment whose settlement and TLCs pay more than the liquid capacity", async () => {
@@ -1743,13 +2609,12 @@ describe("checkAndClaim", () => {
             });
         });
 
-        // Only the raw balances size the commitment cell; the balance rule never reads them.
-        it("refuses a commitment whose raw balances no longer hold the channel's capacity", async () => {
+        // Only the liquid capacity sizes the commitment cell; the balance rule never reads it.
+        it("refuses a commitment whose liquid capacity no longer holds the channel's", async () => {
             const { engine } = await opened();
             const input = {
                 ...ckbCommitment(),
-                toLocalShannons: 0n,
-                toRemoteShannons: 0n,
+                liquidCapacityShannons: 0n,
                 settlementLocalShannons: 0n,
                 settlementRemoteShannons: 0n,
             };
@@ -1829,8 +2694,8 @@ describe("checkAndClaim", () => {
             ["an announcement", () => announcementRequest("ckb")],
             ["a revocation", () => revocationRequest("ckb, send side")],
         ])("judges the first commitment after %s as the opening", async (_, first) => {
-            const { engine } = await registered();
-            await engine.checkAndClaim(KEYS, first());
+            const { engine, store } = await registered();
+            await engine.checkAndClaim(KEYS, await holdingReplacement(store, first()));
             const refusal = await refusalOf(
                 engine.checkAndClaim(
                     KEYS,
@@ -1846,7 +2711,7 @@ describe("checkAndClaim", () => {
         it("judges a commitment after a close by its view alone", async () => {
             const { engine } = await registered();
             await engine.recordDebitIntent(OFFERED_HASH, OFFERED_AMOUNT);
-            await engine.checkAndClaim(KEYS, shutdownRequest("ckb", { nonceCommitmentNumber: 10 }));
+            await engine.checkAndClaim(KEYS, closingRequest("ckb", { slot: { commitmentNumber: 10, counter: "local" } }));
             await expect(
                 engine.checkAndClaim(
                     KEYS,
@@ -2020,8 +2885,7 @@ describe("checkAndClaim", () => {
 
         it("draws one budget across every channel the payment shows on", async () => {
             const { engine, store } = await opened(new AsyncInMemorySignerStorage());
-            await engine.registerChannel(OTHER_CHANNEL_ID, OTHER_CHANNEL_INDEX, FUNDED, CLOSE_SCRIPT);
-            await openChannel(engine, OTHER_CHANNEL);
+            await addOtherChannel(engine);
             await engine.recordDebitIntent(OFFERED_HASH, "2999999999");
             const part = { forRemote: true, commitmentNumber: 11, settlementLocalShannons: "60500000000", tlcIds: [OFFERED_TLC_ID] };
 
@@ -2044,8 +2908,7 @@ describe("checkAndClaim", () => {
         // The node may broadcast either commitment of each channel.
         it("refuses a second channel's view drawing a budget another channel's other view already draws", async () => {
             const { engine } = await opened();
-            await engine.registerChannel(OTHER_CHANNEL_ID, OTHER_CHANNEL_INDEX, FUNDED, CLOSE_SCRIPT);
-            await openChannel(engine, OTHER_CHANNEL);
+            await addOtherChannel(engine);
             await engine.recordDebitIntent(OFFERED_HASH, OFFERED_AMOUNT);
             await engine.checkAndClaim(
                 KEYS,
@@ -2078,7 +2941,7 @@ describe("checkAndClaim", () => {
                     async set(key: string, value: string): Promise<void> {
                         // Between the commitment's decision and its claim.
                         if (armed && key === intentKey && revocation === null) {
-                            revocation = engine.checkAndClaim(KEYS, revocationRequest("ckb, send side", { stateVersion: 2 }));
+                            revocation = engine.checkAndClaim(KEYS, revocationRequest("ckb, send side"));
                             await new Promise((resolve) => setTimeout(resolve, 0));
                         }
                         inner.set(key, value);
@@ -2086,7 +2949,9 @@ describe("checkAndClaim", () => {
                 }),
             );
             await engine.registerChannel(CHANNEL_ID, CHANNEL_INDEX, FUNDED, CLOSE_SCRIPT);
+            await engine.pinChannelTerms(CHANNEL_ID, TERMS);
             await openChannel(engine);
+            await holdingReplacement(new SignerStore(inner), revocationRequest("ckb, send side"));
             await engine.recordDebitIntent(OFFERED_HASH, OFFERED_AMOUNT);
             const part = { forRemote: true, commitmentNumber: 11, settlementLocalShannons: "60500000000", tlcIds: [OFFERED_TLC_ID] };
             armed = true;
@@ -2095,15 +2960,13 @@ describe("checkAndClaim", () => {
             expect(revocation).not.toBeNull();
             await expect(revocation).resolves.toMatchObject({ status: "fresh", context: "REVOKE" });
             await expect(new SignerStore(inner).getChannelRecord(CHANNEL_INDEX)).resolves.toMatchObject({
-                lastSignedCommitmentNumbers: { COMMITMENT: 11, REVOKE: 5 },
-                lastStateVersion: 2,
+                lastSignedCommitmentNumbers: { "COMMITMENT:local": 11, "REVOKE:remote": 5 },
             });
         });
 
         it("lets only one of two channels racing for one budget take it", async () => {
             const { engine } = await opened(new AsyncInMemorySignerStorage());
-            await engine.registerChannel(OTHER_CHANNEL_ID, OTHER_CHANNEL_INDEX, FUNDED, CLOSE_SCRIPT);
-            await openChannel(engine, OTHER_CHANNEL);
+            await addOtherChannel(engine);
             await engine.recordDebitIntent(OFFERED_HASH, OFFERED_AMOUNT);
             const part = { forRemote: true, commitmentNumber: 11, settlementLocalShannons: "60500000000", tlcIds: [OFFERED_TLC_ID] };
 
@@ -2129,6 +2992,7 @@ describe("checkAndClaim", () => {
             };
             const engine = new PolicyEngine(new SignerStore(storage));
             await engine.registerChannel(CHANNEL_ID, CHANNEL_INDEX, FUNDED, CLOSE_SCRIPT);
+            await engine.pinChannelTerms(CHANNEL_ID, TERMS);
             await openChannel(engine);
             await engine.recordDebitIntent(OFFERED_HASH, OFFERED_AMOUNT);
             intentReads = 0;
@@ -2150,8 +3014,10 @@ describe("checkAndClaim", () => {
                 }),
             );
             await engine.registerChannel(CHANNEL_ID, CHANNEL_INDEX, FUNDED, CLOSE_SCRIPT);
+            await engine.pinChannelTerms(CHANNEL_ID, TERMS);
+            const request = await holdingReplacement(new SignerStore(inner), revocationRequest("ckb, send side"));
             armed = true;
-            await expect(engine.checkAndClaim(KEYS, revocationRequest("ckb, send side"))).rejects.toThrow(
+            await expect(engine.checkAndClaim(KEYS, request)).rejects.toThrow(
                 new TypeError(`channel ${CHANNEL_ID} resolves to channel index ${CHANNEL_INDEX}, which holds no record`),
             );
             expect(recordReads).toBe(2);
@@ -2400,8 +3266,7 @@ describe("checkAndClaim", () => {
             // Otherwise the node could broadcast the two commitments that did not pay.
             it("asks a channel for the invoice unless every commitment another channel holds has already paid it", async () => {
                 const { engine } = await opened();
-                await engine.registerChannel(OTHER_CHANNEL_ID, OTHER_CHANNEL_INDEX, FUNDED, CLOSE_SCRIPT);
-                await openChannel(engine, OTHER_CHANNEL);
+                await addOtherChannel(engine);
                 await engine.recordHoldInvoice(RECEIVED_HASH, RECEIVED_AMOUNT, "sha256");
                 const other = { keys: OTHER_KEYS, channelId: OTHER_CHANNEL_ID };
                 const holding = (forRemote: boolean, commitmentNumber: number) => ({
@@ -2475,23 +3340,42 @@ describe("checkAndClaim", () => {
             ).resolves.toMatchObject({ status: "fresh" });
         });
 
-        it("refuses a cooperative close that pays the device less than a view showed", async () => {
+        it("refuses a cooperative close that pays the device less than a view showed, past its fee", async () => {
             const { engine } = await registered(new InMemorySignerStorage(), "75000000000");
-            const refusal = await refusalOf(engine.checkAndClaim(KEYS, shutdownRequest("ckb")));
-            expect(refusal.message).toBe("the close pays the device 71900000000 shannons, below the 75000000000 of the remote commitment");
+            const refusal = await refusalOf(engine.checkAndClaim(KEYS, closingRequest("ckb")));
+            expect(refusal.message).toBe(
+                `the close pays the device ${CLOSE_LOCAL_CAPACITY} shannons, below the 75000000000 of the remote commitment by more than the 100000000 its fee may take`,
+            );
+        });
+
+        // A crossing removal can leave one view lower; the close must pay the higher.
+        it("refuses a close that pays what the remote view showed but not the local one", async () => {
+            const { engine } = await opened();
+            await engine.checkAndClaim(
+                KEYS,
+                customCommitmentRequest({ forRemote: false, commitmentNumber: 11, settlementLocalShannons: "64250000000", tlcIds: [] }),
+            );
+            const refusal = await refusalOf(
+                engine.checkAndClaim(KEYS, closingRequest("ckb", { slot: { commitmentNumber: 12, counter: "local" } })),
+            );
+            expect(refusal.message).toBe(
+                `the close pays the device ${CLOSE_LOCAL_CAPACITY} shannons, below the 74150000000 of the local commitment by more than the 100000000 its fee may take`,
+            );
         });
 
         it("refuses a cooperative close while a view still lists TLCs", async () => {
             const { engine } = await opened();
             await recordThreeTlcIntents(engine);
             await engine.checkAndClaim(KEYS, threeTlcRequest());
-            const refusal = await refusalOf(engine.checkAndClaim(KEYS, shutdownRequest("ckb", { nonceCommitmentNumber: 12 })));
+            const refusal = await refusalOf(
+                engine.checkAndClaim(KEYS, closingRequest("ckb", { slot: { commitmentNumber: 12, counter: "local" } })),
+            );
             expect(refusal.message).toBe("a cooperative close while the remote commitment still lists TLCs");
         });
 
         it("signs a cooperative close that pays what both views showed, and moves no snapshot", async () => {
             const { engine, store } = await registered();
-            await engine.checkAndClaim(KEYS, shutdownRequest("ckb"));
+            await engine.checkAndClaim(KEYS, closingRequest("ckb"));
             await expect(store.getChannelRecord(CHANNEL_INDEX)).resolves.toMatchObject({
                 views: { remote: OPENING_VIEW, local: OPENING_VIEW },
             });
@@ -2502,7 +3386,7 @@ describe("checkAndClaim", () => {
             ["an announcement", announcementRequest("ckb")],
         ])("leaves the views untouched for %s", async (_, request) => {
             const { engine, store } = await registered();
-            await engine.checkAndClaim(KEYS, request);
+            await engine.checkAndClaim(KEYS, await holdingReplacement(store, request));
             await expect(store.getChannelRecord(CHANNEL_INDEX)).resolves.toMatchObject({
                 views: { remote: OPENING_VIEW, local: OPENING_VIEW },
             });
@@ -2543,10 +3427,7 @@ describe("checkAndClaim", () => {
                 commitmentNumber,
                 settlementLocalShannons: settlementLocal,
                 settlementRemoteShannons:
-                    base.toLocalShannons +
-                    base.toRemoteShannons -
-                    settlementLocal -
-                    tlcs.reduce((sum, tlc) => sum + tlc.amountShannons, 0n),
+                    base.liquidCapacityShannons - settlementLocal - tlcs.reduce((sum, tlc) => sum + tlc.amountShannons, 0n),
                 tlcs,
             };
             return signedRequest({ kind: "commitment_tx", input }, commitmentNumber);
@@ -2555,6 +3436,7 @@ describe("checkAndClaim", () => {
         async function registeredFullHash() {
             const context = newEngine();
             await context.engine.registerChannel(CHANNEL_ID, CHANNEL_INDEX, FUNDED_FULL_HASH, CLOSE_SCRIPT);
+            await context.engine.pinChannelTerms(CHANNEL_ID, TERMS);
             return context;
         }
 
@@ -2579,9 +3461,10 @@ describe("checkAndClaim", () => {
             ["a commitment", () => signedRequest({ kind: "commitment_tx", input: ckbCommitment() }, 11)],
             ["a revocation", () => revocationRequest("ckb, send side")],
         ])("refuses %s under the legacy layout once the full hash is pinned, and moves nothing", async (_, request) => {
-            const { engine, storage } = await openedFullHash();
+            const { engine, store, storage } = await openedFullHash();
+            const held = await holdingReplacement(store, request());
             const stored = new Map(storage.map);
-            const refusal = await refusalOf(engine.checkAndClaim(KEYS, request()));
+            const refusal = await refusalOf(engine.checkAndClaim(KEYS, held));
             expect(refusal.code).toBe("policy_refusal");
             expect(refusal.message).toBe("the request states lockLayout legacy, but the channel pinned fullPaymentHash");
             expect(storage.map).toEqual(stored);
@@ -2591,16 +3474,19 @@ describe("checkAndClaim", () => {
             ["a commitment", () => signedRequest({ kind: "commitment_tx", input: fullHashCommitment() }, 11)],
             ["a revocation", () => revocationRequest("ckb, send side, full payment hash")],
         ])("refuses %s under the full hash once the legacy layout is pinned", async (_, request) => {
-            const { engine, storage } = await opened();
+            const { engine, store, storage } = await opened();
+            const held = await holdingReplacement(store, request());
             const stored = new Map(storage.map);
-            const refusal = await refusalOf(engine.checkAndClaim(KEYS, request()));
+            const refusal = await refusalOf(engine.checkAndClaim(KEYS, held));
             expect(refusal.message).toBe("the request states lockLayout fullPaymentHash, but the channel pinned legacy");
             expect(storage.map).toEqual(stored);
         });
 
         it("signs the revocation sized under the pinned layout, pinning nothing new", async () => {
             const { engine, store } = await openedFullHash();
-            await expect(engine.checkAndClaim(KEYS, revocationRequest("ckb, send side, full payment hash"))).resolves.toMatchObject({
+            await expect(
+                engine.checkAndClaim(KEYS, await holdingReplacement(store, revocationRequest("ckb, send side, full payment hash"))),
+            ).resolves.toMatchObject({
                 status: "fresh",
                 context: "REVOKE",
             });
@@ -2609,7 +3495,7 @@ describe("checkAndClaim", () => {
 
         it("pins the layout from a revocation when it comes first", async () => {
             const { engine, store } = await registeredFullHash();
-            await engine.checkAndClaim(KEYS, revocationRequest("ckb, send side, full payment hash"));
+            await engine.checkAndClaim(KEYS, await holdingReplacement(store, revocationRequest("ckb, send side, full payment hash")));
             await expect(store.getChannelRecord(CHANNEL_INDEX)).resolves.toMatchObject({ pins: { lockLayout: "fullPaymentHash" } });
             const refusal = await refusalOf(engine.checkAndClaim(KEYS, commitmentRequest("ckb, no tlcs, for remote")));
             expect(refusal.message).toBe("the request states lockLayout legacy, but the channel pinned fullPaymentHash");
@@ -2635,45 +3521,14 @@ describe("checkAndClaim", () => {
             expect(storage.map).toEqual(stored);
         });
 
-        it("holds a close to the reserve of the pinned layout", async () => {
-            const { engine } = await openedFullHash();
-            // The funding cell as pinned: the reserve moved to the other side.
-            const input = { ...ckbShutdown(), localReservedCkbShannons: 9_900_000_000n, remoteReservedCkbShannons: 6_400_000_000n };
-            const refusal = await refusalOf(engine.checkAndClaim(KEYS, signedRequest({ kind: "shutdown_tx", input }, 11)));
-            expect(refusal.message).toBe("the request states localReservedCkbShannons 9900000000, but the channel pinned 10000000000");
-            const close = { ...ckbShutdown(), localReservedCkbShannons: 10_000_000_000n };
-            await expect(engine.checkAndClaim(KEYS, signedRequest({ kind: "shutdown_tx", input: close }, 11))).resolves.toMatchObject({
+        // A close states no reserve and no layout, so either layout's channel takes it as it is.
+        it("signs a close on a full-hash channel without reading its layout", async () => {
+            const { engine, store } = await openedFullHash();
+            const input = { ...ckbClose(), localCapacityShannons: 71_900_000_000n };
+            await expect(engine.checkAndClaim(KEYS, signedRequest({ kind: "closing_tx", input }, 11))).resolves.toMatchObject({
                 status: "fresh",
             });
-        });
-
-        // Fiber builds no close that early, but the device does not assume it: the node picks between the two values computed.
-        it.each([
-            ["the legacy reserve", 9_900_000_000n],
-            ["the full-hash reserve", 10_000_000_000n],
-        ])("signs a close as the channel's first message with %s, pinning no layout", async (_, localReservedCkbShannons) => {
-            const { engine, store } = await registered();
-            const input = { ...ckbShutdown(), localReservedCkbShannons };
-            await expect(
-                engine.checkAndClaim(KEYS, signedRequest({ kind: "shutdown_tx", input }, SHUTDOWN_NONCE_NUMBER)),
-            ).resolves.toMatchObject({ status: "fresh" });
-            const record = await store.getChannelRecord(CHANNEL_INDEX);
-            expect(record?.pins.lockLayout).toBeUndefined();
-            expect(record?.pins.localReservedCkbShannons).toEqual(REGISTERED_PINS.localReservedCkbShannons);
-        });
-
-        it("refuses a close as the channel's first message with a third reserve, naming both values, writing nothing", async () => {
-            const { engine, storage } = await registered();
-            const stored = new Map(storage.map);
-            const input = { ...ckbShutdown(), localReservedCkbShannons: 9_950_000_000n };
-            const refusal = await refusalOf(
-                engine.checkAndClaim(KEYS, signedRequest({ kind: "shutdown_tx", input }, SHUTDOWN_NONCE_NUMBER)),
-            );
-            expect(refusal.code).toBe("policy_refusal");
-            expect(refusal.message).toBe(
-                "the request states localReservedCkbShannons 9950000000, but the channel pinned 9900000000 under legacy or 10000000000 under fullPaymentHash",
-            );
-            expect(storage.map).toEqual(stored);
+            await expect(store.getChannelRecord(CHANNEL_INDEX)).resolves.toMatchObject({ pins: OPENED_FULL_HASH_PINS });
         });
 
         it("signs a commitment under the full hash and keeps the whole hashes in its view", async () => {

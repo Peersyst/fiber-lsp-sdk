@@ -13,6 +13,7 @@ import {
     readArray,
     readObject,
     readPair,
+    readTagged,
     requireObject,
 } from "../../../src/wire";
 import { refusal } from "../../utils/refusal";
@@ -50,6 +51,54 @@ describe("readObject", () => {
 
     it("refuses what is not an object before any member is read", () => {
         expect(refusal(() => readObject(field([]))).path).toBe("root");
+    });
+});
+
+describe("readTagged", () => {
+    type ContentWire = { type: "Commitment"; transaction: string } | { type: "Revocation"; output: string; output_data: string };
+    const VARIANTS = ["Commitment", "Revocation"] as const;
+
+    it("reads the tag and the variant's other members as fields with dotted paths", () => {
+        const tagged = readTagged<ContentWire>(field({ type: "Revocation", output: "0x00" }), VARIANTS);
+        expect(tagged.tag).toBe("Revocation");
+        if (tagged.tag !== "Revocation") throw new Error("the tag did not narrow");
+        expect(tagged.at("output")).toEqual({ value: "0x00", path: "root.output" });
+        expect(tagged.at("output_data")).toEqual({ value: undefined, path: "root.output_data" });
+        // @ts-expect-error a member of the other variant is not spellable once the tag narrows
+        expect(tagged.at("transaction").path).toBe("root.transaction");
+        // @ts-expect-error the tag itself is not read twice
+        expect(tagged.at("type").value).toBe("Revocation");
+    });
+
+    it("reads a variant with no other member, the form of a bare outcome", () => {
+        const RESULTS = ["Applied", "AlreadyApplied"] as const;
+        expect(readTagged<{ type: (typeof RESULTS)[number] }>(field({ type: "AlreadyApplied" }), RESULTS).tag).toBe("AlreadyApplied");
+    });
+
+    it("accepts only the variants it is given, even of the same union", () => {
+        expect(readTagged<ContentWire>(field({ type: "Commitment" }), ["Commitment"]).tag).toBe("Commitment");
+        expect(refusal(() => readTagged<ContentWire>(field({ type: "Revocation" }), ["Commitment"])).message).toBe(
+            "root.type must be one of Commitment",
+        );
+    });
+
+    it.each([undefined, null, 1, "", "revocation", "Other", ["Revocation"], { type: "Revocation" }])(
+        "refuses the tag %p, naming the set and not the value",
+        (tag) => {
+            expect(refusal(() => readTagged<ContentWire>(field({ type: tag }), VARIANTS)).message).toBe(
+                "root.type must be one of Commitment, Revocation",
+            );
+        },
+    );
+
+    it("refuses a missing tag", () => {
+        expect(refusal(() => readTagged<ContentWire>(field({ output: "0x00" }), VARIANTS)).message).toBe(
+            "root.type must be one of Commitment, Revocation",
+        );
+    });
+
+    it.each([null, [], "Revocation", 1, undefined])("refuses %p before the tag is read", (value) => {
+        expect(refusal(() => readTagged<ContentWire>(field(value), VARIANTS)).message).toBe("root must be an object");
     });
 });
 

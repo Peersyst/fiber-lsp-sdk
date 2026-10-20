@@ -18,8 +18,7 @@ describe("deriveWalletIdentityKey", () => {
         expect(bytesToHex(deriveWalletIdentityKey(MASTER_SEED))).not.toBe(bytesToHex(deriveWalletIdentityKey(OTHER_MASTER_SEED)));
     });
 
-    // Two devices restored from the same mnemonic are the same wallet, so they present
-    // the same identity: the key is a function of the seed and of nothing else.
+    // Two devices restored from one mnemonic are one wallet.
     it("is a function of the master seed alone", () => {
         const restored = Uint8Array.from(MASTER_SEED);
         expect(bytesToHex(deriveWalletIdentityKey(restored))).toBe(bytesToHex(deriveWalletIdentityKey(MASTER_SEED)));
@@ -91,15 +90,15 @@ describe("deriveNonceSeed", () => {
         expect(() => deriveNonceSeed(channelKeys, 2 ** 48, "COMMITMENT")).toThrow(RangeError);
     });
 
-    it("rejects an unknown context", () => {
-        const unknownContext = "SETTLE" as unknown as NonceContext;
+    // A close signs in the commitment slot, as fiber does.
+    it.each(["SETTLE", "CLOSE"])("rejects the unknown context %s", (context) => {
+        const unknownContext = context as unknown as NonceContext;
         expect(() => deriveNonceSeed(channelKeys, 0, unknownContext)).toThrow(
-            new TypeError("context must be one of COMMITMENT, REVOKE, CLOSE, ANNOUNCEMENT"),
+            new TypeError("context must be one of COMMITMENT, REVOKE, ANNOUNCEMENT"),
         );
     });
 
-    // The only public derivation that takes a compound object: it validates nothing
-    // itself, so the guards of the functions it composes have to do the work.
+    // It validates nothing itself: the guards of what it composes do.
     it("rejects channel keys with malformed secrets", () => {
         expect(() => deriveNonceSeed({ ...channelKeys, commitmentSeed: new Uint8Array(31) }, 0, "COMMITMENT")).toThrow(TypeError);
         expect(() => deriveNonceSeed({ ...channelKeys, musig2BaseNonce: new Uint8Array(31) }, 0, "COMMITMENT")).toThrow(TypeError);
@@ -107,8 +106,7 @@ describe("deriveNonceSeed", () => {
 });
 
 describe("scheme v1 outputs", () => {
-    // The recoverability contract, pinned independently of the interop vectors:
-    // changing these strands existing channels, so a change needs a new scheme version.
+    // The recoverability contract: changing these strands existing channels, so a change needs a new scheme version.
     it("derives the pinned wallet identity key", () => {
         expect(bytesToHex(deriveWalletIdentityKey(MASTER_SEED))).toBe("fe11dd3161e80f6e20a43106d2b0853ec87d613c87ab0c87f41584c31f091ed1");
     });

@@ -1,6 +1,7 @@
 export * from "./field";
 export * from "./flags";
 export * from "./hex";
+export * from "./molecule";
 export * from "./script";
 export * from "./transaction";
 export * from "./uint";

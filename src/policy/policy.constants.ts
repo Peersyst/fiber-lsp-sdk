@@ -1,4 +1,5 @@
 import { SHANNONS_PER_CKB } from "../common";
+import { MAX_COMMITMENT_NUMBER } from "../derivation";
 
 /**
  * Namespaced: the host may back the storage with a store it also uses for its own keys.
@@ -32,19 +33,25 @@ export const DEBIT_INTENT_ERROR_CODES = ["intent_open", "intent_charged", "own_i
 export const HOLD_INVOICE_ERROR_CODES = ["offered_in_flight", "algorithm_mismatch"] as const;
 
 /**
- * Pinned to the first value stated; the other pins are fixed at registration.
+ * Pinned to the first value stated; the terms are the host's, and the other pins are fixed at registration.
  */
 export const FIRST_SIGHT_CHANNEL_PINS = [
     "fundingOutPoint",
     "fundingCapacityShannons",
-    "liquidCapacityShannons",
     "remoteFundingPubkey",
     "remoteTlcBasePubkey",
     "commitmentDelayEpoch",
-    "commitmentFeeRate",
-    "remoteReservedCkbShannons",
     "lockLayout",
 ] as const;
+
+/**
+ * Pinned by the host alone: a message stating one before the host pinned it is refused, never taken as the first sight.
+ */
+export const CHANNEL_TERMS_PINS = ["liquidCapacityShannons", "commitmentFeeRate", "remoteReservedCkbShannons"] as const;
+
+export const NONCE_REUSE_MODES = ["refuse", "allow"] as const;
+
+export const SIGNING_LANES = ["COMMITMENT:local", "REVOKE:local", "REVOKE:remote", "ANNOUNCEMENT"] as const;
 
 /**
  * Fiber's `DEFAULT_MIN_SHUTDOWN_FEE`.
@@ -79,6 +86,11 @@ export const PAYMENT_RECORD_VERSION = 1;
  * The announcement nonce never rotates, so its slot is fixed and latched on first use.
  */
 export const ANNOUNCEMENT_SLOT_NUMBER = 0;
+
+/**
+ * The revocation that revokes a version claims the slot one above it, so the chain's last number is never revoked.
+ */
+export const MAX_REVOKED_VERSION = MAX_COMMITMENT_NUMBER - 1;
 
 /**
  * Stored format: changing it reopens every slot a device has already served.

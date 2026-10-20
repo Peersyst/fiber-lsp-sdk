@@ -1,0 +1,1246 @@
+{
+  "fiber_ref": "8db6a117",
+  "device": {
+    "master_seed": "2424242424242424242424242424242424242424242424242424242424242424",
+    "channel_index": 1760572800,
+    "funding_pubkey": "02e42662b93a36b0817ec942512688ce880d300f3d48309ac79953cfd402c10ff5",
+    "tlc_base_pubkey": "035de18a9013ba6eb918a415764d99945683f18d3f9fa4c881ed92423124de0849"
+  },
+  "peer": {
+    "seed": "7777777777777777777777777777777777777777777777777777777777777777",
+    "funding_pubkey": "026372d1f1bf5f44d3bf185fe8f69502f36c9a01760029db0a15f6c7dedb4f5638",
+    "tlc_base_pubkey": "032559e1b167552782cab5be4294260d51edfc36aef4ca7cc165b3b21b15e98e21"
+  },
+  "channel": {
+    "channel_id": "0x40a7d4c39ec7d2900cd5bd4158f314f713da4847b7f0bd910302c8d7c9567f69",
+    "funding_out_point": {
+      "tx_hash": "341b96611104178e30e46e7b2a9039a76b9a76422328ee39a2d4cb09aa8711af",
+      "index": 0
+    },
+    "lock_layout": "full_payment_hash",
+    "commitment_lock": {
+      "code_hash": "740dee83f87c6f309824d8fd3fbdd3c8380ee6fc9acc90b1a748438afcdf81d8",
+      "hash_type": "type",
+      "args": ""
+    },
+    "funding_lock_cell_deps_count": 2,
+    "delay_epoch": "1099511627777",
+    "commitment_fee_rate": "1000",
+    "udt_type_script": null,
+    "to_local": "62000000000",
+    "to_remote": "18500000000",
+    "local_reserved": "10000000000",
+    "remote_reserved": "6300000000",
+    "local_close_script": {
+      "code_hash": "537320e708e05f80a3d3a873b32eda052298e274ad93e7b9d5c2fc0ca201d769",
+      "hash_type": "type",
+      "args": "8d66477ba3b60a96feb27a3f57fe11f6697be87d"
+    },
+    "remote_close_script": {
+      "code_hash": "4d62a160ec2d470f499fb511b77777e0af54af776d9d31ee9ecdc71d7378c2ba",
+      "hash_type": "type",
+      "args": "8f1e030962418183dc890ef5664b1f2a64b0064c"
+    },
+    "local_shutdown_fee_rate": "1000",
+    "remote_shutdown_fee_rate": "1200",
+    "tlcs": [
+      {
+        "id": 0,
+        "direction": "offered",
+        "hash_algorithm": "ckb-hash",
+        "amount": "1500000000",
+        "payment_hash": "b570807ecd66dbcebb2947e7406032a30e8cf3aa5b428a117ec408754480834f",
+        "expiry_ms": "1760576400000",
+        "local_key_commitment_number": 1,
+        "remote_tlc_pubkey": "02472f54e4d91d996072f2f98051713867cd88833135c95d4d45414ff3bca2b8bf"
+      },
+      {
+        "id": 0,
+        "direction": "received",
+        "hash_algorithm": "sha256",
+        "amount": "2250000000",
+        "payment_hash": "ad6da67e459695e3985fa37aff8e45c07167760b9e9252b5d500b913fe70d499",
+        "expiry_ms": "1760580000000",
+        "local_key_commitment_number": 2,
+        "remote_tlc_pubkey": "02d469124f0bc3cfcf094833b07ce97653eccd643eaa550da99492adba664393f8"
+      },
+      {
+        "id": 1,
+        "direction": "offered",
+        "hash_algorithm": "sha256",
+        "amount": "750000000",
+        "payment_hash": "e8990955f9e49378973c979ced61815c283effe85d4b84b8ef51e2440739a05c",
+        "expiry_ms": "1760583600000",
+        "local_key_commitment_number": 2,
+        "remote_tlc_pubkey": "0397f7d412ed096800d678f2e2249304f96c29408f2e0470ff656933cac8e1a61d"
+      }
+    ]
+  },
+  "cases": [
+    {
+      "name": "send commitment signed",
+      "transition": "SendCommitmentSigned",
+      "result": {
+        "channel_id": "0x40a7d4c39ec7d2900cd5bd4158f314f713da4847b7f0bd910302c8d7c9567f69",
+        "status": {
+          "type": "SignatureRequired",
+          "request_id": "0x0d08603c21792e52dc266fe7cfccd7865b9cc2d3bb200eb1ec7465c8c8157949",
+          "transition": "SendCommitmentSigned",
+          "content": {
+            "slot": {
+              "purpose": "Commitment",
+              "commitment_number": "0x4"
+            },
+            "commitment_counter": "Local",
+            "key_agg_ctx": "0x0000000002026372d1f1bf5f44d3bf185fe8f69502f36c9a01760029db0a15f6c7dedb4f563802e42662b93a36b0817ec942512688ce880d300f3d48309ac79953cfd402c10ff5",
+            "agg_nonce": "0x02d1a501cb9bf0b72e16a42ce4c0efd8b4c988e3c02d52c87657119b1076cc7d5503f01dab57e2588aa73acc6805cffc369c83e5e56c8e4cc59783eeafde680c1302",
+            "content": {
+              "type": "CommitmentTransaction",
+              "transaction": {
+                "version": "0x0",
+                "cell_deps": [],
+                "header_deps": [],
+                "inputs": [
+                  {
+                    "since": "0x0",
+                    "previous_output": {
+                      "tx_hash": "0x341b96611104178e30e46e7b2a9039a76b9a76422328ee39a2d4cb09aa8711af",
+                      "index": "0x0"
+                    }
+                  }
+                ],
+                "outputs": [
+                  {
+                    "capacity": "0x1689bac637",
+                    "lock": {
+                      "code_hash": "0x740dee83f87c6f309824d8fd3fbdd3c8380ee6fc9acc90b1a748438afcdf81d8",
+                      "hash_type": "type",
+                      "args": "0x5c5dfaf84654cd9ca715c1e585b951d5d0d62c9601000000000100a00000000000000004072dc1e95ec2be0bbcd1f9a5ab1af169a340f1050001"
+                    },
+                    "type": null
+                  }
+                ],
+                "outputs_data": [
+                  "0x"
+                ],
+                "witnesses": []
+              }
+            }
+          },
+          "session_evidence": {
+            "peer_public_nonce": "0x03791be12ca7c1d705c5c8d7a84146ebe53b097bf98cde8a40d1c998fffcc7e22402c8227dc41d8d4582c51efa19651ced92f7d03a18aba29c8759c82a50bf631b0e",
+            "peer_partial_signature": null
+          },
+          "settlement": {
+            "local_amount": "0x103d6c8980",
+            "remote_amount": "0x54015b180",
+            "local_settlement_pubkey": "035de18a9013ba6eb918a415764d99945683f18d3f9fa4c881ed92423124de0849",
+            "remote_settlement_pubkey": "032559e1b167552782cab5be4294260d51edfc36aef4ca7cc165b3b21b15e98e21",
+            "for_remote": true,
+            "tlcs": [
+              {
+                "tlc_id": "0x0",
+                "local_key_commitment_number": "0x2",
+                "inbound": true,
+                "payment_hash": "0xad6da67e459695e3985fa37aff8e45c07167760b9e9252b5d500b913fe70d499",
+                "payment_amount": "0x861c4680",
+                "hash_algorithm": "sha256",
+                "expiry": "0x199eabed900",
+                "local_key_pubkey": "030460ab5766cae9195cea30cd6c8abf42ff0b7213e1dd995e09e76397f90b2fe5",
+                "remote_key": "02d469124f0bc3cfcf094833b07ce97653eccd643eaa550da99492adba664393f8"
+              },
+              {
+                "tlc_id": "0x0",
+                "local_key_commitment_number": "0x1",
+                "inbound": false,
+                "payment_hash": "0xb570807ecd66dbcebb2947e7406032a30e8cf3aa5b428a117ec408754480834f",
+                "payment_amount": "0x59682f00",
+                "hash_algorithm": "ckb_hash",
+                "expiry": "0x199ea87ea80",
+                "local_key_pubkey": "03afd50467f12b93c009dd9a62ae1c2760cf336d655f582fb2a5b84f5288f7462b",
+                "remote_key": "02472f54e4d91d996072f2f98051713867cd88833135c95d4d45414ff3bca2b8bf"
+              },
+              {
+                "tlc_id": "0x1",
+                "local_key_commitment_number": "0x2",
+                "inbound": false,
+                "payment_hash": "0xe8990955f9e49378973c979ced61815c283effe85d4b84b8ef51e2440739a05c",
+                "payment_amount": "0x2cb41780",
+                "hash_algorithm": "sha256",
+                "expiry": "0x199eaf5c780",
+                "local_key_pubkey": "030460ab5766cae9195cea30cd6c8abf42ff0b7213e1dd995e09e76397f90b2fe5",
+                "remote_key": "0397f7d412ed096800d678f2e2249304f96c29408f2e0470ff656933cac8e1a61d"
+              }
+            ]
+          }
+        }
+      },
+      "expected": {
+        "key_order": [
+          "peer",
+          "device"
+        ],
+        "message": "dd733424470c1daa2f79d9793b81f29e24968a1a3b5f25fcb844fff83d62c0b4",
+        "public_nonce": "022f92386492e43a36a1a749ec42c16f74b0afe53b597794c31c53ba21c021278c034f7e51649f13e4ea7799b75b45c13869bb6a11b8afe7f94069ef9304c0d1888c",
+        "partial_signature": "dff59ca39a4ef99d797eee422dd2d4d10c849be612aab7af838e2f4868acc7de",
+        "next_material": {
+          "next_commitment_point": "02b2c782bfa2e4c59792e3842dd1318b90052f8e1df40dace928277c056ffda76f",
+          "next_commitment_nonce": "02722e8552aaca158655bf45d49ef120270cf60d2c25e26af54271be93fb7e7d2c024a64e3c7dda140d6b28ebadeb6403255febe7f0fa51dbb2b70608ac87826d78f",
+          "next_revocation_nonce": "02045a33de8d66a38f8444c004d7feca2641aa86c5e724f2cede46823d4869c213036f96c6773ab31719be4dbc8ed717989d86543b2d5a8bb09dca04bffa68ce6434"
+        },
+        "signature": null
+      }
+    },
+    {
+      "name": "complete received commitment",
+      "transition": "CompleteReceivedCommitment",
+      "result": {
+        "channel_id": "0x40a7d4c39ec7d2900cd5bd4158f314f713da4847b7f0bd910302c8d7c9567f69",
+        "status": {
+          "type": "SignatureRequired",
+          "request_id": "0xec37e8ec19655e5341521849750193e50b1e61f69f626adf0a676f18c414b8ad",
+          "transition": "CompleteReceivedCommitment",
+          "content": {
+            "slot": {
+              "purpose": "Commitment",
+              "commitment_number": "0x3"
+            },
+            "commitment_counter": "Local",
+            "key_agg_ctx": "0x0000000002026372d1f1bf5f44d3bf185fe8f69502f36c9a01760029db0a15f6c7dedb4f563802e42662b93a36b0817ec942512688ce880d300f3d48309ac79953cfd402c10ff5",
+            "agg_nonce": "0x03155451f24aed5c780295b77c9e8bed906eef36bf1be37830b352d7523315bcf1024f7128388b87d08e0f4941b59912a1a0e431043ab97814ca15805c01ecb6226e",
+            "content": {
+              "type": "CommitmentTransaction",
+              "transaction": {
+                "version": "0x0",
+                "cell_deps": [],
+                "header_deps": [],
+                "inputs": [
+                  {
+                    "since": "0x0",
+                    "previous_output": {
+                      "tx_hash": "0x341b96611104178e30e46e7b2a9039a76b9a76422328ee39a2d4cb09aa8711af",
+                      "index": "0x0"
+                    }
+                  }
+                ],
+                "outputs": [
+                  {
+                    "capacity": "0x1689bac637",
+                    "lock": {
+                      "code_hash": "0x740dee83f87c6f309824d8fd3fbdd3c8380ee6fc9acc90b1a748438afcdf81d8",
+                      "hash_type": "type",
+                      "args": "0xd28355e59077c4ac7d755f5f63c5a3e4d154e9dd01000000000100a000000000000000023325e8325d21fb755da6ce46b88abd1a4f6944840001"
+                    },
+                    "type": null
+                  }
+                ],
+                "outputs_data": [
+                  "0x"
+                ],
+                "witnesses": []
+              }
+            }
+          },
+          "session_evidence": {
+            "peer_public_nonce": "0x02a3ef2f64714c9e3d9edcc7bb7f4ec6095c70316f2d6427301a4cbd84e3ab8525024df3a407346881969dfa56951c16cd6083dea3acd5ffaaa11ccf18edec4790f6",
+            "peer_partial_signature": "0xddfc723cdd2dc66da0d3c725f41bfb458b515fec5f5607373405dbd41d730df3"
+          },
+          "settlement": {
+            "local_amount": "0x103d6c8980",
+            "remote_amount": "0x54015b180",
+            "local_settlement_pubkey": "035de18a9013ba6eb918a415764d99945683f18d3f9fa4c881ed92423124de0849",
+            "remote_settlement_pubkey": "032559e1b167552782cab5be4294260d51edfc36aef4ca7cc165b3b21b15e98e21",
+            "for_remote": false,
+            "tlcs": [
+              {
+                "tlc_id": "0x0",
+                "local_key_commitment_number": "0x1",
+                "inbound": false,
+                "payment_hash": "0xb570807ecd66dbcebb2947e7406032a30e8cf3aa5b428a117ec408754480834f",
+                "payment_amount": "0x59682f00",
+                "hash_algorithm": "ckb_hash",
+                "expiry": "0x199ea87ea80",
+                "local_key_pubkey": "03afd50467f12b93c009dd9a62ae1c2760cf336d655f582fb2a5b84f5288f7462b",
+                "remote_key": "02472f54e4d91d996072f2f98051713867cd88833135c95d4d45414ff3bca2b8bf"
+              },
+              {
+                "tlc_id": "0x1",
+                "local_key_commitment_number": "0x2",
+                "inbound": false,
+                "payment_hash": "0xe8990955f9e49378973c979ced61815c283effe85d4b84b8ef51e2440739a05c",
+                "payment_amount": "0x2cb41780",
+                "hash_algorithm": "sha256",
+                "expiry": "0x199eaf5c780",
+                "local_key_pubkey": "030460ab5766cae9195cea30cd6c8abf42ff0b7213e1dd995e09e76397f90b2fe5",
+                "remote_key": "0397f7d412ed096800d678f2e2249304f96c29408f2e0470ff656933cac8e1a61d"
+              },
+              {
+                "tlc_id": "0x0",
+                "local_key_commitment_number": "0x2",
+                "inbound": true,
+                "payment_hash": "0xad6da67e459695e3985fa37aff8e45c07167760b9e9252b5d500b913fe70d499",
+                "payment_amount": "0x861c4680",
+                "hash_algorithm": "sha256",
+                "expiry": "0x199eabed900",
+                "local_key_pubkey": "030460ab5766cae9195cea30cd6c8abf42ff0b7213e1dd995e09e76397f90b2fe5",
+                "remote_key": "02d469124f0bc3cfcf094833b07ce97653eccd643eaa550da99492adba664393f8"
+              }
+            ]
+          }
+        }
+      },
+      "expected": {
+        "key_order": [
+          "peer",
+          "device"
+        ],
+        "message": "f736d8e87e87f5c1c74b007b4f2ffb732db549a5233fd0adf11ff3ee1938ca13",
+        "public_nonce": "03cc4b8c31f28e8899f9aa3c290498340a3b656696b84cd56f75b048ceaf92212902b705d7de0ce7357db65055e6ee5a94c56a12332518d072df81f5e37e5385fae5",
+        "partial_signature": "945e3ba5d0cc291317f09054c828111db8970c7f099f3a12ee0e11392ef233c2",
+        "next_material": {
+          "next_commitment_point": "02901b57503043e3fe3c98645f4bd82ed68e673d16ac0b7c31ef966318430bd3fe",
+          "next_commitment_nonce": "022f92386492e43a36a1a749ec42c16f74b0afe53b597794c31c53ba21c021278c034f7e51649f13e4ea7799b75b45c13869bb6a11b8afe7f94069ef9304c0d1888c",
+          "next_revocation_nonce": "034d821d4efde257a23661564b3de89703f8d2442a27a43cda0065f4546e4491ec03a6f67bc412f44c330ec72729e0aa8aa9709ee97ad8ceb864be7fad14c1dad9c6"
+        },
+        "signature": null
+      }
+    },
+    {
+      "name": "send revoke and ack",
+      "transition": "SendRevokeAndAck",
+      "result": {
+        "channel_id": "0x40a7d4c39ec7d2900cd5bd4158f314f713da4847b7f0bd910302c8d7c9567f69",
+        "status": {
+          "type": "SignatureRequired",
+          "request_id": "0x0c5269ab04ac732bf857154ce9f8fbcddef725b36fbe5136a4dfda537920c47b",
+          "transition": "SendRevokeAndAck",
+          "content": {
+            "slot": {
+              "purpose": "Revocation",
+              "commitment_number": "0x3"
+            },
+            "commitment_counter": "Remote",
+            "key_agg_ctx": "0x0000000002026372d1f1bf5f44d3bf185fe8f69502f36c9a01760029db0a15f6c7dedb4f563802e42662b93a36b0817ec942512688ce880d300f3d48309ac79953cfd402c10ff5",
+            "agg_nonce": "0x02298a541534815ed5b226c449d7eaf3ac896a8f7646f27b58946a1e31187fe44d02da297302f2dbdf8d99f33e3d26c8bef7ccba11817a0aced08d5d29b94f45b506",
+            "content": {
+              "type": "Revocation",
+              "output": "0x6100000010000000180000006100000037c6ba8916000000490000001000000030000000310000004d62a160ec2d470f499fb511b77777e0af54af776d9d31ee9ecdc71d7378c2ba01140000008f1e030962418183dc890ef5664b1f2a64b0064c",
+              "output_data": "0x00000000",
+              "commitment_lock_script_args": "0xd28355e59077c4ac7d755f5f63c5a3e4d154e9dd01000000000100a00000000000000002"
+            }
+          },
+          "session_evidence": {
+            "peer_public_nonce": "0x03062681536ee7fdd2fcd6e747b5fd61be71ad3df273cce29afb7bfdc316b9ea3c03b1247e4160a99af7a5bfca9f267b71340c19efe72b8b93ff42fdf96ddcd4e860",
+            "peer_partial_signature": null
+          },
+          "settlement": null
+        }
+      },
+      "expected": {
+        "key_order": [
+          "peer",
+          "device"
+        ],
+        "message": "178ae358f71b73edfa9c14c63e5ad989768c31a13550d2fe9bbc83cf59c81508",
+        "public_nonce": "032e5e84aaf3f10c0a0cad39debc453ece2cc04cb6b40df008464693c7881b3c7a03f041b9b324d02cfa30511f7109e241ce069f9231cbb17d5204aadb99330cda1e",
+        "partial_signature": "214ad4ec3e39714bd1b3527191986cdf5980bbc18603f78a28e8a90971314430",
+        "next_material": {
+          "next_commitment_point": "02901b57503043e3fe3c98645f4bd82ed68e673d16ac0b7c31ef966318430bd3fe",
+          "next_commitment_nonce": "022f92386492e43a36a1a749ec42c16f74b0afe53b597794c31c53ba21c021278c034f7e51649f13e4ea7799b75b45c13869bb6a11b8afe7f94069ef9304c0d1888c",
+          "next_revocation_nonce": "034d821d4efde257a23661564b3de89703f8d2442a27a43cda0065f4546e4491ec03a6f67bc412f44c330ec72729e0aa8aa9709ee97ad8ceb864be7fad14c1dad9c6"
+        },
+        "signature": null
+      }
+    },
+    {
+      "name": "complete received revoke and ack",
+      "transition": "CompleteReceivedRevokeAndAck",
+      "result": {
+        "channel_id": "0x40a7d4c39ec7d2900cd5bd4158f314f713da4847b7f0bd910302c8d7c9567f69",
+        "status": {
+          "type": "SignatureRequired",
+          "request_id": "0x241c1fee20095d8f9b45f6d43a62d686993a970dd137740e9e1c453e6c4c85a6",
+          "transition": "CompleteReceivedRevokeAndAck",
+          "content": {
+            "slot": {
+              "purpose": "Revocation",
+              "commitment_number": "0x4"
+            },
+            "commitment_counter": "Local",
+            "key_agg_ctx": "0x000000000202e42662b93a36b0817ec942512688ce880d300f3d48309ac79953cfd402c10ff5026372d1f1bf5f44d3bf185fe8f69502f36c9a01760029db0a15f6c7dedb4f5638",
+            "agg_nonce": "0x03a020e57a91246feb0a27d8c5407744b72fff81f236f8641547d67b85fa52621102780917b41e7390dc7d08c7119ac351c42ffff9152fa5063b4c315aaeee1e1af3",
+            "content": {
+              "type": "Revocation",
+              "output": "0x6100000010000000180000006100000037c6ba891600000049000000100000003000000031000000537320e708e05f80a3d3a873b32eda052298e274ad93e7b9d5c2fc0ca201d76901140000008d66477ba3b60a96feb27a3f57fe11f6697be87d",
+              "output_data": "0x00000000",
+              "commitment_lock_script_args": "0x5c5dfaf84654cd9ca715c1e585b951d5d0d62c9601000000000100a00000000000000003"
+            }
+          },
+          "session_evidence": {
+            "peer_public_nonce": "0x037f940f7f26d97ab832872207f1c6b817e1b6ca7f9317ae2b231f532096ac0f600352c0e3da18619f2ea41c4472b0a5db1db431596b33bc5f9d428875f664fafe3b",
+            "peer_partial_signature": "0xb718a2195a47ba2097762206999df1a3ec16a1f7e4410c42ffe5c7d26a608e5d"
+          },
+          "settlement": null
+        }
+      },
+      "expected": {
+        "key_order": [
+          "device",
+          "peer"
+        ],
+        "message": "b95fe03e42927206266a36f07d4ed1db750228a40643e9f88113480d0a9da6c3",
+        "public_nonce": "034d821d4efde257a23661564b3de89703f8d2442a27a43cda0065f4546e4491ec03a6f67bc412f44c330ec72729e0aa8aa9709ee97ad8ceb864be7fad14c1dad9c6",
+        "partial_signature": "940cf050af1283bb91ef1672c1bb43ce014936ffc3b4e387f9a63b3db600ec67",
+        "next_material": {
+          "next_commitment_point": "02b2c782bfa2e4c59792e3842dd1318b90052f8e1df40dace928277c056ffda76f",
+          "next_commitment_nonce": "02722e8552aaca158655bf45d49ef120270cf60d2c25e26af54271be93fb7e7d2c024a64e3c7dda140d6b28ebadeb6403255febe7f0fa51dbb2b70608ac87826d78f",
+          "next_revocation_nonce": "02045a33de8d66a38f8444c004d7feca2641aa86c5e724f2cede46823d4869c213036f96c6773ab31719be4dbc8ed717989d86543b2d5a8bb09dca04bffa68ce6434"
+        },
+        "signature": "61d87a76b90f6189277f7ceabe04ccf14eeb01ea4d6295de68b2a3fc212e68284b25926a095a3ddc296538795b59357332b0fc10f8ad4f8f39b9a483502b3983"
+      }
+    },
+    {
+      "name": "send closing signed",
+      "transition": "SendClosingSigned",
+      "result": {
+        "channel_id": "0x40a7d4c39ec7d2900cd5bd4158f314f713da4847b7f0bd910302c8d7c9567f69",
+        "status": {
+          "type": "SignatureRequired",
+          "request_id": "0xa98be0cedd16030e2d899eba3a71564ed873b017d0a67fa63b68208ede003a7b",
+          "transition": "SendClosingSigned",
+          "content": {
+            "slot": {
+              "purpose": "Commitment",
+              "commitment_number": "0x5"
+            },
+            "commitment_counter": "Local",
+            "key_agg_ctx": "0x0000000002026372d1f1bf5f44d3bf185fe8f69502f36c9a01760029db0a15f6c7dedb4f563802e42662b93a36b0817ec942512688ce880d300f3d48309ac79953cfd402c10ff5",
+            "agg_nonce": "0x024208b9d3fec7cd68d775b92f8a24b6cebb1d7c61648fc78cba3817c90ff9f0c202dccb269e680708a7130d11aa50869161992d3a671a0200ce63df8890c35f4efa",
+            "content": {
+              "type": "CooperativeCloseTransaction",
+              "transaction": {
+                "version": "0x0",
+                "cell_deps": [],
+                "header_deps": [],
+                "inputs": [
+                  {
+                    "since": "0x0",
+                    "previous_output": {
+                      "tx_hash": "0x341b96611104178e30e46e7b2a9039a76b9a76422328ee39a2d4cb09aa8711af",
+                      "index": "0x0"
+                    }
+                  }
+                ],
+                "outputs": [
+                  {
+                    "capacity": "0x5c631f587",
+                    "lock": {
+                      "code_hash": "0x4d62a160ec2d470f499fb511b77777e0af54af776d9d31ee9ecdc71d7378c2ba",
+                      "hash_type": "type",
+                      "args": "0x8f1e030962418183dc890ef5664b1f2a64b0064c"
+                    },
+                    "type": null
+                  },
+                  {
+                    "capacity": "0x10c388cdf0",
+                    "lock": {
+                      "code_hash": "0x537320e708e05f80a3d3a873b32eda052298e274ad93e7b9d5c2fc0ca201d769",
+                      "hash_type": "type",
+                      "args": "0x8d66477ba3b60a96feb27a3f57fe11f6697be87d"
+                    },
+                    "type": null
+                  }
+                ],
+                "outputs_data": [
+                  "0x",
+                  "0x"
+                ],
+                "witnesses": []
+              }
+            }
+          },
+          "session_evidence": {
+            "peer_public_nonce": "0x03295c22d766a524eb4fade5a85048b84e5905015b7c7b8d9381aeaebb249cbf97020200bc8d50935872b9dfafc99ceb99475fc1839d02a8eb27d5fd3831b52dd4d7",
+            "peer_partial_signature": null
+          },
+          "settlement": null
+        }
+      },
+      "expected": {
+        "key_order": [
+          "peer",
+          "device"
+        ],
+        "message": "64315871c89ebd70e887591c120285148e0b858fc6ad498549b95662f607695b",
+        "public_nonce": "02722e8552aaca158655bf45d49ef120270cf60d2c25e26af54271be93fb7e7d2c024a64e3c7dda140d6b28ebadeb6403255febe7f0fa51dbb2b70608ac87826d78f",
+        "partial_signature": "b14f36e28538bf62e96f032a10d86e4b703aca95856a212514df64546ad58eaa",
+        "next_material": null,
+        "signature": null
+      }
+    },
+    {
+      "name": "sign channel announcement",
+      "transition": "SignChannelAnnouncement",
+      "result": {
+        "channel_id": "0x40a7d4c39ec7d2900cd5bd4158f314f713da4847b7f0bd910302c8d7c9567f69",
+        "status": {
+          "type": "SignatureRequired",
+          "request_id": "0x2e180b749ea3dd94fbd90723cd198761cc312cd2d838a1bb129a988eadf605e7",
+          "transition": "SignChannelAnnouncement",
+          "content": {
+            "slot": {
+              "purpose": "ChannelAnnouncement",
+              "commitment_number": "0x0"
+            },
+            "commitment_counter": null,
+            "key_agg_ctx": "0x0000000002026372d1f1bf5f44d3bf185fe8f69502f36c9a01760029db0a15f6c7dedb4f563802e42662b93a36b0817ec942512688ce880d300f3d48309ac79953cfd402c10ff5",
+            "agg_nonce": "0x0245e18e1756ce4ac6f5546f5797970b6823809cff755860f39cc5f706be75732a0333c25e3677acf940de68d4e79ee7ec06235515439ebf3adb37e348b4daee971a",
+            "content": {
+              "type": "ChannelAnnouncement",
+              "unsigned_announcement": "0xae0100003000000070000000b0000000f0000000f8000000180100003c0100005d0100007e0100009e010000ae01000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000007dd6a90d41a8137fd3a212a69b8c14c554ca590e431d77bc836e5c5d05a545af341b96611104178e30e46e7b2a9039a76b9a76422328ee39a2d4cb09aa8711af0000000002106fa580a1c56411d6ee7deabcc98aae6f6479858f924487cf58c4c2ca3023040388b3f6725f602c2264516a7cb3e769ee809ef696eef87fa3f7f33b34e1f922c22e1e62fc327b5be20d8ee21232a25ca7de1016464895df90b2166305e248a7be00c8ba89160000000000000000000000"
+            }
+          },
+          "session_evidence": {
+            "peer_public_nonce": "0x039c0eb00a5fe61d51b35b99b994103df8d7070b81528b6931a729f0999b66f52b02e79edd56e2aec2048a93308ae6c377b5cd9027ec346d5b97deef819f2f8c674e",
+            "peer_partial_signature": null
+          },
+          "settlement": null
+        }
+      },
+      "expected": {
+        "key_order": [
+          "peer",
+          "device"
+        ],
+        "message": "5409a845f901336966ee4c69abe5defc8e40e4357387b6715cc482a8caac6c30",
+        "public_nonce": "03924f4d852e8aba80b0618efe58fe623db917ee7f2b83d7f50ae49496fc7086f802c063a949bc565bb251d4d562d2d0eb3b04a5d0692a4869db1cfdaa14be1ed799",
+        "partial_signature": "a9b1dd4dfda581722760874b3494be6c7341921a8d349098f9cba4276da90bce",
+        "next_material": null,
+        "signature": null
+      }
+    }
+  ],
+  "variants": [
+    {
+      "name": "key_agg_ctx with the parity header bit",
+      "case": "send commitment signed",
+      "result": {
+        "channel_id": "0x40a7d4c39ec7d2900cd5bd4158f314f713da4847b7f0bd910302c8d7c9567f69",
+        "status": {
+          "type": "SignatureRequired",
+          "request_id": "0x0d08603c21792e52dc266fe7cfccd7865b9cc2d3bb200eb1ec7465c8c8157949",
+          "transition": "SendCommitmentSigned",
+          "content": {
+            "slot": {
+              "purpose": "Commitment",
+              "commitment_number": "0x4"
+            },
+            "commitment_counter": "Local",
+            "key_agg_ctx": "0x0100000002026372d1f1bf5f44d3bf185fe8f69502f36c9a01760029db0a15f6c7dedb4f563802e42662b93a36b0817ec942512688ce880d300f3d48309ac79953cfd402c10ff5",
+            "agg_nonce": "0x02d1a501cb9bf0b72e16a42ce4c0efd8b4c988e3c02d52c87657119b1076cc7d5503f01dab57e2588aa73acc6805cffc369c83e5e56c8e4cc59783eeafde680c1302",
+            "content": {
+              "type": "CommitmentTransaction",
+              "transaction": {
+                "version": "0x0",
+                "cell_deps": [],
+                "header_deps": [],
+                "inputs": [
+                  {
+                    "since": "0x0",
+                    "previous_output": {
+                      "tx_hash": "0x341b96611104178e30e46e7b2a9039a76b9a76422328ee39a2d4cb09aa8711af",
+                      "index": "0x0"
+                    }
+                  }
+                ],
+                "outputs": [
+                  {
+                    "capacity": "0x1689bac637",
+                    "lock": {
+                      "code_hash": "0x740dee83f87c6f309824d8fd3fbdd3c8380ee6fc9acc90b1a748438afcdf81d8",
+                      "hash_type": "type",
+                      "args": "0x5c5dfaf84654cd9ca715c1e585b951d5d0d62c9601000000000100a00000000000000004072dc1e95ec2be0bbcd1f9a5ab1af169a340f1050001"
+                    },
+                    "type": null
+                  }
+                ],
+                "outputs_data": [
+                  "0x"
+                ],
+                "witnesses": []
+              }
+            }
+          },
+          "session_evidence": {
+            "peer_public_nonce": "0x03791be12ca7c1d705c5c8d7a84146ebe53b097bf98cde8a40d1c998fffcc7e22402c8227dc41d8d4582c51efa19651ced92f7d03a18aba29c8759c82a50bf631b0e",
+            "peer_partial_signature": null
+          },
+          "settlement": {
+            "local_amount": "0x103d6c8980",
+            "remote_amount": "0x54015b180",
+            "local_settlement_pubkey": "035de18a9013ba6eb918a415764d99945683f18d3f9fa4c881ed92423124de0849",
+            "remote_settlement_pubkey": "032559e1b167552782cab5be4294260d51edfc36aef4ca7cc165b3b21b15e98e21",
+            "for_remote": true,
+            "tlcs": [
+              {
+                "tlc_id": "0x0",
+                "local_key_commitment_number": "0x2",
+                "inbound": true,
+                "payment_hash": "0xad6da67e459695e3985fa37aff8e45c07167760b9e9252b5d500b913fe70d499",
+                "payment_amount": "0x861c4680",
+                "hash_algorithm": "sha256",
+                "expiry": "0x199eabed900",
+                "local_key_pubkey": "030460ab5766cae9195cea30cd6c8abf42ff0b7213e1dd995e09e76397f90b2fe5",
+                "remote_key": "02d469124f0bc3cfcf094833b07ce97653eccd643eaa550da99492adba664393f8"
+              },
+              {
+                "tlc_id": "0x0",
+                "local_key_commitment_number": "0x1",
+                "inbound": false,
+                "payment_hash": "0xb570807ecd66dbcebb2947e7406032a30e8cf3aa5b428a117ec408754480834f",
+                "payment_amount": "0x59682f00",
+                "hash_algorithm": "ckb_hash",
+                "expiry": "0x199ea87ea80",
+                "local_key_pubkey": "03afd50467f12b93c009dd9a62ae1c2760cf336d655f582fb2a5b84f5288f7462b",
+                "remote_key": "02472f54e4d91d996072f2f98051713867cd88833135c95d4d45414ff3bca2b8bf"
+              },
+              {
+                "tlc_id": "0x1",
+                "local_key_commitment_number": "0x2",
+                "inbound": false,
+                "payment_hash": "0xe8990955f9e49378973c979ced61815c283effe85d4b84b8ef51e2440739a05c",
+                "payment_amount": "0x2cb41780",
+                "hash_algorithm": "sha256",
+                "expiry": "0x199eaf5c780",
+                "local_key_pubkey": "030460ab5766cae9195cea30cd6c8abf42ff0b7213e1dd995e09e76397f90b2fe5",
+                "remote_key": "0397f7d412ed096800d678f2e2249304f96c29408f2e0470ff656933cac8e1a61d"
+              }
+            ]
+          }
+        }
+      },
+      "verdict": {
+        "accepted": true,
+        "message": null
+      }
+    },
+    {
+      "name": "key_agg_ctx with the tweak header bit and no tweak",
+      "case": "send commitment signed",
+      "result": {
+        "channel_id": "0x40a7d4c39ec7d2900cd5bd4158f314f713da4847b7f0bd910302c8d7c9567f69",
+        "status": {
+          "type": "SignatureRequired",
+          "request_id": "0x0d08603c21792e52dc266fe7cfccd7865b9cc2d3bb200eb1ec7465c8c8157949",
+          "transition": "SendCommitmentSigned",
+          "content": {
+            "slot": {
+              "purpose": "Commitment",
+              "commitment_number": "0x4"
+            },
+            "commitment_counter": "Local",
+            "key_agg_ctx": "0x0200000002026372d1f1bf5f44d3bf185fe8f69502f36c9a01760029db0a15f6c7dedb4f563802e42662b93a36b0817ec942512688ce880d300f3d48309ac79953cfd402c10ff5",
+            "agg_nonce": "0x02d1a501cb9bf0b72e16a42ce4c0efd8b4c988e3c02d52c87657119b1076cc7d5503f01dab57e2588aa73acc6805cffc369c83e5e56c8e4cc59783eeafde680c1302",
+            "content": {
+              "type": "CommitmentTransaction",
+              "transaction": {
+                "version": "0x0",
+                "cell_deps": [],
+                "header_deps": [],
+                "inputs": [
+                  {
+                    "since": "0x0",
+                    "previous_output": {
+                      "tx_hash": "0x341b96611104178e30e46e7b2a9039a76b9a76422328ee39a2d4cb09aa8711af",
+                      "index": "0x0"
+                    }
+                  }
+                ],
+                "outputs": [
+                  {
+                    "capacity": "0x1689bac637",
+                    "lock": {
+                      "code_hash": "0x740dee83f87c6f309824d8fd3fbdd3c8380ee6fc9acc90b1a748438afcdf81d8",
+                      "hash_type": "type",
+                      "args": "0x5c5dfaf84654cd9ca715c1e585b951d5d0d62c9601000000000100a00000000000000004072dc1e95ec2be0bbcd1f9a5ab1af169a340f1050001"
+                    },
+                    "type": null
+                  }
+                ],
+                "outputs_data": [
+                  "0x"
+                ],
+                "witnesses": []
+              }
+            }
+          },
+          "session_evidence": {
+            "peer_public_nonce": "0x03791be12ca7c1d705c5c8d7a84146ebe53b097bf98cde8a40d1c998fffcc7e22402c8227dc41d8d4582c51efa19651ced92f7d03a18aba29c8759c82a50bf631b0e",
+            "peer_partial_signature": null
+          },
+          "settlement": {
+            "local_amount": "0x103d6c8980",
+            "remote_amount": "0x54015b180",
+            "local_settlement_pubkey": "035de18a9013ba6eb918a415764d99945683f18d3f9fa4c881ed92423124de0849",
+            "remote_settlement_pubkey": "032559e1b167552782cab5be4294260d51edfc36aef4ca7cc165b3b21b15e98e21",
+            "for_remote": true,
+            "tlcs": [
+              {
+                "tlc_id": "0x0",
+                "local_key_commitment_number": "0x2",
+                "inbound": true,
+                "payment_hash": "0xad6da67e459695e3985fa37aff8e45c07167760b9e9252b5d500b913fe70d499",
+                "payment_amount": "0x861c4680",
+                "hash_algorithm": "sha256",
+                "expiry": "0x199eabed900",
+                "local_key_pubkey": "030460ab5766cae9195cea30cd6c8abf42ff0b7213e1dd995e09e76397f90b2fe5",
+                "remote_key": "02d469124f0bc3cfcf094833b07ce97653eccd643eaa550da99492adba664393f8"
+              },
+              {
+                "tlc_id": "0x0",
+                "local_key_commitment_number": "0x1",
+                "inbound": false,
+                "payment_hash": "0xb570807ecd66dbcebb2947e7406032a30e8cf3aa5b428a117ec408754480834f",
+                "payment_amount": "0x59682f00",
+                "hash_algorithm": "ckb_hash",
+                "expiry": "0x199ea87ea80",
+                "local_key_pubkey": "03afd50467f12b93c009dd9a62ae1c2760cf336d655f582fb2a5b84f5288f7462b",
+                "remote_key": "02472f54e4d91d996072f2f98051713867cd88833135c95d4d45414ff3bca2b8bf"
+              },
+              {
+                "tlc_id": "0x1",
+                "local_key_commitment_number": "0x2",
+                "inbound": false,
+                "payment_hash": "0xe8990955f9e49378973c979ced61815c283effe85d4b84b8ef51e2440739a05c",
+                "payment_amount": "0x2cb41780",
+                "hash_algorithm": "sha256",
+                "expiry": "0x199eaf5c780",
+                "local_key_pubkey": "030460ab5766cae9195cea30cd6c8abf42ff0b7213e1dd995e09e76397f90b2fe5",
+                "remote_key": "0397f7d412ed096800d678f2e2249304f96c29408f2e0470ff656933cac8e1a61d"
+              }
+            ]
+          }
+        }
+      },
+      "verdict": {
+        "accepted": false,
+        "message": "error decoding musig2::key_agg::KeyAggContext: unexpected length 71"
+      }
+    },
+    {
+      "name": "key_agg_ctx with the tweak header bit and its tweak",
+      "case": "send commitment signed",
+      "result": {
+        "channel_id": "0x40a7d4c39ec7d2900cd5bd4158f314f713da4847b7f0bd910302c8d7c9567f69",
+        "status": {
+          "type": "SignatureRequired",
+          "request_id": "0x0d08603c21792e52dc266fe7cfccd7865b9cc2d3bb200eb1ec7465c8c8157949",
+          "transition": "SendCommitmentSigned",
+          "content": {
+            "slot": {
+              "purpose": "Commitment",
+              "commitment_number": "0x4"
+            },
+            "commitment_counter": "Local",
+            "key_agg_ctx": "0x024140a663980cc0397275f1155eb073a91c1f13b97ef5c2177855aaf1bc55b3a200000002026372d1f1bf5f44d3bf185fe8f69502f36c9a01760029db0a15f6c7dedb4f563802e42662b93a36b0817ec942512688ce880d300f3d48309ac79953cfd402c10ff5",
+            "agg_nonce": "0x02d1a501cb9bf0b72e16a42ce4c0efd8b4c988e3c02d52c87657119b1076cc7d5503f01dab57e2588aa73acc6805cffc369c83e5e56c8e4cc59783eeafde680c1302",
+            "content": {
+              "type": "CommitmentTransaction",
+              "transaction": {
+                "version": "0x0",
+                "cell_deps": [],
+                "header_deps": [],
+                "inputs": [
+                  {
+                    "since": "0x0",
+                    "previous_output": {
+                      "tx_hash": "0x341b96611104178e30e46e7b2a9039a76b9a76422328ee39a2d4cb09aa8711af",
+                      "index": "0x0"
+                    }
+                  }
+                ],
+                "outputs": [
+                  {
+                    "capacity": "0x1689bac637",
+                    "lock": {
+                      "code_hash": "0x740dee83f87c6f309824d8fd3fbdd3c8380ee6fc9acc90b1a748438afcdf81d8",
+                      "hash_type": "type",
+                      "args": "0x5c5dfaf84654cd9ca715c1e585b951d5d0d62c9601000000000100a00000000000000004072dc1e95ec2be0bbcd1f9a5ab1af169a340f1050001"
+                    },
+                    "type": null
+                  }
+                ],
+                "outputs_data": [
+                  "0x"
+                ],
+                "witnesses": []
+              }
+            }
+          },
+          "session_evidence": {
+            "peer_public_nonce": "0x03791be12ca7c1d705c5c8d7a84146ebe53b097bf98cde8a40d1c998fffcc7e22402c8227dc41d8d4582c51efa19651ced92f7d03a18aba29c8759c82a50bf631b0e",
+            "peer_partial_signature": null
+          },
+          "settlement": {
+            "local_amount": "0x103d6c8980",
+            "remote_amount": "0x54015b180",
+            "local_settlement_pubkey": "035de18a9013ba6eb918a415764d99945683f18d3f9fa4c881ed92423124de0849",
+            "remote_settlement_pubkey": "032559e1b167552782cab5be4294260d51edfc36aef4ca7cc165b3b21b15e98e21",
+            "for_remote": true,
+            "tlcs": [
+              {
+                "tlc_id": "0x0",
+                "local_key_commitment_number": "0x2",
+                "inbound": true,
+                "payment_hash": "0xad6da67e459695e3985fa37aff8e45c07167760b9e9252b5d500b913fe70d499",
+                "payment_amount": "0x861c4680",
+                "hash_algorithm": "sha256",
+                "expiry": "0x199eabed900",
+                "local_key_pubkey": "030460ab5766cae9195cea30cd6c8abf42ff0b7213e1dd995e09e76397f90b2fe5",
+                "remote_key": "02d469124f0bc3cfcf094833b07ce97653eccd643eaa550da99492adba664393f8"
+              },
+              {
+                "tlc_id": "0x0",
+                "local_key_commitment_number": "0x1",
+                "inbound": false,
+                "payment_hash": "0xb570807ecd66dbcebb2947e7406032a30e8cf3aa5b428a117ec408754480834f",
+                "payment_amount": "0x59682f00",
+                "hash_algorithm": "ckb_hash",
+                "expiry": "0x199ea87ea80",
+                "local_key_pubkey": "03afd50467f12b93c009dd9a62ae1c2760cf336d655f582fb2a5b84f5288f7462b",
+                "remote_key": "02472f54e4d91d996072f2f98051713867cd88833135c95d4d45414ff3bca2b8bf"
+              },
+              {
+                "tlc_id": "0x1",
+                "local_key_commitment_number": "0x2",
+                "inbound": false,
+                "payment_hash": "0xe8990955f9e49378973c979ced61815c283effe85d4b84b8ef51e2440739a05c",
+                "payment_amount": "0x2cb41780",
+                "hash_algorithm": "sha256",
+                "expiry": "0x199eaf5c780",
+                "local_key_pubkey": "030460ab5766cae9195cea30cd6c8abf42ff0b7213e1dd995e09e76397f90b2fe5",
+                "remote_key": "0397f7d412ed096800d678f2e2249304f96c29408f2e0470ff656933cac8e1a61d"
+              }
+            ]
+          }
+        }
+      },
+      "verdict": {
+        "accepted": true,
+        "message": null
+      }
+    },
+    {
+      "name": "key_agg_ctx with a count of 3 and three keys",
+      "case": "send commitment signed",
+      "result": {
+        "channel_id": "0x40a7d4c39ec7d2900cd5bd4158f314f713da4847b7f0bd910302c8d7c9567f69",
+        "status": {
+          "type": "SignatureRequired",
+          "request_id": "0x0d08603c21792e52dc266fe7cfccd7865b9cc2d3bb200eb1ec7465c8c8157949",
+          "transition": "SendCommitmentSigned",
+          "content": {
+            "slot": {
+              "purpose": "Commitment",
+              "commitment_number": "0x4"
+            },
+            "commitment_counter": "Local",
+            "key_agg_ctx": "0x0000000003026372d1f1bf5f44d3bf185fe8f69502f36c9a01760029db0a15f6c7dedb4f563802e42662b93a36b0817ec942512688ce880d300f3d48309ac79953cfd402c10ff502b1621ddb5fcb68f70c5897d779ab3572857cf356329e6f0f3bee8745548ff9c1",
+            "agg_nonce": "0x02d1a501cb9bf0b72e16a42ce4c0efd8b4c988e3c02d52c87657119b1076cc7d5503f01dab57e2588aa73acc6805cffc369c83e5e56c8e4cc59783eeafde680c1302",
+            "content": {
+              "type": "CommitmentTransaction",
+              "transaction": {
+                "version": "0x0",
+                "cell_deps": [],
+                "header_deps": [],
+                "inputs": [
+                  {
+                    "since": "0x0",
+                    "previous_output": {
+                      "tx_hash": "0x341b96611104178e30e46e7b2a9039a76b9a76422328ee39a2d4cb09aa8711af",
+                      "index": "0x0"
+                    }
+                  }
+                ],
+                "outputs": [
+                  {
+                    "capacity": "0x1689bac637",
+                    "lock": {
+                      "code_hash": "0x740dee83f87c6f309824d8fd3fbdd3c8380ee6fc9acc90b1a748438afcdf81d8",
+                      "hash_type": "type",
+                      "args": "0x5c5dfaf84654cd9ca715c1e585b951d5d0d62c9601000000000100a00000000000000004072dc1e95ec2be0bbcd1f9a5ab1af169a340f1050001"
+                    },
+                    "type": null
+                  }
+                ],
+                "outputs_data": [
+                  "0x"
+                ],
+                "witnesses": []
+              }
+            }
+          },
+          "session_evidence": {
+            "peer_public_nonce": "0x03791be12ca7c1d705c5c8d7a84146ebe53b097bf98cde8a40d1c998fffcc7e22402c8227dc41d8d4582c51efa19651ced92f7d03a18aba29c8759c82a50bf631b0e",
+            "peer_partial_signature": null
+          },
+          "settlement": {
+            "local_amount": "0x103d6c8980",
+            "remote_amount": "0x54015b180",
+            "local_settlement_pubkey": "035de18a9013ba6eb918a415764d99945683f18d3f9fa4c881ed92423124de0849",
+            "remote_settlement_pubkey": "032559e1b167552782cab5be4294260d51edfc36aef4ca7cc165b3b21b15e98e21",
+            "for_remote": true,
+            "tlcs": [
+              {
+                "tlc_id": "0x0",
+                "local_key_commitment_number": "0x2",
+                "inbound": true,
+                "payment_hash": "0xad6da67e459695e3985fa37aff8e45c07167760b9e9252b5d500b913fe70d499",
+                "payment_amount": "0x861c4680",
+                "hash_algorithm": "sha256",
+                "expiry": "0x199eabed900",
+                "local_key_pubkey": "030460ab5766cae9195cea30cd6c8abf42ff0b7213e1dd995e09e76397f90b2fe5",
+                "remote_key": "02d469124f0bc3cfcf094833b07ce97653eccd643eaa550da99492adba664393f8"
+              },
+              {
+                "tlc_id": "0x0",
+                "local_key_commitment_number": "0x1",
+                "inbound": false,
+                "payment_hash": "0xb570807ecd66dbcebb2947e7406032a30e8cf3aa5b428a117ec408754480834f",
+                "payment_amount": "0x59682f00",
+                "hash_algorithm": "ckb_hash",
+                "expiry": "0x199ea87ea80",
+                "local_key_pubkey": "03afd50467f12b93c009dd9a62ae1c2760cf336d655f582fb2a5b84f5288f7462b",
+                "remote_key": "02472f54e4d91d996072f2f98051713867cd88833135c95d4d45414ff3bca2b8bf"
+              },
+              {
+                "tlc_id": "0x1",
+                "local_key_commitment_number": "0x2",
+                "inbound": false,
+                "payment_hash": "0xe8990955f9e49378973c979ced61815c283effe85d4b84b8ef51e2440739a05c",
+                "payment_amount": "0x2cb41780",
+                "hash_algorithm": "sha256",
+                "expiry": "0x199eaf5c780",
+                "local_key_pubkey": "030460ab5766cae9195cea30cd6c8abf42ff0b7213e1dd995e09e76397f90b2fe5",
+                "remote_key": "0397f7d412ed096800d678f2e2249304f96c29408f2e0470ff656933cac8e1a61d"
+              }
+            ]
+          }
+        }
+      },
+      "verdict": {
+        "accepted": true,
+        "message": null
+      }
+    },
+    {
+      "name": "key_agg_ctx with a count of 3 and two keys",
+      "case": "send commitment signed",
+      "result": {
+        "channel_id": "0x40a7d4c39ec7d2900cd5bd4158f314f713da4847b7f0bd910302c8d7c9567f69",
+        "status": {
+          "type": "SignatureRequired",
+          "request_id": "0x0d08603c21792e52dc266fe7cfccd7865b9cc2d3bb200eb1ec7465c8c8157949",
+          "transition": "SendCommitmentSigned",
+          "content": {
+            "slot": {
+              "purpose": "Commitment",
+              "commitment_number": "0x4"
+            },
+            "commitment_counter": "Local",
+            "key_agg_ctx": "0x0000000003026372d1f1bf5f44d3bf185fe8f69502f36c9a01760029db0a15f6c7dedb4f563802e42662b93a36b0817ec942512688ce880d300f3d48309ac79953cfd402c10ff5",
+            "agg_nonce": "0x02d1a501cb9bf0b72e16a42ce4c0efd8b4c988e3c02d52c87657119b1076cc7d5503f01dab57e2588aa73acc6805cffc369c83e5e56c8e4cc59783eeafde680c1302",
+            "content": {
+              "type": "CommitmentTransaction",
+              "transaction": {
+                "version": "0x0",
+                "cell_deps": [],
+                "header_deps": [],
+                "inputs": [
+                  {
+                    "since": "0x0",
+                    "previous_output": {
+                      "tx_hash": "0x341b96611104178e30e46e7b2a9039a76b9a76422328ee39a2d4cb09aa8711af",
+                      "index": "0x0"
+                    }
+                  }
+                ],
+                "outputs": [
+                  {
+                    "capacity": "0x1689bac637",
+                    "lock": {
+                      "code_hash": "0x740dee83f87c6f309824d8fd3fbdd3c8380ee6fc9acc90b1a748438afcdf81d8",
+                      "hash_type": "type",
+                      "args": "0x5c5dfaf84654cd9ca715c1e585b951d5d0d62c9601000000000100a00000000000000004072dc1e95ec2be0bbcd1f9a5ab1af169a340f1050001"
+                    },
+                    "type": null
+                  }
+                ],
+                "outputs_data": [
+                  "0x"
+                ],
+                "witnesses": []
+              }
+            }
+          },
+          "session_evidence": {
+            "peer_public_nonce": "0x03791be12ca7c1d705c5c8d7a84146ebe53b097bf98cde8a40d1c998fffcc7e22402c8227dc41d8d4582c51efa19651ced92f7d03a18aba29c8759c82a50bf631b0e",
+            "peer_partial_signature": null
+          },
+          "settlement": {
+            "local_amount": "0x103d6c8980",
+            "remote_amount": "0x54015b180",
+            "local_settlement_pubkey": "035de18a9013ba6eb918a415764d99945683f18d3f9fa4c881ed92423124de0849",
+            "remote_settlement_pubkey": "032559e1b167552782cab5be4294260d51edfc36aef4ca7cc165b3b21b15e98e21",
+            "for_remote": true,
+            "tlcs": [
+              {
+                "tlc_id": "0x0",
+                "local_key_commitment_number": "0x2",
+                "inbound": true,
+                "payment_hash": "0xad6da67e459695e3985fa37aff8e45c07167760b9e9252b5d500b913fe70d499",
+                "payment_amount": "0x861c4680",
+                "hash_algorithm": "sha256",
+                "expiry": "0x199eabed900",
+                "local_key_pubkey": "030460ab5766cae9195cea30cd6c8abf42ff0b7213e1dd995e09e76397f90b2fe5",
+                "remote_key": "02d469124f0bc3cfcf094833b07ce97653eccd643eaa550da99492adba664393f8"
+              },
+              {
+                "tlc_id": "0x0",
+                "local_key_commitment_number": "0x1",
+                "inbound": false,
+                "payment_hash": "0xb570807ecd66dbcebb2947e7406032a30e8cf3aa5b428a117ec408754480834f",
+                "payment_amount": "0x59682f00",
+                "hash_algorithm": "ckb_hash",
+                "expiry": "0x199ea87ea80",
+                "local_key_pubkey": "03afd50467f12b93c009dd9a62ae1c2760cf336d655f582fb2a5b84f5288f7462b",
+                "remote_key": "02472f54e4d91d996072f2f98051713867cd88833135c95d4d45414ff3bca2b8bf"
+              },
+              {
+                "tlc_id": "0x1",
+                "local_key_commitment_number": "0x2",
+                "inbound": false,
+                "payment_hash": "0xe8990955f9e49378973c979ced61815c283effe85d4b84b8ef51e2440739a05c",
+                "payment_amount": "0x2cb41780",
+                "hash_algorithm": "sha256",
+                "expiry": "0x199eaf5c780",
+                "local_key_pubkey": "030460ab5766cae9195cea30cd6c8abf42ff0b7213e1dd995e09e76397f90b2fe5",
+                "remote_key": "0397f7d412ed096800d678f2e2249304f96c29408f2e0470ff656933cac8e1a61d"
+              }
+            ]
+          }
+        }
+      },
+      "verdict": {
+        "accepted": false,
+        "message": "error decoding musig2::key_agg::KeyAggContext: unexpected length 71"
+      }
+    },
+    {
+      "name": "key_agg_ctx with an off-curve key",
+      "case": "send commitment signed",
+      "result": {
+        "channel_id": "0x40a7d4c39ec7d2900cd5bd4158f314f713da4847b7f0bd910302c8d7c9567f69",
+        "status": {
+          "type": "SignatureRequired",
+          "request_id": "0x0d08603c21792e52dc266fe7cfccd7865b9cc2d3bb200eb1ec7465c8c8157949",
+          "transition": "SendCommitmentSigned",
+          "content": {
+            "slot": {
+              "purpose": "Commitment",
+              "commitment_number": "0x4"
+            },
+            "commitment_counter": "Local",
+            "key_agg_ctx": "0x0000000002026372d1f1bf5f44d3bf185fe8f69502f36c9a01760029db0a15f6c7dedb4f5638022068854bacc49665230d0813b9b3d055d1cb42a62b10b53d633c952e99f665b2",
+            "agg_nonce": "0x02d1a501cb9bf0b72e16a42ce4c0efd8b4c988e3c02d52c87657119b1076cc7d5503f01dab57e2588aa73acc6805cffc369c83e5e56c8e4cc59783eeafde680c1302",
+            "content": {
+              "type": "CommitmentTransaction",
+              "transaction": {
+                "version": "0x0",
+                "cell_deps": [],
+                "header_deps": [],
+                "inputs": [
+                  {
+                    "since": "0x0",
+                    "previous_output": {
+                      "tx_hash": "0x341b96611104178e30e46e7b2a9039a76b9a76422328ee39a2d4cb09aa8711af",
+                      "index": "0x0"
+                    }
+                  }
+                ],
+                "outputs": [
+                  {
+                    "capacity": "0x1689bac637",
+                    "lock": {
+                      "code_hash": "0x740dee83f87c6f309824d8fd3fbdd3c8380ee6fc9acc90b1a748438afcdf81d8",
+                      "hash_type": "type",
+                      "args": "0x5c5dfaf84654cd9ca715c1e585b951d5d0d62c9601000000000100a00000000000000004072dc1e95ec2be0bbcd1f9a5ab1af169a340f1050001"
+                    },
+                    "type": null
+                  }
+                ],
+                "outputs_data": [
+                  "0x"
+                ],
+                "witnesses": []
+              }
+            }
+          },
+          "session_evidence": {
+            "peer_public_nonce": "0x03791be12ca7c1d705c5c8d7a84146ebe53b097bf98cde8a40d1c998fffcc7e22402c8227dc41d8d4582c51efa19651ced92f7d03a18aba29c8759c82a50bf631b0e",
+            "peer_partial_signature": null
+          },
+          "settlement": {
+            "local_amount": "0x103d6c8980",
+            "remote_amount": "0x54015b180",
+            "local_settlement_pubkey": "035de18a9013ba6eb918a415764d99945683f18d3f9fa4c881ed92423124de0849",
+            "remote_settlement_pubkey": "032559e1b167552782cab5be4294260d51edfc36aef4ca7cc165b3b21b15e98e21",
+            "for_remote": true,
+            "tlcs": [
+              {
+                "tlc_id": "0x0",
+                "local_key_commitment_number": "0x2",
+                "inbound": true,
+                "payment_hash": "0xad6da67e459695e3985fa37aff8e45c07167760b9e9252b5d500b913fe70d499",
+                "payment_amount": "0x861c4680",
+                "hash_algorithm": "sha256",
+                "expiry": "0x199eabed900",
+                "local_key_pubkey": "030460ab5766cae9195cea30cd6c8abf42ff0b7213e1dd995e09e76397f90b2fe5",
+                "remote_key": "02d469124f0bc3cfcf094833b07ce97653eccd643eaa550da99492adba664393f8"
+              },
+              {
+                "tlc_id": "0x0",
+                "local_key_commitment_number": "0x1",
+                "inbound": false,
+                "payment_hash": "0xb570807ecd66dbcebb2947e7406032a30e8cf3aa5b428a117ec408754480834f",
+                "payment_amount": "0x59682f00",
+                "hash_algorithm": "ckb_hash",
+                "expiry": "0x199ea87ea80",
+                "local_key_pubkey": "03afd50467f12b93c009dd9a62ae1c2760cf336d655f582fb2a5b84f5288f7462b",
+                "remote_key": "02472f54e4d91d996072f2f98051713867cd88833135c95d4d45414ff3bca2b8bf"
+              },
+              {
+                "tlc_id": "0x1",
+                "local_key_commitment_number": "0x2",
+                "inbound": false,
+                "payment_hash": "0xe8990955f9e49378973c979ced61815c283effe85d4b84b8ef51e2440739a05c",
+                "payment_amount": "0x2cb41780",
+                "hash_algorithm": "sha256",
+                "expiry": "0x199eaf5c780",
+                "local_key_pubkey": "030460ab5766cae9195cea30cd6c8abf42ff0b7213e1dd995e09e76397f90b2fe5",
+                "remote_key": "0397f7d412ed096800d678f2e2249304f96c29408f2e0470ff656933cac8e1a61d"
+              }
+            ]
+          }
+        }
+      },
+      "verdict": {
+        "accepted": false,
+        "message": "error decoding musig2::key_agg::KeyAggContext: received invalid point byte representation"
+      }
+    },
+    {
+      "name": "agg_nonce of 65 bytes",
+      "case": "send commitment signed",
+      "result": {
+        "channel_id": "0x40a7d4c39ec7d2900cd5bd4158f314f713da4847b7f0bd910302c8d7c9567f69",
+        "status": {
+          "type": "SignatureRequired",
+          "request_id": "0x0d08603c21792e52dc266fe7cfccd7865b9cc2d3bb200eb1ec7465c8c8157949",
+          "transition": "SendCommitmentSigned",
+          "content": {
+            "slot": {
+              "purpose": "Commitment",
+              "commitment_number": "0x4"
+            },
+            "commitment_counter": "Local",
+            "key_agg_ctx": "0x0000000002026372d1f1bf5f44d3bf185fe8f69502f36c9a01760029db0a15f6c7dedb4f563802e42662b93a36b0817ec942512688ce880d300f3d48309ac79953cfd402c10ff5",
+            "agg_nonce": "0x02d1a501cb9bf0b72e16a42ce4c0efd8b4c988e3c02d52c87657119b1076cc7d5503f01dab57e2588aa73acc6805cffc369c83e5e56c8e4cc59783eeafde680c13",
+            "content": {
+              "type": "CommitmentTransaction",
+              "transaction": {
+                "version": "0x0",
+                "cell_deps": [],
+                "header_deps": [],
+                "inputs": [
+                  {
+                    "since": "0x0",
+                    "previous_output": {
+                      "tx_hash": "0x341b96611104178e30e46e7b2a9039a76b9a76422328ee39a2d4cb09aa8711af",
+                      "index": "0x0"
+                    }
+                  }
+                ],
+                "outputs": [
+                  {
+                    "capacity": "0x1689bac637",
+                    "lock": {
+                      "code_hash": "0x740dee83f87c6f309824d8fd3fbdd3c8380ee6fc9acc90b1a748438afcdf81d8",
+                      "hash_type": "type",
+                      "args": "0x5c5dfaf84654cd9ca715c1e585b951d5d0d62c9601000000000100a00000000000000004072dc1e95ec2be0bbcd1f9a5ab1af169a340f1050001"
+                    },
+                    "type": null
+                  }
+                ],
+                "outputs_data": [
+                  "0x"
+                ],
+                "witnesses": []
+              }
+            }
+          },
+          "session_evidence": {
+            "peer_public_nonce": "0x03791be12ca7c1d705c5c8d7a84146ebe53b097bf98cde8a40d1c998fffcc7e22402c8227dc41d8d4582c51efa19651ced92f7d03a18aba29c8759c82a50bf631b0e",
+            "peer_partial_signature": null
+          },
+          "settlement": {
+            "local_amount": "0x103d6c8980",
+            "remote_amount": "0x54015b180",
+            "local_settlement_pubkey": "035de18a9013ba6eb918a415764d99945683f18d3f9fa4c881ed92423124de0849",
+            "remote_settlement_pubkey": "032559e1b167552782cab5be4294260d51edfc36aef4ca7cc165b3b21b15e98e21",
+            "for_remote": true,
+            "tlcs": [
+              {
+                "tlc_id": "0x0",
+                "local_key_commitment_number": "0x2",
+                "inbound": true,
+                "payment_hash": "0xad6da67e459695e3985fa37aff8e45c07167760b9e9252b5d500b913fe70d499",
+                "payment_amount": "0x861c4680",
+                "hash_algorithm": "sha256",
+                "expiry": "0x199eabed900",
+                "local_key_pubkey": "030460ab5766cae9195cea30cd6c8abf42ff0b7213e1dd995e09e76397f90b2fe5",
+                "remote_key": "02d469124f0bc3cfcf094833b07ce97653eccd643eaa550da99492adba664393f8"
+              },
+              {
+                "tlc_id": "0x0",
+                "local_key_commitment_number": "0x1",
+                "inbound": false,
+                "payment_hash": "0xb570807ecd66dbcebb2947e7406032a30e8cf3aa5b428a117ec408754480834f",
+                "payment_amount": "0x59682f00",
+                "hash_algorithm": "ckb_hash",
+                "expiry": "0x199ea87ea80",
+                "local_key_pubkey": "03afd50467f12b93c009dd9a62ae1c2760cf336d655f582fb2a5b84f5288f7462b",
+                "remote_key": "02472f54e4d91d996072f2f98051713867cd88833135c95d4d45414ff3bca2b8bf"
+              },
+              {
+                "tlc_id": "0x1",
+                "local_key_commitment_number": "0x2",
+                "inbound": false,
+                "payment_hash": "0xe8990955f9e49378973c979ced61815c283effe85d4b84b8ef51e2440739a05c",
+                "payment_amount": "0x2cb41780",
+                "hash_algorithm": "sha256",
+                "expiry": "0x199eaf5c780",
+                "local_key_pubkey": "030460ab5766cae9195cea30cd6c8abf42ff0b7213e1dd995e09e76397f90b2fe5",
+                "remote_key": "0397f7d412ed096800d678f2e2249304f96c29408f2e0470ff656933cac8e1a61d"
+              }
+            ]
+          }
+        }
+      },
+      "verdict": {
+        "accepted": false,
+        "message": "error decoding musig2::nonces::AggNonce: unexpected length 65"
+      }
+    }
+  ]
+}

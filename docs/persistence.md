@@ -55,24 +55,35 @@ index and its name at another.
 One record per channel, holding what the policy checks need. Everything else about a channel lives on the node, which stays
 the durable store for channel state.
 
-| Field                         | What it holds                                                                             |
-| ----------------------------- | ----------------------------------------------------------------------------------------- |
-| `version`                     | Format version of the record itself                                                       |
-| `channelId`                   | The channel's current name, which the open handshake may still change                     |
-| `lastSignedCommitmentNumbers` | Last commitment number signed per context, strictly increasing                            |
-| `signedSessions`              | Sign-once registry: the session served in each `<context>:<number>` slot                  |
-| `lastStateVersion`            | Last state version seen from the node, non-decreasing                                     |
-| `pins`                        | The channel's constant values, each held to one value for the channel's life              |
-| `views`                       | One snapshot per commitment the device signs, `remote` (the peer's) and `local` (its own) |
+| Field                         | What it holds                                                                                                      |
+| ----------------------------- | ------------------------------------------------------------------------------------------------------------------ |
+| `version`                     | Format version of the record itself                                                                                |
+| `channelId`                   | The channel's current name, which the open handshake may still change                                              |
+| `lastSignedCommitmentNumbers` | Last number claimed fresh per lane (`COMMITMENT:local`, `REVOKE:remote`, `REVOKE:local`, `ANNOUNCEMENT`)           |
+| `signedSessions`              | Sign-once registry: the first session served in each `<context>:<number>` slot                                     |
+| `nonceReuse`                  | Under `allow` only: per slot, the second session it served, its session commitment and its message (hex)           |
+| `commitmentHashes`            | Per view, the last commitment signed in it: its version, the view's floor, and its `compute_tx_message` hash (hex) |
+| `revocations`                 | The complete revocation signature of each revoked peer commitment, `{ version, forRemote: true, signature }`       |
+| `pins`                        | The channel's constant values, each held to one value for the channel's life                                       |
+| `views`                       | One snapshot per commitment the device signs, `remote` (the peer's) and `local` (its own)                          |
+
+`commitmentHashes` is read by more than the views' order: a revocation is signed only while the last commitment of the
+revoked one's view is its replacement, at the slot's number ([policy.md](./policy.md)). Its hash is the message the
+device signed, not the on-chain hash: the transaction fiber broadcasts adds the funding lock's cell deps.
 
 `pins` holds four values from the registration, `fundedShannons` (base 10), `localReservedCkbShannons` (a map from each
 lock layout, `legacy` and `fullPaymentHash`, to the reserve computed under it in base 10, exactly those two keys),
-`localCloseScript` (the script's molecule bytes, hex) and `udtTypeScript` (always `null`), and nine more that are absent
-until the host or the first message stating them sets them: `fundingOutPoint` (`<tx hash hex>:<index>`),
-`fundingCapacityShannons`, `liquidCapacityShannons`, `commitmentDelayEpoch`, `commitmentFeeRate` and
-`remoteReservedCkbShannons` (base 10), `remoteFundingPubkey` and `remoteTlcBasePubkey` (33 bytes, hex), and `lockLayout`
-(`legacy` or `fullPaymentHash`, which picks the reserve). One canonical string per value, so a pin is compared by
-equality ([policy.md](./policy.md)). A pin is never cleared: an absent one reads as not seen yet, never as unknown.
+`localCloseScript` (the script's molecule bytes, hex) and `udtTypeScript` (always `null`); three terms only the host
+pins, `liquidCapacityShannons`, `commitmentFeeRate` and `remoteReservedCkbShannons` (base 10); and six more that are
+absent until the host or the first message stating them sets them: `fundingOutPoint` (`<tx hash hex>:<index>`),
+`fundingCapacityShannons` and `commitmentDelayEpoch` (base 10), `remoteFundingPubkey` and `remoteTlcBasePubkey` (33
+bytes, hex), and `lockLayout` (`legacy` or `fullPaymentHash`, which picks the reserve). One canonical string per value, so
+a pin is compared by equality ([policy.md](./policy.md)). A pin is never cleared: an absent one reads as not seen yet,
+never as unknown.
+
+The record is read strictly, field by field: a counter under an unknown lane, a log entry on a slot the registry
+never served or repeating its first session, a commitment hash under an unknown view, and revocation evidence out of
+ascending version order, repeated, or of the device's own commitment all read as corruption.
 
 A view's snapshot holds:
 
@@ -87,7 +98,8 @@ Two fields carry more than their name suggests, and [policy.md](./policy.md) is 
 
 - `signedSessions` stores a commitment to the whole triple a signature answers (the ordered key list, the aggregated nonce
   and the message), not to the message alone. Storing only the message would let a node re-ask one slot under three
-  aggregated nonces of its choosing and recover the funding key.
+  aggregated nonces of its choosing and recover the funding key. `nonceReuse` holds at most one more per slot, for the
+  same reason: a third session solves for the key.
 - `exposureShannons` is fiber's settlement amount plus the device's reserve, not the raw balance: it drops the moment an
   offered TLC is committed, which is while the device can still refuse, rather than later when the TLC settles. With the
   reserve in it, a view opens at the funded amount. It is kept per view because the two commitments do not list the same
@@ -125,18 +137,21 @@ Nothing here is ever deleted, so it is worth stating what that costs. An alias i
 ever opened costs under 200 bytes of names for good: a thousand channels is under 200 KB.
 
 The registry inside the record is the half that grows without a bound, at about 85 bytes per slot ever served, in a value
-re-serialized on every claim. A channel a thousand commitments deep therefore rewrites an 85 KB record on each signature, and
-that write amplification, not the alias map, is the cost to watch on a device.
+re-serialized on every claim. The revocation evidence grows beside it, one entry of about 170 bytes per update of the
+channel (every received revocation adds one), and under `allow` the reuse log adds about 170 bytes per slot that served a
+second session. A channel a thousand updates deep therefore rewrites a record of about 300 KB on each signature, and that
+write amplification, not the alias map, is the cost to watch on a device. The commitment hashes stay two entries, one
+per view, whatever the channel's depth.
 
 The views grow the same way, more slowly: each keeps one entry of about 60 bytes per payment hash it has ever charged or
 credited, so the record also carries every payment that ever crossed the channel. A payment record is about 200 bytes and
 one exists per payment and per invoice the device ever made, so ten thousand of them is about 2 MB, read only when a
 commitment names their hash.
 
-Neither is pruned, and the reason is the same for both: the device never learns from a source it trusts that a channel is
-finished, since closure is node-supplied state, and deleting on it would hand the node a way to clear the names and slots that
-refuse it. Pruning the registry is additionally bounded by what would still be safe without it, the monotonic counter, and it
-would cost the idempotent replay of an old request ([policy.md](./policy.md)).
+None of it is pruned, and the reason is the same for all of it: the device never learns from a source it trusts that a
+channel is finished, since closure is node-supplied state, and deleting on it would hand the node a way to clear the names
+and slots that refuse it. Pruning the registry is additionally bounded by what would still be safe without it, the lanes,
+and it would cost the idempotent replay of an old request ([policy.md](./policy.md)).
 
 ## The facade's records
 
@@ -178,10 +193,10 @@ host must give the SDK a single instance, or keep its storage private to one.
 ## Recovery
 
 From the mnemonic alone the host re-derives the master seed, and the SDK re-derives every channel key (see
-[derivation.md](./derivation.md)). What does not come back is the record: counters, the sign-once registry and the view
-snapshots all start empty, and so do the intents and the invoices. Losing the storage is therefore not losing funds, with
-one exception: hold-invoice preimages exist only on the device, so unclaimed held payments need the storage intact. They
-are refundable to the payer otherwise.
+[derivation.md](./derivation.md)). What does not come back is the record: counters, the sign-once registry, the evidence and
+the view snapshots all start empty, and so do the intents and the invoices. Losing the storage is therefore not losing
+funds, with one exception: hold-invoice preimages exist only on the device, so unclaimed held payments need the storage
+intact. They are refundable to the payer otherwise.
 
 **Rebuilding that state is not something the SDK does today.** What a restore would have to rebuild before anything else is
 the alias map: which channel index each of the node's channels belongs to. `ISignerStorage` is `get` and `set` with no

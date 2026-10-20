@@ -1,7 +1,7 @@
 import { bytesToHex } from "@noble/hashes/utils.js";
 import { MILLISECONDS_PER_SECOND, truncatePaymentHash } from "../common";
 import type { CommitmentLockLayout, SettlementTlc } from "../digest";
-import { MAX_EXACT_CHARGE_TLCS, POLICY_VIEWS } from "./policy.constants";
+import { MAX_EXACT_CHARGE_TLCS, MAX_SHUTDOWN_FEE_SHANNONS, POLICY_VIEWS } from "./policy.constants";
 import { refusePolicyRequest } from "./policy.error";
 import type {
     BalanceRuleCommitment,
@@ -182,20 +182,22 @@ export function judgeOpeningCommitment(fundedShannons: string, next: BalanceRule
 }
 
 /**
- * Judges a cooperative close: no TLC left, and at least what both views last showed.
+ * Judges a cooperative close: no TLC left, and at least what both views last showed, less the fee its reserve keeps.
  * @param views The channel's two snapshots.
- * @param payoutShannons What the close pays the device before the fee, reserve included.
+ * @param localCapacityShannons What the close's output pays the device, after its fee.
  */
-export function judgeShutdown(views: Record<PolicyView, PolicyViewSnapshot>, payoutShannons: bigint): void {
+export function judgeClosingTx(views: Record<PolicyView, PolicyViewSnapshot>, localCapacityShannons: bigint): void {
     for (const view of POLICY_VIEWS) {
         const snapshot = views[view];
         if (snapshot.tlcs.length > 0) {
             refusePolicyRequest("policy_refusal", `a cooperative close while the ${view} commitment still lists TLCs`);
         }
-        if (payoutShannons < BigInt(snapshot.exposureShannons)) {
+        // Check 5's bound on the close fee, read on the payout: the tx states no fee rate.
+        if (localCapacityShannons + MAX_SHUTDOWN_FEE_SHANNONS < BigInt(snapshot.exposureShannons)) {
             refusePolicyRequest(
                 "policy_refusal",
-                `the close pays the device ${payoutShannons} shannons, below the ${snapshot.exposureShannons} of the ${view} commitment`,
+                `the close pays the device ${localCapacityShannons} shannons, below the ${snapshot.exposureShannons} of the ${view} ` +
+                    `commitment by more than the ${MAX_SHUTDOWN_FEE_SHANNONS} its fee may take`,
             );
         }
     }
