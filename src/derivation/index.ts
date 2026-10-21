@@ -20,3 +20,4 @@ export {
 } from "./fiber-scheme";
 export { deriveChannelSeed, deriveNonceSeed, deriveWalletIdentityKey } from "./device-scheme";
 export { deriveMasterSeed } from "./master-seed";
+export { blake2bHashWithSalt } from "./utils";

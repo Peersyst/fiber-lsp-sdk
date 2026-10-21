@@ -2,7 +2,8 @@
 
 The entry of a signing request and the musig2 (BIP-327) engine behind it: what the device checks before it claims a slot,
 the order fiber aggregates the keys in, how the device computes the message itself, why its nonces are deterministic and
-how many sessions one of them can answer, and the public material it hands the node. For how the status is read see
+how many sessions one of them can answer, the public material it hands the node, and the tenant identity it registers
+with, the one signature outside musig2. For how the status is read see
 [protocol.md](./protocol.md); for the gate a request passes see [policy.md](./policy.md); for the four constructions the
 messages are rebuilt with see [digest.md](./digest.md); for the keys see [derivation.md](./derivation.md).
 
@@ -198,6 +199,34 @@ since all of it derives from the seed and the node checks each value against the
   (`fiber-lsp-sdk/src/signer.rs:363-385`). The decoder bounds the slot one below the derivation's top, so `slot + 1` is
   always derivable.
 
+## The tenant identity
+
+A tenant of the hosted LSP is one RootSigner, and the device's is `walletIdentityKey`
+([derivation.md](./derivation.md)): the same on every device restored from the seed, so a restored wallet lands on the
+same tenant. `TenantIdentity` holds it in a private field, out of every property, enumeration and serialization, and
+gives out three things:
+
+- **`publicKey`**, the 33-byte compressed key the LSP issues registry nonces to.
+- **`tenantId`**, fiber's `TenantId::from_root_signer_pubkey`: the lowercase hex of
+  `blake2b_hash_with_salt(publicKey, "fiber-hosted-lsp-tenant-id/v1")`, the salt hashed before the data.
+- **`signRegistration(challenge)`**, which takes the result of `lsp_get_tenant_registry_nonce` as it comes and returns
+  the params of `lsp_register_tenant`. It signs fiber's `TenantRegistryPayload`: the bytes
+  `"fiber-hosted-lsp-tenant-registry/v1" ‖ lsp_node_id (33) ‖ root_signer_pubkey (33) ‖ nonce (32)`, their digest
+  `blake2b_hash_with_salt(bytes, [])` (the plain CKB blake2b-256), and a compact ECDSA signature of 64 bytes over it.
+  The signature is RFC 6979 with low S and no added entropy, which is what rust-secp256k1's `sign_ecdsa` produces, so it
+  matches fiber's own signer to the byte; noble signs the digest as given only with `prehash: false`.
+
+A nonce issued to another root signer is refused (`TypeError` naming `challenge.rootSignerPubkey`), as fiber's own
+`begin_registration` refuses it: signing it serves no one and hides a fault of the LSP or the host. The LSP's node id
+must be a point and the nonce 32 bytes. Which LSP the node id should be is the facade's to check against its options.
+
+The SDK signs and never calls: both registration methods need the operator's token ([rpc.md](./rpc.md)), which a phone
+does not hold, so the host's backend (or an agent) asks for the nonce, has the device sign it, registers, and hands the
+tenant's token back to the device.
+
+The private field is ES2022 syntax the build emits as is; under React Native, Metro's Babel preset transpiles it, as it
+does the bundle's other ES2022 syntax.
+
 ## What the engine signs
 
 The message is always an opaque 32-byte digest, handed to the session raw: BIP-327 applies its own tagged challenge hash,
@@ -228,7 +257,8 @@ Those pins, like the vectors, are the idempotent re-delivery contract, not snaps
 | `src/signer/signer-dispatch.ts`           | The twelve steps, the four outcomes, and the opening                                                                          |
 | `src/signer/musig2-engine.ts`             | The public keys, points and nonces, the nonce sum, the partial signature, the peer's half verified, the aggregate             |
 | `src/signer/signer-material.ts`           | The opening block and the next material                                                                                       |
-| `src/signer/signer.constants.ts`          | The key order per transition                                                                                                  |
+| `src/signer/tenant-identity.ts`           | The RootSigner: its public key, the tenant id, the registry payload, its digest and the registration signature                |
+| `src/signer/signer.constants.ts`          | The key order per transition, fiber's two tenant domains                                                                      |
 | `src/signer/utils/key-order.utils.ts`     | The order of the two funding keys, and the peer's key read out of a request held to it                                        |
 | `src/signer/utils/signing-terms.utils.ts` | The message from the plaintext, and the operation built from the content, the pins and the network                            |
 | `src/signer/signer.types.ts`              | The options, the cosigned session, the prepared operation, the outcome and the pending open                                   |
@@ -310,6 +340,29 @@ all four metrics, and the assertions were checked by breaking the code on purpos
 | The seed is held by reference                             | 1                 |
 | The verdict's context is not held to the request's        | 1                 |
 | The verdict's number is not held to the request's         | 1                 |
+
+`test/tests/signer/tenant-identity.spec.ts` pins the identity against fiber's `tenant_registry` vector (the key, the
+tenant id, the payload, the digest and the signature to the byte) and against literal values of its own, refuses each
+field of the challenge (a foreign root signer, the other parity of its x, each wrong length, an LSP node id that is not a
+point, the absent ones), and checks that no property, enumeration or serialization reaches the secret:
+
+| Mutation                                              | Tests that failed |
+| ----------------------------------------------------- | ----------------- |
+| The public key is handed out by reference             | 23                |
+| The answer carries the identity's key by reference    | 18                |
+| The payload omits the protocol prefix                 | 11                |
+| The payload puts the root signer before the LSP       | 11                |
+| The LSP's node id is not checked as a point           | 8                 |
+| The digest is prehashed again before signing          | 8                 |
+| The signature takes added entropy                     | 7                 |
+| The signature may be high-S                           | 6                 |
+| The nonce's length is not checked                     | 5                 |
+| A challenge that is not an object reaches the fields  | 4                 |
+| The tenant id is hashed without its salt              | 3                 |
+| A nonce issued to another root signer is signed       | 2                 |
+| The secret is a public property                       | 2                 |
+| The answer carries the challenge's nonce by reference | 2                 |
+| The nonce is copied with a Buffer's slice             | 1                 |
 
 Reading the pins before the channel resolves fails no test, and cannot: the reader resolves the name itself, with the same
 refusal, so the outcome is the same for every status.

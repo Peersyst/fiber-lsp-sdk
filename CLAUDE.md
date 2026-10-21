@@ -43,7 +43,7 @@ src/
   derivation/     Fiber key scheme port + SDK-owned derivations
   digest/         Rebuilds the four messages fiber signs (no-blind-signing); the transaction serializers
   invoice/        Fiber's invoice string, read and written bit for bit: bech32m, the arithmetic coder, the molecule, the signature
-  signer/         The entry of a signing request over fiber's status, musig2 signing engine, the public material
+  signer/         The entry of a signing request over fiber's status, musig2 signing engine, the public material, the tenant identity
   policy/         Policy engine + persisted per-channel records
   wire/           How fiber writes values in JSON, the readers that refuse anything else, and the writers that produce it
   protocol/       Fiber's signing status, read strictly: transitions, slots, plaintexts, the peer's evidence

@@ -196,7 +196,7 @@ use ckb_types::core::Capacity;
 use ckb_types::prelude::*;
 use fiber_types::{
     compute_tx_message, settlement_data_to_witness, settlement_matches_commitment_tx, CommitmentContractFeatures,
-    HashAlgorithm, SettlementData, SettlementTlc, TLCId,
+    HashAlgorithm, SettlementData, SettlementTlc, TLCId, TenantId, TenantRegistryPayload, TenantRegistrySignature,
 };
 
 const FUNDING_CELL_WITNESS_LEN: usize = 112;
@@ -462,6 +462,7 @@ struct Vectors {
     hashes: Vec<HashVector>,
     fiber_scheme: FiberSchemeVectors,
     sdk_scheme: SdkSchemeVectors,
+    tenant_registry: TenantRegistryVector,
     musig: MusigVector,
     digest: DigestVectors,
 }
@@ -659,6 +660,19 @@ struct NonceSeedVector {
 }
 
 #[derive(Serialize, Deserialize)]
+struct TenantRegistryVector {
+    root_signer_secret_from: String,
+    lsp_node_secret: String,
+    lsp_node_id: String,
+    root_signer_pubkey: String,
+    nonce: String,
+    payload: String,
+    digest: String,
+    signature: String,
+    tenant_id: String,
+}
+
+#[derive(Serialize, Deserialize)]
 struct MusigVector {
     remote_seckey: String,
     remote_pubkey: String,
@@ -682,6 +696,8 @@ const MASTER_SEED: [u8; 32] = [0x24; 32];
 /// rest of the SDK half starts from directly.
 const BIP39_SEED: [u8; 64] = [0x37; 64];
 const REMOTE_SEED: [u8; 32] = [0x99; 32];
+const LSP_NODE_SECRET: [u8; 32] = [0x11; 32];
+const TENANT_REGISTRY_NONCE: [u8; 32] = [0x5a; 32];
 
 const MASTER_SEED_PURPOSE: u32 = 1017;
 const MASTER_SEED_COIN_TYPE: u32 = 309;
@@ -1029,6 +1045,34 @@ fn hash_vector(label: &str, chunks: &[&[u8]]) -> HashVector {
     }
 }
 
+/// The wallet identity key signs a registration as fiber's agent does (crates/fiber-lsp-sdk/src/root_key.rs:53-64).
+fn tenant_registry_vector() -> TenantRegistryVector {
+    let root_signer_secret = secp030::SecretKey::from_slice(&wallet_identity_key(&MASTER_SEED)).unwrap();
+    let lsp_node_secret = secp030::SecretKey::from_slice(&LSP_NODE_SECRET).unwrap();
+    let payload = TenantRegistryPayload::new(
+        lsp_node_secret.public_key(secp030::SECP256K1).into(),
+        root_signer_secret.public_key(secp030::SECP256K1).into(),
+        TENANT_REGISTRY_NONCE,
+    );
+    let compact = secp030::SECP256K1
+        .sign_ecdsa(&secp030::Message::from_digest(payload.digest()), &root_signer_secret)
+        .serialize_compact();
+    let signature = TenantRegistrySignature::from_slice(&compact).expect("fiber parses the registration signature");
+    assert_eq!(signature.serialize(), compact, "fiber rewrites the registration signature");
+    payload.verify_signature(&signature).expect("fiber verifies the registration signature");
+    TenantRegistryVector {
+        root_signer_secret_from: "sdk_scheme.wallet_identity_key".to_string(),
+        lsp_node_secret: hex::encode(LSP_NODE_SECRET),
+        lsp_node_id: hex::encode(payload.lsp_node_id.0),
+        root_signer_pubkey: hex::encode(payload.root_signer_pubkey.0),
+        nonce: hex::encode(payload.nonce),
+        payload: hex::encode(payload.canonical_bytes()),
+        digest: hex::encode(payload.digest()),
+        signature: hex::encode(signature.serialize()),
+        tenant_id: TenantId::from_root_signer_pubkey(&payload.root_signer_pubkey).as_str().to_string(),
+    }
+}
+
 fn gen_vectors(out_path: &str) {
     let signer = FiberSigner::generate_from_seed(&CHANNEL_SEED_PARAMS);
 
@@ -1106,6 +1150,7 @@ fn gen_vectors(out_path: &str) {
                 nonce_seeds,
             },
         },
+        tenant_registry: tenant_registry_vector(),
         musig: MusigVector {
             remote_seckey: hex::encode(remote_sk.secret_bytes()),
             remote_pubkey: hex::encode(pubkey_of(&remote_sk).serialize()),

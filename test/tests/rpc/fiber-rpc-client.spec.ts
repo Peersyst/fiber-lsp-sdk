@@ -7,6 +7,10 @@ import { caseOf } from "../../utils/interop-vectors";
 import { rejection } from "../../utils/rejection";
 import { answering, refusing, sent } from "../../utils/rpc-answers";
 import {
+    toGetTenantRegistryNonceParams,
+    toGetTenantRegistryNonceResult,
+    toRegisterTenantParams,
+    toRegisterTenantResult,
     toRpcChannelIdParams,
     toRpcSigningStatusResult,
     toRpcSubmissionResult,
@@ -17,7 +21,12 @@ import { loadRpcVectors } from "../../utils/rpc-vectors";
 import { withRuntime } from "../../utils/with-runtime";
 
 const vectors = loadRpcVectors();
-const { get_channel_signing_status: getStatus, submit_channel_signature: submit } = vectors.methods;
+const {
+    get_channel_signing_status: getStatus,
+    submit_channel_signature: submit,
+    lsp_get_tenant_registry_nonce: getNonce,
+    lsp_register_tenant: register,
+} = vectors.methods;
 
 const URL = "http://fiber.example:8227";
 const TOKEN = "En0KEwoEMTIzNBgDIgkKBwgKEgMYgAgSJAgAEiDs-token_example=";
@@ -410,6 +419,71 @@ describe("FiberRpcClient", () => {
             const error = await rejection(run(clientOf(new FetchMock().answer({ rejection: cause }))));
             expect(error).toBeInstanceOf(RpcTransportError);
             expect(error).toMatchObject({ method, status: undefined, cause });
+        });
+    });
+
+    describe("the tenant registration methods", () => {
+        it("reads the registry nonce, sending the method and the vector's params", async () => {
+            const params = caseOf(getNonce.params, "root signer pubkey");
+            const entry = caseOf(getNonce.results, "nonce");
+            const mock = answering(entry.json);
+            await expect(clientOf(mock).getTenantRegistryNonce(toGetTenantRegistryNonceParams(params.values))).resolves.toEqual(
+                toGetTenantRegistryNonceResult(entry.values),
+            );
+            expect(sent(mock)).toEqual({ jsonrpc: "2.0", id: 1, method: "lsp_get_tenant_registry_nonce", params: [params.json] });
+        });
+
+        it.each(register.results.map((entry) => [entry.name, entry] as const))(
+            "registers a tenant, reading the %s result",
+            async (_, entry) => {
+                const params = caseOf(register.params, "signed payload");
+                const mock = answering(entry.json);
+                await expect(clientOf(mock).registerTenant(toRegisterTenantParams(params.values))).resolves.toEqual(
+                    toRegisterTenantResult(entry.values),
+                );
+                expect(sent(mock)).toEqual({ jsonrpc: "2.0", id: 1, method: "lsp_register_tenant", params: [params.json] });
+            },
+        );
+
+        it("names the nested field of a registration result with an unknown runtime status", async () => {
+            const params = toRegisterTenantParams(caseOf(register.params, "signed payload").values);
+            const json = caseOf(register.results, "cold tenant without a channel").json as { tenant: object };
+            const mock = answering({ ...json, tenant: { ...json.tenant, runtime_status: "warm" } });
+            const error = await rejection(clientOf(mock).registerTenant(params));
+            expect(error).toBeInstanceOf(RpcResponseError);
+            expect(error).toMatchObject({ method: "lsp_register_tenant", path: "response.result.tenant.runtime_status" });
+        });
+
+        it.each<[string, (client: FiberRpcClient) => Promise<unknown>]>([
+            ["getTenantRegistryNonce", (client) => client.getTenantRegistryNonce({ rootSignerPubkey: new Uint8Array(32) })],
+            [
+                "registerTenant",
+                (client) =>
+                    client.registerTenant({
+                        ...toRegisterTenantParams(caseOf(register.params, "signed payload").values),
+                        signature: new Uint8Array(63),
+                    }),
+            ],
+        ])("%s refuses params it cannot write before sending anything", async (_, run) => {
+            const mock = new FetchMock();
+            await expect(run(clientOf(mock))).rejects.toThrow(TypeError);
+            expect(mock.requests).toHaveLength(0);
+        });
+
+        it.each<[string, (client: FiberRpcClient) => Promise<unknown>]>([
+            [
+                "lsp_get_tenant_registry_nonce",
+                (client) =>
+                    client.getTenantRegistryNonce(toGetTenantRegistryNonceParams(caseOf(getNonce.params, "root signer pubkey").values)),
+            ],
+            [
+                "lsp_register_tenant",
+                (client) => client.registerTenant(toRegisterTenantParams(caseOf(register.params, "signed payload").values)),
+            ],
+        ])("%s surfaces the node's refusal as an RpcError", async (method, run) => {
+            const error = await rejection(run(clientOf(refusing(-32000, "tenant already registered"))));
+            expect(error).toBeInstanceOf(RpcError);
+            expect(error).toMatchObject({ method, code: -32000, message: "tenant already registered" });
         });
     });
 });
