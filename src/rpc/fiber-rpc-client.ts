@@ -2,6 +2,7 @@ import { assertNonEmptyString } from "../common";
 import { asWireError } from "../wire";
 import {
     decodeAbandonChannelResult,
+    decodeListChannelIdsResult,
     decodeListChannelsResult,
     decodeOpenChannelWithExternalFundingResult,
     decodeSubmitSignedFundingTxResult,
@@ -21,9 +22,11 @@ import { decodeRpcResponse, encodeRpcRequest } from "./json-rpc";
 import { decodeRpcPayment, encodeSendPaymentParams } from "./payments";
 import { RPC_BEARER_PREFIX, RPC_CONTENT_TYPE } from "./rpc.constants";
 import { RpcError, RpcResponseError, RpcTransportError } from "./rpc.error";
+import { decodeRpcSigningStatusResult, decodeRpcSubmissionResult, encodeSubmitChannelSignatureParams } from "./signing";
 import type {
     AbandonChannelParams,
     RpcChannel,
+    RpcChannelIdParams,
     FiberRpcClientOptions,
     ListChannelsParams,
     NewInvoiceParams,
@@ -36,8 +39,11 @@ import type {
     RpcPayment,
     RpcPaymentHashParams,
     RpcResultDecoder,
+    RpcSigningStatusResult,
+    RpcSubmissionResult,
     SendPaymentParams,
     SettleInvoiceParams,
+    SubmitChannelSignatureParams,
     SubmitSignedFundingTxParams,
     SubmitSignedFundingTxResult,
 } from "./rpc.types";
@@ -132,6 +138,15 @@ export class FiberRpcClient {
     }
 
     /**
+     * Lists the node's channel ids, reading no other field.
+     * @param params The filter, if any.
+     * @returns The channel ids.
+     */
+    async listChannelIds(params: ListChannelsParams = {}): Promise<string[]> {
+        return this.call("list_channels", encodeListChannelsParams(params), decodeListChannelIdsResult);
+    }
+
+    /**
      * Creates a hold invoice: the node gets the hash, never the preimage.
      * @param params The invoice to create.
      * @returns The encoded invoice.
@@ -182,6 +197,24 @@ export class FiberRpcClient {
      */
     async getPayment(params: RpcPaymentHashParams): Promise<RpcPayment> {
         return this.call("get_payment", encodeRpcPaymentHashParams(params), decodeRpcPayment);
+    }
+
+    /**
+     * Reads a channel's signing status: the request the node waits for the device to sign, if any.
+     * @param params The channel's id.
+     * @returns The channel's id and its status, still undecoded.
+     */
+    async getChannelSigningStatus(params: RpcChannelIdParams): Promise<RpcSigningStatusResult> {
+        return this.call("get_channel_signing_status", encodeRpcChannelIdParams(params), decodeRpcSigningStatusResult);
+    }
+
+    /**
+     * Hands the node the device's partial signature for a channel's signing request.
+     * @param params The request, its signature and the next signer material.
+     * @returns Whether the node applied the signature or had already applied it.
+     */
+    async submitChannelSignature(params: SubmitChannelSignatureParams): Promise<RpcSubmissionResult> {
+        return this.call("submit_channel_signature", encodeSubmitChannelSignatureParams(params), decodeRpcSubmissionResult);
     }
 
     /**

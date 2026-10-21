@@ -37,3 +37,11 @@ export class FetchMock {
         return request;
     }
 }
+
+export function rpcResultAnswer(id: number, result: unknown): FetchAnswer {
+    return { status: 200, body: JSON.stringify({ jsonrpc: "2.0", id, result }) };
+}
+
+export function rpcErrorAnswer(id: number, code: number, message: string): FetchAnswer {
+    return { status: 200, body: JSON.stringify({ jsonrpc: "2.0", id, error: { code, message } }) };
+}

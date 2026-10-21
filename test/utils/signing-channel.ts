@@ -1,14 +1,21 @@
 import { hexToBytes } from "@noble/hashes/utils.js";
+import type { ScriptTemplate } from "../../src/common";
 import { SCRIPT_HASH_TYPES, TLC_DIRECTIONS, TLC_HASH_ALGORITHMS } from "../../src/common";
 import type { FiberChannelKeys } from "../../src/derivation";
 import { deriveChannelKeys, deriveChannelSeed } from "../../src/derivation";
 import type { ChannelPolicyRecord, PolicyEngineOptions, PolicyView, PolicyViewTlc } from "../../src/policy";
 import { PolicyEngine, SignerStore } from "../../src/policy";
+import type { SdkEvent } from "../../src/sdk";
 import { SignerDispatch } from "../../src/signer";
+import type { WireField } from "../../src/wire";
 import { InMemorySignerStorage } from "../mocks/policy";
+import type { SentCall } from "../mocks/rpc";
 import { toLockLayout, toScript } from "./digest-inputs";
 import { asBoolean, asRecord, asString } from "./json-shape";
+import { resignPeerHalf } from "./peer-musig";
 import type { SigningCaseVector, SigningVectors } from "./signing-vectors";
+import { signingCaseOf, signingStatusField } from "./signing-vectors";
+import { withField } from "./with-field";
 
 // The view a revocation's replacement belongs to: the device's own commitment when it sends one, the peer's when it receives.
 const REPLACEMENT_VIEWS = { SendRevokeAndAck: "local", CompleteReceivedRevokeAndAck: "remote" } as const;
@@ -35,6 +42,14 @@ export function signingPeerKeys(vectors: SigningVectors): FiberChannelKeys {
     return deriveChannelKeys(hexToBytes(vectors.peer.seed));
 }
 
+export function signingCommitmentLock(vectors: SigningVectors): ScriptTemplate {
+    const lock = vectors.channel.commitment_lock;
+    return {
+        codeHash: hexToBytes(lock.code_hash),
+        hashType: oneOf(lock.hash_type, "channel.commitment_lock.hash_type", SCRIPT_HASH_TYPES),
+    };
+}
+
 export function signingViewTlcs(vectors: SigningVectors): PolicyViewTlc[] {
     const fullHash = toLockLayout(vectors.channel.lock_layout) === "fullPaymentHash";
     return vectors.channel.tlcs.map((tlc) => ({
@@ -51,17 +66,14 @@ export async function openSigningChannel(
     vectors: SigningVectors,
     kase: SigningCaseVector,
     options: PolicyEngineOptions = {},
+    storage: InMemorySignerStorage = new InMemorySignerStorage(),
 ): Promise<SigningChannel> {
     const { channel, device } = vectors;
-    const storage = new InMemorySignerStorage();
     const store = new SignerStore(storage);
     const policy = new PolicyEngine(store, options);
     const dispatch = new SignerDispatch({
         masterSeed: hexToBytes(device.master_seed),
-        commitmentLock: {
-            codeHash: hexToBytes(channel.commitment_lock.code_hash),
-            hashType: oneOf(channel.commitment_lock.hash_type, "channel.commitment_lock.hash_type", SCRIPT_HASH_TYPES),
-        },
+        commitmentLock: signingCommitmentLock(vectors),
         fundingLockCellDepsCount: channel.funding_lock_cell_deps_count,
         policy,
     });
@@ -77,6 +89,66 @@ export async function openSigningChannel(
     // and TLCs, so the balance rule judges no change. Before a revocation: its replacement as its view's last commitment.
     await store.updateChannelRecord(device.channel_index, (current) => withCaseState(vectors, kase, required(current)));
     return { dispatch, policy, store, storage, channelId, channelIndex: device.channel_index, keys: signingDeviceKeys(vectors) };
+}
+
+export function signingRequestIdOf(kase: SigningCaseVector): string {
+    return asString(kase.result.status.request_id, "status.request_id");
+}
+
+export function signedEventOf(vectors: SigningVectors, kase: SigningCaseVector, outcome: "signed" | "warning" = "signed"): SdkEvent {
+    return {
+        type: "SIGNING",
+        channelId: vectors.channel.channel_id,
+        requestId: signingRequestIdOf(kase),
+        transition: kase.transition,
+        outcome,
+    };
+}
+
+export function signatureSubmissionCall(vectors: SigningVectors, kase: SigningCaseVector): SentCall {
+    const { partial_signature: partialSignature, next_material: material } = kase.expected;
+    const params = {
+        channel_id: vectors.channel.channel_id,
+        request_id: signingRequestIdOf(kase),
+        partial_signature: `0x${partialSignature}`,
+        ...(material === null
+            ? {}
+            : {
+                  next_material: {
+                      next_commitment_point: material.next_commitment_point,
+                      next_commitment_nonce: `0x${material.next_commitment_nonce}`,
+                      next_revocation_nonce: `0x${material.next_revocation_nonce}`,
+                  },
+              }),
+    };
+    return { method: "submit_channel_signature", params };
+}
+
+// Fiber's open lands both commitment transitions on one slot: the received commitment, moved onto the sent one's slot.
+export function secondSessionStatus(vectors: SigningVectors): WireField {
+    const status = signingStatusField(signingCaseOf(vectors, "CompleteReceivedCommitment"));
+    return resignPeerHalf(
+        { ...status, value: withField(status.value, "content.slot.commitment_number", "0x4") },
+        signingDeviceKeys(vectors),
+        signingPeerKeys(vectors).fundingKey,
+        0x71,
+    );
+}
+
+// Moves the local view to the received commitment's balance and TLCs, so the second session's balance rule sees no change.
+export async function stageSecondSession(vectors: SigningVectors, channel: SigningChannel): Promise<void> {
+    const settlement = asRecord(signingCaseOf(vectors, "CompleteReceivedCommitment").result.status.settlement, "status.settlement");
+    const localAmount = asString(settlement.local_amount, "settlement.local_amount");
+    await channel.store.updateChannelRecord(channel.channelIndex, (current) => {
+        const record = required(current);
+        const local = {
+            exposureShannons: BigInt(localAmount).toString(),
+            tlcs: signingViewTlcs(vectors),
+            chargedShannons: {},
+            creditedShannons: {},
+        };
+        return { ...record, views: { ...record.views, local } };
+    });
 }
 
 function withCaseState(vectors: SigningVectors, kase: SigningCaseVector, record: ChannelPolicyRecord): ChannelPolicyRecord {

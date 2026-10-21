@@ -3,13 +3,26 @@ import { deriveChannelKeys, pubkeyOf } from "../../../src/derivation";
 import { COMMITMENT_LOCK_MAINNET, COMMITMENT_LOCK_TESTNET } from "../../../src/digest";
 import type { FiberLspSdkOptions, SdkContext, SdkEvent } from "../../../src/sdk";
 import { DEFAULT_POLL_INTERVAL_MS, FiberLspSdk, POLL_STEP_TIMEOUT_MS, SdkError } from "../../../src/sdk";
-import type { SigningNetwork } from "../../../src/signer";
-import { FetchMock } from "../../mocks/rpc";
+import type { ChannelSigningTransition } from "../../../src/protocol";
+import type { SignerRefusal } from "../../../src/signer";
+import { FetchMock, ScriptedNode } from "../../mocks/rpc";
 import { InMemorySignerStorage } from "../../mocks/policy";
 import { flush } from "../../utils/flush";
 import { TimerMock } from "../../mocks/common";
 import { loadInteropVectors } from "../../utils/interop-vectors";
 import { rejection } from "../../utils/rejection";
+import { LIST_CHANNELS_CALL, signingStatusCall } from "../../utils/rpc-answers";
+import type { SigningChannel } from "../../utils/signing-channel";
+import {
+    openSigningChannel,
+    secondSessionStatus,
+    signatureSubmissionCall,
+    signedEventOf,
+    signingCommitmentLock,
+    signingRequestIdOf,
+    stageSecondSession,
+} from "../../utils/signing-channel";
+import { loadSigningVectors, signingCaseOf, signingStatusField } from "../../utils/signing-vectors";
 import { withRuntime } from "../../utils/with-runtime";
 
 const vectors = loadInteropVectors();
@@ -21,6 +34,8 @@ const TOKEN = "En0KEwoEMTIzNBgDIgkKBwgKEgMYgAgSJAgAEiDs-token_example=";
 const CHANNEL_ID = `0x${"1f".repeat(32)}`;
 const POLL_INTERVAL_MS = 7_000;
 const NOW_MS = 1_791_367_200_250;
+const signing = loadSigningVectors();
+const SIGNING_CHANNEL_ID = signing.channel.channel_id;
 const DEV_NETWORK = {
     commitmentLock: { codeHash: new Uint8Array(32).fill(0x5d), hashType: "data1" },
     invoiceCurrency: "Fibd",
@@ -55,8 +70,49 @@ function contextOf(sdk: FiberLspSdk): SdkContext {
     return (sdk as unknown as { context: SdkContext }).context;
 }
 
-function dispatchNetworkOf(sdk: FiberLspSdk): SigningNetwork {
-    return (contextOf(sdk).dispatch as unknown as { network: SigningNetwork }).network;
+type SigningHarness = {
+    sdk: FiberLspSdk;
+    node: ScriptedNode;
+    events: SdkEvent[];
+};
+
+async function signingHarness(
+    overrides: Partial<FiberLspSdkOptions>,
+    prepare: (channel: SigningChannel) => Promise<void> = async () => undefined,
+): Promise<SigningHarness> {
+    const storage = new InMemorySignerStorage();
+    const channel = await openSigningChannel(signing, signingCaseOf(signing, "SendCommitmentSigned"), {}, storage);
+    await prepare(channel);
+    const node = new ScriptedNode();
+    const events: SdkEvent[] = [];
+    const sdk = new FiberLspSdk(hexToBytes(signing.device.master_seed), {
+        network: "testnet",
+        storage,
+        rpcUrl: RPC_URL,
+        lspPubkey: hexToBytes(signing.peer.funding_pubkey),
+        fetch: node.fetch,
+        timer: new TimerMock(),
+        now: () => NOW_MS,
+        pollIntervalMs: POLL_INTERVAL_MS,
+        ...overrides,
+    });
+    sdk.onEvent((event) => events.push(event));
+    return { sdk, node, events };
+}
+
+async function tickOver(h: SigningHarness, status: unknown): Promise<void> {
+    h.node
+        .result({ channels: [{ channel_id: SIGNING_CHANNEL_ID }] })
+        .result({ channel_id: SIGNING_CHANNEL_ID, status })
+        .result({ type: "Applied" });
+    h.sdk.connect();
+    await flush();
+    h.sdk.disconnect();
+}
+
+function refusedEvent(transition: ChannelSigningTransition, error: SignerRefusal): SdkEvent {
+    const kase = signingCaseOf(signing, transition);
+    return { type: "SIGNING", channelId: SIGNING_CHANNEL_ID, requestId: signingRequestIdOf(kase), transition, outcome: "refused", error };
 }
 
 describe("FiberLspSdk", () => {
@@ -167,6 +223,24 @@ describe("FiberLspSdk", () => {
                 new RangeError("network.fundingLockCellDepsCount must be an integer between 1 and 255, got undefined"),
             ],
             [
+                "a nonce reuse mode in another case",
+                { nonceReuse: "ALLOW" as never },
+                MASTER_SEED,
+                new TypeError("options.nonceReuse must be one of refuse, allow"),
+            ],
+            [
+                "a null nonce reuse mode",
+                { nonceReuse: null as never },
+                MASTER_SEED,
+                new TypeError("options.nonceReuse must be one of refuse, allow"),
+            ],
+            [
+                "a nonce reuse mode that is a number",
+                { nonceReuse: 1 as never },
+                MASTER_SEED,
+                new TypeError("options.nonceReuse must be one of refuse, allow"),
+            ],
+            [
                 "a token with a space",
                 { biscuitToken: "not a token" },
                 MASTER_SEED,
@@ -193,6 +267,9 @@ describe("FiberLspSdk", () => {
             ["the mainnet preset", { network: "mainnet" as const }],
             ["a development chain", { network: DEV_NETWORK }],
             ["no clock", { now: undefined }],
+            ["no nonce reuse mode", { nonceReuse: undefined }],
+            ["nonce reuse refused", { nonceReuse: "refuse" as const }],
+            ["nonce reuse allowed", { nonceReuse: "allow" as const }],
         ])("accepts %s", (_, overrides) => {
             expect(() => harness(overrides)).not.toThrow();
         });
@@ -231,29 +308,18 @@ describe("FiberLspSdk", () => {
         it.each([
             ["testnet", COMMITMENT_LOCK_TESTNET],
             ["mainnet", COMMITMENT_LOCK_MAINNET],
-        ] as const)("hands the %s commitment lock to the dispatch", (network, lock) => {
-            const h = harness({ network });
-            expect(dispatchNetworkOf(h.sdk).commitmentLock).toBe(lock);
-            expect(contextOf(h.sdk).network.commitmentLock).toBe(lock);
+        ] as const)("resolves the %s preset's commitment lock", (network, lock) => {
+            expect(contextOf(harness({ network }).sdk).network.commitmentLock).toBe(lock);
         });
 
-        it("hands a development chain's commitment lock to the dispatch as a copy", () => {
+        it("keeps a copy of a development chain's network", () => {
             const h = harness({ network: DEV_NETWORK });
-            expect(dispatchNetworkOf(h.sdk).commitmentLock).toEqual(DEV_NETWORK.commitmentLock);
-            expect(dispatchNetworkOf(h.sdk).commitmentLock).not.toBe(DEV_NETWORK.commitmentLock);
-            expect(contextOf(h.sdk).network.invoiceCurrency).toBe("Fibd");
+            expect(contextOf(h.sdk).network).toEqual(DEV_NETWORK);
+            expect(contextOf(h.sdk).network.commitmentLock).not.toBe(DEV_NETWORK.commitmentLock);
         });
 
         it.each(["testnet", "mainnet"] as const)("takes the %s funding lock's two cell deps from the preset", (network) => {
-            const h = harness({ network });
-            expect(contextOf(h.sdk).network.fundingLockCellDepsCount).toBe(2);
-            expect(dispatchNetworkOf(h.sdk).fundingLockCellDepsCount).toBe(2);
-        });
-
-        it("takes a development chain's funding lock cell deps count", () => {
-            const h = harness({ network: DEV_NETWORK });
-            expect(contextOf(h.sdk).network.fundingLockCellDepsCount).toBe(3);
-            expect(dispatchNetworkOf(h.sdk).fundingLockCellDepsCount).toBe(3);
+            expect(contextOf(harness({ network }).sdk).network.fundingLockCellDepsCount).toBe(2);
         });
 
         it("sends the rpc through the host's fetch, to the rpc url, under the token", async () => {
@@ -302,14 +368,15 @@ describe("FiberLspSdk", () => {
     });
 
     describe("construction defaults", () => {
-        it("defaults the poll interval to five seconds", () => {
+        it("defaults the poll interval to five seconds", async () => {
             const h = harness({ pollIntervalMs: undefined });
             h.sdk.connect();
+            await flush();
             expect(DEFAULT_POLL_INTERVAL_MS).toBe(5_000);
             expect(h.timer.delays).toContain(DEFAULT_POLL_INTERVAL_MS);
         });
 
-        it("defaults the timer to the runtime's, read once at construction", () => {
+        it("defaults the timer to the runtime's, read once at construction", async () => {
             const delays: number[] = [];
             const runtime = {
                 setTimeout: function (this: unknown, _callback: () => void, delayMs: number) {
@@ -328,7 +395,8 @@ describe("FiberLspSdk", () => {
                 },
             };
             withRuntime(later, () => h.sdk.connect());
-            expect(delays).toEqual([POLL_INTERVAL_MS]);
+            await flush();
+            expect(delays).toEqual([POLL_STEP_TIMEOUT_MS, POLL_INTERVAL_MS]);
             withRuntime(later, () => h.sdk.disconnect());
         });
     });
@@ -337,15 +405,18 @@ describe("FiberLspSdk", () => {
         it("ticks when connect() is called, and then at the interval", async () => {
             const h = harness();
             h.sdk.connect();
-            expect(h.timer.delays).toEqual([POLL_INTERVAL_MS]);
+            expect(h.timer.delays).toEqual([POLL_STEP_TIMEOUT_MS]);
             await flush();
             expect(h.polls()).toBe(1);
+            expect(h.fetch.requests).toHaveLength(1);
             h.timer.advance(POLL_INTERVAL_MS);
             await flush();
             expect(h.polls()).toBe(2);
+            expect(h.fetch.requests).toHaveLength(2);
             h.timer.advance(POLL_INTERVAL_MS);
             await flush();
             expect(h.polls()).toBe(3);
+            expect(h.fetch.requests).toHaveLength(3);
         });
 
         it("starts nothing twice when called while polling", async () => {
@@ -405,6 +476,105 @@ describe("FiberLspSdk", () => {
             const h = harness({ timer: throwing });
             h.sdk.connect();
             expect(() => h.sdk.disconnect()).not.toThrow();
+        });
+    });
+
+    describe("signing", () => {
+        const sent = signingCaseOf(signing, "SendCommitmentSigned");
+        const vectorsChain = {
+            commitmentLock: signingCommitmentLock(signing),
+            invoiceCurrency: "Fibd",
+            fundingLockCellDepsCount: signing.channel.funding_lock_cell_deps_count,
+        } as const;
+
+        it("answers a signing request at the first tick of connect(), submitting the vectors' signature", async () => {
+            // The vectors are signed on testnet's network.
+            expect(vectorsChain.commitmentLock).toEqual(COMMITMENT_LOCK_TESTNET);
+            expect(vectorsChain.fundingLockCellDepsCount).toBe(2);
+            const h = await signingHarness({ network: "testnet" });
+            await tickOver(h, sent.result.status);
+            expect(h.node.calls()).toEqual([
+                LIST_CHANNELS_CALL,
+                signingStatusCall(SIGNING_CHANNEL_ID),
+                signatureSubmissionCall(signing, sent),
+            ]);
+            expect(h.events).toStrictEqual([signedEventOf(signing, sent)]);
+        });
+
+        it("signs on a development chain with the vectors' network", async () => {
+            const h = await signingHarness({ network: vectorsChain });
+            await tickOver(h, sent.result.status);
+            expect(h.events).toStrictEqual([signedEventOf(signing, sent)]);
+        });
+
+        it("signs over its copy of a development chain's code hash, whatever the host does to its bytes", async () => {
+            const codeHash = Uint8Array.from(vectorsChain.commitmentLock.codeHash);
+            const h = await signingHarness({ network: { ...vectorsChain, commitmentLock: { ...vectorsChain.commitmentLock, codeHash } } });
+            codeHash.fill(0);
+            await tickOver(h, sent.result.status);
+            expect(h.events).toStrictEqual([signedEventOf(signing, sent)]);
+        });
+
+        it("refuses a commitment under another network's commitment lock, submitting nothing", async () => {
+            const h = await signingHarness({ network: "mainnet" });
+            await tickOver(h, sent.result.status);
+            expect(h.node.calls()).toEqual([LIST_CHANNELS_CALL, signingStatusCall(SIGNING_CHANNEL_ID)]);
+            expect(h.events).toStrictEqual([
+                refusedEvent("SendCommitmentSigned", {
+                    code: "malformed",
+                    message: "the message does not match the attached channel state",
+                }),
+            ]);
+        });
+
+        it("refuses a commitment under another funding lock cell deps count, submitting nothing", async () => {
+            const h = await signingHarness({
+                network: { ...vectorsChain, fundingLockCellDepsCount: vectorsChain.fundingLockCellDepsCount + 1 },
+            });
+            await tickOver(h, sent.result.status);
+            expect(h.node.calls()).toEqual([LIST_CHANNELS_CALL, signingStatusCall(SIGNING_CHANNEL_ID)]);
+            expect(h.events).toStrictEqual([
+                refusedEvent("SendCommitmentSigned", {
+                    code: "malformed",
+                    message: "the message does not match the attached channel state",
+                }),
+            ]);
+        });
+
+        // Signs the slot's first session before the facade is built, so its first tick serves the second.
+        async function servedSlot(overrides: Partial<FiberLspSdkOptions>): Promise<SigningHarness> {
+            return signingHarness(overrides, async (channel) => {
+                await stageSecondSession(signing, channel);
+                const first = await channel.dispatch.handle(SIGNING_CHANNEL_ID, signingStatusField(sent));
+                if (first.kind !== "signed") throw new Error(`the slot's first session was ${first.kind}`);
+            });
+        }
+
+        it("serves a second session on a served slot under nonceReuse allow, as a warning", async () => {
+            const h = await servedSlot({ nonceReuse: "allow" });
+            const second = secondSessionStatus(signing);
+            await tickOver(h, second.value);
+            expect(h.node.calls().map((call) => call.method)).toEqual([
+                "list_channels",
+                "get_channel_signing_status",
+                "submit_channel_signature",
+            ]);
+            expect(h.events).toStrictEqual([signedEventOf(signing, signingCaseOf(signing, "CompleteReceivedCommitment"), "warning")]);
+        });
+
+        it.each([
+            ["by default", {}],
+            ["under nonceReuse refuse", { nonceReuse: "refuse" as const }],
+        ])("refuses a second session on a served slot %s", async (_, overrides) => {
+            const h = await servedSlot(overrides);
+            await tickOver(h, secondSessionStatus(signing).value);
+            expect(h.node.calls()).toEqual([LIST_CHANNELS_CALL, signingStatusCall(SIGNING_CHANNEL_ID)]);
+            expect(h.events).toStrictEqual([
+                refusedEvent("CompleteReceivedCommitment", {
+                    code: "policy_refusal",
+                    message: "slot COMMITMENT:4 has already served a different signing session",
+                }),
+            ]);
         });
     });
 

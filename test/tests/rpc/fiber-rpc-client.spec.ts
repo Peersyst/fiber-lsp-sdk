@@ -3,11 +3,21 @@ import { FiberRpcClient, RPC_UNAUTHORIZED_CODE, RpcError, RpcResponseError, RpcT
 import type { WireField } from "../../../src/wire";
 import { WireError, decodeHexBytes, readObject } from "../../../src/wire";
 import { FetchMock } from "../../mocks/rpc";
+import { caseOf } from "../../utils/interop-vectors";
 import { rejection } from "../../utils/rejection";
+import { answering, refusing, sent } from "../../utils/rpc-answers";
+import {
+    toRpcChannelIdParams,
+    toRpcSigningStatusResult,
+    toRpcSubmissionResult,
+    toSubmitChannelSignatureParams,
+    withoutNulls,
+} from "../../utils/rpc-typed";
 import { loadRpcVectors } from "../../utils/rpc-vectors";
 import { withRuntime } from "../../utils/with-runtime";
 
 const vectors = loadRpcVectors();
+const { get_channel_signing_status: getStatus, submit_channel_signature: submit } = vectors.methods;
 
 const URL = "http://fiber.example:8227";
 const TOKEN = "En0KEwoEMTIzNBgDIgkKBwgKEgMYgAgSJAgAEiDs-token_example=";
@@ -315,5 +325,91 @@ describe("FiberRpcClient", () => {
             const error = (await rejection(client.call("list_channels", {}, passThrough))) as Error;
             expect(`${error.message} ${String(error.cause)}`).not.toContain(TOKEN);
         }
+    });
+
+    describe("the signing methods", () => {
+        it("reads a channel's signing status, sending the method and the vector's params", async () => {
+            const params = caseOf(getStatus.params, "channel id");
+            const entry = caseOf(getStatus.results, "no signature required");
+            const mock = answering(entry.json);
+            await expect(clientOf(mock).getChannelSigningStatus(toRpcChannelIdParams(params.values))).resolves.toEqual(
+                toRpcSigningStatusResult(entry.values),
+            );
+            expect(sent(mock)).toEqual({ jsonrpc: "2.0", id: 1, method: "get_channel_signing_status", params: [params.json] });
+        });
+
+        it.each(["with next material", "without next material"])(
+            "submits a channel signature, %s, sending the vector's params",
+            async (name) => {
+                const params = caseOf(submit.params, name);
+                const mock = answering(caseOf(submit.results, "applied").json);
+                await expect(clientOf(mock).submitChannelSignature(toSubmitChannelSignatureParams(params.values))).resolves.toBe(
+                    toRpcSubmissionResult(caseOf(submit.results, "applied").values),
+                );
+                expect(sent(mock)).toEqual({
+                    jsonrpc: "2.0",
+                    id: 1,
+                    method: "submit_channel_signature",
+                    params: [withoutNulls(params.json)],
+                });
+            },
+        );
+
+        it("reads an already applied submission as it is", async () => {
+            const entry = caseOf(submit.results, "already applied");
+            const mock = answering(entry.json);
+            const params = toSubmitChannelSignatureParams(caseOf(submit.params, "with next material").values);
+            await expect(clientOf(mock).submitChannelSignature(params)).resolves.toBe(toRpcSubmissionResult(entry.values));
+        });
+
+        it("names the field of a submission result it cannot read", async () => {
+            const params = toSubmitChannelSignatureParams(caseOf(submit.params, "with next material").values);
+            const error = await rejection(clientOf(answering({ type: "Rejected" })).submitChannelSignature(params));
+            expect(error).toBeInstanceOf(RpcResponseError);
+            expect(error).toMatchObject({ method: "submit_channel_signature", path: "response.result.type" });
+        });
+
+        it.each<[string, (client: FiberRpcClient) => Promise<unknown>]>([
+            ["getChannelSigningStatus", (client) => client.getChannelSigningStatus({ channelId: "0x11" })],
+            [
+                "submitChannelSignature",
+                (client) =>
+                    client.submitChannelSignature({
+                        ...toSubmitChannelSignatureParams(caseOf(submit.params, "with next material").values),
+                        partialSignature: new Uint8Array(31),
+                    }),
+            ],
+        ])("%s refuses params it cannot write before sending anything", async (_, run) => {
+            const mock = new FetchMock();
+            await expect(run(clientOf(mock))).rejects.toThrow(TypeError);
+            expect(mock.requests).toHaveLength(0);
+        });
+
+        it.each<[string, (client: FiberRpcClient) => Promise<unknown>]>([
+            ["get_channel_signing_status", (client) => client.getChannelSigningStatus({ channelId: CHANNEL_ID })],
+            [
+                "submit_channel_signature",
+                (client) =>
+                    client.submitChannelSignature(toSubmitChannelSignatureParams(caseOf(submit.params, "with next material").values)),
+            ],
+        ])("%s surfaces the node's refusal as an RpcError", async (method, run) => {
+            const error = await rejection(run(clientOf(refusing(-32000, "no pending signature request"))));
+            expect(error).toBeInstanceOf(RpcError);
+            expect(error).toMatchObject({ method, code: -32000, message: "no pending signature request" });
+        });
+
+        it.each<[string, (client: FiberRpcClient) => Promise<unknown>]>([
+            ["get_channel_signing_status", (client) => client.getChannelSigningStatus({ channelId: CHANNEL_ID })],
+            [
+                "submit_channel_signature",
+                (client) =>
+                    client.submitChannelSignature(toSubmitChannelSignatureParams(caseOf(submit.params, "with next material").values)),
+            ],
+        ])("%s surfaces a fetch that rejects as an RpcTransportError", async (method, run) => {
+            const cause = new TypeError("fetch failed");
+            const error = await rejection(run(clientOf(new FetchMock().answer({ rejection: cause }))));
+            expect(error).toBeInstanceOf(RpcTransportError);
+            expect(error).toMatchObject({ method, status: undefined, cause });
+        });
     });
 });

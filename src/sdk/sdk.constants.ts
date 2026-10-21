@@ -13,7 +13,8 @@ export const SDK_NETWORK_PRESETS = {
 } as const satisfies Record<SdkNetworkName, SdkNetworkConfig>;
 
 /**
- * Unmeasured against a node: a tick is one `list_channels` plus one read per payment and invoice in flight.
+ * Unmeasured against a node: a tick is one `list_channels`, one read per payment and invoice in flight, one signing status
+ * per registered channel and one submit per signature.
  */
 export const DEFAULT_POLL_INTERVAL_MS = 5_000;
 
@@ -44,6 +45,7 @@ export const SDK_EVENT_TYPES = [
     "PAYMENT_FAILED",
     "PAYMENT_PENDING",
     "PAYMENT_RECEIVED",
+    "SIGNING",
     "ERROR",
 ] as const;
 

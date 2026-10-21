@@ -2175,6 +2175,7 @@ describe("checkAndClaim", () => {
 
         it.each([
             ["an unknown mode", { nonceReuse: "warn" as never }, new TypeError("options.nonceReuse must be one of refuse, allow")],
+            ["a null mode", { nonceReuse: null as never }, new TypeError("options.nonceReuse must be one of refuse, allow")],
             ["options that are no object", null as never, new TypeError("options must be an object")],
         ])("rejects %s", (_, options, error) => {
             expect(() => new PolicyEngine(new SignerStore(new InMemorySignerStorage()), options)).toThrow(error);

@@ -1,7 +1,8 @@
 export { SIGNER_ERROR_CODES } from "./common";
 export type { ITimer, Script, ScriptHashType, ScriptTemplate, SignerErrorCode, TlcHashAlgorithm } from "./common";
 export { BIP39_SEED_LENGTH, DERIVATION_SCHEME_VERSION, MAX_ACCOUNT_INDEX, deriveMasterSeed } from "./derivation";
-export type { IAsyncSignerStorage, ISignerStorage } from "./policy";
+export type { IAsyncSignerStorage, ISignerStorage, NonceReuseMode } from "./policy";
+export type { ChannelSigningTransition } from "./protocol";
 export { InvoiceError, decodeInvoice } from "./invoice";
 export type { Invoice, InvoiceAttribute, InvoiceAttributeType, InvoiceCurrency, UnsignedInvoice } from "./invoice";
 export { RpcError, RpcResponseError, RpcTransportError } from "./rpc";
@@ -16,4 +17,6 @@ export type {
     SdkNetwork,
     SdkNetworkConfig,
     SdkNetworkName,
+    SigningEventOutcome,
 } from "./sdk";
+export type { SignerRefusal } from "./signer";

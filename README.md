@@ -34,13 +34,13 @@ These properties reflect the current specification and may evolve with it while 
 | [`rpc`](./src/rpc)               | Typed fiber JSON-RPC client (Biscuit-authed)                                                                 |
 | [`sdk`](./src/sdk)               | Public facade wiring the above: `FiberLspSdk`, its lifecycle, events and errors, the time index, the poller  |
 
-`derivation`, `digest`, `invoice`, `signer`, `policy`, `wire`, `protocol` and `rpc` are implemented; `sdk` has its
-core, construction, `connect`/`disconnect` and the events, while the operations a wallet calls (open a channel, create an
-invoice, pay one) land next, so the public API is not settled yet. The upstream reference is the head of Fiber's hosted-LSP
-PR (nervosnetwork/fiber#1623, `8db6a117`), whose polled signing protocol the modules under the facade are being aligned to:
-`digest` and `policy` know both commitment-lock layouts, `rpc` writes the tenant API's forms, `invoice` reads the
-trampoline route hint every tenant invoice carries, and `signer` answers the node's signing status; the poller that asks
-for it lands next.
+`derivation`, `digest`, `invoice`, `signer`, `policy`, `wire`, `protocol` and `rpc` are implemented; `sdk` has its core,
+construction, `connect`/`disconnect` and the events, while the operations a wallet calls (open a channel, create an
+invoice, pay one) land next, so the public API is not settled yet. The upstream reference is the head of Fiber's
+hosted-LSP PR (nervosnetwork/fiber#1623, `8db6a117`), whose polled signing protocol the modules under the facade are
+being aligned to: `digest` and `policy` know both commitment-lock layouts, `rpc` writes the tenant API's forms,
+`invoice` reads the trampoline route hint every tenant invoice carries, and `signer` answers the node's signing status,
+which the facade's poller reads and answers on every tick.
 
 ## Repository layout
 
@@ -121,9 +121,11 @@ const sdk = new FiberLspSdk(masterSeed, {
   rpcUrl: "https://lsp.example/rpc",
   biscuitToken,
   lspPubkey, // the LSP node's key, 33 bytes
+  nonceReuse: "allow", // Fiber's current nonces ask a second session of some slots; drop it once they are strict
 });
 
 const unsubscribe = sdk.onEvent((event) => {
+  if (event.type === "SIGNING" && event.outcome === "refused") log(event.channelId, event.error.code);
   if (event.type === "ERROR") log(event.error.code, event.error.cause);
 });
 sdk.connect(); // on foreground: the polling of the node

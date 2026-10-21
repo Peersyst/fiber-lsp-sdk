@@ -1,8 +1,7 @@
 import type { ITimer } from "../common";
 import { TimerSlot } from "../common";
-import { SdkError } from "./sdk.error";
 import type { SdkEvent } from "./sdk.types";
-import { describeSdkFailure } from "./utils";
+import { emitPollFailure } from "./utils";
 
 export type PollRun = {
     /**
@@ -167,15 +166,10 @@ export class ActivityPoller {
     }
 
     /**
-     * Reports a step's failure as a `poll_failed` error; an emitter that throws never breaks the loop.
+     * Reports a step's failure as a `poll_failed` error.
      * @param cause What the step threw.
      */
     private report(cause: unknown): void {
-        const error = new SdkError("poll_failed", describeSdkFailure("a poll of the node failed", cause), { cause });
-        try {
-            this.emit({ type: "ERROR", error });
-        } catch {
-            // The emitter's failure is the host's.
-        }
+        emitPollFailure(this.emit, "a poll of the node failed", cause);
     }
 }

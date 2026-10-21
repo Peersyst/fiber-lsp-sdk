@@ -71,7 +71,8 @@ export class PolicyEngine {
      */
     constructor(store: SignerStore, options: PolicyEngineOptions = {}) {
         if (!isPlainObject(options)) throw new TypeError("options must be an object");
-        const nonceReuse = options.nonceReuse ?? "refuse";
+        // Not `??`: a `null` is refused below.
+        const nonceReuse = options.nonceReuse === undefined ? "refuse" : options.nonceReuse;
         assertOneOf("options.nonceReuse", nonceReuse, NONCE_REUSE_MODES);
         this.store = store;
         this.nonceReuse = nonceReuse;
