@@ -5,4 +5,5 @@ export * from "./poller";
 export * from "./sdk.constants";
 export * from "./sdk.error";
 export * from "./sdk.types";
+export * from "./signing-step";
 export * from "./utils";

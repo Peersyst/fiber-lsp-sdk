@@ -1,8 +1,9 @@
 import type { ITimer, ScriptTemplate } from "../common";
 import type { InvoiceCurrency } from "../invoice";
-import type { IAsyncSignerStorage, ISignerStorage, PolicyEngine } from "../policy";
+import type { IAsyncSignerStorage, ISignerStorage, NonceReuseMode, PolicyEngine } from "../policy";
+import type { ChannelSigningTransition } from "../protocol";
 import type { FiberRpcClient, IFetchLike, RpcChannelStateName, RpcInvoiceStatus, RpcPaymentStatus } from "../rpc";
-import type { SignerDispatch } from "../signer";
+import type { SignerDispatch, SignerRefusal } from "../signer";
 import type { ActivityTracker } from "./activity";
 import type { IndexAllocator } from "./allocator";
 import type { ActivityPoller } from "./poller";
@@ -51,9 +52,27 @@ export type FiberLspSdkOptions = {
      */
     now?: () => number;
     pollIntervalMs?: number;
+    /**
+     * Defaults to `refuse`; `allow` serves a second signing session on a slot, as fiber's nonce lifecycle asks, never a third.
+     */
+    nonceReuse?: NonceReuseMode;
 };
 
 export type SdkEventType = (typeof SDK_EVENT_TYPES)[number];
+
+/**
+ * `warning`: a signature served under `nonceReuse: "allow"` on a slot that already served another session.
+ */
+export type SigningEventOutcome = "signed" | "warning" | "refused";
+
+type SigningEventPayload = {
+    channelId: string;
+    /**
+     * Wire hex; `null`, with the transition, when the status could not be read or was another channel's.
+     */
+    requestId: string | null;
+    transition: ChannelSigningTransition | null;
+} & ({ outcome: Exclude<SigningEventOutcome, "refused"> } | { outcome: "refused"; error: SignerRefusal });
 
 // Keyed by every event type, so one added to `SDK_EVENT_TYPES` alone fails to compile.
 type SdkEventPayloads = {
@@ -66,6 +85,7 @@ type SdkEventPayloads = {
     PAYMENT_FAILED: { paymentHashHex: string; reason: string };
     PAYMENT_PENDING: { paymentHashHex: string };
     PAYMENT_RECEIVED: { paymentHashHex: string };
+    SIGNING: SigningEventPayload;
     ERROR: { error: SdkError };
 };
 

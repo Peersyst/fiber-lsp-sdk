@@ -47,9 +47,11 @@ header fails there and not on every call. No error the client throws carries it.
 - **Ids** are a counter per client, from 1, one per call and never reused, a failed call included. A notification (no
   id) is always refused by fiber, so there is none.
 - **The params are typed per method** by `RpcParamsWireByMethod`, which names all eighteen, so `call` cannot be handed
-  the params of another method. The typed method of each RPC is what a caller uses; `call` is what they share. The eight
-  methods of the tenant API have their codecs and no client method yet: each lands with the task that calls it, which is
-  the one that observes what it sends, and until then a caller composes `call` with the codec.
+  the params of another method. The typed method of each RPC is what a caller uses; `call` is what they share. Of the
+  eight methods of the tenant API, the two the signing poller calls have their client methods
+  (`getChannelSigningStatus`, `submitChannelSignature`); the other six have their codecs and no client method yet: each
+  lands with the task that calls it, which is the one that observes what it sends, and until then a caller composes
+  `call` with the codec.
 
 The answer is read strictly, as `response`:
 
@@ -107,6 +109,7 @@ the rest even when they are malformed.
 | `submit_signed_funding_tx`           | `submitSignedFundingTx`          | `channel_id`, `signed_funding_tx`                                              | `channel_id`, `funding_tx_hash`     |
 | `abandon_channel`                    | `abandonChannel`                 | `channel_id`                                                                   | `null`                              |
 | `list_channels`                      | `listChannels`                   | nothing, or one of `include_closed` and `only_pending`                         | per channel, the fields below       |
+| `list_channels`                      | `listChannelIds`                 | the same as `listChannels`                                                     | each channel's `channel_id` alone   |
 
 - **The open blocks** until the peer has accepted and the funding transaction is built, and answers with the channel's
   **final** id, not the temporary one. Its answer is the only copy of the unsigned transaction: no other method returns it.
@@ -125,6 +128,9 @@ the rest even when they are malformed.
   them; `only_pending` shows the openings, failed ones included, as synthetic entries fiber builds from its open records: a
   failed opening always reads `Closed` with `FUNDING_ABORTED`, an abandon included, told apart only by `failure_detail`. The
   `pubkey` filter is never sent.
+- **The listing can be read for its ids alone**: `listChannelIds` reads `channels[].channel_id`, strict in it (an
+  array of objects, each id 32 bytes of `0x` lowercase hex) and blind to every other field, so a state or a flag a newer
+  fiber adds cannot stop a caller that needs only the ids, which is the signing step ([sdk.md](./sdk.md)).
 
 A channel is read as:
 
@@ -268,7 +274,10 @@ public signer material at the open, and signs on request afterwards ([Signing re
 ## Signing request methods
 
 Four methods carry the polled signing protocol: the device reads whether the node waits on a signature, and submits one.
-Two getters and two submissions, one pair for the channel and one for the watchtower, with the same forms.
+Two getters and two submissions, one pair for the channel and one for the watchtower, with the same forms. The channel
+pair is on the client as `getChannelSigningStatus({ channelId })` and `submitChannelSignature({ channelId, requestId,
+partialSignature, nextMaterial })`, which the facade's signing step calls ([sdk.md](./sdk.md)); the watchtower pair is
+reached through `call` until its step lands.
 
 | Method                          | Sends                                                                   | Reads                  |
 | ------------------------------- | ----------------------------------------------------------------------- | ---------------------- |
@@ -433,7 +442,9 @@ inputs do, and the host hands it to its CKB signer as it is.
   the 65-byte watchtower signature) written as fiber's serde wrote it; `NoSignatureRequired` of both getters decoded and
   compared with the vector's values, which pins that fiber writes the unit variant as its tag alone; both outcomes of both
   submissions; the status handed over untouched, the same value with its path, whatever it holds; a null next material
-  left out and never sent as `null`; the exact body of a submission through `call`, and `AlreadyApplied` resolved as a result.
+  left out and never sent as `null`; the exact body of both channel methods through the client's own methods, `Applied`
+  and `AlreadyApplied` both resolved as results, a result it cannot read named by its path, and a bad param refused
+  before any fetch; the watchtower pair through `call`.
 - **The registration methods against fiber**: both params cases written as fiber's serde wrote them, the signature bare;
   both tenants decoded and compared with the vector's values, which carry both runtime statuses, a tenant without a root
   signer or a channel and one with both; a literal cold and a literal active tenant read field by field; the operator's
@@ -555,6 +566,18 @@ Coverage of the module and of `wire` is 100% on all four metrics, and the assert
 | A missing `failed_error` is read as no error                 | 1                 |
 | `settleInvoice` does not read the answer                     | 1                 |
 | `newInvoice` reads the answer as an invoice with a status    | 1                 |
+| The ids reader takes the channels from another field         | 32                |
+| The ids reader takes ids of 33 bytes                         | 19                |
+| The ids reader reads each channel whole                      | 9                 |
+| The ids reader skips the hex check                           | 9                 |
+| A channel signature is submitted as the watchtower's         | 5                 |
+| A channel signature is sent unchecked                        | 3                 |
+| The channel signing status is asked of the watchtower        | 3                 |
+| Any submission result is read as Applied                     | 2                 |
+| The ids method ignores the filter                            | 2                 |
+| The ids method reads the full listing                        | 1                 |
+| The signing status params are sent unchecked                 | 1                 |
+| The signing status result is not read                        | 1                 |
 
 One mutant changes nothing observable and is left out: dropping the `public: false` the tenant's open writes after the
 spread, since the encoder it spreads already writes it; the member stays for the literal type the wire form states.

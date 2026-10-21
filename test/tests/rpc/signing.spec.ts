@@ -4,7 +4,6 @@ import {
     FiberRpcClient,
     RPC_SUBMISSION_RESULTS,
     RpcError,
-    RpcResponseError,
     decodeRpcSigningStatusResult,
     decodeRpcSubmissionResult,
     encodeRpcChannelIdParams,
@@ -335,25 +334,6 @@ describe("FiberRpcClient signing methods", () => {
         });
     });
 
-    it("submits a channel signature through call, sending the exact body, and reads AlreadyApplied as success", async () => {
-        const mock = answering({ type: "AlreadyApplied" });
-        const params = encodeSubmitChannelSignatureParams(SUBMIT_CHANNEL);
-        await expect(clientOf(mock).call("submit_channel_signature", params, decodeRpcSubmissionResult)).resolves.toBe("AlreadyApplied");
-        expect(sent(mock)).toEqual({
-            jsonrpc: "2.0",
-            id: 1,
-            method: "submit_channel_signature",
-            params: [
-                {
-                    channel_id: CHANNEL_ID,
-                    request_id: `0x${REQUEST_ID}`,
-                    partial_signature: `0x${PARTIAL_SIGNATURE}`,
-                    next_material: NEXT_MATERIAL_WIRE,
-                },
-            ],
-        });
-    });
-
     it("passes the node's refusal through, its message verbatim", async () => {
         const mock = refusing(-32000, "no pending signature request for this channel");
         const params = encodeSubmitWatchtowerSignatureParams(SUBMIT_WATCHTOWER);
@@ -364,13 +344,5 @@ describe("FiberRpcClient signing methods", () => {
             code: -32000,
             message: "no pending signature request for this channel",
         });
-    });
-
-    it("names the field of an answer it cannot read", async () => {
-        const mock = answering({ type: "Rejected" });
-        const params = encodeSubmitChannelSignatureParams(SUBMIT_CHANNEL);
-        const error = await rejection(clientOf(mock).call("submit_channel_signature", params, decodeRpcSubmissionResult));
-        expect(error).toBeInstanceOf(RpcResponseError);
-        expect(error).toMatchObject({ method: "submit_channel_signature", path: "response.result.type" });
     });
 });

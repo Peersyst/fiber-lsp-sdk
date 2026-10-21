@@ -150,7 +150,9 @@ Fiber's lifecycle, as it stands, asks for more than one signature per slot: at t
 on one commitment slot, a payment the peer fulfils has one commitment slot serve three messages, and the two sides of a
 revocation round share the revocation slot at one number. Under the default rule the second message of each is refused,
 and no channel can open. `new PolicyEngine(store, { nonceReuse })` takes the mode: `refuse`, the default and the rule
-above, or `allow`, a compatibility mode for fiber's current nonces that goes once fiber fixes them.
+above, or `allow`, a compatibility mode for fiber's current nonces that goes once fiber fixes them. An absent mode is
+the default; any other value, `null` included, is a `TypeError` naming `options.nonceReuse`. The facade takes it as its
+`nonceReuse` option ([sdk.md](./sdk.md)).
 
 Under `allow` a served slot serves **one** more session, never two. With a deterministic nonce, each partial signature on
 one slot is one equation `s_i = σ_i·(k1 + b_i·k2) + e_i·a·g·d` in the same three unknowns `k1`, `k2` and `d`: two of them
@@ -806,6 +808,7 @@ checked by breaking the code on purpose:
 | The reuse log may name a slot never served                         | 1                 |
 | The reuse log may repeat the first session                         | 1                 |
 | The terms are not checked to be an object                          | 1                 |
+| A null nonce reuse mode is taken as the default                    | 1                 |
 
 Three mutants fail no test, and cannot. The host's pin of the funding cell given the terms' fields as well pins nothing
 more, because the funding cell states none of them. Handing out the pins `readChannelPins` read without copying them, the

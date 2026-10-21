@@ -14,7 +14,13 @@ import { InMemorySignerStorage } from "../../mocks/policy";
 import { toScript } from "../../utils/digest-inputs";
 import { resignPeerHalf } from "../../utils/peer-musig";
 import type { SigningChannel } from "../../utils/signing-channel";
-import { openSigningChannel, signingDeviceKeys, signingPeerKeys, signingViewTlcs } from "../../utils/signing-channel";
+import {
+    openSigningChannel,
+    secondSessionStatus,
+    signingDeviceKeys,
+    signingPeerKeys,
+    stageSecondSession,
+} from "../../utils/signing-channel";
 import type { SigningCaseVector } from "../../utils/signing-vectors";
 import { loadSigningVectors, signingCaseOf, signingStatusField } from "../../utils/signing-vectors";
 import { withField } from "../../utils/with-field";
@@ -859,33 +865,16 @@ describe("re-delivery", () => {
 });
 
 describe("a second session on a served slot", () => {
-    // Fiber's open lands both commitment transitions on one slot: the received commitment, moved onto the sent one's slot.
-    function secondSession(randByte = 0x71): WireField {
-        return resigned(mutated(statusOf("CompleteReceivedCommitment"), "content.slot.commitment_number", "0x4"), randByte);
-    }
-
     async function servedChannel(nonceReuse: "refuse" | "allow"): Promise<SigningChannel> {
         const channel = await openSigningChannel(vectors, caseOf("SendCommitmentSigned"), { nonceReuse });
-        const settlement = (caseOf("CompleteReceivedCommitment").result.status as { settlement: { local_amount: string } }).settlement;
-        await updateRecord(channel, (record) => ({
-            ...record,
-            views: {
-                ...record.views,
-                local: {
-                    exposureShannons: BigInt(settlement.local_amount).toString(),
-                    tlcs: signingViewTlcs(vectors),
-                    chargedShannons: {},
-                    creditedShannons: {},
-                },
-            },
-        }));
+        await stageSecondSession(vectors, channel);
         signedOf(await channel.dispatch.handle(channel.channelId, statusOf("SendCommitmentSigned")));
         return channel;
     }
 
     it("is refused by default, claiming nothing", async () => {
         const channel = await servedChannel("refuse");
-        expect(await refusedUnclaimed(channel, secondSession())).toEqual({
+        expect(await refusedUnclaimed(channel, secondSessionStatus(vectors))).toEqual({
             code: "policy_refusal",
             message: "slot COMMITMENT:4 has already served a different signing session",
         });
@@ -893,7 +882,7 @@ describe("a second session on a served slot", () => {
 
     it("is signed under allow, reported as reused with its warning", async () => {
         const channel = await servedChannel("allow");
-        const status = secondSession();
+        const status = secondSessionStatus(vectors);
         const signed = signedOf(await channel.dispatch.handle(channel.channelId, status));
         expect(signed.status).toBe("reused");
         expect(signed.warnings).toEqual([{ kind: "nonce-reused", slot: "COMMITMENT:4" }]);
@@ -912,7 +901,7 @@ describe("a second session on a served slot", () => {
 
     it("refuses a third session under allow: three equations solve for the funding key", async () => {
         const channel = await servedChannel("allow");
-        signedOf(await channel.dispatch.handle(channel.channelId, secondSession()));
+        signedOf(await channel.dispatch.handle(channel.channelId, secondSessionStatus(vectors)));
         const third = resigned(statusOf("SendCommitmentSigned"), 0x72);
         expect(await refusedUnclaimed(channel, third)).toEqual({
             code: "policy_refusal",
@@ -922,9 +911,9 @@ describe("a second session on a served slot", () => {
 
     it("answers each served session again with its bytes, the reused one with its warning every time", async () => {
         const channel = await servedChannel("allow");
-        const second = signedOf(await channel.dispatch.handle(channel.channelId, secondSession()));
+        const second = signedOf(await channel.dispatch.handle(channel.channelId, secondSessionStatus(vectors)));
         channel.storage.ops.length = 0;
-        const secondAgain = signedOf(await channel.dispatch.handle(channel.channelId, secondSession()));
+        const secondAgain = signedOf(await channel.dispatch.handle(channel.channelId, secondSessionStatus(vectors)));
         expect(secondAgain).toEqual(second);
         const firstAgain = signedOf(await channel.dispatch.handle(channel.channelId, statusOf("SendCommitmentSigned")));
         expect(firstAgain.status).toBe("already-signed");
