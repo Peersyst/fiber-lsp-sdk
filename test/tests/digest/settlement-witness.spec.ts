@@ -1,6 +1,6 @@
 import { bytesToHex } from "@noble/hashes/utils.js";
 import { deriveChannelSeed } from "../../../src/derivation/device-scheme";
-import { deriveChannelKeys, derivePublicKey, deriveTlcKey, pubkeyOf } from "../../../src/derivation/fiber-scheme";
+import { deriveChannelKeys, deriveTlcKey, pubkeyOf } from "../../../src/derivation/fiber-scheme";
 import type { SettlementTlc } from "../../../src/digest/digest.types";
 import type { SettlementWitnessInput } from "../../../src/digest/settlement-witness";
 import { buildSettlementWitness } from "../../../src/digest/settlement-witness";
@@ -13,7 +13,7 @@ const localTlcBaseHash = blake160(pubkeyOf(channelKeys.tlcBaseKey));
 const remoteTlcBasePubkey = pubkeyOf(new Uint8Array(32).fill(0x66));
 const remoteTlcBaseHash = blake160(remoteTlcBasePubkey);
 
-const REMOTE_COMMITMENT_POINT = pubkeyOf(new Uint8Array(32).fill(0x55));
+const REMOTE_TLC_PUBKEY = pubkeyOf(new Uint8Array(32).fill(0x55));
 
 const OFFERED_TLC: SettlementTlc = {
     id: 7,
@@ -22,8 +22,8 @@ const OFFERED_TLC: SettlementTlc = {
     amountShannons: 1_500_000_000n,
     paymentHash: new Uint8Array(32).fill(0xa1),
     expiryMs: 1_723_257_890_123n,
-    createdAtRemoteCommitmentNumber: 5,
-    remoteCommitmentPoint: REMOTE_COMMITMENT_POINT,
+    localKeyCommitmentNumber: 5,
+    remoteTlcPubkey: REMOTE_TLC_PUBKEY,
 };
 
 const RECEIVED_TLC: SettlementTlc = {
@@ -33,8 +33,8 @@ const RECEIVED_TLC: SettlementTlc = {
     amountShannons: 2_250_000_000n,
     paymentHash: new Uint8Array(32).fill(0xb2),
     expiryMs: 1_750_000_000_000n,
-    createdAtRemoteCommitmentNumber: 0,
-    remoteCommitmentPoint: REMOTE_COMMITMENT_POINT,
+    localKeyCommitmentNumber: 0,
+    remoteTlcPubkey: REMOTE_TLC_PUBKEY,
 };
 
 const BASE_INPUT: SettlementWitnessInput = {
@@ -136,8 +136,8 @@ describe("buildSettlementWitness", () => {
         expect(tlcRecord[0]).toBe(0b00);
         expect(bytesToHex(tlcRecord.slice(1, 17))).toBe("002f6859" + "00".repeat(12));
         expect(bytesToHex(tlcRecord.slice(17, 49))).toBe("a1".repeat(32));
-        const localHash = blake160(pubkeyOf(deriveTlcKey(channelKeys, OFFERED_TLC.createdAtRemoteCommitmentNumber)));
-        const remoteHash = blake160(derivePublicKey(remoteTlcBasePubkey, REMOTE_COMMITMENT_POINT));
+        const localHash = blake160(pubkeyOf(deriveTlcKey(channelKeys, OFFERED_TLC.localKeyCommitmentNumber)));
+        const remoteHash = blake160(REMOTE_TLC_PUBKEY);
         expect(bytesToHex(tlcRecord.slice(49, 69))).toBe(bytesToHex(remoteHash));
         expect(bytesToHex(tlcRecord.slice(69, 89))).toBe(bytesToHex(localHash));
         const since = new DataView(tlcRecord.slice(89, 97).buffer).getBigUint64(0, true);
@@ -151,16 +151,36 @@ describe("buildSettlementWitness", () => {
     it("derives the per-TLC key hashes, remote first for the remote variant", () => {
         const witness = buildSettlementWitness(channelKeys, { ...BASE_INPUT, tlcs: [OFFERED_TLC] });
         const tlcRecord = record(witness, 0);
-        const localHash = blake160(pubkeyOf(deriveTlcKey(channelKeys, OFFERED_TLC.createdAtRemoteCommitmentNumber)));
-        const remoteHash = blake160(derivePublicKey(remoteTlcBasePubkey, REMOTE_COMMITMENT_POINT));
+        const localHash = blake160(pubkeyOf(deriveTlcKey(channelKeys, OFFERED_TLC.localKeyCommitmentNumber)));
+        const remoteHash = blake160(REMOTE_TLC_PUBKEY);
         expect(bytesToHex(tlcRecord.slice(37, 57))).toBe(bytesToHex(remoteHash));
         expect(bytesToHex(tlcRecord.slice(57, 77))).toBe(bytesToHex(localHash));
+    });
+
+    it("derives the device's per-TLC key at the TLC's own number, and hashes the peer's as the node states it", () => {
+        const recordAt = (tlc: SettlementTlc): string =>
+            bytesToHex(record(buildSettlementWitness(channelKeys, { ...BASE_INPUT, tlcs: [tlc] }), 0));
+        const atSix = record(
+            buildSettlementWitness(channelKeys, { ...BASE_INPUT, tlcs: [{ ...OFFERED_TLC, localKeyCommitmentNumber: 6 }] }),
+            0,
+        );
+        expect(bytesToHex(atSix.slice(57, 77))).toBe(bytesToHex(blake160(pubkeyOf(deriveTlcKey(channelKeys, 6)))));
+        const otherRemote = pubkeyOf(new Uint8Array(32).fill(0x56));
+        const withOtherRemote = record(
+            buildSettlementWitness(channelKeys, { ...BASE_INPUT, tlcs: [{ ...OFFERED_TLC, remoteTlcPubkey: otherRemote }] }),
+            0,
+        );
+        expect(bytesToHex(withOtherRemote.slice(37, 57))).toBe(bytesToHex(blake160(otherRemote)));
+        // The base key reaches the side block alone: no record moves with it.
+        const otherBase = pubkeyOf(new Uint8Array(32).fill(0x67));
+        const withOtherBase = buildSettlementWitness(channelKeys, { ...BASE_INPUT, remoteTlcBasePubkey: otherBase, tlcs: [OFFERED_TLC] });
+        expect(bytesToHex(record(withOtherBase, 0))).toBe(recordAt(OFFERED_TLC));
     });
 
     it("swaps the per-TLC key hashes for the local variant", () => {
         const witness = buildSettlementWitness(channelKeys, { ...BASE_INPUT, forRemote: false, tlcs: [OFFERED_TLC] });
         const tlcRecord = record(witness, 0);
-        const localHash = blake160(pubkeyOf(deriveTlcKey(channelKeys, OFFERED_TLC.createdAtRemoteCommitmentNumber)));
+        const localHash = blake160(pubkeyOf(deriveTlcKey(channelKeys, OFFERED_TLC.localKeyCommitmentNumber)));
         expect(bytesToHex(tlcRecord.slice(37, 57))).toBe(bytesToHex(localHash));
     });
 
@@ -195,8 +215,21 @@ describe("buildSettlementWitness", () => {
         expect(witnessWith({ ...OFFERED_TLC, amountShannons: 1n << 128n })).toThrow(RangeError);
         expect(witnessWith({ ...OFFERED_TLC, paymentHash: new Uint8Array(31) })).toThrow(TypeError);
         expect(witnessWith({ ...OFFERED_TLC, expiryMs: -1n })).toThrow(RangeError);
-        expect(witnessWith({ ...OFFERED_TLC, createdAtRemoteCommitmentNumber: 2 ** 48 })).toThrow(RangeError);
-        expect(witnessWith({ ...OFFERED_TLC, remoteCommitmentPoint: new Uint8Array(32) })).toThrow(TypeError);
+        expect(witnessWith({ ...OFFERED_TLC, localKeyCommitmentNumber: undefined as never })).toThrow(RangeError);
+        expect(witnessWith({ ...OFFERED_TLC, localKeyCommitmentNumber: -1 })).toThrow(RangeError);
+        expect(witnessWith({ ...OFFERED_TLC, localKeyCommitmentNumber: 2 ** 48 })).toThrow(
+            new RangeError("tlc.localKeyCommitmentNumber must be an integer between 0 and 281474976710655, got 281474976710656"),
+        );
+        expect(witnessWith({ ...OFFERED_TLC, remoteTlcPubkey: undefined as never })).toThrow(
+            new TypeError("tlc.remoteTlcPubkey must be a Uint8Array"),
+        );
+        expect(witnessWith({ ...OFFERED_TLC, remoteTlcPubkey: new Uint8Array(32) })).toThrow(
+            new TypeError("tlc.remoteTlcPubkey must be 33 bytes, got 32"),
+        );
+        // An x coordinate past the field prime: 33 bytes with a valid prefix, but no point.
+        expect(witnessWith({ ...OFFERED_TLC, remoteTlcPubkey: new Uint8Array(33).fill(0xff).fill(0x02, 0, 1) })).toThrow(
+            new TypeError("tlc.remoteTlcPubkey must be a compressed point on secp256k1"),
+        );
     });
 
     it("refuses a 31-byte payment hash under fullPaymentHash too", () => {

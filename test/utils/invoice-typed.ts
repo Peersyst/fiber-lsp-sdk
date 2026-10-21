@@ -3,7 +3,7 @@ import type { TlcHashAlgorithm } from "../../src/common";
 import type { Invoice, InvoiceAttribute, InvoiceCurrency, UnsignedInvoice } from "../../src/invoice";
 import { toScript } from "./digest-inputs";
 import type { InvoiceAttributeVector, InvoiceCaseVector, InvoiceValuesVector } from "./invoice-vectors";
-import { HASH_ALGORITHM_WIRE } from "./wire-requests";
+import { HASH_ALGORITHM_WIRE } from "./wire-spellings";
 
 function hashAlgorithmOf(wire: string): TlcHashAlgorithm {
     const found = Object.entries(HASH_ALGORITHM_WIRE).find(([, spelling]) => spelling === wire);

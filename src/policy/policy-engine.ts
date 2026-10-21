@@ -1,39 +1,60 @@
 import { equalBytes } from "@noble/curves/utils.js";
+import { bytesToHex } from "@noble/hashes/utils.js";
 import type { OutPoint, Script, SignerErrorCode, TlcHashAlgorithm } from "../common";
 import {
     PAYMENT_HASH_LENGTH,
+    SCHNORR_SIGNATURE_LENGTH,
     TLC_HASH_ALGORITHMS,
     TRUNCATED_PAYMENT_HASH_LENGTH,
     UINT64_MAX,
+    assertBytes,
     assertDecimalShannons,
     assertHexBytes,
     assertNonEmptyString,
     assertOneOf,
     assertOutPoint,
+    assertUnsignedBigInt,
     assertUnsignedInteger,
+    isPlainObject,
 } from "../common";
 import type { FiberChannelKeys } from "../derivation";
 import { MAX_CHANNEL_INDEX } from "../derivation";
-import { computeChannelAnnouncementDigest, computeCommitmentTxDigest, computeRevocationDigest, computeShutdownTxDigest } from "../digest";
-import { judgeCommitment, judgeOpeningCommitment, judgeShutdown, toPolicyViewTlcs } from "./balance-rule";
+import { computeChannelAnnouncementDigest, computeClosingTxDigest, computeCommitmentTxDigest, computeRevocationDigest } from "../digest";
+import { judgeClosingTx, judgeCommitment, judgeOpeningCommitment, toPolicyViewTlcs } from "./balance-rule";
 import { judgeCapacityBounds } from "./capacity-bounds";
 import { openingChannelPins } from "./channel-opening";
-import { findChannelPinConflict, fundingCellPins, statedChannelPins, withChannelPins } from "./channel-pins";
-import { CHANNEL_POLICY_RECORD_VERSION, PAYMENT_RECORD_VERSION, POLICY_VIEWS } from "./policy.constants";
-import { DebitIntentError, FundingCellError, HoldInvoiceError, refusePolicyRequest } from "./policy.error";
+import { channelTermsPins, findChannelPinConflict, fundingCellPins, statedChannelPins, withChannelPins } from "./channel-pins";
+import {
+    CHANNEL_POLICY_RECORD_VERSION,
+    CHANNEL_TERMS_PINS,
+    FIRST_SIGHT_CHANNEL_PINS,
+    MAX_REVOKED_VERSION,
+    NONCE_REUSE_MODES,
+    PAYMENT_RECORD_VERSION,
+    POLICY_VIEWS,
+} from "./policy.constants";
+import { ChannelPinError, DebitIntentError, HoldInvoiceError, refusePolicyRequest } from "./policy.error";
 import type {
     BalanceRuleContext,
     ChannelPins,
     ChannelPolicyRecord,
+    ChannelTermsPin,
     DebitIntentRecord,
+    FirstSightChannelPin,
     HoldInvoicePolicyRecord,
+    NonceReuseMode,
+    PolicyChannelTerms,
+    PolicyEngineOptions,
     PolicySignRequest,
     PolicyVerdict,
     PolicyView,
     PolicyViewSnapshot,
     PolicyViewTlc,
+    RevocationEvidence,
+    RevokedCommitmentSignature,
     SignOperation,
-    SignSlotRef,
+    SignSlotClaim,
+    StatedChannelPins,
 } from "./policy.types";
 import type { SignerStore } from "./signer-store";
 import { assertSignSession, boundPaymentHashOf, buildSessionCommitment, isTlcOfPaymentRecord, resolveSignSlot, signSlotKey } from "./utils";
@@ -41,21 +62,28 @@ import { assertSignSession, boundPaymentHashOf, buildSessionCommitment, isTlcOfP
 export class PolicyEngine {
     private readonly store: SignerStore;
 
+    private readonly nonceReuse: NonceReuseMode;
+
     /**
      * Creates the gate over a store.
      * @param store Typed persistence the checks read and claim slots in.
+     * @param options The nonce reuse mode.
      */
-    constructor(store: SignerStore) {
+    constructor(store: SignerStore, options: PolicyEngineOptions = {}) {
+        if (!isPlainObject(options)) throw new TypeError("options must be an object");
+        const nonceReuse = options.nonceReuse ?? "refuse";
+        assertOneOf("options.nonceReuse", nonceReuse, NONCE_REUSE_MODES);
         this.store = store;
+        this.nonceReuse = nonceReuse;
     }
 
     /**
      * Registers a channel whose keys this device holds, creating the record every later check reads.
-     * @param channelId Channel identifier the node uses on the wire, which the open handshake may still change.
-     * @param channelIndex Index the channel seed derives from, the one piece recovery cannot re-seed from the node.
-     * @param fundedShannons What the user paid into the channel, reserve included, in decimal shannons.
-     * @param localCloseScript The script the device's side of a close pays to, the one the open passed as shutdown script.
-     * @returns The stored record, the existing one when the channel was already registered.
+     * @param channelId Channel id, which the open handshake may still change.
+     * @param channelIndex Index the channel seed derives from.
+     * @param fundedShannons What the user paid in, reserve included.
+     * @param localCloseScript The open's shutdown script.
+     * @returns The stored record, the existing one on a repeat.
      */
     async registerChannel(
         channelId: string,
@@ -77,7 +105,9 @@ export class PolicyEngine {
                     channelId,
                     lastSignedCommitmentNumbers: {},
                     signedSessions: {},
-                    lastStateVersion: 0,
+                    nonceReuse: {},
+                    commitmentHashes: {},
+                    revocations: [],
                     pins,
                     views: { remote: openingSnapshot(fundedShannons), local: openingSnapshot(fundedShannons) },
                 };
@@ -97,29 +127,90 @@ export class PolicyEngine {
     }
 
     /**
-     * Pins the funding cell the host signs, throwing a {@link FundingCellError} when the channel pinned another.
+     * Pins the funding cell the host signs, throwing a {@link ChannelPinError} when the channel pinned another.
      * @param channelId Channel identifier, any name the channel was registered under.
      * @param fundingOutPoint The funding output.
      * @param capacityShannons That output's capacity, in decimal shannons.
      */
     async pinFundingCell(channelId: string, fundingOutPoint: OutPoint, capacityShannons: string): Promise<void> {
         assertOutPoint("fundingOutPoint", fundingOutPoint);
-        assertDecimalShannons("capacityShannons", capacityShannons);
-        if (BigInt(capacityShannons) > UINT64_MAX) {
-            throw new RangeError(`capacityShannons must be at most ${UINT64_MAX}, the most a CKB cell's capacity holds`);
-        }
-        const channelIndex = await this.store.resolveChannelIndex(channelId);
-        if (channelIndex === null) throw new TypeError(`channel ${channelId} is not registered on this device`);
-        const stated = fundingCellPins(fundingOutPoint, capacityShannons);
+        assertUint64Shannons("capacityShannons", capacityShannons);
+        await this.pinHostValues(channelId, fundingCellPins(fundingOutPoint, capacityShannons), FIRST_SIGHT_CHANNEL_PINS);
+    }
+
+    /**
+     * Pins the terms no signing request states, throwing a {@link ChannelPinError} when the channel pinned others.
+     * @param channelId Channel identifier, any name the channel was registered under.
+     * @param terms The terms, from the node's opening context.
+     */
+    async pinChannelTerms(channelId: string, terms: PolicyChannelTerms): Promise<void> {
+        if (!isPlainObject(terms)) throw new TypeError("terms must be an object");
+        assertUnsignedBigInt("terms.commitmentFeeRate", terms.commitmentFeeRate, UINT64_MAX);
+        assertUint64Shannons("terms.remoteReservedCkbShannons", terms.remoteReservedCkbShannons);
+        // Liquid capacity sits in the funding cell, so a cell's u64 bounds it.
+        assertUint64Shannons("terms.liquidCapacityShannons", terms.liquidCapacityShannons);
+        await this.pinHostValues(channelId, channelTermsPins(terms), CHANNEL_TERMS_PINS);
+    }
+
+    /**
+     * Records the complete revocation signature of a superseded peer commitment, once the caller has verified it.
+     * @param channelId Channel identifier, any name the channel was registered under.
+     * @param evidence The revoked version and the aggregated signature.
+     */
+    async recordRevocation(channelId: string, evidence: RevokedCommitmentSignature): Promise<void> {
+        if (!isPlainObject(evidence)) throw new TypeError("evidence must be an object");
+        assertUnsignedInteger("evidence.version", evidence.version, MAX_REVOKED_VERSION);
+        assertBytes("evidence.signature", evidence.signature, SCHNORR_SIGNATURE_LENGTH);
+        const { version } = evidence;
+        const entry: RevocationEvidence = { version, forRemote: true, signature: bytesToHex(evidence.signature) };
+        const channelIndex = await this.requireRegisteredIndex(channelId);
+        // Outside the balance lane: no claim reads the evidence, so the record's own lane is enough.
+        await this.store.updateChannelRecord(channelIndex, (current) => {
+            if (current === null) throw missingRecord(channelId, channelIndex);
+            const slot = signSlotKey({ context: "REVOKE", commitmentNumber: version + 1 });
+            if (current.signedSessions[slot] === undefined) {
+                throw new TypeError(`channel ${channelId} never signed the revocation of version ${version}, at slot ${slot}`);
+            }
+            // Rewritten on every delivery of the signature, so a crash between signing and recording heals itself.
+            const recorded = current.revocations.find((revocation) => revocation.version === version);
+            if (recorded?.signature === entry.signature) return current;
+            const others = current.revocations.filter((revocation) => revocation !== recorded);
+            return { ...current, revocations: [...others, entry].sort((a, b) => a.version - b.version) };
+        });
+    }
+
+    /**
+     * Pins values the host states, in the balance lane, refusing one the channel pinned otherwise.
+     * @param channelId Channel identifier, any name the channel was registered under.
+     * @param stated The values, in the pins' forms.
+     * @param fields The fields the host may pin with them.
+     */
+    private async pinHostValues(
+        channelId: string,
+        stated: StatedChannelPins,
+        fields: readonly (FirstSightChannelPin | ChannelTermsPin)[],
+    ): Promise<void> {
+        const channelIndex = await this.requireRegisteredIndex(channelId);
         await this.store.withBalanceLock(async () => {
             await this.store.updateChannelRecord(channelIndex, (current) => {
                 if (current === null) throw missingRecord(channelId, channelIndex);
                 const conflict = findChannelPinConflict(current.pins, stated);
-                if (conflict !== null) throw new FundingCellError(channelId, conflict);
-                const pins = withChannelPins(current.pins, stated);
+                if (conflict !== null) throw new ChannelPinError(channelId, conflict);
+                const pins = withChannelPins(current.pins, stated, fields);
                 return pins === current.pins ? current : { ...current, pins };
             });
         });
+    }
+
+    /**
+     * Resolves a name the host gives to the channel index it was registered under.
+     * @param channelId Channel identifier, any name the channel was registered under.
+     * @returns The index; throws a host error for an unregistered name.
+     */
+    private async requireRegisteredIndex(channelId: string): Promise<number> {
+        const channelIndex = await this.store.resolveChannelIndex(channelId);
+        if (channelIndex === null) throw new TypeError(`channel ${channelId} is not registered on this device`);
+        return channelIndex;
     }
 
     /**
@@ -135,7 +226,19 @@ export class PolicyEngine {
     }
 
     /**
-     * Records the budget the user approved for a payment, the only thing that lets an offered TLC under its hash be signed.
+     * Reads the values a channel is pinned to.
+     * @param channelId Channel identifier the alias is keyed by.
+     * @returns A copy of the pins.
+     */
+    async readChannelPins(channelId: string): Promise<ChannelPins> {
+        const channelIndex = await this.requireChannelIndex(channelId);
+        const record = await this.store.getChannelRecord(channelIndex);
+        if (record === null) throw missingRecord(channelId, channelIndex);
+        return { ...record.pins, localReservedCkbShannons: { ...record.pins.localReservedCkbShannons } };
+    }
+
+    /**
+     * Records the budget the user approved for a payment, which an offered TLC under its hash needs.
      * @param paymentHashHex The payment hash, 32 bytes of lowercase hex.
      * @param maxShannons Highest amount the payment may take, fee budget included, in decimal shannons.
      */
@@ -152,7 +255,6 @@ export class PolicyEngine {
             if (current !== null) {
                 assertSameHash(current, paymentHashHex);
                 if (current.open) {
-                    // Idempotent repeat.
                     if (current.maxShannons === maxShannons) return;
                     throw new DebitIntentError("intent_open", `a debit intent for ${paymentHashHex} is already open with another maximum`);
                 }
@@ -267,17 +369,16 @@ export class PolicyEngine {
 
     /**
      * Runs the six checks and claims the request's slot for its session, so the engine may sign it exactly once.
-     * @param keys The channel's four secrets, which the digest recomputation needs.
+     * @param keys The channel's four secrets.
      * @param request The signing request as the node sent it.
-     * @returns The claimed slot, and whether this exact session had already been served.
+     * @returns The claimed slot and its status.
      */
     async checkAndClaim(keys: FiberChannelKeys, request: PolicySignRequest): Promise<PolicyVerdict> {
-        const { channelId, session, operation, stateVersion, nonceCommitmentNumber } = request;
-        const slot = refusing("malformed", () => {
+        const { channelId, session, operation, slot } = request;
+        const claimed = refusing("malformed", () => {
             assertNonEmptyString("channelId", channelId);
-            assertUnsignedInteger("stateVersion", stateVersion, Number.MAX_SAFE_INTEGER);
             assertSignSession(keys, session);
-            return resolveSignSlot(operation, nonceCommitmentNumber);
+            return resolveSignSlot(operation, slot);
         });
         const channelIndex = await this.requireChannelIndex(channelId);
 
@@ -289,9 +390,10 @@ export class PolicyEngine {
         const claim: Claim = {
             channelId,
             channelIndex,
-            slot,
+            slot: claimed,
             sessionCommitment: buildSessionCommitment(session),
-            stateVersion,
+            message: bytesToHex(session.message),
+            nonceReuse: this.nonceReuse,
             operation,
             tlcs: operation.kind === "commitment_tx" ? toPolicyViewTlcs(operation.input.tlcs, operation.input.lockLayout) : [],
         };
@@ -300,8 +402,8 @@ export class PolicyEngine {
             const current = await this.store.getChannelRecord(channelIndex);
             if (current === null) throw missingRecord(channelId, channelIndex);
             const context = await this.loadBalanceContext(claim, current);
-            // Decided before writing, so a refusal leaves the payment records untouched.
-            if (decideClaim(claim, current, context).verdict.status === "fresh") {
+            // Decided before writing, so a refusal leaves the payment records untouched; a repeat writes nothing at all.
+            if (decideClaim(claim, current, context).record !== current) {
                 await this.fileChannel(claim, context);
             }
             return this.claim(claim, context);
@@ -315,7 +417,7 @@ export class PolicyEngine {
      * @returns The verdict.
      */
     private async claim(claim: Claim, context: BalanceRuleContext): Promise<PolicyVerdict> {
-        let verdict: PolicyVerdict = { ...claim.slot, status: "fresh" };
+        let verdict: PolicyVerdict = { context: claim.slot.context, commitmentNumber: claim.slot.commitmentNumber, status: "fresh" };
         await this.store.updateChannelRecord(claim.channelIndex, (current) => {
             if (current === null) throw missingRecord(claim.channelId, claim.channelIndex);
             const decision = decideClaim(claim, current, context);
@@ -327,7 +429,7 @@ export class PolicyEngine {
 
     /**
      * Loads what the balance rule reads for a commitment beyond the channel's record.
-     * @param claim The checked request, whose channel is left out of the other channels.
+     * @param claim The checked request.
      * @param record The channel's record.
      * @returns The intents and invoices under every hash involved, and both views of every other channel they list.
      */
@@ -436,8 +538,8 @@ function recomputeDigest(keys: FiberChannelKeys, operation: SignOperation): Uint
     switch (operation.kind) {
         case "commitment_tx":
             return computeCommitmentTxDigest(keys, operation.input);
-        case "shutdown_tx":
-            return computeShutdownTxDigest(keys, operation.input);
+        case "closing_tx":
+            return computeClosingTxDigest(keys, operation.input);
         case "revocation":
             return computeRevocationDigest(keys, operation.input);
         case "channel_announcement":
@@ -445,24 +547,21 @@ function recomputeDigest(keys: FiberChannelKeys, operation: SignOperation): Uint
     }
 }
 
-/**
- * A request whose shape, channel and digest have been checked.
- */
 type Claim = {
     channelId: string;
     channelIndex: number;
-    slot: SignSlotRef;
+    slot: SignSlotClaim;
     sessionCommitment: string;
-    stateVersion: number;
+    // Lowercase hex.
+    message: string;
+    nonceReuse: NonceReuseMode;
     operation: SignOperation;
-    /**
-     * Empty for any operation but a commitment.
-     */
+    // Empty for any operation but a commitment.
     tlcs: PolicyViewTlc[];
 };
 
 /**
- * Runs sign-once, monotonicity, the pins and bounds, and the balance rule over a record, without writing anything.
+ * Runs every check of a claim on the record, writing nothing.
  * @param claim The checked request.
  * @param current The channel's record.
  * @param context What the balance rule reads beyond the record, empty for an operation that reads nothing.
@@ -473,40 +572,112 @@ function decideClaim(
     current: ChannelPolicyRecord,
     context: BalanceRuleContext,
 ): { verdict: PolicyVerdict; record: ChannelPolicyRecord } {
-    const { slot, sessionCommitment, stateVersion } = claim;
+    const { slot, sessionCommitment, operation } = claim;
     const slotKey = signSlotKey(slot);
+    const ref = { context: slot.context, commitmentNumber: slot.commitmentNumber };
     const served = current.signedSessions[slotKey];
+    const reused = current.nonceReuse[slotKey];
+    // Both repeats leave here, before the counters and views they would trip, whatever the mode.
+    if (served === sessionCommitment) return { verdict: { ...ref, status: "already-signed" }, record: current };
+    if (reused?.sessionCommitment === sessionCommitment) return { verdict: { ...ref, status: "reused" }, record: current };
+
     if (served !== undefined) {
-        if (served !== sessionCommitment) {
+        // Three sessions under one deterministic nonce are three equations that solve for the funding key.
+        if (reused !== undefined) {
+            refusePolicyRequest("policy_refusal", `slot ${slotKey} has already served two signing sessions, the most one nonce can`);
+        }
+        if (claim.nonceReuse === "refuse") {
             refusePolicyRequest("policy_refusal", `slot ${slotKey} has already served a different signing session`);
         }
-        return { verdict: { ...slot, status: "already-signed" }, record: current };
+    }
+    const lastSigned = current.lastSignedCommitmentNumbers[slot.lane];
+    if (lastSigned !== undefined) {
+        // A fresh slot must be above its lane's last; a reused one may be that last, never below it.
+        const fresh = served === undefined;
+        if (fresh ? slot.commitmentNumber <= lastSigned : slot.commitmentNumber < lastSigned) {
+            refusePolicyRequest(
+                "stale_state",
+                `commitment number ${slot.commitmentNumber} is ${fresh ? "not above" : "below"} the last ${slot.lane} signed, ${lastSigned}`,
+            );
+        }
     }
 
-    const lastSigned = current.lastSignedCommitmentNumbers[slot.context];
-    if (lastSigned !== undefined && slot.commitmentNumber <= lastSigned) {
-        refusePolicyRequest(
-            "stale_state",
-            `commitment number ${slot.commitmentNumber} is not above the last ${slot.context} signed, ${lastSigned}`,
-        );
+    assertReplacementSigned(current, operation, slot.commitmentNumber);
+    const commitmentHashes = nextCommitmentHashes(current, operation, claim.message);
+    const pins = pinClaim(current.pins, operation);
+    const views = applyBalanceRule(current, claim, context);
+    if (served !== undefined) {
+        // A reused slot moves no lane: its number was claimed by the session it served first.
+        return {
+            verdict: { ...ref, status: "reused" },
+            record: {
+                ...current,
+                nonceReuse: { ...current.nonceReuse, [slotKey]: { sessionCommitment, message: claim.message } },
+                commitmentHashes,
+                pins,
+                views,
+            },
+        };
     }
-    if (stateVersion < current.lastStateVersion) {
-        refusePolicyRequest("stale_state", `state version ${stateVersion} is below the last seen, ${current.lastStateVersion}`);
-    }
-
-    const pins = pinClaim(current.pins, claim.operation);
-
     return {
-        verdict: { ...slot, status: "fresh" },
+        verdict: { ...ref, status: "fresh" },
         record: {
             ...current,
-            lastSignedCommitmentNumbers: { ...current.lastSignedCommitmentNumbers, [slot.context]: slot.commitmentNumber },
+            lastSignedCommitmentNumbers: { ...current.lastSignedCommitmentNumbers, [slot.lane]: slot.commitmentNumber },
             signedSessions: { ...current.signedSessions, [slotKey]: sessionCommitment },
-            lastStateVersion: stateVersion,
+            commitmentHashes,
             pins,
-            views: applyBalanceRule(current, claim, context),
+            views,
         },
     };
+}
+
+/**
+ * Holds a commitment's version above its view's last one, and records it with the hash of the tx signed.
+ * @param current The channel's record.
+ * @param operation The operation, whose digest already matched.
+ * @param message The digest, lowercase hex: a commitment's `compute_tx_message`.
+ * @returns The commitment hashes once the operation is signed, the ones given for any other operation.
+ */
+function nextCommitmentHashes(
+    current: ChannelPolicyRecord,
+    operation: SignOperation,
+    message: string,
+): ChannelPolicyRecord["commitmentHashes"] {
+    if (operation.kind !== "commitment_tx") return current.commitmentHashes;
+    const { commitmentNumber, forRemote } = operation.input;
+    const view = viewOf(forRemote);
+    const last = current.commitmentHashes[view];
+    if (last !== undefined && commitmentNumber <= last.commitmentNumber) {
+        refusePolicyRequest(
+            "stale_state",
+            `the ${view} commitment's version ${commitmentNumber} is not above the last one signed in its view, ${last.commitmentNumber}`,
+        );
+    }
+    return { ...current.commitmentHashes, [view]: { commitmentNumber, txHash: message } };
+}
+
+/**
+ * Holds a revocation to its replacement, the last commitment signed in the revoked one's view, at the slot's number.
+ * @param current The channel's record.
+ * @param operation The operation, whose digest already matched.
+ * @param slotNumber The revoked version plus one, the replacement's version.
+ */
+function assertReplacementSigned(current: ChannelPolicyRecord, operation: SignOperation, slotNumber: number): void {
+    if (operation.kind !== "revocation") return;
+    // Fiber's device SDK refuses the same way (`fiber-lsp-sdk/src/commitment.rs:671-689`).
+    const view = viewOf(operation.input.forRemote);
+    const replacement = current.commitmentHashes[view];
+    if (replacement?.commitmentNumber !== slotNumber) {
+        const last =
+            replacement === undefined
+                ? `no ${view} commitment has been signed`
+                : `the last one signed is version ${replacement.commitmentNumber}`;
+        refusePolicyRequest(
+            "stale_state",
+            `the revocation at slot ${slotNumber} must follow its replacement, the ${view} commitment at version ${slotNumber}, and ${last}`,
+        );
+    }
 }
 
 /**
@@ -524,14 +695,19 @@ function pinClaim(pins: ChannelPins, operation: SignOperation): ChannelPins {
             `the request states ${conflict.field} ${conflict.stated}, but the channel pinned ${conflict.pinned}`,
         );
     }
+    // The node's first statement of a term is no evidence of it: only the host pins one.
+    const unpinned = CHANNEL_TERMS_PINS.find((field) => stated[field] !== undefined && pins[field] === undefined);
+    if (unpinned !== undefined) {
+        refusePolicyRequest("policy_refusal", `the request states ${unpinned}, which the host has not pinned for the channel yet`);
+    }
     judgeCapacityBounds(operation);
-    return withChannelPins(pins, stated);
+    return withChannelPins(pins, stated, FIRST_SIGHT_CHANNEL_PINS);
 }
 
 /**
  * Applies the balance rule to the operations that move funds.
  * @param record The channel's record before the operation.
- * @param claim The checked request, carrying the operation and the TLCs it lists.
+ * @param claim The checked request.
  * @param context What the rule reads beyond the record.
  * @returns The snapshots once the operation is signed.
  */
@@ -544,12 +720,14 @@ function applyBalanceRule(record: ChannelPolicyRecord, claim: Claim, context: Ba
             const view = viewOf(input.forRemote);
             // What the witness pays the device, reserve included.
             const next = { exposureShannons: input.settlementLocalShannons + input.localReservedCkbShannons, tlcs: claim.tlcs };
-            // A close claims the same slot: after one, the views alone judge.
-            if (record.lastSignedCommitmentNumbers.COMMITMENT === undefined) judgeOpeningCommitment(record.pins.fundedShannons, next);
+            // A close claims the same lane: after one, the views alone judge.
+            if (record.lastSignedCommitmentNumbers["COMMITMENT:local"] === undefined) {
+                judgeOpeningCommitment(record.pins.fundedShannons, next);
+            }
             return { ...views, [view]: judgeCommitment(view, views, next, context) };
         }
-        case "shutdown_tx":
-            judgeShutdown(views, operation.input.toLocalShannons + operation.input.localReservedCkbShannons);
+        case "closing_tx":
+            judgeClosingTx(views, operation.input.localCapacityShannons);
             return views;
         case "revocation":
         case "channel_announcement":
@@ -598,6 +776,16 @@ function withChannel<T extends { channelIndexes: number[] }>(current: T | null, 
     if (current === null) throw vanishedPaymentRecord();
     if (current.channelIndexes.includes(channelIndex)) return current;
     return { ...current, channelIndexes: [...current.channelIndexes, channelIndex] };
+}
+
+/**
+ * Asserts that a host-stated amount is decimal shannons a CKB cell's capacity can hold.
+ * @param name Name of the value, used in the error message.
+ * @param value Value to check.
+ */
+function assertUint64Shannons(name: string, value: string): void {
+    assertDecimalShannons(name, value);
+    if (BigInt(value) > UINT64_MAX) throw new RangeError(`${name} must be at most ${UINT64_MAX}, the most a CKB cell's capacity holds`);
 }
 
 /**

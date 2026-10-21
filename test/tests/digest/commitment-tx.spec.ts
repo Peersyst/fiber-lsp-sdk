@@ -1,7 +1,13 @@
 import { bytesToHex, hexToBytes } from "@noble/hashes/utils.js";
 import { deriveChannelSeed } from "../../../src/derivation/device-scheme";
 import { deriveChannelKeys, pubkeyOf } from "../../../src/derivation/fiber-scheme";
-import { buildCommitmentLockArgs, computeCommitmentTxDigest, readCommitmentLockLayout } from "../../../src/digest/commitment-tx";
+import {
+    buildCommitmentLockArgs,
+    computeCommitmentTxDigest,
+    readCommitmentLockDelay,
+    readCommitmentLockLayout,
+    readCommitmentLockVersion,
+} from "../../../src/digest/commitment-tx";
 import { blake160 } from "../../../src/common/utils/ckb-hash.utils";
 import { COMMITMENT_LOCK_LAYOUTS, COMMITMENT_LOCK_TESTNET } from "../../../src/digest/digest.constants";
 import type { CommitmentTxInput, SettlementTlc } from "../../../src/digest/digest.types";
@@ -19,8 +25,8 @@ const TLC: SettlementTlc = {
     amountShannons: 1_000_000_000n,
     paymentHash: new Uint8Array(32).fill(0xa1),
     expiryMs: 1_723_257_890_123n,
-    createdAtRemoteCommitmentNumber: 2,
-    remoteCommitmentPoint: pubkeyOf(new Uint8Array(32).fill(0x55)),
+    localKeyCommitmentNumber: 2,
+    remoteTlcPubkey: pubkeyOf(new Uint8Array(32).fill(0x55)),
 };
 
 // The same TLC with its payment hash changed from byte 20 on: what a legacy record leaves out and a full one binds.
@@ -36,8 +42,7 @@ const BASE_INPUT: CommitmentTxInput = {
     commitmentFeeRate: 1000n,
     cellDepsCount: 2,
     udtTypeScript: null,
-    toLocalShannons: 62_000_000_000n,
-    toRemoteShannons: 18_500_000_000n,
+    liquidCapacityShannons: 80_500_000_000n,
     settlementLocalShannons: 62_000_000_000n,
     settlementRemoteShannons: 18_500_000_000n,
     localReservedCkbShannons: 4_200_000_000n,
@@ -51,8 +56,7 @@ const UDT_INPUT: CommitmentTxInput = {
     ...BASE_INPUT,
     cellDepsCount: 3,
     udtTypeScript: { codeHash: hexToBytes("aa".repeat(32)), hashType: "type", args: hexToBytes("bb".repeat(32)) },
-    toLocalShannons: 500_000_000_000_000_000_000n,
-    toRemoteShannons: 300_000_000_000_000_000_000n,
+    liquidCapacityShannons: 800_000_000_000_000_000_000n,
     settlementLocalShannons: 500_000_000_000_000_000_000n,
     settlementRemoteShannons: 300_000_000_000_000_000_000n,
 };
@@ -141,6 +145,91 @@ describe("readCommitmentLockLayout", () => {
     });
 });
 
+// The 36 bytes a commitment lock's args and a revocation's share: key hash, delay since, big-endian version.
+function lockArgsOf(length: number, delaySince: bigint, version: bigint): Uint8Array {
+    const args = new Uint8Array(length).fill(0xab);
+    const view = new DataView(args.buffer);
+    view.setBigUint64(20, delaySince, true);
+    view.setBigUint64(28, version, false);
+    return args;
+}
+
+describe("readCommitmentLockDelay", () => {
+    it.each(COMMITMENT_LOCK_LAYOUTS)("reads back the delay the %s args were built with", (layout) => {
+        expect(readCommitmentLockDelay(buildCommitmentLockArgs(XONLY, DELAY, VERSION, WITNESS, layout))).toBe(DELAY);
+    });
+
+    it.each([36, 57, 58])("reads the delay out of %i bytes, its relative epoch flags stripped", (length) => {
+        expect(readCommitmentLockDelay(lockArgsOf(length, 0xa0ffffffffffffffn, 0n))).toBe((1n << 56n) - 1n);
+        expect(readCommitmentLockDelay(lockArgsOf(length, 0xa000000000000000n, 0n))).toBe(0n);
+    });
+
+    it.each([0x00, 0x20, 0x80, 0xa1, 0xe0, 0xff])("refuses a since whose flags byte is %i, no relative epoch delay", (flags) => {
+        const since = (BigInt(flags) << 56n) | 1n;
+        expect(() => readCommitmentLockDelay(lockArgsOf(57, since, 0n))).toThrow(
+            new TypeError(`commitment lock args must carry a relative epoch delay, got the since 0x${since.toString(16)}`),
+        );
+    });
+
+    it.each([0, 35, 37, 56, 59])("refuses %i bytes", (length) => {
+        expect(() => readCommitmentLockDelay(new Uint8Array(length))).toThrow(
+            new TypeError(`commitment lock args must be 36, 57 or 58 bytes, got ${length}`),
+        );
+    });
+
+    it("refuses what is not bytes", () => {
+        expect(() => readCommitmentLockDelay(undefined as never)).toThrow(new TypeError("commitment lock args must be a Uint8Array"));
+        expect(() => readCommitmentLockDelay(Array.from(new Uint8Array(57)) as never)).toThrow(
+            new TypeError("commitment lock args must be a Uint8Array"),
+        );
+    });
+
+    it("reads at the args' own offset when they are a view into a larger buffer", () => {
+        const buffer = new Uint8Array(64);
+        buffer.set(lockArgsOf(57, 0xa000000000000007n, 9n), 7);
+        expect(readCommitmentLockDelay(buffer.subarray(7, 64))).toBe(7n);
+    });
+});
+
+describe("readCommitmentLockVersion", () => {
+    it.each(COMMITMENT_LOCK_LAYOUTS)("reads back the version the %s args were built with", (layout) => {
+        expect(readCommitmentLockVersion(buildCommitmentLockArgs(XONLY, DELAY, 11, WITNESS, layout))).toBe(11);
+        expect(readCommitmentLockVersion(buildCommitmentLockArgs(XONLY, DELAY, VERSION, WITNESS, layout))).toBe(VERSION);
+    });
+
+    it.each([36, 57, 58])("reads the big-endian version out of %i bytes", (length) => {
+        expect(readCommitmentLockVersion(lockArgsOf(length, 0xa000000000000000n, 0x0102n))).toBe(0x0102);
+        expect(readCommitmentLockVersion(lockArgsOf(length, 0xa000000000000000n, 0n))).toBe(0);
+    });
+
+    it("reads up to the highest commitment number and refuses the next", () => {
+        expect(readCommitmentLockVersion(lockArgsOf(36, 0n, 2n ** 48n - 1n))).toBe(2 ** 48 - 1);
+        expect(() => readCommitmentLockVersion(lockArgsOf(36, 0n, 2n ** 48n))).toThrow(
+            new RangeError("commitment lock args must carry a version of at most 281474976710655, got 281474976710656"),
+        );
+        expect(() => readCommitmentLockVersion(lockArgsOf(36, 0n, (1n << 64n) - 1n))).toThrow(RangeError);
+    });
+
+    it.each([0, 35, 37, 56, 59])("refuses %i bytes", (length) => {
+        expect(() => readCommitmentLockVersion(new Uint8Array(length))).toThrow(
+            new TypeError(`commitment lock args must be 36, 57 or 58 bytes, got ${length}`),
+        );
+    });
+
+    it("refuses what is not bytes", () => {
+        expect(() => readCommitmentLockVersion(null as never)).toThrow(new TypeError("commitment lock args must be a Uint8Array"));
+        expect(() => readCommitmentLockVersion("ab".repeat(36) as never)).toThrow(
+            new TypeError("commitment lock args must be a Uint8Array"),
+        );
+    });
+
+    it("reads at the args' own offset when they are a view into a larger buffer", () => {
+        const buffer = new Uint8Array(64);
+        buffer.set(lockArgsOf(36, 0n, 9n), 5);
+        expect(readCommitmentLockVersion(buffer.subarray(5, 41))).toBe(9);
+    });
+});
+
 describe("computeCommitmentTxDigest", () => {
     it("returns a deterministic 32-byte digest", () => {
         expect(computeCommitmentTxDigest(channelKeys, BASE_INPUT)).toHaveLength(32);
@@ -157,8 +246,7 @@ describe("computeCommitmentTxDigest", () => {
         ["commitmentDelayEpoch", { commitmentDelayEpoch: (2n << 40n) | 1n }],
         ["commitmentFeeRate", { commitmentFeeRate: 2000n }],
         ["cellDepsCount", { cellDepsCount: 3 }],
-        ["toLocalShannons", { toLocalShannons: 62_000_000_001n }],
-        ["toRemoteShannons", { toRemoteShannons: 18_500_000_001n }],
+        ["liquidCapacityShannons", { liquidCapacityShannons: 80_500_000_001n }],
         ["settlementLocalShannons", { settlementLocalShannons: 61_999_999_999n }],
         ["settlementRemoteShannons", { settlementRemoteShannons: 18_499_999_999n }],
         ["localReservedCkbShannons", { localReservedCkbShannons: 4_200_000_001n }],
@@ -200,11 +288,18 @@ describe("computeCommitmentTxDigest", () => {
         expect(() => digestOf({ commitmentDelayEpoch: 1n << 56n })).toThrow(RangeError);
         expect(() => digestOf({ commitmentFeeRate: -1n })).toThrow(RangeError);
         expect(() => digestOf({ cellDepsCount: 256 })).toThrow(RangeError);
-        expect(() => digestOf({ toLocalShannons: -1n })).toThrow(RangeError);
-        expect(() => digestOf({ toRemoteShannons: 1n << 128n })).toThrow(RangeError);
+        expect(() => digestOf({ liquidCapacityShannons: undefined })).toThrow(RangeError);
+        expect(() => digestOf({ liquidCapacityShannons: -1n })).toThrow(RangeError);
+        expect(() => digestOf({ liquidCapacityShannons: 1n << 128n })).toThrow(RangeError);
         expect(() => digestOf({ settlementLocalShannons: -1n })).toThrow(RangeError);
         expect(() => digestOf({ localReservedCkbShannons: 1n << 64n })).toThrow(RangeError);
-        expect(() => digestOf({ fundingOutPoint: { txHash: new Uint8Array(31), index: 0 } })).toThrow(TypeError);
+        expect(() => digestOf({ fundingOutPoint: undefined })).toThrow(new TypeError("fundingOutPoint must be an object"));
+        expect(() => digestOf({ fundingOutPoint: { txHash: new Uint8Array(31), index: 0 } })).toThrow(
+            new TypeError("fundingOutPoint.txHash must be 32 bytes, got 31"),
+        );
+        expect(() => digestOf({ fundingOutPoint: { txHash: new Uint8Array(32), index: 2 ** 32 } })).toThrow(
+            new RangeError("fundingOutPoint.index must be an integer between 0 and 4294967295, got 4294967296"),
+        );
         expect(() => digestOf({ lockLayout: undefined })).toThrow(new TypeError("lockLayout must be one of legacy, fullPaymentHash"));
         expect(() => digestOf({ lockLayout: null as never })).toThrow(new TypeError("lockLayout must be one of legacy, fullPaymentHash"));
         expect(() => digestOf({ lockLayout: "full_payment_hash" as never })).toThrow(

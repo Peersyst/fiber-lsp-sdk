@@ -1,5 +1,5 @@
-import type { ITimer } from "../session";
-import { TimerSlot } from "../session";
+import type { ITimer } from "../common";
+import { TimerSlot } from "../common";
 import { SdkError } from "./sdk.error";
 import type { SdkEvent } from "./sdk.types";
 import { describeSdkFailure } from "./utils";
@@ -47,7 +47,7 @@ export class ActivityPoller {
 
     /**
      * Creates a poller; nothing runs until `start()`.
-     * @param options The timer, the interval between ticks, a step's deadline, the steps of a tick and where a failure is reported.
+     * @param options The timer, the interval, a step's deadline, the steps and the emitter.
      */
     constructor(options: ActivityPollerOptions) {
         this.timer = options.timer;
@@ -59,7 +59,7 @@ export class ActivityPoller {
     }
 
     /**
-     * Ticks now and then once per interval, measured from the end of each tick; a poller already running is left as it is.
+     * Ticks now, then once per interval measured from each tick's end; a no-op while running.
      */
     start(): void {
         if (this.running) return;
@@ -68,7 +68,7 @@ export class ActivityPoller {
     }
 
     /**
-     * Stops ticking: the step in flight is abandoned and its tick ends at once, runs no further step and arms nothing.
+     * Stops ticking: the step in flight is abandoned and its tick ends at once.
      */
     stop(): void {
         this.running = false;
@@ -130,7 +130,7 @@ export class ActivityPoller {
     /**
      * Runs one step against its deadline, so a call that never settles cannot hold the loop forever.
      * @param step The step.
-     * @returns Settles with the step, at once on a stop(), or rejects once the deadline passes first.
+     * @returns Settles with the step or on a stop(), or rejects at the deadline.
      */
     private runStep(step: PollStep): Promise<void> {
         const run = { abandoned: false };

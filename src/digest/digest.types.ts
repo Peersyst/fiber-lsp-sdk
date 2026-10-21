@@ -4,67 +4,62 @@ import type { COMMITMENT_LOCK_LAYOUTS } from "./digest.constants";
 export type CommitmentLockLayout = (typeof COMMITMENT_LOCK_LAYOUTS)[number];
 
 /**
- * One TLC of the settlement witness, as the node attaches it: selection and status filtering happen node-side, the
- * device only binds the signature to the set it was shown.
+ * Selection and status filtering happen node-side: the signature only binds to the set the device was shown.
  */
 export type SettlementTlc = {
     /**
-     * Fiber's numeric TLC id, the witness sort key.
+     * The witness sort key.
      */
     id: number;
     /**
-     * Direction from the device's side of the channel, before any `forRemote` flip.
+     * From the device's side, before any `forRemote` flip.
      */
     direction: TlcDirection;
     hashAlgorithm: TlcHashAlgorithm;
     amountShannons: bigint;
     paymentHash: Uint8Array;
     /**
-     * Absolute expiry in milliseconds; the witness truncates it to whole seconds.
+     * The witness truncates it to whole seconds.
      */
     expiryMs: bigint;
     /**
-     * The remote commitment number at the TLC's creation, the index of the device's per-TLC key.
+     * Fiber's `local_key_commitment_number`.
      */
-    createdAtRemoteCommitmentNumber: number;
+    localKeyCommitmentNumber: number;
     /**
-     * The peer's commitment point at the TLC's creation (its local number); peer state the device cannot derive.
+     * Derived node-side from the peer's commitment point; hashed as it comes.
      */
-    remoteCommitmentPoint: Uint8Array;
+    remoteTlcPubkey: Uint8Array;
 };
 
-/**
- * Everything a commitment tx digest is a function of, besides the channel keys.
- */
 export type CommitmentTxInput = {
     /**
-     * Fiber's direction parameter: `true` builds the tx the device signs into its outgoing `commitment_signed`.
+     * `true` builds the tx the device signs into its outgoing `commitment_signed`.
      */
     forRemote: boolean;
     fundingOutPoint: OutPoint;
     remoteFundingPubkey: Uint8Array;
     remoteTlcBasePubkey: Uint8Array;
     /**
-     * The version in the lock args: the local commitment number when `forRemote`, the remote one otherwise.
+     * The lock args version: the local commitment number when `forRemote`, the remote one otherwise.
      */
     commitmentNumber: number;
     /**
-     * The negotiated `EpochNumberWithFraction` full value of the commitment delay.
+     * The full `EpochNumberWithFraction` value.
      */
     commitmentDelayEpoch: bigint;
     commitmentFeeRate: bigint;
     /**
-     * Cell deps of the funding lock plus the UDT's, mocked into fee sizing even though the digest blanks them.
+     * Mocked into fee sizing even though the digest blanks the cell deps.
      */
     cellDepsCount: number;
     udtTypeScript: Script | null;
     /**
-     * Raw channel balances; they size the output capacity (and the UDT liquid data), not the settlement witness.
+     * `to_local + to_remote`: fiber only reads the sum.
      */
-    toLocalShannons: bigint;
-    toRemoteShannons: bigint;
+    liquidCapacityShannons: bigint;
     /**
-     * TLC-adjusted balances of the settlement witness, before the reserved CKB each side adds on non-UDT channels.
+     * TLC-adjusted, before the reserved CKB each side adds on non-UDT channels.
      */
     settlementLocalShannons: bigint;
     settlementRemoteShannons: bigint;
@@ -73,21 +68,18 @@ export type CommitmentTxInput = {
     tlcs: SettlementTlc[];
     commitmentLock: ScriptTemplate;
     /**
-     * Read from the args the node attaches; it shapes the lock args, each TLC record of the witness and the fee mock.
+     * Shapes the lock args, each TLC record of the witness and the fee mock.
      */
     lockLayout: CommitmentLockLayout;
 };
 
-/**
- * Everything a cooperative-close (shutdown) tx digest is a function of, besides the channel keys.
- */
 export type ShutdownTxInput = {
     fundingOutPoint: OutPoint;
     remoteFundingPubkey: Uint8Array;
     localCloseScript: Script;
     remoteCloseScript: Script;
     /**
-     * Each side pays its own fee from its own advertised rate, over the same mock size.
+     * Each side pays its own fee at its own rate, over the same mock size.
      */
     localFeeRate: bigint;
     remoteFeeRate: bigint;
@@ -100,20 +92,31 @@ export type ShutdownTxInput = {
 };
 
 /**
- * Everything a revocation digest is a function of, besides the channel keys. Not a transaction: the message is a hash
- * over one synthetic output plus the revoked commitment cell's lock args.
+ * The tx carries neither fee rate, so the device rebuilds it from the outputs it judges. CKB channels only.
+ */
+export type ClosingTxInput = {
+    fundingOutPoint: OutPoint;
+    remoteFundingPubkey: Uint8Array;
+    localCloseScript: Script;
+    remoteCloseScript: Script;
+    localCapacityShannons: bigint;
+    remoteCapacityShannons: bigint;
+};
+
+/**
+ * Not a transaction: a hash over one synthetic output plus the revoked commitment cell's lock args.
  */
 export type RevocationInput = {
     /**
-     * Fiber's direction parameter: `false` on the sending side of a `revoke_and_ack`, `true` on the receiving side.
+     * `false` on the sending side of a `revoke_and_ack`, `true` on the receiving side.
      */
     forRemote: boolean;
     /**
-     * The number in the signed args: the current commitment number of the revoked side minus one, as fiber computes it.
+     * The revoked side's current commitment number minus one, as fiber computes it.
      */
     revokedCommitmentNumber: number;
     /**
-     * The close script the swept funds go to: the counterparty's when sending, the device's own when receiving.
+     * The counterparty's close script when sending, the device's own when receiving.
      */
     payoutScript: Script;
     remoteFundingPubkey: Uint8Array;
@@ -121,34 +124,80 @@ export type RevocationInput = {
     commitmentFeeRate: bigint;
     cellDepsCount: number;
     udtTypeScript: Script | null;
-    toLocalShannons: bigint;
-    toRemoteShannons: bigint;
+    /**
+     * `to_local + to_remote`: fiber only reads the sum.
+     */
+    liquidCapacityShannons: bigint;
     localReservedCkbShannons: bigint;
     remoteReservedCkbShannons: bigint;
     /**
-     * The commitment fee is sized over a mock carrying this lock, so the revocation digest depends on it too.
+     * The commitment fee is sized over a mock carrying this lock, so the digest depends on it.
      */
     commitmentLock: ScriptTemplate;
     /**
-     * The revoked cell's 36-byte args carry no feature byte, but the fee is sized over the commitment mock, which does.
+     * The revoked args carry no feature byte, but the commitment mock the fee is sized over does.
      */
     lockLayout: CommitmentLockLayout;
 };
 
-/**
- * Everything a channel announcement digest is a function of, besides the channel keys.
- */
 export type ChannelAnnouncementInput = {
     chainHash: Uint8Array;
     fundingOutPoint: OutPoint;
     /**
-     * The two node identity pubkeys, in either order: the announcement sorts them lexicographically.
+     * In either order: the announcement sorts them.
      */
     nodeIds: [Uint8Array, Uint8Array];
     remoteFundingPubkey: Uint8Array;
     /**
-     * The channel's liquid capacity, `to_local + to_remote`.
+     * The liquid capacity, `to_local + to_remote`.
      */
     capacityShannons: bigint;
     udtTypeScript: Script | null;
+};
+
+export type SigningSettlementTlc = {
+    tlcId: number;
+    /**
+     * From fiber's `inbound`, which is relative to the device in both views.
+     */
+    direction: TlcDirection;
+    hashAlgorithm: TlcHashAlgorithm;
+    amountShannons: bigint;
+    paymentHash: Uint8Array;
+    expiryMs: bigint;
+    localKeyCommitmentNumber: number;
+    /**
+     * The node's claim; refused unless the device derives the same key.
+     */
+    localKeyPubkey: Uint8Array;
+    remoteTlcPubkey: Uint8Array;
+};
+
+/**
+ * Fiber's snapshot behind a commitment request, trusted only once the commitment rebuilt from it hashes to the node's tx.
+ */
+export type SigningSettlement = {
+    /**
+     * TLC-adjusted, each side's reserve already added.
+     */
+    localAmountShannons: bigint;
+    remoteAmountShannons: bigint;
+    localSettlementPubkey: Uint8Array;
+    remoteSettlementPubkey: Uint8Array;
+    forRemote: boolean;
+    tlcs: SigningSettlementTlc[];
+};
+
+export type CommitmentSettlementTerms = {
+    fundingOutPoint: OutPoint;
+    remoteFundingPubkey: Uint8Array;
+    commitmentDelayEpoch: bigint;
+    commitmentFeeRate: bigint;
+    cellDepsCount: number;
+    udtTypeScript: Script | null;
+    liquidCapacityShannons: bigint;
+    localReservedCkbShannons: bigint;
+    remoteReservedCkbShannons: bigint;
+    commitmentLock: ScriptTemplate;
+    lockLayout: CommitmentLockLayout;
 };

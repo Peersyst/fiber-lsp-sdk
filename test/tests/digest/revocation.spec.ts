@@ -6,6 +6,9 @@ import type { Script } from "../../../src/common";
 import type { RevocationInput } from "../../../src/digest/digest.types";
 import { calculateCommitmentTxFee } from "../../../src/digest/fee";
 import { computeRevocationDigest } from "../../../src/digest/revocation";
+import { computeRevocationContentMessage } from "../../../src/digest/tx-message";
+import { aggregateXOnlyPubkey } from "../../../src/digest/utils/digest.utils";
+import { blake160 } from "../../../src/common/utils/ckb-hash.utils";
 
 const MASTER_SEED = new Uint8Array(32).fill(0x24);
 const channelKeys = deriveChannelKeys(deriveChannelSeed(MASTER_SEED, 0));
@@ -23,8 +26,7 @@ const BASE_INPUT: RevocationInput = {
     commitmentFeeRate: 1000n,
     cellDepsCount: 2,
     udtTypeScript: null,
-    toLocalShannons: 62_000_000_000n,
-    toRemoteShannons: 18_500_000_000n,
+    liquidCapacityShannons: 80_500_000_000n,
     localReservedCkbShannons: 4_200_000_000n,
     remoteReservedCkbShannons: 6_300_000_000n,
     commitmentLock: COMMITMENT_LOCK_TESTNET,
@@ -43,7 +45,16 @@ describe("computeRevocationDigest", () => {
         expect(digestOf({})).toBe(baseDigest);
     });
 
-    // The revocation aggregation is role-ordered, so flipping the direction must move the x-only key in the args.
+    // The content fiber hands over for the send side: the payout output, its empty molecule data, and the revoked args.
+    it("is the message of the revocation content fiber builds for it", () => {
+        const args = new Uint8Array(36);
+        args.set(blake160(aggregateXOnlyPubkey([remoteFundingPubkey, pubkeyOf(channelKeys.fundingKey)])), 0);
+        args.set(hexToBytes("01000000000100a0"), 20);
+        args.set(hexToBytes("0000000000000004"), 28);
+        const output = { capacityShannons: 80_500_000_000n + 10_500_000_000n - 456n, lock: PAYOUT_SCRIPT, type: null };
+        expect(digestOf({})).toBe(bytesToHex(computeRevocationContentMessage(output, hexToBytes("00000000"), args)));
+    });
+
     it("commits to the direction through the role-ordered key aggregation", () => {
         expect(digestOf({ forRemote: true })).not.toBe(baseDigest);
     });
@@ -55,8 +66,7 @@ describe("computeRevocationDigest", () => {
         ["commitmentDelayEpoch", { commitmentDelayEpoch: (2n << 40n) | 1n }],
         ["commitmentFeeRate", { commitmentFeeRate: 2000n }],
         ["cellDepsCount", { cellDepsCount: 3 }],
-        ["toLocalShannons", { toLocalShannons: 62_000_000_001n }],
-        ["toRemoteShannons", { toRemoteShannons: 18_500_000_001n }],
+        ["liquidCapacityShannons", { liquidCapacityShannons: 80_500_000_001n }],
         ["localReservedCkbShannons", { localReservedCkbShannons: 4_200_000_001n }],
         ["remoteReservedCkbShannons", { remoteReservedCkbShannons: 6_300_000_001n }],
         ["udtTypeScript", { udtTypeScript: { codeHash: hexToBytes("aa".repeat(32)), hashType: "type", args: new Uint8Array(0) } }],
@@ -90,7 +100,9 @@ describe("computeRevocationDigest", () => {
         expect(() => digestOf({ revokedCommitmentNumber: 2 ** 48 })).toThrow(RangeError);
         expect(() => digestOf({ commitmentDelayEpoch: 1n << 56n })).toThrow(RangeError);
         expect(() => digestOf({ commitmentFeeRate: -1n })).toThrow(RangeError);
-        expect(() => digestOf({ toLocalShannons: 1n << 128n })).toThrow(RangeError);
+        expect(() => digestOf({ liquidCapacityShannons: undefined })).toThrow(RangeError);
+        expect(() => digestOf({ liquidCapacityShannons: -1n })).toThrow(RangeError);
+        expect(() => digestOf({ liquidCapacityShannons: 1n << 128n })).toThrow(RangeError);
         expect(() => digestOf({ localReservedCkbShannons: -1n })).toThrow(RangeError);
         expect(() => digestOf({ payoutScript: { ...PAYOUT_SCRIPT, codeHash: new Uint8Array(31) } })).toThrow(TypeError);
         expect(() => digestOf({ lockLayout: undefined })).toThrow(new TypeError("lockLayout must be one of legacy, fullPaymentHash"));

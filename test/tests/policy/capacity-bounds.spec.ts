@@ -1,15 +1,15 @@
 import { PolicyRefusalError } from "../../../src/policy";
 import { judgeCapacityBounds } from "../../../src/policy/capacity-bounds";
-import { toChannelAnnouncementInput, toCommitmentTxInput, toRevocationInput, toShutdownTxInput } from "../../utils/digest-inputs";
+import { toChannelAnnouncementInput, toClosingTxInput, toCommitmentTxInput, toRevocationInput } from "../../utils/digest-inputs";
 import { caseOf, loadInteropVectors } from "../../utils/interop-vectors";
 
 const digest = loadInteropVectors().digest;
 
-// Its mock commitment tx is 456 bytes, and its mock close 540.
+// Its mock commitment tx is 456 bytes.
 const COMMITMENT = toCommitmentTxInput(caseOf(digest.commitment_cases, "ckb, no tlcs, for remote"), digest.remote);
 const THREE_TLCS = toCommitmentTxInput(caseOf(digest.commitment_cases, "ckb, three tlcs, for remote"), digest.remote);
 const REVOCATION = toRevocationInput(caseOf(digest.revocation_cases, "ckb, send side"), digest.remote);
-const SHUTDOWN = toShutdownTxInput(caseOf(digest.shutdown_cases, "ckb"), digest.remote);
+const CLOSE = toClosingTxInput(caseOf(digest.shutdown_cases, "ckb"), digest.remote);
 // The same commitment and revocation under the full-hash layout: the feature byte makes the mock 457 bytes.
 const FULL_HASH_COMMITMENT = toCommitmentTxInput(
     caseOf(digest.commitment_cases, "ckb, no tlcs, for remote, full payment hash"),
@@ -32,7 +32,7 @@ describe("judgeCapacityBounds", () => {
         ["a commitment", { kind: "commitment_tx" as const, input: COMMITMENT }],
         ["a commitment with TLCs", { kind: "commitment_tx" as const, input: THREE_TLCS }],
         ["a revocation", { kind: "revocation" as const, input: REVOCATION }],
-        ["a close", { kind: "shutdown_tx" as const, input: SHUTDOWN }],
+        ["a close", { kind: "closing_tx" as const, input: CLOSE }],
         [
             "an announcement",
             {
@@ -86,24 +86,15 @@ describe("judgeCapacityBounds", () => {
         });
     });
 
-    describe("the close fee", () => {
-        it("passes a local fee of exactly the reserve's margin, and refuses one shannon more", () => {
-            expect(() => judgeCapacityBounds({ kind: "shutdown_tx", input: { ...SHUTDOWN, localFeeRate: 185_185_187n } })).not.toThrow();
-            const refusal = refusalOf(() =>
-                judgeCapacityBounds({ kind: "shutdown_tx", input: { ...SHUTDOWN, localFeeRate: 185_185_188n } }),
-            );
-            expect(refusal.message).toBe("the close takes a local fee of 100000001 shannons, above the 100000000 the reserve keeps for it");
-        });
-
-        it("leaves the peer's fee to the peer", () => {
-            expect(() => judgeCapacityBounds({ kind: "shutdown_tx", input: { ...SHUTDOWN, remoteFeeRate: 10n ** 12n } })).not.toThrow();
-        });
+    // The tx states no fee rate; the balance rule bounds the close's fee on what it pays the device.
+    it("bounds nothing on a close, whatever its outputs pay", () => {
+        expect(() => judgeCapacityBounds({ kind: "closing_tx", input: { ...CLOSE, localCapacityShannons: 0n } })).not.toThrow();
     });
 
     describe("what a commitment pays out", () => {
         it("passes a settlement and TLCs that sum to exactly the liquid capacity", () => {
             expect(THREE_TLCS.settlementLocalShannons + THREE_TLCS.settlementRemoteShannons + 4_500_000_000n).toBe(
-                THREE_TLCS.toLocalShannons + THREE_TLCS.toRemoteShannons,
+                THREE_TLCS.liquidCapacityShannons,
             );
             expect(() => judgeCapacityBounds({ kind: "commitment_tx", input: THREE_TLCS })).not.toThrow();
         });
@@ -128,8 +119,8 @@ describe("judgeCapacityBounds", () => {
             expect(() => judgeCapacityBounds({ kind: "commitment_tx", input })).not.toThrow();
         });
 
-        it("refuses raw balances that hold less than the settlement pays", () => {
-            const input = { ...COMMITMENT, toLocalShannons: 0n, toRemoteShannons: 0n };
+        it("refuses a liquid capacity that holds less than the settlement pays", () => {
+            const input = { ...COMMITMENT, liquidCapacityShannons: 0n };
             expect(refusalOf(() => judgeCapacityBounds({ kind: "commitment_tx", input })).message).toBe(
                 "the commitment's settlement pays 80500000000 shannons with its TLCs, above the channel's liquid capacity of 0",
             );

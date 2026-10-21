@@ -1,6 +1,6 @@
 import type { ActivityPollerOptions, PollRun, PollStep, SdkEvent } from "../../../src/sdk";
 import { ActivityPoller, SdkError } from "../../../src/sdk";
-import { TimerMock } from "../../mocks/session";
+import { TimerMock } from "../../mocks/common";
 import { flush } from "../../utils/flush";
 
 const INTERVAL_MS = 7_000;

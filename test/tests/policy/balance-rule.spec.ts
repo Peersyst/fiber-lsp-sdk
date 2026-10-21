@@ -2,7 +2,7 @@ import { hexToBytes } from "@noble/hashes/utils.js";
 import type { TlcHashAlgorithm } from "../../../src/common";
 import type { BalanceRuleContext, PolicyView, PolicyViewSnapshot, PolicyViewTlc } from "../../../src/policy";
 import { PolicyRefusalError } from "../../../src/policy";
-import { judgeCommitment, judgeOpeningCommitment, judgeShutdown, toPolicyViewTlcs } from "../../../src/policy/balance-rule";
+import { judgeClosingTx, judgeCommitment, judgeOpeningCommitment, toPolicyViewTlcs } from "../../../src/policy/balance-rule";
 
 const HASH_A = "aa".repeat(20);
 const HASH_B = "bb".repeat(20);
@@ -43,8 +43,8 @@ describe("toPolicyViewTlcs", () => {
         amountShannons: 1500n,
         paymentHash: hexToBytes(FULL_HASH_A),
         expiryMs: 1723257890123n,
-        createdAtRemoteCommitmentNumber: 3,
-        remoteCommitmentPoint: new Uint8Array(33),
+        localKeyCommitmentNumber: 3,
+        remoteTlcPubkey: new Uint8Array(33),
     };
 
     it("keeps what a legacy witness binds: the direction, 20 bytes of the hash, the amount and the expiry in seconds", () => {
@@ -82,8 +82,8 @@ describe("toPolicyViewTlcs", () => {
             amountShannons: 10n,
             paymentHash: hexToBytes(HASH_R + "01".repeat(12)),
             expiryMs: 5000n,
-            createdAtRemoteCommitmentNumber: 1,
-            remoteCommitmentPoint: new Uint8Array(33),
+            localKeyCommitmentNumber: 1,
+            remoteTlcPubkey: new Uint8Array(33),
         },
         {
             id: 2,
@@ -92,8 +92,8 @@ describe("toPolicyViewTlcs", () => {
             amountShannons: 10n,
             paymentHash: hexToBytes(HASH_R + "02".repeat(12)),
             expiryMs: 5999n,
-            createdAtRemoteCommitmentNumber: 2,
-            remoteCommitmentPoint: new Uint8Array(33).fill(2),
+            localKeyCommitmentNumber: 2,
+            remoteTlcPubkey: new Uint8Array(33).fill(2),
         },
     ];
 
@@ -120,8 +120,8 @@ describe("toPolicyViewTlcs", () => {
                     amountShannons: 10n,
                     paymentHash: hexToBytes(FULL_HASH_R),
                     expiryMs: 5000n,
-                    createdAtRemoteCommitmentNumber: 1,
-                    remoteCommitmentPoint: new Uint8Array(33),
+                    localKeyCommitmentNumber: 1,
+                    remoteTlcPubkey: new Uint8Array(33),
                 },
                 {
                     id: 2,
@@ -130,8 +130,8 @@ describe("toPolicyViewTlcs", () => {
                     amountShannons: 10n,
                     paymentHash: hexToBytes(FULL_HASH_R),
                     expiryMs: 5000n,
-                    createdAtRemoteCommitmentNumber: 1,
-                    remoteCommitmentPoint: new Uint8Array(33),
+                    localKeyCommitmentNumber: 1,
+                    remoteTlcPubkey: new Uint8Array(33),
                 },
             ],
             "legacy",
@@ -151,8 +151,8 @@ describe("toPolicyViewTlcs", () => {
                     amountShannons: 10n,
                     paymentHash: hexToBytes(FULL_HASH_R),
                     expiryMs: 5000n,
-                    createdAtRemoteCommitmentNumber: 1,
-                    remoteCommitmentPoint: new Uint8Array(33),
+                    localKeyCommitmentNumber: 1,
+                    remoteTlcPubkey: new Uint8Array(33),
                 },
                 {
                     id: 2,
@@ -161,8 +161,8 @@ describe("toPolicyViewTlcs", () => {
                     amountShannons: 20n,
                     paymentHash: hexToBytes(FULL_HASH_A),
                     expiryMs: 6000n,
-                    createdAtRemoteCommitmentNumber: 1,
-                    remoteCommitmentPoint: new Uint8Array(33),
+                    localKeyCommitmentNumber: 1,
+                    remoteTlcPubkey: new Uint8Array(33),
                 },
             ],
             "legacy",
@@ -1944,7 +1944,7 @@ describe("judgeOpeningCommitment", () => {
     });
 });
 
-describe("judgeShutdown", () => {
+describe("judgeClosingTx", () => {
     const settled = (exposureShannons: string): PolicyViewSnapshot => ({
         exposureShannons,
         tlcs: [],
@@ -1953,16 +1953,31 @@ describe("judgeShutdown", () => {
     });
 
     it("signs a close that pays the device what both views last showed", () => {
-        expect(() => judgeShutdown({ remote: settled("1000"), local: settled("990") }, 1000n)).not.toThrow();
+        expect(() => judgeClosingTx({ remote: settled("1000"), local: settled("990") }, 1000n)).not.toThrow();
+    });
+
+    // The tx states no fee rate, so the 1 CKB the reserve keeps for the fee is read off the payout.
+    it.each([
+        ["remote", { remote: settled("1100001000"), local: settled("990") }],
+        ["local", { remote: settled("990"), local: settled("1100001000") }],
+    ])("signs a close paying the 1 CKB fee below what the %s view showed", (_, views) => {
+        expect(() => judgeClosingTx(views, 1000001000n)).not.toThrow();
     });
 
     it.each([
-        ["remote", { remote: settled("1001"), local: settled("990") }],
-        ["local", { remote: settled("990"), local: settled("1001") }],
-    ])("refuses a close below what the %s view showed", (view, views) => {
-        const refusal = refusalOf(() => judgeShutdown(views, 1000n));
+        ["remote", { remote: settled("1100001001"), local: settled("990") }],
+        ["local", { remote: settled("990"), local: settled("1100001001") }],
+    ])("refuses a close one shannon further below what the %s view showed", (view, views) => {
+        const refusal = refusalOf(() => judgeClosingTx(views, 1000001000n));
         expect(refusal.code).toBe("policy_refusal");
-        expect(refusal.message).toBe(`the close pays the device 1000 shannons, below the 1001 of the ${view} commitment`);
+        expect(refusal.message).toBe(
+            `the close pays the device 1000001000 shannons, below the 1100001001 of the ${view} commitment by more than the 100000000 its fee may take`,
+        );
+    });
+
+    it("signs a close of nothing when no view showed more than the fee", () => {
+        expect(() => judgeClosingTx({ remote: settled("100000000"), local: settled("0") }, 0n)).not.toThrow();
+        expect(refusalOf(() => judgeClosingTx({ remote: settled("100000001"), local: settled("0") }, 0n)).code).toBe("policy_refusal");
     });
 
     it("judges the two views alone when the record carries an unknown key beside them", () => {
@@ -1970,7 +1985,7 @@ describe("judgeShutdown", () => {
             PolicyView,
             PolicyViewSnapshot
         >;
-        expect(() => judgeShutdown(views, 1000n)).not.toThrow();
+        expect(() => judgeClosingTx(views, 1000n)).not.toThrow();
     });
 
     it.each(["remote", "local"] as const)("refuses a close while the %s view still lists a TLC", (view) => {
@@ -1988,7 +2003,7 @@ describe("judgeShutdown", () => {
                 },
             ],
         };
-        expect(refusalOf(() => judgeShutdown(views, 1000n)).message).toBe(
+        expect(refusalOf(() => judgeClosingTx(views, 1000n)).message).toBe(
             `a cooperative close while the ${view} commitment still lists TLCs`,
         );
     });

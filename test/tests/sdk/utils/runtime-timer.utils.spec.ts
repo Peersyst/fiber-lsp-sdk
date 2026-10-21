@@ -1,4 +1,4 @@
-import type { ITimer } from "../../../../src/session";
+import type { ITimer } from "../../../../src/common";
 import { runtimeTimer } from "../../../../src/sdk";
 import { withRuntime } from "../../../utils/with-runtime";
 

@@ -4,9 +4,12 @@ import type { SdkNetworkConfig, SdkNetworkName } from "./sdk.types";
 
 export const SDK_NETWORK_NAMES = ["mainnet", "testnet"] as const;
 
+// The cell deps of fiber's funding lock on both presets: the lock's code cell and the auth library's.
+const FUNDING_LOCK_CELL_DEPS_COUNT = 2;
+
 export const SDK_NETWORK_PRESETS = {
-    mainnet: { commitmentLock: COMMITMENT_LOCK_MAINNET, invoiceCurrency: "Fibb" },
-    testnet: { commitmentLock: COMMITMENT_LOCK_TESTNET, invoiceCurrency: "Fibt" },
+    mainnet: { commitmentLock: COMMITMENT_LOCK_MAINNET, invoiceCurrency: "Fibb", fundingLockCellDepsCount: FUNDING_LOCK_CELL_DEPS_COUNT },
+    testnet: { commitmentLock: COMMITMENT_LOCK_TESTNET, invoiceCurrency: "Fibt", fundingLockCellDepsCount: FUNDING_LOCK_CELL_DEPS_COUNT },
 } as const satisfies Record<SdkNetworkName, SdkNetworkConfig>;
 
 /**
@@ -15,7 +18,7 @@ export const SDK_NETWORK_PRESETS = {
 export const DEFAULT_POLL_INTERVAL_MS = 5_000;
 
 /**
- * The default `fetch` has no timeout, so a request that hangs would hold every later tick; far above a node's answer.
+ * The default `fetch` has no timeout, so a hung request would hold every later tick.
  */
 export const POLL_STEP_TIMEOUT_MS = 30_000;
 
@@ -35,7 +38,6 @@ export const ACTIVITY_RECORD_VERSION = 1;
 export const ACTIVITY_KINDS = ["channel", "payment", "invoice"] as const;
 
 export const SDK_EVENT_TYPES = [
-    "SESSION",
     "CHANNEL_READY",
     "CHANNEL_CLOSED",
     "PAYMENT_SENT",
@@ -45,4 +47,4 @@ export const SDK_EVENT_TYPES = [
     "ERROR",
 ] as const;
 
-export const SDK_ERROR_CODES = ["connect_failed", "session_error", "poll_failed", "clock_before_floor"] as const;
+export const SDK_ERROR_CODES = ["poll_failed", "clock_before_floor"] as const;

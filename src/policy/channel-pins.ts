@@ -2,8 +2,15 @@ import { bytesToHex } from "@noble/hashes/utils.js";
 import type { OutPoint, Script } from "../common";
 import { moleculeScript } from "../common";
 import { COMMITMENT_LOCK_LAYOUTS } from "../digest";
-import { FIRST_SIGHT_CHANNEL_PINS } from "./policy.constants";
-import type { ChannelPinConflict, ChannelPins, SignOperation, StatedChannelPins } from "./policy.types";
+import type {
+    ChannelPinConflict,
+    ChannelPins,
+    ChannelTermsPin,
+    FirstSightChannelPin,
+    PolicyChannelTerms,
+    SignOperation,
+    StatedChannelPins,
+} from "./policy.types";
 
 // The device's reserve is a value per layout; every other pin is one string.
 type PlainChannelPin = Exclude<keyof StatedChannelPins, "localReservedCkbShannons">;
@@ -16,6 +23,19 @@ type PlainChannelPin = Exclude<keyof StatedChannelPins, "localReservedCkbShannon
  */
 export function fundingCellPins(fundingOutPoint: OutPoint, capacityShannons: string): StatedChannelPins {
     return { fundingOutPoint: outPointPin(fundingOutPoint), fundingCapacityShannons: capacityShannons };
+}
+
+/**
+ * Builds the pins of the channel's terms as the host reads them from the node's opening context.
+ * @param terms The terms.
+ * @returns The pins.
+ */
+export function channelTermsPins(terms: PolicyChannelTerms): StatedChannelPins {
+    return {
+        liquidCapacityShannons: terms.liquidCapacityShannons,
+        commitmentFeeRate: terms.commitmentFeeRate.toString(),
+        remoteReservedCkbShannons: terms.remoteReservedCkbShannons,
+    };
 }
 
 /**
@@ -39,11 +59,11 @@ export function statedChannelPins(operation: SignOperation): StatedChannelPins {
                 commitmentFeeRate: input.commitmentFeeRate.toString(),
             };
         }
-        case "shutdown_tx": {
+        case "closing_tx": {
             const { input } = operation;
+            // Its outputs are what is left after both fees, so it states neither capacity nor reserve.
             return {
-                udtTypeScript: scriptOptPin(input.udtTypeScript),
-                ...fundingCapacityPins(input),
+                udtTypeScript: null,
                 fundingOutPoint: outPointPin(input.fundingOutPoint),
                 remoteFundingPubkey: bytesToHex(input.remoteFundingPubkey),
                 localCloseScript: scriptPin(input.localCloseScript),
@@ -90,14 +110,18 @@ export function findChannelPinConflict(pins: ChannelPins, stated: StatedChannelP
 }
 
 /**
- * Pins every stated value not pinned yet; the caller has found no conflict first.
+ * Pins every stated value of the given fields not pinned yet; the caller has found no conflict first.
  * @param pins The channel's pins.
  * @param stated What a request or the host states.
+ * @param fields The fields the statement may pin: the first-sight ones for a message, the terms for the host.
  * @returns The pins with the new values, the ones given when nothing is new.
  */
-export function withChannelPins(pins: ChannelPins, stated: StatedChannelPins): ChannelPins {
-    // The other pins are fixed at registration.
-    const fresh = FIRST_SIGHT_CHANNEL_PINS.filter((field) => pins[field] === undefined && stated[field] !== undefined);
+export function withChannelPins(
+    pins: ChannelPins,
+    stated: StatedChannelPins,
+    fields: readonly (FirstSightChannelPin | ChannelTermsPin)[],
+): ChannelPins {
+    const fresh = fields.filter((field) => pins[field] === undefined && stated[field] !== undefined);
     if (fresh.length === 0) return pins;
     const next = { ...pins };
     for (const field of fresh) next[field] = stated[field];
@@ -117,25 +141,17 @@ function plainConflict(pins: ChannelPins, field: PlainChannelPin, stated: string
 }
 
 /**
- * Contrasts a stated reserve with the one computed under the declared layout, else the pinned one, else under either.
+ * Contrasts a stated reserve with the one computed under the layout stated beside it.
  * @param pins The channel's pins.
- * @param declared The layout the statement declares, if it declares one.
+ * @param declared The layout stated beside the reserve.
  * @param stated The reserve stated.
- * @returns The conflict, naming the value computed under that layout, or `null` when the statement matches it.
+ * @returns The conflict, or `null` when the statement matches.
  */
 function reserveConflict(pins: ChannelPins, declared: string | undefined, stated: string | null): ChannelPinConflict | null {
-    const reserves = pins.localReservedCkbShannons;
-    const known = declared ?? pins.lockLayout;
-    const layout = COMMITMENT_LOCK_LAYOUTS.find((candidate) => candidate === known);
-    if (layout !== undefined) {
-        return reserves[layout] === stated ? null : { field: "localReservedCkbShannons", pinned: reserves[layout], stated };
-    }
-    if (COMMITMENT_LOCK_LAYOUTS.some((candidate) => reserves[candidate] === stated)) return null;
-    return {
-        field: "localReservedCkbShannons",
-        pinned: COMMITMENT_LOCK_LAYOUTS.map((candidate) => `${reserves[candidate]} under ${candidate}`).join(" or "),
-        stated,
-    };
+    const layout = COMMITMENT_LOCK_LAYOUTS.find((candidate) => candidate === declared);
+    if (layout === undefined) throw new TypeError("a reserve is stated without the lock layout that sizes it");
+    const pinned = pins.localReservedCkbShannons[layout];
+    return pinned === stated ? null : { field: "localReservedCkbShannons", pinned, stated };
 }
 
 /**
@@ -151,18 +167,17 @@ function statedEntries(stated: StatedChannelPins): [keyof StatedChannelPins, str
 }
 
 /**
- * Reads the capacity values a transaction over the funding cell states.
- * @param input Its asset, balances and reserves.
+ * Reads the capacity values a commitment or a revocation states.
+ * @param input Its asset, liquid capacity and reserves.
  * @returns The liquid capacity, the funding cell's capacity and both reserves.
  */
 function fundingCapacityPins(input: {
     udtTypeScript: Script | null;
-    toLocalShannons: bigint;
-    toRemoteShannons: bigint;
+    liquidCapacityShannons: bigint;
     localReservedCkbShannons: bigint;
     remoteReservedCkbShannons: bigint;
 }): StatedChannelPins {
-    const liquid = input.toLocalShannons + input.toRemoteShannons;
+    const liquid = input.liquidCapacityShannons;
     const reserved = input.localReservedCkbShannons + input.remoteReservedCkbShannons;
     return {
         liquidCapacityShannons: liquid.toString(),

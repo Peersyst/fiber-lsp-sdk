@@ -7,7 +7,7 @@ export class PolicyRefusalError extends Error {
     /**
      * Creates a refusal.
      * @param code Wire error code the node is answered with.
-     * @param message Reason, safe to log: refusal messages never carry key material.
+     * @param message Reason, safe to log: never key material.
      */
     constructor(code: SignerErrorCode, message: string) {
         super(message);
@@ -25,14 +25,11 @@ export function refusePolicyRequest(code: SignerErrorCode, message: string): nev
     throw new PolicyRefusalError(code, message);
 }
 
-/**
- * A debit intent the recorded state refuses: the user's doing, not a bug.
- */
 export class DebitIntentError extends Error {
     readonly code: DebitIntentErrorCode;
 
     /**
-     * Creates the error.
+     * Creates the error, the user's doing rather than a bug.
      * @param code What in the recorded state refused the intent.
      * @param message Reason, safe to log.
      */
@@ -43,14 +40,11 @@ export class DebitIntentError extends Error {
     }
 }
 
-/**
- * A hold invoice step the recorded state does not allow yet: the host retries later.
- */
 export class HoldInvoiceError extends Error {
     readonly code: HoldInvoiceErrorCode;
 
     /**
-     * Creates the error.
+     * Creates the error, for a step the host retries later.
      * @param code What in the recorded state holds the step back.
      * @param message Reason, safe to log.
      */
@@ -61,7 +55,7 @@ export class HoldInvoiceError extends Error {
     }
 }
 
-export class FundingCellError extends Error {
+export class ChannelPinError extends Error {
     readonly conflict: ChannelPinConflict;
 
     /**
@@ -71,7 +65,7 @@ export class FundingCellError extends Error {
      */
     constructor(channelId: string, conflict: ChannelPinConflict) {
         super(`channel ${channelId} already pins ${conflict.field} to ${conflict.pinned}, not ${conflict.stated}`);
-        this.name = "FundingCellError";
+        this.name = "ChannelPinError";
         this.conflict = conflict;
     }
 }

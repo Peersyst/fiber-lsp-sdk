@@ -9,16 +9,17 @@ the per-channel record ([persistence.md](./persistence.md)).
 
 Ahead of them, `PolicyEngine.checkAndClaim` validates the request's own **shape** and refuses it as `malformed`: two
 distinct 33-byte public keys on the curve, one of which is this channel's funding key, a 66-byte aggregated nonce whose two
-halves are points on the curve or at infinity, a 32-byte message, a known operation, and numbers in range. On the wire the
-lengths are checked once more, and earlier, by the protocol codecs ([protocol.md](./protocol.md)), which is where a field's
-spelling and encoding are judged; the engine repeats the part it depends on because it is callable without the wire. The
-points are not the codecs' to check but the gate's, before the claim: the musig2 engine would refuse them too, but with
-the slot already served and nothing ever signed in it. Everything in a request is node-supplied, so a bad field has to be
-a wire refusal rather than an exception escaping into the session, and the same mapping covers the digest builders, whose
-rejections of structurally impossible state (a fee no capacity covers, more than 255 TLCs, a public key off the curve)
-become `malformed` rather than a crash. Inside the engine it precedes the channel lookup. Through the signer dispatch the
-channel is resolved first, since the keys the gate takes derive from it, so a request for an unknown channel answers
-`unknown_channel` unless the codecs have already refused it ([signing.md](./signing.md)).
+halves are points on the curve or at infinity, a 32-byte message, a known operation, and a slot fiber could have named: a
+commitment number in range and the counter fiber reads that operation's slot from (below). On the wire the lengths are
+checked once more, and earlier, by the protocol codecs ([protocol.md](./protocol.md)), which is where a field's spelling and
+encoding are judged; the engine repeats the part it depends on because it is callable without the wire. The points are not
+the codecs' to check but the gate's, before the claim: the musig2 engine would refuse them too, but with the slot already
+served and nothing ever signed in it. Everything in a request is node-supplied, so a bad field has to be a wire refusal
+rather than an exception escaping into the caller, and the same mapping covers the digest builders, whose rejections of
+structurally impossible state (a fee no capacity covers, more than 255 TLCs, a public key off the curve) become `malformed`
+rather than a crash. Inside the engine it precedes the channel lookup. Through the signer dispatch the channel is resolved
+first, since the keys the gate takes derive from it, so a request for an unknown channel answers `unknown_channel` unless
+the codecs have already refused it ([signing.md](./signing.md)).
 
 The six then resolve the channel's name to its index and run as one step inside `SignerStore.updateChannelRecord`, so the
 record they read is the record they write and no concurrent request can interleave with the decision. Every claim also
@@ -26,14 +27,14 @@ runs inside the store's balance lane, one at a time across every channel: the ru
 nothing may move a record between the decision that files a channel on a payment record and the claim it was filed for
 (below).
 
-| #   | Check                | Refusal           | What it means                                                                                               |
-| --- | -------------------- | ----------------- | ----------------------------------------------------------------------------------------------------------- |
-| 1   | Known channel        | `unknown_channel` | The channel's name resolves to no channel index. Corrupt state throws instead, it never reads as absence    |
-| 2   | Digest recomputation | `malformed`       | The message must equal what the `digest` module rebuilds from the attached state: the no-blind-signing rule |
-| 3   | Sign-once            | `policy_refusal`  | The slot must be free, or already served for this exact session, which is answered `already-signed`         |
-| 4   | Monotonicity         | `stale_state`     | Commitment numbers strictly increase per context, `stateVersion` never decreases                            |
-| 5   | Pins and bounds      | `policy_refusal`  | The channel's constant values as first stated, and what a message takes from the funding cell beyond them   |
-| 6   | Balance rule         | `policy_refusal`  | Per commitment view and per payment hash: growth needs an open intent, a fall a TLC that took it            |
+| #   | Check                | Refusal           | What it means                                                                                                       |
+| --- | -------------------- | ----------------- | ------------------------------------------------------------------------------------------------------------------- |
+| 1   | Known channel        | `unknown_channel` | The channel's name resolves to no channel index. Corrupt state throws instead, it never reads as absence            |
+| 2   | Digest recomputation | `malformed`       | The message must equal what the `digest` module rebuilds from the attached state: the no-blind-signing rule         |
+| 3   | Sign-once            | `policy_refusal`  | The slot must be free, or already served for this exact session; under `allow`, one more session (below)            |
+| 4   | Lanes and versions   | `stale_state`     | A fresh slot above its lane's last, a commitment's version above its view's, a revocation after its replacement     |
+| 5   | Pins and bounds      | `policy_refusal`  | The channel's constant values, the terms the host pinned among them, and what a message takes from the funding cell |
+| 6   | Balance rule         | `policy_refusal`  | Per commitment view and per payment hash: growth needs an open intent, a fall a TLC that took it                    |
 
 ## One channel, one registry
 
@@ -60,34 +61,118 @@ winner's slots are unaffected by.
 ## The slot model
 
 A slot is claimed by the commitment number **the nonce is derived at**, which is not always the number inside the message.
-That is what the sign-once registry has to protect, since nonce reuse is what leaks the funding key.
+That is what the sign-once registry has to protect, since nonce reuse is what leaks the funding key. The request names the
+slot as fiber does, by its number and the counter fiber read the number from, and the counter has to be the one fiber uses
+for the operation; any other is `malformed`.
 
-| Operation                    | Slot                        | Number inside the message           |
-| ---------------------------- | --------------------------- | ----------------------------------- |
-| Commitment tx                | `COMMITMENT:<local number>` | `forRemote ? local : remote` number |
-| Cooperative close (shutdown) | `COMMITMENT:<local number>` | no commitment number                |
-| Revocation                   | `REVOKE:<remote number>`    | the remote number minus one         |
-| Channel announcement         | `ANNOUNCEMENT:0`            | no commitment number                |
+| Operation                      | Slot                        | Counter  | Lane               | Number inside the message                                          |
+| ------------------------------ | --------------------------- | -------- | ------------------ | ------------------------------------------------------------------ |
+| Commitment tx                  | `COMMITMENT:<local number>` | `local`  | `COMMITMENT:local` | the version: local number when for remote, remote number otherwise |
+| Cooperative close              | `COMMITMENT:<local number>` | `local`  | `COMMITMENT:local` | no commitment number                                               |
+| Revocation the device sends    | `REVOKE:<remote number>`    | `remote` | `REVOKE:remote`    | the remote number minus one                                        |
+| Revocation the device receives | `REVOKE:<local number>`     | `local`  | `REVOKE:local`     | the local number minus one                                         |
+| Channel announcement           | `ANNOUNCEMENT:0`            | none     | `ANNOUNCEMENT`     | no commitment number                                               |
 
-Three consequences, all of them fiber's behavior rather than our choice:
+A revocation's counter is the one the revoked commitment's version counts: the device's own commitment carries the peer's
+number, the peer's commitment the device's. Three consequences follow, all of them fiber's behavior rather than our choice:
 
-- **A commitment slot serves a commitment tx or a close, never both.** Fiber derives no closing nonce: a cooperative close
-  signs with the commitment slot of the current local number (`get_funding_sign_context`). The device therefore refuses
-  whichever of the two arrives second, and the `CLOSE` nonce context of the derivation scheme stays reserved and unused.
-- **The announcement slot is fixed and latched.** Its nonce never rotates, so a second distinct announcement session over
-  it would leak the funding key. The number a request carries is ignored, never trusted.
+- **A commitment slot serves a commitment tx or a close, never both** under the default mode. Fiber derives no closing
+  nonce: a cooperative close signs with the commitment slot of the current local number (`get_funding_sign_context`).
+- **The announcement slot is fixed and latched.** Its nonce never rotates, so a slot that followed the request would be a
+  second nonce space under one nonce; a request naming another number than 0 is `malformed`. The signer dispatch refuses
+  every announcement before it reaches the gate (a tenant channel is private), and the slot logic stays for the
+  construction the vectors pin.
 - **A revocation claims the slot of its nonce**, one above the number its message revokes. The off-by-one is fiber's.
+
+## Lanes
+
+Check 4 orders slots per **lane**, one per counter fiber reads a number from: `COMMITMENT:local` (commitments and closes),
+`REVOKE:remote`, `REVOKE:local` and `ANNOUNCEMENT`, kept in the record's `lastSignedCommitmentNumbers`. The two revocation
+lanes advance on different events, the remote number after a `SendRevokeAndAck` and the local one after a
+`CompleteReceivedRevokeAndAck`, so they drift apart in the normal course of a channel. One counter for both would read a
+fresh slot of the lane that lags as a rollback.
+
+A slot the registry has not served must be strictly above the last number of its own lane, whatever the other lanes signed;
+at or below it is `stale_state` (anti-rollback, the VLS pattern). A served slot goes to sign-once instead, which answers its
+exact repeat whatever the lane signed since and refuses anything else, but for the one more session `allow` serves, which
+may not sit below its lane's last (below). The sign-once key stays `<context>:<number>` and names no lane, because the nonce
+does not depend on the lane: both sides of one revocation round derive the same nonce at the same number, so the second of
+them meets a served slot, which is a second session (below).
+
+## Versions per view
+
+A commitment carries its own number, the **version** in its lock args, and check 4 holds it strictly above the last
+version signed in the same view. The two views carry different counters (the local number in the peer's commitment, the
+remote one in the device's own), so neither the slot nor the other view orders them. The record keeps, per view, the last
+commitment signed in it in `commitmentHashes`: its version, the view's floor, and the hash of its transaction, fiber's
+`compute_tx_message` (the raw transaction with its cell deps emptied). That hash is the digest the gate recomputed, which is
+the message of the transaction the node sent once the two match, so it costs nothing to keep. The transaction fiber
+broadcasts adds the funding lock's cell deps, so its on-chain hash is another one: whatever reads this hash compares it
+with the signed transaction rebuilt, not with a chain lookup.
+
+### A revocation follows its replacement
+
+A revocation gives up the commitment one below its slot, and check 4 signs it only while the commitment replacing it is
+the last one signed in the revoked one's view, at the slot's number: `commitmentHashes.local` at the slot for a revocation
+the device sends (`SendRevokeAndAck`, which revokes the device's own commitment and is slotted by the remote number its
+commitments carry), `commitmentHashes.remote` for one it receives (`CompleteReceivedRevokeAndAck`, the peer's commitment,
+slotted by the local number). Fiber's device SDK holds a revocation to the same replacement
+(`fiber-lsp-sdk/src/commitment.rs:671-689`). No replacement yet, one below the slot or one above it is `stale_state`: the
+request is out of order with the record, not a content the device refuses, so the code of the rest of check 4 fits it,
+and one whose replacement is not signed yet is answerable once it is. A repeat leaves at check 3 as ever, so a
+revocation already served is answered after the view moved past it; a second session under `allow` is held to the
+replacement like a first.
+
+Fiber's SDK also requires, when sending, that the replacement hold a complete signature, so the device could publish it.
+That check is not ported: the device keeps no complete signature of its own commitment. Through the dispatch, the
+replacement reaches `commitmentHashes.local` only by `CompleteReceivedCommitment`, whose peer half the dispatch verified
+before the claim ([signing.md](./signing.md)), but the claim writes the hash before `partialSign` runs: the node, which
+publishes the device's commitment, holds the complete signature only once the device's answer lands. Until then the
+replacement is recorded with no complete signature anywhere, which costs nothing, since the slot is served and a
+redelivery of `CompleteReceivedCommitment` gets the device's half again. Keeping one on the device would serve a
+recovery path the device does not have yet.
 
 ## Sign-once claims a session, not a message
 
 The registry stores a commitment to the whole triple a signature answers: the ordered key list, the aggregated nonce and
 the message, hashed under a versioned label. Counting messages would not be enough. A partial signature is
-`s = k1 + b·k2 + e·a·d`, and both `b` and `e` come from the aggregated nonce the node chose, so one slot and one message
-under three different aggregates are three linear equations that solve for the funding key ([signing.md](./signing.md)).
+`s = σ·(k1 + b·k2) + e·a·g·d`, and `σ`, `b` and `e` all come from the aggregated nonce the node chose, so one slot and one
+message under three different aggregates are three linear equations that solve for the funding key
+([signing.md](./signing.md)).
 
 A repeat that matches the stored commitment byte for byte is the idempotent resume path: the gate answers `already-signed`
 and the caller re-signs, which is deterministic and therefore identical. That path leaves the pipeline at check 3, so a
 re-delivery charges nothing, files nothing and moves no counter, and the stale numbers it would otherwise carry never matter.
+
+## Nonce reuse under `allow`
+
+Fiber's lifecycle, as it stands, asks for more than one signature per slot: at the open both commitment transitions land
+on one commitment slot, a payment the peer fulfils has one commitment slot serve three messages, and the two sides of a
+revocation round share the revocation slot at one number. Under the default rule the second message of each is refused,
+and no channel can open. `new PolicyEngine(store, { nonceReuse })` takes the mode: `refuse`, the default and the rule
+above, or `allow`, a compatibility mode for fiber's current nonces that goes once fiber fixes them.
+
+Under `allow` a served slot serves **one** more session, never two. With a deterministic nonce, each partial signature on
+one slot is one equation `s_i = σ_i·(k1 + b_i·k2) + e_i·a·g·d` in the same three unknowns `k1`, `k2` and `d`: two of them
+leave a nonce pair that answers both for every candidate key, which hides it, and a third solves the system for `d`
+([signing.md](./signing.md)). So:
+
+- A second distinct session on a served slot is claimed, logged in the record's `nonceReuse` under the slot (its session
+  commitment and its message), and answered `reused`, which the dispatch reports as a warning.
+- A third distinct session is `policy_refusal`, in either mode.
+- A byte-identical repeat is idempotent and writes nothing: the first session answers `already-signed`, the second
+  `reused` again, so every delivery of a signature made under a reused nonce carries its warning. Both are answered in
+  either mode, so a host that turns `allow` off keeps answering what was already served and refuses the rest.
+- The second session runs every check a first one does: the digest, its view's version, the pins and bounds, the balance
+  rule, and it updates the view and the commitment hash a first one would. It moves no lane, since its number was claimed
+  by the session the slot served first, and it may sit at its lane's last number but never below it: reuse serves fiber's
+  lifecycle, never a rollback to a slot the lane has left (`stale_state`). A reused revocation so leaves its own lane
+  below the number it signed, which is harmless: the replacement rule ties a revocation to its view's last commitment,
+  which only moves up, so no fresh slot below that number can be signed on the lane.
+- The claim is written before anything is signed, as for a first session.
+
+The known cost: the payment fiber fulfils asks for a third message on one slot, which `allow` refuses, so that flow fails
+under it until fiber gives each message its own nonce.
 
 ## The claim is written before anything is signed
 
@@ -105,20 +190,21 @@ request says they are the channel's: a node could state a longer delay, a higher
 never paid into, and sign a digest of it. Check 5 holds each of them to one value per channel, kept in the record's
 `pins` ([persistence.md](./persistence.md)).
 
-| Pin                                         | Fixed by                                     | Stated by                                     |
-| ------------------------------------------- | -------------------------------------------- | --------------------------------------------- |
-| `fundedShannons`                            | the registration                             | (the opening, below)                          |
-| `localCloseScript`                          | the registration                             | a close, and a revocation the device receives |
-| `localReservedCkbShannons`                  | the registration, under both layouts (below) | a commitment, a close, a revocation           |
-| `udtTypeScript`                             | the registration, as `null`                  | all four                                      |
-| `fundingOutPoint`                           | the host, or the first sight                 | a commitment, a close, an announcement        |
-| `fundingCapacityShannons`                   | the host, or the first sight                 | a commitment, a close, a revocation           |
-| `liquidCapacityShannons`                    | the first sight                              | all four                                      |
-| `remoteFundingPubkey`                       | the first sight                              | all four                                      |
-| `remoteTlcBasePubkey`                       | the first sight                              | a commitment                                  |
-| `commitmentDelayEpoch`, `commitmentFeeRate` | the first sight                              | a commitment, a revocation                    |
-| `remoteReservedCkbShannons`                 | the first sight                              | a commitment, a close, a revocation           |
-| `lockLayout`                                | the first sight                              | a commitment, a revocation                    |
+| Pin                         | Fixed by                                     | Stated by                                     |
+| --------------------------- | -------------------------------------------- | --------------------------------------------- |
+| `fundedShannons`            | the registration                             | (the opening, below)                          |
+| `localCloseScript`          | the registration                             | a close, and a revocation the device receives |
+| `localReservedCkbShannons`  | the registration, under both layouts (below) | a commitment, a revocation                    |
+| `udtTypeScript`             | the registration, as `null`                  | all four                                      |
+| `liquidCapacityShannons`    | the host's terms                             | a commitment, a revocation, an announcement   |
+| `commitmentFeeRate`         | the host's terms                             | a commitment, a revocation                    |
+| `remoteReservedCkbShannons` | the host's terms                             | a commitment, a revocation                    |
+| `fundingOutPoint`           | the host, or the first sight                 | a commitment, a close, an announcement        |
+| `fundingCapacityShannons`   | the host, or the first sight                 | a commitment, a revocation                    |
+| `remoteFundingPubkey`       | the first sight                              | all four                                      |
+| `remoteTlcBasePubkey`       | the first sight                              | a commitment                                  |
+| `commitmentDelayEpoch`      | the first sight                              | a commitment, a revocation                    |
+| `lockLayout`                | the first sight                              | a commitment, a revocation                    |
 
 What the device knows before the node states anything is fixed when the channel is registered: the amount the user
 funded and the close script the open passed as the device's shutdown script, both given by the facade, the device's
@@ -127,49 +213,63 @@ fiber would not open: a funded amount below the lower of the two reserves, the `
 not below `u64::MAX`, the most a CKB channel's capacity holds. The floor is the lower one on purpose: registration exists
 so as not to refuse what a node would open, a legacy node opens in that 1 CKB window, and what a full-hash node refuses it
 refuses itself, with nothing signed.
-`SignerDispatch.prepareChannelRegistration` runs the same check (`assertChannelOpening`) before the registration is sent,
-since a channel the node opens and the device then refuses to file is left open and unfiled.
+`SignerDispatch.prepareChannelOpen` runs the same check (`assertChannelOpening`) before the open is sent, since a
+channel the node opens and the device then refuses to file is left open and unfiled.
+
+**The terms** are three values a request states but nothing in it vouches for, so a first sight of them would be a value the
+node chose: the commitment fee rate, the peer's reserve and the liquid capacity. `PolicyEngine.pinChannelTerms` takes them
+from the host, which reads them from the node's `opening_context` once the open is accepted and checks them against what the
+device asked. A commitment, a revocation or an announcement on a channel whose terms the host has not pinned is refused
+(`policy_refusal`), naming the first term that is missing; a close states none of them and needs none.
+
 `PolicyEngine.pinFundingCell` takes what the host knows from the funding tx it is to sign, the out point and the
 capacity of the funding output. Neither order is assumed, since fiber can ask for the device's own first commitment
-before the signed tx is back: whichever states the cell first pins it, a message that then states another is refused,
-and a pin that finds another one throws a `FundingCellError` carrying the conflict, so the host can tell a cell other
-than the one it is to sign (the open is not to be funded) from a malformed argument, which throws a `TypeError` or, out
-of range, a `RangeError`, or a channel it never registered, which throws a `TypeError`. It runs in the balance lane, so
-it never moves a record between a claim's decision and its write.
+before the signed tx is back: whichever states the cell first pins it, and a message that then states another is refused.
+Both host pins share one path: a value that conflicts with the one pinned throws a `ChannelPinError` carrying the
+conflict, so the host can tell a cell or terms other than the channel's (the open is not to be funded) from a malformed
+argument, which throws a `TypeError` or, out of range, a `RangeError`, or a channel it never registered, which throws a
+`TypeError`. Pinning the same values again writes nothing. Both run in the balance lane, so neither moves a record between
+a claim's decision and its write.
 The rest is pinned by the first signed message that states it, in the same write as its claim; a refused message pins
-nothing. A value that differs from the one pinned is refused, naming the field and both values.
+nothing, and no message ever pins a term. A value that differs from the one pinned is refused, naming the field and both
+values.
+`PolicyEngine.readChannelPins(channelId)` hands out a copy of them, resolving the name as a claim does (`unknown_channel`
+for a name never registered, a thrown `TypeError` for one whose index holds no record). The signer dispatch calls it at its
+step 8 to build a request's input from the terms, the device's reserve and the layout a commitment pinned, since no request
+states them ([signing.md](./signing.md)). The read takes no lane, so a pin may move before the claim; the claim holds the
+input to the pins as they stand when it runs, so a value pinned in between that differs refuses the request rather than
+being signed over.
 
 Five choices sit in that table:
 
 - **The asset is fixed, not seen.** A channel the device opens is a CKB channel until the multi-asset shape is decided,
   so a request that states a UDT script is refused. Pinned at first sight, a node could present a CKB channel as a UDT
   one, whose amounts are not shannons, and read the funded amount in another unit. The asset is read ahead of every
-  other pin, so that is the refusal such a request gets, whatever else it states.
+  other pin, so that is the refusal such a request gets, whatever else it states. A close states it as `null` always: it
+  is read off outputs that carry no type script ([digest.md](./digest.md)).
 - **The device's reserve is computed, not seen.** Fiber sizes it over the shutdown script of the open
   (`reserved_capacity`, over `occupied_capacity`): the capacity a cell locked by that script occupies, its args counted
   at no less than the commitment lock's, plus the 1 CKB kept for the close fee. The commitment lock's args are 57 bytes
   under the `legacy` layout and 58 under `fullPaymentHash` ([digest.md](./digest.md)), so on a typical lock the reserve
   is 99 CKB under one and 100 under the other, and the node never declares the layout: it is read from the lock args of
-  the first commitment. Registration therefore computes the reserve under both layouts, and the pinned layout picks the
-  value: a commitment or a revocation declares its layout and is held to the reserve computed under it, a close is held
-  to the reserve under the layout already pinned, and a close before any commitment, which declares none and finds none
-  pinned, must state one of the two values. "Computed, not seen" stays true: the node only ever chooses between two
-  values the device computed, and choosing one pins the layout with it. Pinned at first sight instead, a node could open
-  with the whole funding as the device's reserve: the opening would still pay the funded amount, and none of it could be
-  spent. The peer's reserve is sized over the peer's script, which the device does not read, so it stays first sight.
+  the first commitment. Registration therefore computes the reserve under both layouts, and the layout a message states
+  picks the value it is held to: only a commitment and a revocation state the reserve, and both state the layout beside
+  it. "Computed, not seen" stays true: the node only ever chooses between two values the device computed, and choosing
+  one pins the layout with it. Pinned at first sight instead, a node could open with the whole funding as the device's
+  reserve: the opening would still pay the funded amount, and none of it could be spent.
 - **The lock layout is pinned at first sight**, declared by a commitment and by a revocation (both size their fee over
   the commitment lock's mock, so both carry it), never by a close or an announcement, which do not depend on it. A
   message under the other layout is refused as any pin conflict, and it is read right after the asset, so a legacy
   message on a full-hash channel is refused by its layout before its reserve.
-- **A revocation the device receives sweeps to the device's own close script** (fiber's `local_shutdown_script`), so it
-  states that pin too. A revocation the device sends sweeps to the peer's script, which the device has no reason to fix:
-  a wrong one harms the peer only.
+- **A close and a revocation the device receives pay the device's own close script** (fiber's `local_shutdown_script`),
+  so they state that pin. A close is read by output position, in fiber's funding-pubkey order, so a close whose two
+  outputs the node swapped reads with the peer's output as the device's and still hashes to its message: this pin is what
+  refuses it. A revocation the device sends sweeps to the peer's script, which the device has no reason to fix: a wrong
+  one harms the peer only.
 - **The capacities are pinned as sums.** The liquid capacity, `to_local + to_remote`, is what the funding cell holds
   beyond the reserves and does not move while the channel lives; the funding cell's capacity is that plus both reserves
-  (on a UDT channel the liquid amount is the cell's data, and its capacity the reserves alone).
-  The pair is what ties the raw balances a commitment states, which size its cell and nothing the balance rule reads, to
-  the cell the user paid into. With the device's reserve fixed, the two also fix the peer's reserve, so its own pin is
-  never the first conflict a message meets; it is kept so a record states every value a message is held to.
+  (on a UDT channel the liquid amount is the cell's data, and its capacity the reserves alone). The pair is what ties
+  what a commitment states, which sizes its cell and nothing the balance rule reads, to the cell the user paid into.
 
 ## Bounds on what a message takes
 
@@ -177,10 +277,11 @@ The pins fix the cell; check 5 then bounds what a message takes out of it beyond
 
 - **The commitment fee**, which a commitment and a revocation both take from the funding cell, is at most 0.5 CKB:
   half of the 1 CKB fiber keeps in each reserve for the close fee, which is fiber's own bound at open
-  (`check_commitment_reserved_fee`). The device runs it on every request because the rate is the node's, and bounds the
-  fee rather than the rate because the cell dep count that sizes it is not a channel constant and is not pinned.
+  (`check_commitment_reserved_fee`). The device runs it on every request, even at the rate the host pinned, and bounds
+  the fee rather than the rate because the cell dep count that sizes it is not a channel constant and is not pinned.
 - **The device's fee on a close** is at most 1 CKB, the part of the reserve fiber sets aside for it
-  (`DEFAULT_MIN_SHUTDOWN_FEE`). Fiber bounds it by the whole balance only. The peer's fee is the peer's.
+  (`DEFAULT_MIN_SHUTDOWN_FEE`). The close's tx states no fee rate, so the bound is read on what it pays the device, and
+  the balance rule applies it (below). Fiber bounds it by the whole balance only. The peer's output is the peer's.
 - **What a commitment pays out**, both settlement amounts and every TLC it lists, is at most the liquid capacity. Fiber
   pays out exactly that in every state but one: the device's own commitment while a removal waits on the previous ack
   lists the TLC nowhere and still deducts its amount, so it pays out less.
@@ -299,16 +400,17 @@ intent before the operation that causes the TLC, never after: `transfer` records
 invoice is recorded before the node hears of its hash, and marked released before the preimage leaves the device.
 
 A **cooperative close** is judged against both views at once: it lists no TLC, so neither view may still list one (fiber
-builds a close only once none is pending), and it may not pay the device less than either view's exposure, its payout
-being `to_local` and the device's reserve before its fee, which check 5 bounds. It spends no intent, having no hash to
-name one.
+builds a close only once none is pending), and what its output pays the device may fall short of neither view's
+exposure by more than the 1 CKB its fee may take, check 5's bound read on the payout, since the close's tx states no fee
+rate: `local capacity >= max(exposure) - 1 CKB`. Its payout is read off the tx itself, the output fiber's funding-pubkey
+order gives the device, held to the device's close script by check 5. It spends no intent, having no hash to name one.
 
-**The opening.** Both views start at the funded amount with no TLC. The channel's first commitment, the first message
-that claims a commitment slot, must list no TLC and pay the device exactly the funded amount, whichever view it belongs
-to; the first message of the other view is then judged against the opening state by the rule above. A channel whose first
-message is a close (fiber builds none that early, but the device does not assume it) is judged by its views alone from
-then on, which stand at the opening state. The funded amount comes from the facade, so a node that opens a channel with
-less in it than the user paid is refused at its first signature.
+**The opening.** Both views start at the funded amount with no TLC. The channel's first commitment, the first message that
+claims a slot on the commitment lane, must list no TLC and pay the device exactly the funded amount, whichever view it
+belongs to; the first message of the other view is then judged against the opening state by the rule above. A channel whose
+first message is a close (fiber builds none that early, but the device does not assume it) is judged by its views alone from
+then on, which stand at the opening state. The funded amount comes from the facade, so a node that opens a channel with less
+in it than the user paid is refused at its first signature.
 
 Each device-wide record lists the channels that have shown a TLC under its hash, written before the claim that shows it,
 since a claim may only write its own channel's record. That list is how a claim finds the other channels drawing on one
@@ -316,53 +418,68 @@ budget or crediting one invoice, and a channel too many on it costs a read. The 
 writing anything and again inside the record's critical section, so a refused request leaves the device-wide records
 untouched too, and the balance lane keeps two channels from drawing on one budget at once.
 
+## Revocation evidence
+
+Once the device has signed the revocation of a peer commitment and holds the peer's partial signature too, the signer
+dispatch aggregates the two, verifies the complete schnorr signature under the aggregated key, and hands it to
+`PolicyEngine.recordRevocation(channelId, { version, signature })` ([signing.md](./signing.md)). The record keeps it in
+`revocations` as `{ version, forRemote: true, signature }`: the evidence that the peer's commitment at that version is
+revoked, which a superseded peer commitment published on chain would be swept with.
+
+The write is an upsert by version, kept in ascending version order: recording the same signature again writes nothing,
+and another signature of the same version replaces it. The dispatch records again on the already-signed path, so a crash
+between signing and recording heals on the next delivery. The engine verifies nothing cryptographic here, the caller has;
+it refuses, as a host error, evidence for a version whose revocation slot (one above it) the channel never served, since
+evidence of a revocation the device never signed is none. The write runs in the record's own lane and not in the balance
+lane: no claim reads the evidence, and a claim that lands beside it writes the record it read, evidence included.
+
 ## What this layer deliberately does not do
 
-- **It does not verify the aggregated nonce.** Nothing proves the 66 bytes the node sent contain the public nonce the
-  device published. The sign-once rule is what makes that safe, and it is why a legitimate node error is indistinguishable
-  from an attack here (open question with the Fiber team).
-- **It does not re-derive the state it is shown.** TLC selection, settlement amounts, fee rates and close scripts arrive as
-  inputs. The digest binds the signature to them and the record judges them; re-running fiber's TLC state machine would be
-  a second source of truth with its own bugs.
+- **It does not verify the aggregated nonce or the peer's partial signature.** Both are the signer dispatch's, before it
+  calls the gate ([signing.md](./signing.md)). The gate's guarantee does not rest on them: whatever aggregate the node
+  sends, a slot serves at most the sessions its nonce can safely answer.
+- **It does not re-derive the state it is shown.** TLC selection, settlement amounts and close outputs arrive as inputs.
+  The digest binds the signature to them and the record judges them; re-running fiber's TLC state machine would be a
+  second source of truth with its own bugs.
 - **It does not sign.** Nothing in the pipeline forces the caller to sign what it claimed. The gate and the engine are
   one path in the signer dispatch, at one call site that signs exactly the slot the verdict names
   ([signing.md](./signing.md)).
 - **It cannot check a value the first time it sees it.** A pin taken from a request is a value the node chose once: the
-  commitment delay, the fee rate, the peer's keys and the peer's reserve are held to their first value, not to a right
-  one. The funded amount, the close script, the device's reserve, the asset and, through the host, the funding cell are
-  the exceptions, being the device's own. Fixing the rest at registration is a protocol question, open with the Fiber team.
+  commitment delay and the peer's keys are held to their first value, not to a right one. The funded amount, the close
+  script, the device's reserve, the asset and, through the host, the funding cell and the terms are the exceptions, being
+  the device's own or checked by the host against the open it asked for.
 - **It does not check the funding output's lock.** The funding cell's out point and capacity are pinned, but whether its
   lock is the 2-of-2 the device holds half of needs the peer's funding key before the host signs, which nothing gives it
   (an open question with the Fiber team).
 - **It judges the latest commitment of each view, never the ones it supersedes.** A commitment the device signed stays
-  publishable until it is revoked, and revocation is a musig2 transaction the node completes: the device produces its half
-  on request, never sees the peer's `RevokeAndAck`, and holds no completed revocation, so it has no signal it can check that
-  a superseded commitment is no longer publishable. A budget is therefore bounded at the latest state only: a TLC that
-  failed under a hash in one channel frees its budget, and an operator that withholds its `RevokeAndAck` could publish the
-  superseded commitment still listing it after a retry elsewhere was paid. More broadly, a revoked own commitment and the
-  revocation that sweeps it both sit with the node, so the device rests on the operator of its node not publishing
-  superseded state. Nothing device-side closes this; it is an open question with the Fiber team (I8).
+  publishable until it is revoked. The device keeps the complete revocation of every superseded peer commitment as
+  evidence (above), but its own superseded commitments are revoked by a signature only the node holds, and the gate has no
+  signal it can check that one is no longer publishable. A budget is therefore bounded at the latest state only: a TLC
+  that failed under a hash in one channel frees its budget, and an operator that withholds its `RevokeAndAck` could
+  publish the superseded commitment still listing it after a retry elsewhere was paid. The device rests on the operator of
+  its node not publishing superseded state; nothing device-side closes this, and it is an open question with the Fiber
+  team (I8).
 - **It cannot tell a fulfilled TLC from a failed one except by the amounts.** The request carries no preimage, so step 2
   charges every TLC that could have been paid, as described above.
-- **It never prunes the registry.** A slot per signed commitment stays forever. Pruning is only safe behind the monotonic
-  counter, which refuses a number already served even when its slot is gone, and it would cost the idempotent replay of an
-  old request.
+- **It never prunes the record.** A slot per signed commitment, a log entry per reused slot and an evidence entry per
+  revoked peer commitment stay forever. Pruning the registry is only safe behind the lanes, which refuse a number already
+  served even when its slot is gone, and it would cost the idempotent replay of an old request.
 
 ## Where it lives
 
-| File                                     | Contents                                                                                                                     |
-| ---------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------- |
-| `src/policy/policy-engine.ts`            | The six checks, the claim, channel registration, the host's pin, intents and hold invoices                                   |
-| `src/policy/channel-opening.ts`          | What a channel opens with: the funded amount and close script checked, and the registration's pins                           |
-| `src/policy/channel-pins.ts`             | Check 5's pins, pure: what each operation states, in the pins' forms, and the first conflict                                 |
-| `src/policy/capacity-bounds.ts`          | Check 5's bounds, pure: the two fees and what a commitment pays out                                                          |
-| `src/policy/balance-rule.ts`             | Check 6 itself, pure: the opening, the three steps over two snapshots, and the close                                         |
-| `src/policy/policy.constants.ts`         | The keyspace prefixes and the balance lane, the record formats and their versions, the error codes                           |
-| `src/policy/policy.error.ts`             | `PolicyRefusalError`, carrying the wire error code; the host's `DebitIntentError`, `HoldInvoiceError` and `FundingCellError` |
-| `src/policy/utils/payment-hash.utils.ts` | The bound payment hash a payment record is keyed by, and whether a TLC under that key is the record's                        |
-| `src/policy/utils/slot.utils.ts`         | Operation to slot, where the shared close slot and the fixed announcement live                                               |
-| `src/policy/utils/session.utils.ts`      | The session commitment and the shape a signable session must have                                                            |
-| `src/policy/signer-store.ts`             | The persistence underneath ([persistence.md](./persistence.md))                                                              |
+| File                                     | Contents                                                                                                                       |
+| ---------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------ |
+| `src/policy/policy-engine.ts`            | The six checks, sign-once and reuse, the claim, channel registration, the host's pins, the evidence, intents and hold invoices |
+| `src/policy/channel-opening.ts`          | What a channel opens with: the funded amount and close script checked, and the registration's pins                             |
+| `src/policy/channel-pins.ts`             | Check 5's pins, pure: what each operation and the host's terms state, in the pins' forms, and the first conflict               |
+| `src/policy/capacity-bounds.ts`          | Check 5's bounds, pure: the commitment fee and what a commitment pays out                                                      |
+| `src/policy/balance-rule.ts`             | Check 6 itself, pure: the opening, the three steps over two snapshots, and the close with its fee bound                        |
+| `src/policy/policy.constants.ts`         | The keyspace prefixes and the balance lane, the pins by who fixes them, the reuse modes and the lanes, the record versions     |
+| `src/policy/policy.error.ts`             | `PolicyRefusalError`, carrying the wire error code; the host's `DebitIntentError`, `HoldInvoiceError` and `ChannelPinError`    |
+| `src/policy/utils/payment-hash.utils.ts` | The bound payment hash a payment record is keyed by, and whether a TLC under that key is the record's                          |
+| `src/policy/utils/slot.utils.ts`         | Operation and counter to slot and lane, where the shared close slot and the fixed announcement live                            |
+| `src/policy/utils/session.utils.ts`      | The session commitment and the shape a signable session must have                                                              |
+| `src/policy/signer-store.ts`             | The persistence underneath ([persistence.md](./persistence.md))                                                                |
 
 ## What the tests guarantee
 
@@ -371,233 +488,326 @@ against digests generated by fiber's own Rust code rather than by the code under
 per malformed field, both sign-once refusals the spec demands (a served slot re-requested with another message, and with
 the same message under another aggregated nonce or another key list), the two directions of the shared commitment slot, the
 latched announcement, the already-signed path leaving the record untouched and costing no write, and two concurrent
-sessions racing for one slot where exactly one wins.
+sessions racing for one slot where exactly one wins. The slot is refused per field: a number past the chain or not an
+integer, no slot, every counter fiber does not use for the operation (a commitment, a close, either revocation and the
+announcement each read from the wrong one), and an announcement at another number. The lanes: a fresh slot at and below
+its lane's last refused, a revocation below the other lane's last accepted, both lanes and the announcement's kept apart,
+a close ordered on the commitment lane, the second side of a revocation round refused under the default mode, and a
+repeat answered whatever the other lane signed since. The replacement, for each direction: a revocation signed once its
+view's last commitment is at the slot's number, refused as stale with no commitment in the view, one below and one above,
+writing nothing, refused when only the other view is at the number, its repeat answered once the view moved past, and a
+second session under `allow` held to its own. The views: a version equal to and below its view's last refused,
+each view ordered apart from the slot and from the other view, and the hash of each view's last commitment kept, checked
+against `compute_tx_message` of the transactions fiber built. Under `allow`: the second session served, logged and
+reported as reused, the same one refused by default, a third refused, both repeats idempotent with no write, a logged
+session still answered once the mode is off and a third still refused, the other lane's revocation served without moving
+either lane, a second session at its lane's last served and below it refused as stale, a second session held to its
+view's version, the pins, the balance rule and the close rule, its channel filed on its intents, and an unknown mode
+refused. The terms: pinned, at u64's maximum, repeated with no write under either name, each one conflicting with a
+`ChannelPinError` naming both values, each malformed argument refused by name, an unregistered channel and an alias with
+no record thrown, every operation but the close refused on a channel whose terms are unpinned, naming the first missing,
+and the close signed there. The evidence: kept, repeated with no write under either name, replaced by another signature
+of its version, kept in ascending order, the record otherwise untouched, refused for a version whose revocation slot was
+never served, each malformed argument refused, the highest version the chain holds recorded, and an unregistered channel
+and an alias with no record thrown. The pins read back: the registration's, then with the terms, then with what the first
+message stated, under either name, as a copy the caller's writes do not reach, and an unregistered channel refused and an
+alias with no record thrown.
 
-The balance rule has a spec of its own, `test/tests/policy/balance-rule.spec.ts`, over snapshots written by hand: a
-refusal per step and per bound (no intent, a closed one, one shannon over the maximum, other channels' TLCs and charges,
-this view's charges, every channel counted at its worst view), a view catching up with its other view under a closed
-intent and one drawing past it, the retry after a failure, the replacement inside one message, the parts of a multi-path
-payment, every charging case (exact, none, ambiguous, widened by a received TLC and never by a held one, with nothing
-fallen, the twelve-TLC boundary on both), every credit case (failed, fulfilled, unreleased, unknown, a part, the cap
-across channels, another channel at its less paid view), the offered TLC refused beside a released held one in either
-view and a mixed channel refused a new offered or released held TLC and allowed to retire TLCs, a TLC of a released
-invoice refused under another algorithm (added, or changed between two messages) and allowed before the release, and the
-close against each view, and the full-hash layout: an offered TLC under a twin of its intent's hash refused (first,
-even where the other view already shows the intent's TLC), a received twin of a released invoice neither credited nor
-asked for nor held to the release or the algorithm, a twin under `legacy` matched by its prefix as before, the multiset
-identity telling two TLCs apart by the full hash alone, and growth summed under one intent across a legacy channel and a
-full-hash channel. The engine's spec drives it through real requests, whose digests the SDK computes for the
-states the vectors do not cover: the crossing views, one budget drawn from two channels, a second channel's other view
-refused against it, an invoice two channels paid in different views, a revocation fired between a commitment's decision
-and its claim, a release refused while an offered TLC is listed beside a TLC of the invoice (in either view) and allowed
-on a channel that no longer lists one, an offered TLC refused beside a released TLC listed only in the other view, a
-charge found in the local view alone, a hash refused as both payment and invoice, an offered TLC refused on a channel
-holding a released one, two channels racing for it, a released preimage dropped and paid, the intent and invoice
-records' own rules, and on a channel driven with the full-hash cases of the vectors: the layout pinned at first sight by
-the opening or by a revocation, a legacy commitment and a legacy revocation then refused by their layout (and the
-reverse on a legacy channel), the revocation sized under the pinned layout signed, a twin offered TLC refused through a
-real request, the whole hashes kept in the view, and a release held back by the invoice's own TLC beside an offered one
-but not by a twin. A malformed request for an unregistered channel pins that the shape check answers first. Renaming
-has its own set: both names of a channel reaching one record, a repeat under the other name answered `already-signed`, a
-rename refused once the record has served, two names racing for the same slot, and two registrations racing for one name
-where the loser's index never takes it.
+The balance rule has a spec of its own, `test/tests/policy/balance-rule.spec.ts`, over snapshots written by hand: a refusal
+per step and per bound (no intent, a closed one, one shannon over the maximum, other channels' TLCs and charges, this view's
+charges, every channel counted at its worst view), a view catching up with its other view under a closed intent and one
+drawing past it, the retry after a failure, the replacement inside one message, the parts of a multi-path payment, every
+charging case (exact, none, ambiguous, widened by a received TLC and never by a held one, with nothing fallen, the
+twelve-TLC boundary on both), every credit case (failed, fulfilled, unreleased, unknown, a part, the cap across channels,
+another channel at its less paid view), the offered TLC refused beside a released held one in either view and a mixed
+channel refused a new offered or released held TLC and allowed to retire TLCs, a TLC of a released invoice refused under
+another algorithm (added, or changed between two messages) and allowed before the release, the close against each view at
+the exact edge of the 1 CKB its fee may take and one shannon past it, and the full-hash layout: an offered TLC under a twin
+of its intent's hash refused (first, even where the other view already shows the intent's TLC), a received twin of a
+released invoice neither credited nor asked for nor held to the release or the algorithm, a twin under `legacy` matched by
+its prefix as before, the multiset identity telling two TLCs apart by the full hash alone, and growth summed under one
+intent across a legacy channel and a full-hash channel. The engine's spec drives it through real requests, whose digests the
+SDK computes for the states the vectors do not cover: the crossing views, one budget drawn from two channels, a second
+channel's other view refused against it, an invoice two channels paid in different views, a revocation fired between a
+commitment's decision and its claim, a release refused while an offered TLC is listed beside a TLC of the invoice (in either
+view) and allowed on a channel that no longer lists one, an offered TLC refused beside a released TLC listed only in the
+other view, a charge found in the local view alone, a hash refused as both payment and invoice, an offered TLC refused on a
+channel holding a released one, two channels racing for it, a released preimage dropped and paid, the intent and invoice
+records' own rules, and on a channel driven with the full-hash cases of the vectors: the layout pinned at first sight by the
+opening or by a revocation, a legacy commitment and a legacy revocation then refused by their layout (and the reverse on a
+legacy channel), the revocation sized under the pinned layout signed, a twin offered TLC refused through a real request, the
+whole hashes kept in the view, and a release held back by the invoice's own TLC beside an offered one but not by a twin. A
+malformed request for an unregistered channel pins that the shape check answers first. Renaming has its own set: both names
+of a channel reaching one record, a repeat under the other name answered `already-signed`, a rename refused once the record
+has served, two names racing for the same slot, and two registrations racing for one name where the loser's index never
+takes it.
 
 Check 5 is pinned three ways. `test/tests/policy/channel-pins.spec.ts` reads what each operation of the vectors states,
-field for field, under both layouts, and contrasts the reserve under the layout a statement declares, under the one
-pinned, and under either when neither is known, each conflict naming the computed value.
-`test/tests/policy/channel-opening.spec.ts` checks both reserves against the ones fiber's own `occupied_capacity` sizes
-in the vectors, over scripts on both sides of the 57-byte and 58-byte edges, and puts the funded amount at each edge of
-what registration accepts, the `legacy` floor. `test/tests/policy/capacity-bounds.spec.ts` puts each bound at its exact
-edge and one shannon past it, the fees sized over the mock transactions fiber's own fees are pinned against, the
-commitment fee bound reached one byte sooner under the full-hash layout. The
-engine's spec refuses, per operation, every pin that operation states, moved by one field (the out point, its hash, the
-liquid capacity, a reserve, a reserve moved between the sides, the peer's keys, the delay, the rate, the asset, the
-close script), and checks the refusal writes nothing; it signs a sent revocation whatever its payout, pins what a close,
-a revocation or an announcement states when it comes first, refuses an opening that turns the whole funding into the
-device's reserve, refuses every UDT operation on a channel registered as CKB, by its asset even once the capacities are
-pinned, refuses the opening under either layout with the other layout's reserve, holds a close to the pinned layout's
-reserve and a close that comes first to either, with a third value refused naming both, reaches the commitment fee bound
-through the cell dep count alone, and runs the host's pin of the funding cell both ways, each malformed argument refused
-by name and the pin held behind a commitment that is being decided. The
-opening has its own set: TLCs in the first commitment and a shannon more and less than funded, each in both views, a
-funded amount the node's opening does not match, an opening on the device's own commitment with the peer's first one
-judged against it, the first commitment after an announcement or a revocation still judged as the opening, and a
-commitment after a close. The engine's other specs build every channel on the "ckb" cases, which share one funding
-output and fee rate, and open it before its first TLC.
+field for field, under both layouts, a close stating no capacity, reserve or layout, and the host's terms in their pin
+forms; it contrasts the reserve under the layout a statement declares, each conflict naming the computed value, throws on a
+reserve stated without its layout, and pins a term only from the host's statement, never from a message's.
+`test/tests/policy/channel-opening.spec.ts` checks both reserves against the ones fiber's own `occupied_capacity` sizes in
+the vectors, over scripts on both sides of the 57-byte and 58-byte edges, and puts the funded amount at each edge of what
+registration accepts, the `legacy` floor. `test/tests/policy/capacity-bounds.spec.ts` puts each bound at its exact edge and
+one shannon past it, the fees sized over the mock transactions fiber's own fees are pinned against, the commitment fee bound
+reached one byte sooner under the full-hash layout, and a close bounded by nothing there. The engine's spec refuses, per
+operation, every pin that operation states, moved by one field (the out point, its hash, the liquid capacity, a reserve, a
+reserve moved between the sides, the peer's keys, the delay, the rate, the asset, the close script, and a close whose two
+outputs the node swapped, read as fiber orders them and matching its message), and checks the refusal writes nothing; it
+signs a sent revocation whatever its payout, pins what a close, a revocation or an announcement states when it comes first,
+refuses an opening that turns the whole funding into the device's reserve, refuses every UDT operation on a channel
+registered as CKB, by its asset even once the capacities are pinned, refuses the opening under either layout with the other
+layout's reserve, signs a close on a full-hash channel without reading its layout, puts the commitment fee bound at its edge
+at the rate the host pinned and reaches it through the cell dep count alone, puts the close at its exact 1 CKB edge whatever
+the peer is paid, and runs the host's pin of the funding cell both ways, each malformed argument refused by name and the pin
+held behind a commitment that is being decided. The opening has its own set: TLCs in the first commitment and a shannon more
+and less than funded, each in both views, a funded amount the node's opening does not match, an opening on the device's own
+commitment with the peer's first one judged against it, the first commitment after an announcement or a revocation still
+judged as the opening, and a commitment after a close; a close is refused below either view, the local one included. The
+engine's other specs build every channel on the "ckb" cases, which share one funding output and fee rate, pin their terms as
+the host does, and open it before its first TLC.
 
 Coverage of the module is 100% on all four metrics. Coverage only proves there is no dead code, so the assertions were
 checked by breaking the code on purpose:
 
-| Mutation                                                        | Tests that failed |
-| --------------------------------------------------------------- | ----------------- |
-| The close gets a `CLOSE` slot of its own                        | 3                 |
-| The announcement slot follows the request                       | 3                 |
-| The session commitment drops the aggregated nonce               | 4                 |
-| The session commitment sorts the key list                       | 2                 |
-| The keys are not checked to be on the curve                     | 3                 |
-| The nonce is not checked to be on the curve                     | 4                 |
-| A nonce half at infinity is refused                             | 3                 |
-| A zero-prefixed nonce half is read as infinity                  | 1                 |
-| A key at infinity is accepted                                   | 1                 |
-| Monotonicity accepts an equal number                            | 1                 |
-| The state version may roll back                                 | 1                 |
-| A closed intent still lets a TLC grow                           | 3                 |
-| The budget ignores other channels                               | 7                 |
-| Other channels count at the judged view                         | 2                 |
-| Growth is read against this view alone                          | 2                 |
-| The budget ignores what was charged                             | 4                 |
-| Growth is read on the shown amounts alone                       | 3                 |
-| A fulfilment counts as growth                                   | 9                 |
-| A channel may show an offered TLC beside a released held one    | 8                 |
-| The mix guard reads the judged view alone                       | 2                 |
-| A channel that already shows the mix is refused too             | 3                 |
-| A mixed channel may grow                                        | 2                 |
-| Growth of a mixed channel reads offered TLCs alone              | 1                 |
-| Growth of a mixed channel reads released held TLCs alone        | 1                 |
-| The mix guard counts unreleased held TLCs                       | 34                |
-| The release ignores offered TLCs in flight                      | 2                 |
-| The release ignores whether the channel still lists the invoice | 1                 |
-| A payment may take the hash of an own invoice                   | 1                 |
-| An invoice may take the hash of an authorised payment           | 1                 |
-| The release reads the remote view alone                         | 1                 |
-| A charge is looked for in the remote view alone                 | 1                 |
-| The context reads the judged view's TLCs alone                  | 1                 |
-| A mix before is read without the other view                     | 1                 |
-| The budget refuses its own maximum                              | 54                |
-| A non-positive shortfall does not search                        | 4                 |
-| Nothing fallen and no set fitting is a refusal                  | 2                 |
-| Received TLCs that left widen nothing                           | 5                 |
-| An unreleased invoice's TLC widens the window                   | 1                 |
-| Only received TLCs with no invoice widen the window             | 1                 |
-| Every departed TLC is charged                                   | 6                 |
-| No departed TLC is charged                                      | 14                |
-| The exact search stops one TLC early                            | 2                 |
-| An unreleased invoice is credited                               | 3                 |
-| The credit is not capped by what is owed                        | 2                 |
-| The cap ignores other channels' credits                         | 1                 |
-| Another channel's credit counts at its more paid view           | 2                 |
-| Holdings count received TLCs too                                | 18                |
-| TLCs are compared without their expiry                          | 1                 |
-| The snapshot keeps the whole hash                               | 58                |
-| Both commitments share one view                                 | 4                 |
-| A close ignores listed TLCs                                     | 3                 |
-| A close is judged against one view                              | 2                 |
-| The channel is not filed on the intents                         | 9                 |
-| The channel is not filed on the invoices                        | 5                 |
-| The channel is filed before the decision                        | 2                 |
-| Revocations claim outside the balance lane                      | 2                 |
-| Commitment claims skip the balance lane                         | 3                 |
-| A charged intent opens again                                    | 3                 |
-| A legacy TLC is never the record's                              | 64                |
-| The reserve under the full hash counts the args at 57 bytes     | 31                |
-| The reserve is held to the legacy value whatever the layout     | 23                |
-| A commitment states no layout                                   | 19                |
-| A TLC with another whole hash is the record's                   | 10                |
-| A stated reserve passes under either layout when it is known    | 9                 |
-| The registration floor is the full-hash reserve                 | 9                 |
-| A revocation states no layout                                   | 8                 |
-| A reserve matching neither layout passes when none is known     | 6                 |
-| The snapshot drops the whole hash under the full-hash layout    | 5                 |
-| An offered twin is let through to the budget                    | 4                 |
-| The claim's TLCs are read under legacy whatever the input       | 3                 |
-| The record guard accepts any string as the layout               | 3                 |
-| The snapshot keeps the whole hash under legacy too              | 3                 |
-| A received twin is credited to the invoice                      | 2                 |
-| The record guard accepts a whole hash with another prefix       | 2                 |
-| The record guard accepts the reserve as a string                | 2                 |
-| A received twin is refused like an offered one                  | 1                 |
-| The algorithm guard reads a twin as the invoice's               | 1                 |
-| The mix guard reads a received twin as a released one           | 1                 |
-| The pinned layout wins over the declared one                    | 1                 |
-| The record guard accepts a reserve map with an extra key        | 1                 |
-| The release's held filter ignores the whole hash                | 1                 |
-| TLCs are compared without their whole hash                      | 1                 |
-| An open intent is replaced                                      | 1                 |
-| A repeat of an open intent is refused                           | 1                 |
-| An open intent repeated with another maximum is a no-op         | 1                 |
-| A twin hash answers for the recorded one                        | 2                 |
-| A record may sit under another hash's key                       | 2                 |
-| An intent record is read without its version                    | 3                 |
-| An invoice record is read without its version                   | 3                 |
-| TLCs are compared without their algorithm                       | 1                 |
-| The snapshot drops the algorithm                                | 12                |
-| A view TLC is read without its algorithm                        | 2                 |
-| An invoice record is read without its algorithm                 | 1                 |
-| An invoice may be recorded again with another algorithm         | 1                 |
-| The release ignores the algorithm of a held TLC                 | 1                 |
-| A released invoice takes a TLC under another algorithm          | 2                 |
-| The algorithm guard ignores the release                         | 2                 |
-| The already-signed path keeps running                           | 2                 |
-| The digest comparison is dropped                                | 5                 |
-| The channel lookup runs before the shape check                  | 2                 |
-| A record that has served may take a new name                    | 2                 |
-| A rename starts a fresh record                                  | 1                 |
-| A name may be re-registered at another index                    | 1                 |
-| The name is written instead of claimed                          | 6                 |
-| The alias is written before the record                          | 1                 |
-| A no-op update still writes the record                          | 3                 |
-| A first-sight value conflicts while unpinned                    | 144               |
-| Nothing is pinned at first sight                                | 36                |
-| A received revocation states no close script                    | 2                 |
-| A sent revocation states its payout as the close script         | 13                |
-| The funding capacity leaves the reserves out                    | 19                |
-| The funding capacity leaves the remote reserve out              | 22                |
-| A UDT cell's funding capacity counts its liquid amount          | 2                 |
-| An announcement states no capacity                              | 3                 |
-| A commitment states no TLC base key                             | 11                |
-| A revocation states no fee rate                                 | 4                 |
-| A close states no out point                                     | 3                 |
-| The out point pin drops its index                               | 133               |
-| The asset is not fixed at registration                          | 205               |
-| The asset is stated after the capacities                        | 3                 |
-| The commitment fee bound admits its own edge plus one           | 3                 |
-| The commitment fee bound refuses its own edge                   | 5                 |
-| A revocation's fee is not bounded                               | 2                 |
-| The close bound reads the peer's rate                           | 3                 |
-| The close bound refuses its own edge                            | 2                 |
-| Conservation ignores the TLCs                                   | 4                 |
-| Conservation ignores the peer's settlement                      | 5                 |
-| Conservation demands equality                                   | 3                 |
-| Conservation refuses its own edge                               | 121               |
-| The opening is never judged                                     | 5                 |
-| The opening may list TLCs                                       | 4                 |
-| The opening may pay any amount                                  | 5                 |
-| The opening may pay more                                        | 2                 |
-| The exposure leaves the reserve out                             | 116               |
-| A close's payout leaves the reserve out                         | 13                |
-| The device's reserve is left to the first sight                 | 211               |
-| The reserve drops the commitment lock's 57-byte floor           | 142               |
-| The reserve leaves the close fee out                            | 145               |
-| The reserve leaves the capacity field out                       | 145               |
-| The reserve leaves the hash type out                            | 145               |
-| The record guard ignores the device's reserve                   | 3                 |
-| The pins are not checked                                        | 30                |
-| The bounds are not judged                                       | 5                 |
-| The pins are not written with the claim                         | 33                |
-| A re-registration may change the funded amount                  | 1                 |
-| A re-registration may change the close script                   | 1                 |
-| The host's pin overrides a conflict                             | 2                 |
-| A repeated host pin writes again                                | 1                 |
-| The host's pin skips the balance lane                           | 1                 |
-| The host's pin checks no tx hash                                | 1                 |
-| The host's pin checks no index                                  | 2                 |
-| The host's pin checks no capacity                               | 1                 |
-| The record guard ignores the asset                              | 3                 |
-| The record guard ignores the pins' forms                        | 11                |
-| The record guard reads no pins                                  | 27                |
-| The registration checks no close script                         | 3                 |
-| The registration checks no funded amount                        | 3                 |
-| The funded amount may equal u64's maximum                       | 2                 |
-| The funded amount may not equal the reserve                     | 9                 |
-| The registration skips the opening check                        | 6                 |
-| The preparation skips the opening check                         | 10                |
-| The preparation files the caller's code hash                    | 1                 |
-| The preparation files the caller's args                         | 1                 |
-| The preparation copies a Buffer's bytes by view                 | 1                 |
-| The opening is judged on the peer's commitment alone            | 3                 |
-| Any first signed slot opens the channel                         | 2                 |
-| A new pin overwrites one already held                           | 2                 |
-| A pin is written as absent                                      | 1                 |
-| The host's conflict throws a plain TypeError                    | 4                 |
-| The host's error drops what it stated                           | 2                 |
-| The script check ignores the args                               | 3                 |
+| Mutation                                                           | Tests that failed |
+| ------------------------------------------------------------------ | ----------------- |
+| The session commitment drops the aggregated nonce                  | 4                 |
+| The session commitment sorts the key list                          | 2                 |
+| The keys are not checked to be on the curve                        | 3                 |
+| The nonce is not checked to be on the curve                        | 4                 |
+| A nonce half at infinity is refused                                | 3                 |
+| A zero-prefixed nonce half is read as infinity                     | 1                 |
+| A key at infinity is accepted                                      | 1                 |
+| Monotonicity accepts an equal number                               | 1                 |
+| A closed intent still lets a TLC grow                              | 3                 |
+| The budget ignores other channels                                  | 7                 |
+| Other channels count at the judged view                            | 2                 |
+| Growth is read against this view alone                             | 2                 |
+| The budget ignores what was charged                                | 4                 |
+| Growth is read on the shown amounts alone                          | 3                 |
+| A fulfilment counts as growth                                      | 9                 |
+| A channel may show an offered TLC beside a released held one       | 8                 |
+| The mix guard reads the judged view alone                          | 2                 |
+| A channel that already shows the mix is refused too                | 3                 |
+| A mixed channel may grow                                           | 2                 |
+| Growth of a mixed channel reads offered TLCs alone                 | 1                 |
+| Growth of a mixed channel reads released held TLCs alone           | 1                 |
+| The mix guard counts unreleased held TLCs                          | 34                |
+| The release ignores offered TLCs in flight                         | 2                 |
+| The release ignores whether the channel still lists the invoice    | 1                 |
+| A payment may take the hash of an own invoice                      | 1                 |
+| An invoice may take the hash of an authorised payment              | 1                 |
+| The release reads the remote view alone                            | 1                 |
+| A charge is looked for in the remote view alone                    | 1                 |
+| The context reads the judged view's TLCs alone                     | 1                 |
+| A mix before is read without the other view                        | 1                 |
+| The budget refuses its own maximum                                 | 54                |
+| A non-positive shortfall does not search                           | 4                 |
+| Nothing fallen and no set fitting is a refusal                     | 2                 |
+| Received TLCs that left widen nothing                              | 5                 |
+| An unreleased invoice's TLC widens the window                      | 1                 |
+| Only received TLCs with no invoice widen the window                | 1                 |
+| Every departed TLC is charged                                      | 6                 |
+| No departed TLC is charged                                         | 14                |
+| The exact search stops one TLC early                               | 2                 |
+| An unreleased invoice is credited                                  | 3                 |
+| The credit is not capped by what is owed                           | 2                 |
+| The cap ignores other channels' credits                            | 1                 |
+| Another channel's credit counts at its more paid view              | 2                 |
+| Holdings count received TLCs too                                   | 18                |
+| TLCs are compared without their expiry                             | 1                 |
+| The snapshot keeps the whole hash                                  | 58                |
+| Both commitments share one view                                    | 4                 |
+| A close ignores listed TLCs                                        | 3                 |
+| A close is judged against one view                                 | 2                 |
+| The channel is not filed on the intents                            | 9                 |
+| The channel is not filed on the invoices                           | 5                 |
+| The channel is filed before the decision                           | 2                 |
+| Revocations claim outside the balance lane                         | 2                 |
+| Commitment claims skip the balance lane                            | 3                 |
+| A charged intent opens again                                       | 3                 |
+| A legacy TLC is never the record's                                 | 64                |
+| The reserve under the full hash counts the args at 57 bytes        | 31                |
+| The reserve is held to the legacy value whatever the layout        | 23                |
+| A commitment states no layout                                      | 19                |
+| A TLC with another whole hash is the record's                      | 10                |
+| The registration floor is the full-hash reserve                    | 9                 |
+| A revocation states no layout                                      | 8                 |
+| The snapshot drops the whole hash under the full-hash layout       | 5                 |
+| An offered twin is let through to the budget                       | 4                 |
+| The claim's TLCs are read under legacy whatever the input          | 3                 |
+| The record guard accepts any string as the layout                  | 3                 |
+| The snapshot keeps the whole hash under legacy too                 | 3                 |
+| A received twin is credited to the invoice                         | 2                 |
+| The record guard accepts a whole hash with another prefix          | 2                 |
+| The record guard accepts the reserve as a string                   | 2                 |
+| A received twin is refused like an offered one                     | 1                 |
+| The algorithm guard reads a twin as the invoice's                  | 1                 |
+| The mix guard reads a received twin as a released one              | 1                 |
+| The record guard accepts a reserve map with an extra key           | 1                 |
+| The release's held filter ignores the whole hash                   | 1                 |
+| TLCs are compared without their whole hash                         | 1                 |
+| An open intent is replaced                                         | 1                 |
+| A repeat of an open intent is refused                              | 1                 |
+| An open intent repeated with another maximum is a no-op            | 1                 |
+| A twin hash answers for the recorded one                           | 2                 |
+| A record may sit under another hash's key                          | 2                 |
+| An intent record is read without its version                       | 3                 |
+| An invoice record is read without its version                      | 3                 |
+| TLCs are compared without their algorithm                          | 1                 |
+| The snapshot drops the algorithm                                   | 12                |
+| A view TLC is read without its algorithm                           | 2                 |
+| An invoice record is read without its algorithm                    | 1                 |
+| An invoice may be recorded again with another algorithm            | 1                 |
+| The release ignores the algorithm of a held TLC                    | 1                 |
+| A released invoice takes a TLC under another algorithm             | 2                 |
+| The algorithm guard ignores the release                            | 2                 |
+| The already-signed path keeps running                              | 2                 |
+| The digest comparison is dropped                                   | 5                 |
+| The channel lookup runs before the shape check                     | 2                 |
+| A record that has served may take a new name                       | 2                 |
+| A rename starts a fresh record                                     | 1                 |
+| A name may be re-registered at another index                       | 1                 |
+| The name is written instead of claimed                             | 6                 |
+| The alias is written before the record                             | 1                 |
+| A no-op update still writes the record                             | 3                 |
+| A first-sight value conflicts while unpinned                       | 144               |
+| Nothing is pinned at first sight                                   | 36                |
+| A received revocation states no close script                       | 2                 |
+| A sent revocation states its payout as the close script            | 13                |
+| The funding capacity leaves the reserves out                       | 19                |
+| The funding capacity leaves the remote reserve out                 | 22                |
+| A UDT cell's funding capacity counts its liquid amount             | 2                 |
+| An announcement states no capacity                                 | 3                 |
+| A commitment states no TLC base key                                | 11                |
+| A revocation states no fee rate                                    | 4                 |
+| A close states no out point                                        | 3                 |
+| The out point pin drops its index                                  | 133               |
+| The asset is not fixed at registration                             | 205               |
+| The asset is stated after the capacities                           | 3                 |
+| The commitment fee bound admits its own edge plus one              | 3                 |
+| The commitment fee bound refuses its own edge                      | 5                 |
+| A revocation's fee is not bounded                                  | 2                 |
+| Conservation ignores the TLCs                                      | 4                 |
+| Conservation ignores the peer's settlement                         | 5                 |
+| Conservation demands equality                                      | 3                 |
+| Conservation refuses its own edge                                  | 121               |
+| The opening is never judged                                        | 5                 |
+| The opening may list TLCs                                          | 4                 |
+| The opening may pay any amount                                     | 5                 |
+| The opening may pay more                                           | 2                 |
+| The exposure leaves the reserve out                                | 116               |
+| The device's reserve is left to the first sight                    | 211               |
+| The reserve drops the commitment lock's 57-byte floor              | 142               |
+| The reserve leaves the close fee out                               | 145               |
+| The reserve leaves the capacity field out                          | 145               |
+| The reserve leaves the hash type out                               | 145               |
+| The record guard ignores the device's reserve                      | 3                 |
+| The pins are not checked                                           | 30                |
+| The bounds are not judged                                          | 5                 |
+| The pins are not written with the claim                            | 33                |
+| A re-registration may change the funded amount                     | 1                 |
+| A re-registration may change the close script                      | 1                 |
+| The host's pin overrides a conflict                                | 7                 |
+| A repeated host pin writes again                                   | 2                 |
+| The host's pin skips the balance lane                              | 1                 |
+| The host's pin checks no tx hash                                   | 1                 |
+| The host's pin checks no index                                     | 2                 |
+| The host's pin checks no capacity                                  | 1                 |
+| The record guard ignores the asset                                 | 3                 |
+| The record guard ignores the pins' forms                           | 11                |
+| The record guard reads no pins                                     | 27                |
+| The registration checks no close script                            | 3                 |
+| The registration checks no funded amount                           | 3                 |
+| The funded amount may equal u64's maximum                          | 2                 |
+| The funded amount may not equal the reserve                        | 9                 |
+| The registration skips the opening check                           | 6                 |
+| The preparation skips the opening check                            | 10                |
+| The preparation files the caller's code hash                       | 1                 |
+| The preparation files the caller's args                            | 1                 |
+| The preparation copies a Buffer's bytes by view                    | 1                 |
+| The opening is judged on the peer's commitment alone               | 3                 |
+| Any first signed slot opens the channel                            | 2                 |
+| A new pin overwrites one already held                              | 2                 |
+| A pin is written as absent                                         | 1                 |
+| The host's conflict throws a plain TypeError                       | 7                 |
+| The host's error drops what it stated                              | 2                 |
+| The script check ignores the args                                  | 3                 |
+| The liquid capacity term reads the peer's reserve                  | 173               |
+| The stated liquid capacity is one higher                           | 171               |
+| The host's terms pin nothing                                       | 169               |
+| The fee rate term is pinned one higher                             | 165               |
+| The revocation counters are swapped                                | 64                |
+| Every commitment is judged as the opening                          | 41                |
+| The counter is not checked                                         | 15                |
+| A close may take no fee                                            | 14                |
+| The allow mode refuses a second session                            | 13                |
+| The record guard reads no evidence                                 | 12                |
+| A reused slot may not equal its lane's last                        | 10                |
+| The record guard reads no commitment hashes                        | 10                |
+| The record guard reads no reuse log                                | 10                |
+| Both views share one version                                       | 9                 |
+| A revocation is signed without its replacement                     | 9                 |
+| The replacement is read from the other view                        | 56                |
+| The replacement is held to the revoked version                     | 56                |
+| The replacement may sit below the slot                             | 7                 |
+| The replacement may sit above the slot                             | 2                 |
+| A revocation out of order with its replacement is a policy refusal | 7                 |
+| A second session skips the replacement                             | 1                 |
+| The evidence's slot is read at the version itself                  | 8                 |
+| The slot bound is one lower                                        | 8                 |
+| The verdict carries the lane                                       | 9                 |
+| An unpinned term is not refused                                    | 6                 |
+| The evidence is filed for the device's view                        | 6                 |
+| The mode defaults to allow                                         | 6                 |
+| The refuse mode serves a second session                            | 6                 |
+| A close may take twice the fee bound                               | 5                 |
+| A repeat files the channel again                                   | 5                 |
+| A repeat of the first session is answered as reused                | 7                 |
+| Both revocation lanes are one                                      | 5                 |
+| The close refuses its own fee edge                                 | 5                 |
+| The fee bound reads a liquid capacity one higher                   | 5                 |
+| A close orders on a lane apart from the commitment's               | 4                 |
+| A reused session is answered fresh                                 | 4                 |
+| A reused session is not logged                                     | 4                 |
+| The announcement slot may be any number                            | 4                 |
+| The fee rate term may not be u64's maximum                         | 4                 |
+| The record guard ignores the terms' forms                          | 4                 |
+| The slot is not checked to be an object                            | 4                 |
+| A close states no close script                                     | 3                 |
+| A close states no funding key                                      | 3                 |
+| A commitment's version may equal its view's last                   | 3                 |
+| The commitment hash is not checked                                 | 3                 |
+| The commitment hash kept is another                                | 3                 |
+| The evidence may revoke the chain's last version                   | 3                 |
+| The lane map may name any lane                                     | 3                 |
+| The liquid capacity term is not checked                            | 3                 |
+| A host amount may not be u64's maximum                             | 2                 |
+| A repeat of the reused session is refused                          | 2                 |
+| A third session is served                                          | 2                 |
+| Evidence for an unserved revocation is kept                        | 2                 |
+| The evidence may be of the device's view                           | 2                 |
+| The evidence signature is not checked by the guard                 | 2                 |
+| The evidence signature takes any length                            | 2                 |
+| The peer's reserve term is not checked                             | 2                 |
+| The reuse log's message is not checked                             | 2                 |
+| A fresh slot may equal its lane's last                             | 1                 |
+| A repeated evidence writes again                                   | 1                 |
+| A reused session skips the balance rule                            | 1                 |
+| A reused slot may sit below its lane's last                        | 1                 |
+| An unknown mode is accepted                                        | 1                 |
+| Another signature of a version is added beside the first           | 1                 |
+| The commitment hashes may name any view                            | 1                 |
+| The evidence is kept unsorted                                      | 1                 |
+| The evidence is not checked to be an object                        | 1                 |
+| The evidence list may repeat a version                             | 1                 |
+| The options are not checked to be an object                        | 1                 |
+| The reuse log may name a slot never served                         | 1                 |
+| The reuse log may repeat the first session                         | 1                 |
+| The terms are not checked to be an object                          | 1                 |
+
+Three mutants fail no test, and cannot. The host's pin of the funding cell given the terms' fields as well pins nothing
+more, because the funding cell states none of them. Handing out the pins `readChannelPins` read without copying them, the
+reserve map or the whole object, changes nothing a caller sees: the store parses the stored string afresh on every read, so the
+copy is redundant behind it and only keeps the method's contract if the store ever caches.

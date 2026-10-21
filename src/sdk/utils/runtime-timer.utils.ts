@@ -1,4 +1,4 @@
-import type { ITimer } from "../../session";
+import type { ITimer } from "../../common";
 
 type SetTimeoutLike = (callback: () => void, delayMs: number) => unknown;
 

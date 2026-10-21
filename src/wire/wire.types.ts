@@ -6,6 +6,13 @@ export type WireField = { value: unknown; path: string };
 export type WireFieldReader<Wire> = (name: keyof Wire & string) => WireField;
 
 /**
+ * Distributes over the union, so checking `tag` narrows the members `at` can read.
+ */
+export type WireTagged<Wire extends { type: string }> = Wire extends unknown
+    ? { tag: Wire["type"]; at: WireFieldReader<Omit<Wire, "type">> }
+    : never;
+
+/**
  * Bytes as `0x`-prefixed lowercase hex.
  */
 export type HexWire = string;

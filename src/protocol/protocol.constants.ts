@@ -1,38 +1,106 @@
-import type { InboundFrameWire } from "./protocol.types";
+import type { NonceContext } from "../derivation";
+import { MAX_COMMITMENT_NUMBER } from "../derivation";
+import type { NonceCounter } from "../policy";
+import type { ChannelSigningContentKind, ChannelSigningRule, ChannelSigningStatusWire, ChannelSigningTransition } from "./protocol.types";
 
-export const PROTOCOL_VERSION = 1;
+export const CHANNEL_SIGNING_STATUS_TYPES = [
+    "NoSignatureRequired",
+    "SignatureRequired",
+] as const satisfies readonly ChannelSigningStatusWire["type"][];
 
-export const SIGNER_METHODS = [
-    "get_base_public_keys",
-    "get_commitment_point",
-    "get_commitment_pub_nonce",
-    "get_revocation_pub_nonce",
-    "get_channel_announcement_pub_nonce",
-    "get_settlement_keys",
-    "partial_sign_commitment_tx",
-    "partial_sign_closing_tx",
-    "partial_sign_revocation",
-    "partial_sign_channel_announcement",
+export const CHANNEL_SIGNING_TRANSITIONS = [
+    "SendCommitmentSigned",
+    "CompleteReceivedCommitment",
+    "SendRevokeAndAck",
+    "CompleteReceivedRevokeAndAck",
+    "SendClosingSigned",
+    "SignChannelAnnouncement",
 ] as const;
 
-export const INBOUND_FRAME_TYPES = [
-    "challenge",
-    "session_established",
-    "ping",
-    "pong",
-    "channel_registered",
-    "error",
-    "sign_request",
-] as const satisfies readonly InboundFrameWire["type"][];
-
-export const CHALLENGE_LENGTH = 32;
+export const CHANNEL_SIGNING_CONTENT_KINDS = ["commitmentTx", "closingTx", "revocation", "announcement"] as const;
 
 /**
- * Opaque to the device and echoed verbatim; bounded so an id cannot carry a payload.
+ * Fiber's `Musig2SignableContent` tags.
  */
-export const MAX_REQUEST_ID_LENGTH = 64;
+export const SIGNABLE_CONTENT_KINDS = {
+    CommitmentTransaction: "commitmentTx",
+    CooperativeCloseTransaction: "closingTx",
+    Revocation: "revocation",
+    ChannelAnnouncement: "announcement",
+} as const satisfies Record<string, ChannelSigningContentKind>;
 
 /**
- * Domain separation of the session challenge: the identity key never signs bare bytes the bridge chose.
+ * Fiber's `NoncePurpose`; a close has none of its own and signs under `Commitment`.
  */
-export const SESSION_CHALLENGE_LABEL = "fiber-lsp-sdk session challenge v1";
+export const NONCE_PURPOSE_CONTEXTS = {
+    Commitment: "COMMITMENT",
+    Revocation: "REVOKE",
+    ChannelAnnouncement: "ANNOUNCEMENT",
+} as const satisfies Record<string, NonceContext>;
+
+/**
+ * Fiber's `CommitmentCounter`.
+ */
+export const COMMITMENT_COUNTERS = { Local: "local", Remote: "remote" } as const satisfies Record<string, NonceCounter>;
+
+/**
+ * What each transition must carry, as fiber builds and checks it (`fiber-lsp-sdk/src/lifecycle.rs:118-180`): the slot,
+ * counter and content of a revocation or a close
+ * (`fiber-lib/src/fiber/channel.rs:7999-8018,9200-9213,10194-10216`), the peer's evidence (`:11040-11080`), the
+ * settlement and the next material (`fiber-types/src/channel_signer.rs:348-358,380-388`).
+ */
+export const CHANNEL_SIGNING_RULES = {
+    SendCommitmentSigned: {
+        context: "COMMITMENT",
+        counter: "local",
+        contentKind: "commitmentTx",
+        settlementForRemote: true,
+        peerPartialSignature: false,
+        nextMaterial: true,
+    },
+    CompleteReceivedCommitment: {
+        context: "COMMITMENT",
+        counter: "local",
+        contentKind: "commitmentTx",
+        settlementForRemote: false,
+        peerPartialSignature: true,
+        nextMaterial: true,
+    },
+    SendRevokeAndAck: {
+        context: "REVOKE",
+        counter: "remote",
+        contentKind: "revocation",
+        settlementForRemote: null,
+        peerPartialSignature: false,
+        nextMaterial: true,
+    },
+    CompleteReceivedRevokeAndAck: {
+        context: "REVOKE",
+        counter: "local",
+        contentKind: "revocation",
+        settlementForRemote: null,
+        peerPartialSignature: true,
+        nextMaterial: true,
+    },
+    SendClosingSigned: {
+        context: "COMMITMENT",
+        counter: "local",
+        contentKind: "closingTx",
+        settlementForRemote: null,
+        peerPartialSignature: false,
+        nextMaterial: false,
+    },
+    SignChannelAnnouncement: {
+        context: "ANNOUNCEMENT",
+        counter: null,
+        contentKind: "announcement",
+        settlementForRemote: null,
+        peerPartialSignature: false,
+        nextMaterial: false,
+    },
+} as const satisfies Record<ChannelSigningTransition, ChannelSigningRule>;
+
+/**
+ * One below the derivation's bound: the answer publishes the material of `slot + 1`, which must still be derivable.
+ */
+export const MAX_SIGNING_SLOT_NUMBER = MAX_COMMITMENT_NUMBER - 1;

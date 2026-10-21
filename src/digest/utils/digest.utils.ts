@@ -1,20 +1,29 @@
 import { keyAggExport, keyAggregate } from "@scure/btc-signer/musig2.js";
-import { assertUnsignedBigInt } from "../../common";
+import { assertUnsignedBigInt, uint128Le } from "../../common";
 import { MAX_CAPACITY_SHANNONS } from "../digest.constants";
+import type { CommitmentTxInput } from "../digest.types";
+
+export type CommitmentCellValue = {
+    capacityShannons: bigint;
+    /**
+     * The liquid capacity as a UDT amount on a UDT channel, empty on a CKB one.
+     */
+    data: Uint8Array;
+};
 
 /**
- * Aggregates two pubkeys in the exact order given and returns the x-only aggregate, the key fiber bakes into lock args.
- * @param orderedPubkeys The two 33-byte compressed keys, order-sensitive.
- * @returns The 32-byte x-only aggregated key.
+ * Aggregates two pubkeys in the order given into the x-only key fiber bakes into lock args.
+ * @param orderedPubkeys The two compressed keys, order-sensitive.
+ * @returns The x-only aggregate.
  */
 export function aggregateXOnlyPubkey(orderedPubkeys: [Uint8Array, Uint8Array]): Uint8Array {
     return keyAggExport(keyAggregate(orderedPubkeys));
 }
 
 /**
- * Subtracts a fee from a capacity with fiber's checked semantics: u64 overflow of the total and underflow both refuse.
- * @param total Capacity the fee comes out of, in shannons.
- * @param fee Fee to subtract, in shannons.
+ * Subtracts a fee with fiber's checked semantics: a u64 overflow of the total and an underflow both refuse.
+ * @param total The capacity.
+ * @param fee The fee.
  * @returns The remaining capacity.
  */
 export function subtractTxFee(total: bigint, fee: bigint): bigint {
@@ -23,4 +32,22 @@ export function subtractTxFee(total: bigint, fee: bigint): bigint {
         throw new RangeError(`capacity ${total} cannot cover the fee ${fee}`);
     }
     return total - fee;
+}
+
+/**
+ * The commitment cell's capacity and data, which a revocation's punishment output repeats.
+ * @param input The liquid capacity, the reserves and the UDT.
+ * @param fee The commitment fee.
+ * @returns The capacity and raw data.
+ */
+export function commitmentCellValue(
+    input: Pick<CommitmentTxInput, "udtTypeScript" | "liquidCapacityShannons" | "localReservedCkbShannons" | "remoteReservedCkbShannons">,
+    fee: bigint,
+): CommitmentCellValue {
+    const { liquidCapacityShannons } = input;
+    const totalReserved = input.localReservedCkbShannons + input.remoteReservedCkbShannons;
+    // UDT: reserves as capacity, the liquid amount as data. CKB: both as capacity.
+    return input.udtTypeScript === null
+        ? { capacityShannons: subtractTxFee(liquidCapacityShannons + totalReserved, fee), data: new Uint8Array(0) }
+        : { capacityShannons: subtractTxFee(totalReserved, fee), data: uint128Le(liquidCapacityShannons) };
 }

@@ -2,10 +2,12 @@ import { bytesToHex, hexToBytes } from "@noble/hashes/utils.js";
 import { deriveChannelKeys, pubkeyOf } from "../../../src/derivation";
 import { COMMITMENT_LOCK_MAINNET, COMMITMENT_LOCK_TESTNET } from "../../../src/digest";
 import type { FiberLspSdkOptions, SdkContext, SdkEvent } from "../../../src/sdk";
-import { FiberLspSdk, POLL_STEP_TIMEOUT_MS, SdkError } from "../../../src/sdk";
+import { DEFAULT_POLL_INTERVAL_MS, FiberLspSdk, POLL_STEP_TIMEOUT_MS, SdkError } from "../../../src/sdk";
+import type { SigningNetwork } from "../../../src/signer";
 import { FetchMock } from "../../mocks/rpc";
 import { InMemorySignerStorage } from "../../mocks/policy";
-import { TimerMock, WebSocketFactoryMock } from "../../mocks/session";
+import { flush } from "../../utils/flush";
+import { TimerMock } from "../../mocks/common";
 import { loadInteropVectors } from "../../utils/interop-vectors";
 import { rejection } from "../../utils/rejection";
 import { withRuntime } from "../../utils/with-runtime";
@@ -15,15 +17,17 @@ const MASTER_SEED = hexToBytes(vectors.sdk_scheme.master_seed);
 const PEER_KEYS = deriveChannelKeys(hexToBytes(vectors.digest.remote.seed));
 const LSP_PUBKEY = pubkeyOf(PEER_KEYS.fundingKey);
 const RPC_URL = "http://fiber.example:8227";
-const SESSION_URL = "wss://lsp.example/signer";
 const TOKEN = "En0KEwoEMTIzNBgDIgkKBwgKEgMYgAgSJAgAEiDs-token_example=";
 const CHANNEL_ID = `0x${"1f".repeat(32)}`;
 const POLL_INTERVAL_MS = 7_000;
 const NOW_MS = 1_791_367_200_250;
-const DEV_NETWORK = { commitmentLock: { codeHash: new Uint8Array(32).fill(0x5d), hashType: "data1" }, invoiceCurrency: "Fibd" } as const;
+const DEV_NETWORK = {
+    commitmentLock: { codeHash: new Uint8Array(32).fill(0x5d), hashType: "data1" },
+    invoiceCurrency: "Fibd",
+    fundingLockCellDepsCount: 3,
+} as const;
 
 function harness(overrides: Partial<FiberLspSdkOptions> = {}, seed: Uint8Array = MASTER_SEED) {
-    const sockets = new WebSocketFactoryMock();
     const timer = new TimerMock();
     const storage = new InMemorySignerStorage();
     const fetch = new FetchMock();
@@ -31,21 +35,19 @@ function harness(overrides: Partial<FiberLspSdkOptions> = {}, seed: Uint8Array =
     const sdk = new FiberLspSdk(seed, {
         network: "testnet",
         storage,
-        webSocketFactory: sockets.create,
         rpcUrl: RPC_URL,
-        signerSessionUrl: SESSION_URL,
         biscuitToken: TOKEN,
         lspPubkey: LSP_PUBKEY,
         fetch: fetch.fetch,
         timer,
         now: () => NOW_MS,
         pollIntervalMs: POLL_INTERVAL_MS,
-        session: { heartbeatIntervalMs: 0 },
         ...overrides,
     });
     sdk.onEvent((event) => events.push(event));
     const errors = (): SdkError[] => events.flatMap((event) => (event.type === "ERROR" ? [event.error] : []));
-    return { sdk, sockets, timer, storage, fetch, events, errors };
+    const polls = (): number => timer.delays.filter((delay) => delay === POLL_INTERVAL_MS).length;
+    return { sdk, timer, storage, fetch, events, errors, polls };
 }
 
 // Read through the private context until the operations observe the wiring.
@@ -53,19 +55,17 @@ function contextOf(sdk: FiberLspSdk): SdkContext {
     return (sdk as unknown as { context: SdkContext }).context;
 }
 
-function dispatchLockOf(sdk: FiberLspSdk): unknown {
-    return (contextOf(sdk).dispatch as unknown as { commitmentLock: unknown }).commitmentLock;
+function dispatchNetworkOf(sdk: FiberLspSdk): SigningNetwork {
+    return (contextOf(sdk).dispatch as unknown as { network: SigningNetwork }).network;
 }
 
 describe("FiberLspSdk", () => {
     describe("construction", () => {
-        it("connects nothing and schedules nothing until connect()", () => {
+        it("polls nothing and schedules nothing until connect()", () => {
             const h = harness();
-            expect(h.sockets.sockets).toEqual([]);
             expect(h.timer.pending).toBe(0);
             expect(h.fetch.requests).toEqual([]);
             expect(h.storage.ops).toEqual([]);
-            expect(h.sdk.sessionState).toBe("idle");
             expect(h.events).toEqual([]);
         });
 
@@ -90,26 +90,12 @@ describe("FiberLspSdk", () => {
                 MASTER_SEED,
                 new TypeError("storage.set must be a function"),
             ],
-            ["no socket factory", { webSocketFactory: undefined }, MASTER_SEED, new TypeError("webSocketFactory must be a function")],
             ["a fetch that is not a function", { fetch: "fetch" as never }, MASTER_SEED, new TypeError("fetch must be a function")],
             ["a clock that is not a function", { now: 1_791_367_200_250 as never }, MASTER_SEED, new TypeError("now must be a function")],
             ["a timer that is not an object", { timer: (() => undefined) as never }, MASTER_SEED, new TypeError("timer must be an object")],
             ["a timer without schedule", { timer: {} as never }, MASTER_SEED, new TypeError("timer.schedule must be a function")],
-            [
-                "session options that are not an object",
-                { session: 5_000 as never },
-                MASTER_SEED,
-                new TypeError("session must be an object"),
-            ],
-            [
-                "a reconnect policy that is not an object",
-                { session: { reconnect: "abc" as never } },
-                MASTER_SEED,
-                new TypeError("reconnect must be an object"),
-            ],
             ["a null token", { biscuitToken: null as never }, MASTER_SEED, new TypeError("token must be printable ASCII without spaces")],
             ["an empty rpc url", { rpcUrl: "" }, MASTER_SEED, new TypeError("rpcUrl must be a non-empty string")],
-            ["an empty session url", { signerSessionUrl: "" }, MASTER_SEED, new TypeError("signerSessionUrl must be a non-empty string")],
             ["an LSP key of 32 bytes", { lspPubkey: new Uint8Array(32) }, MASTER_SEED, new TypeError("lspPubkey must be 33 bytes, got 32")],
             [
                 "an LSP key off the curve",
@@ -138,31 +124,6 @@ describe("FiberLspSdk", () => {
             ["a null fetch", { fetch: null as never }, MASTER_SEED, new TypeError("fetch must be a function")],
             ["a null clock", { now: null as never }, MASTER_SEED, new TypeError("now must be a function")],
             ["a null timer", { timer: null as never }, MASTER_SEED, new TypeError("timer must be an object")],
-            ["null session options", { session: null as never }, MASTER_SEED, new TypeError("session must be an object")],
-            [
-                "a null reconnect policy",
-                { session: { reconnect: null as never } },
-                MASTER_SEED,
-                new TypeError("reconnect must be an object"),
-            ],
-            [
-                "a null connect timeout",
-                { session: { connectTimeoutMs: null as never } },
-                MASTER_SEED,
-                new RangeError("connectTimeoutMs must be an integer between 1 and 2147483647, got null"),
-            ],
-            [
-                "a null heartbeat interval",
-                { session: { heartbeatIntervalMs: null as never } },
-                MASTER_SEED,
-                new RangeError("heartbeatIntervalMs must be an integer between 0 and 2147483647, got null"),
-            ],
-            [
-                "a null heartbeat timeout",
-                { session: { heartbeatTimeoutMs: null as never } },
-                MASTER_SEED,
-                new RangeError("heartbeatTimeoutMs must be an integer between 1 and 2147483647, got null"),
-            ],
             [
                 "a poll interval of 0",
                 { pollIntervalMs: 0 },
@@ -200,28 +161,16 @@ describe("FiberLspSdk", () => {
                 new TypeError("network.invoiceCurrency must be one of Fibb, Fibt, Fibd"),
             ],
             [
+                "a development chain without a funding lock cell deps count",
+                { network: { ...DEV_NETWORK, fundingLockCellDepsCount: undefined as unknown as number } },
+                MASTER_SEED,
+                new RangeError("network.fundingLockCellDepsCount must be an integer between 1 and 255, got undefined"),
+            ],
+            [
                 "a token with a space",
                 { biscuitToken: "not a token" },
                 MASTER_SEED,
                 new TypeError("token must be printable ASCII without spaces"),
-            ],
-            [
-                "a session connect timeout of 0",
-                { session: { connectTimeoutMs: 0 } },
-                MASTER_SEED,
-                new RangeError("connectTimeoutMs must be an integer between 1 and 2147483647, got 0"),
-            ],
-            [
-                "a session heartbeat timeout of 0",
-                { session: { heartbeatTimeoutMs: 0 } },
-                MASTER_SEED,
-                new RangeError("heartbeatTimeoutMs must be an integer between 1 and 2147483647, got 0"),
-            ],
-            [
-                "a reconnect factor below 1",
-                { session: { reconnect: { factor: 0.5 } } },
-                MASTER_SEED,
-                new RangeError("reconnect.factor must be a finite number of at least 1, got 0.5"),
             ],
         ])("refuses %s", (_, overrides, seed, error) => {
             expect(() => harness(overrides, seed)).toThrow(error);
@@ -243,9 +192,7 @@ describe("FiberLspSdk", () => {
             ["no token", { biscuitToken: undefined }],
             ["the mainnet preset", { network: "mainnet" as const }],
             ["a development chain", { network: DEV_NETWORK }],
-            ["no session options", { session: undefined }],
             ["no clock", { now: undefined }],
-            ["a reconnect policy with a field given as undefined", { session: { reconnect: { maxDelayMs: undefined } } }],
         ])("accepts %s", (_, overrides) => {
             expect(() => harness(overrides)).not.toThrow();
         });
@@ -286,15 +233,27 @@ describe("FiberLspSdk", () => {
             ["mainnet", COMMITMENT_LOCK_MAINNET],
         ] as const)("hands the %s commitment lock to the dispatch", (network, lock) => {
             const h = harness({ network });
-            expect(dispatchLockOf(h.sdk)).toBe(lock);
+            expect(dispatchNetworkOf(h.sdk).commitmentLock).toBe(lock);
             expect(contextOf(h.sdk).network.commitmentLock).toBe(lock);
         });
 
         it("hands a development chain's commitment lock to the dispatch as a copy", () => {
             const h = harness({ network: DEV_NETWORK });
-            expect(dispatchLockOf(h.sdk)).toEqual(DEV_NETWORK.commitmentLock);
-            expect(dispatchLockOf(h.sdk)).not.toBe(DEV_NETWORK.commitmentLock);
+            expect(dispatchNetworkOf(h.sdk).commitmentLock).toEqual(DEV_NETWORK.commitmentLock);
+            expect(dispatchNetworkOf(h.sdk).commitmentLock).not.toBe(DEV_NETWORK.commitmentLock);
             expect(contextOf(h.sdk).network.invoiceCurrency).toBe("Fibd");
+        });
+
+        it.each(["testnet", "mainnet"] as const)("takes the %s funding lock's two cell deps from the preset", (network) => {
+            const h = harness({ network });
+            expect(contextOf(h.sdk).network.fundingLockCellDepsCount).toBe(2);
+            expect(dispatchNetworkOf(h.sdk).fundingLockCellDepsCount).toBe(2);
+        });
+
+        it("takes a development chain's funding lock cell deps count", () => {
+            const h = harness({ network: DEV_NETWORK });
+            expect(contextOf(h.sdk).network.fundingLockCellDepsCount).toBe(3);
+            expect(dispatchNetworkOf(h.sdk).fundingLockCellDepsCount).toBe(3);
         });
 
         it("sends the rpc through the host's fetch, to the rpc url, under the token", async () => {
@@ -339,6 +298,148 @@ describe("FiberLspSdk", () => {
             const now = (): number => NOW_MS;
             expect(contextOf(harness({ now }).sdk).now).toBe(now);
             expect(contextOf(harness({ now: undefined }).sdk).now).toBe(Date.now);
+        });
+    });
+
+    describe("construction defaults", () => {
+        it("defaults the poll interval to five seconds", () => {
+            const h = harness({ pollIntervalMs: undefined });
+            h.sdk.connect();
+            expect(DEFAULT_POLL_INTERVAL_MS).toBe(5_000);
+            expect(h.timer.delays).toContain(DEFAULT_POLL_INTERVAL_MS);
+        });
+
+        it("defaults the timer to the runtime's, read once at construction", () => {
+            const delays: number[] = [];
+            const runtime = {
+                setTimeout: function (this: unknown, _callback: () => void, delayMs: number) {
+                    delays.push(delayMs);
+                    return { delayMs };
+                },
+                clearTimeout: () => undefined,
+            };
+            const h = withRuntime(runtime, () => harness({ timer: undefined }));
+            const later = {
+                setTimeout: () => {
+                    throw new Error("read again");
+                },
+                clearTimeout: () => {
+                    throw new Error("read again");
+                },
+            };
+            withRuntime(later, () => h.sdk.connect());
+            expect(delays).toEqual([POLL_INTERVAL_MS]);
+            withRuntime(later, () => h.sdk.disconnect());
+        });
+    });
+
+    describe("connect() and the poller", () => {
+        it("ticks when connect() is called, and then at the interval", async () => {
+            const h = harness();
+            h.sdk.connect();
+            expect(h.timer.delays).toEqual([POLL_INTERVAL_MS]);
+            await flush();
+            expect(h.polls()).toBe(1);
+            h.timer.advance(POLL_INTERVAL_MS);
+            await flush();
+            expect(h.polls()).toBe(2);
+            h.timer.advance(POLL_INTERVAL_MS);
+            await flush();
+            expect(h.polls()).toBe(3);
+        });
+
+        it("starts nothing twice when called while polling", async () => {
+            const h = harness();
+            h.sdk.connect();
+            await flush();
+            h.sdk.connect();
+            await flush();
+            expect(h.polls()).toBe(1);
+            expect(h.timer.pending).toBe(1);
+        });
+
+        it("stops at disconnect(), leaving no timer behind", async () => {
+            const h = harness();
+            h.sdk.connect();
+            await flush();
+            expect(h.timer.pending).toBe(1);
+            h.sdk.disconnect();
+            expect(h.timer.pending).toBe(0);
+            h.timer.advance(POLL_INTERVAL_MS * 3);
+            await flush();
+            expect(h.polls()).toBe(1);
+        });
+
+        it("starts over at the next connect()", async () => {
+            const h = harness();
+            h.sdk.connect();
+            await flush();
+            h.sdk.disconnect();
+            h.sdk.connect();
+            await flush();
+            expect(h.polls()).toBe(2);
+            expect(h.timer.pending).toBe(1);
+        });
+
+        it("is a no-op to disconnect() before any connect(), and idempotent after one", async () => {
+            const h = harness();
+            expect(() => h.sdk.disconnect()).not.toThrow();
+            expect(h.events).toEqual([]);
+            h.sdk.connect();
+            h.sdk.disconnect();
+            expect(() => h.sdk.disconnect()).not.toThrow();
+            expect(h.timer.pending).toBe(0);
+        });
+
+        it("disconnects without throwing when the host's cancel does", () => {
+            const timer = new TimerMock();
+            const throwing = {
+                schedule: (callback: () => void, delayMs: number) => {
+                    const cancel = timer.schedule(callback, delayMs);
+                    return () => {
+                        cancel();
+                        throw new Error("cancel broke");
+                    };
+                },
+            };
+            const h = harness({ timer: throwing });
+            h.sdk.connect();
+            expect(() => h.sdk.disconnect()).not.toThrow();
+        });
+    });
+
+    describe("events", () => {
+        it("reaches every listener, a throwing one included, and stops at an unsubscribe", () => {
+            const h = harness();
+            const seen: string[] = [];
+            const unsubscribe = h.sdk.onEvent((event) => {
+                seen.push(`first ${event.type}`);
+                throw new Error("listener broke");
+            });
+            h.sdk.onEvent((event) => seen.push(`second ${event.type}`));
+            const error = new SdkError("poll_failed", "the node could not be read");
+            contextOf(h.sdk).emit({ type: "ERROR", error });
+            expect(seen).toEqual(["first ERROR", "second ERROR"]);
+            unsubscribe();
+            contextOf(h.sdk).emit({ type: "ERROR", error });
+            expect(seen.slice(2)).toEqual(["second ERROR"]);
+        });
+
+        it("delivers an event to the listeners subscribed when it is raised, not to one added on hearing it", () => {
+            const h = harness();
+            const seen: SdkEvent[] = [];
+            let added = false;
+            h.sdk.onEvent(() => {
+                if (added) return;
+                added = true;
+                h.sdk.onEvent((event) => seen.push(event));
+            });
+            const first: SdkEvent = { type: "ERROR", error: new SdkError("poll_failed", "first") };
+            const second: SdkEvent = { type: "ERROR", error: new SdkError("poll_failed", "second") };
+            contextOf(h.sdk).emit(first);
+            expect(seen).toEqual([]);
+            contextOf(h.sdk).emit(second);
+            expect(seen).toEqual([second]);
         });
     });
 });

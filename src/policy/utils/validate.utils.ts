@@ -3,6 +3,7 @@ import {
     HASH256_LENGTH,
     MESSAGE_DIGEST_LENGTH,
     PAYMENT_HASH_LENGTH,
+    SCHNORR_SIGNATURE_LENGTH,
     TLC_DIRECTIONS,
     TLC_HASH_ALGORITHMS,
     TRUNCATED_PAYMENT_HASH_LENGTH,
@@ -18,16 +19,32 @@ import {
 } from "../../common";
 import { MAX_CHANNEL_INDEX, MAX_COMMITMENT_NUMBER, NONCE_CONTEXTS } from "../../derivation";
 import { COMMITMENT_LOCK_LAYOUTS } from "../../digest";
-import { CHANNEL_POLICY_RECORD_VERSION, FIRST_SIGHT_CHANNEL_PINS, PAYMENT_RECORD_VERSION, POLICY_VIEWS } from "../policy.constants";
-import type { ChannelPolicyRecord, DebitIntentRecord, FirstSightChannelPin, HoldInvoicePolicyRecord } from "../policy.types";
+import {
+    CHANNEL_POLICY_RECORD_VERSION,
+    CHANNEL_TERMS_PINS,
+    FIRST_SIGHT_CHANNEL_PINS,
+    MAX_REVOKED_VERSION,
+    PAYMENT_RECORD_VERSION,
+    POLICY_VIEWS,
+    SIGNING_LANES,
+} from "../policy.constants";
+import type {
+    ChannelPolicyRecord,
+    ChannelTermsPin,
+    DebitIntentRecord,
+    FirstSightChannelPin,
+    HoldInvoicePolicyRecord,
+} from "../policy.types";
 
 const CONTEXTS: readonly string[] = NONCE_CONTEXTS;
+const LANES: readonly string[] = SIGNING_LANES;
+const VIEWS: readonly string[] = POLICY_VIEWS;
 const DIRECTIONS: readonly unknown[] = TLC_DIRECTIONS;
 const HASH_ALGORITHMS: readonly unknown[] = TLC_HASH_ALGORITHMS;
 const LOCK_LAYOUTS: readonly string[] = COMMITMENT_LOCK_LAYOUTS;
 const MAX_UINT64_DIGITS = UINT64_MAX.toString().length;
 
-const FIRST_SIGHT_PIN_FORMS: Record<FirstSightChannelPin, (value: string) => boolean> = {
+const PIN_FORMS: Record<FirstSightChannelPin | ChannelTermsPin, (value: string) => boolean> = {
     fundingOutPoint: isOutPointPin,
     fundingCapacityShannons: isUint64Decimal,
     liquidCapacityShannons: isDecimalShannons,
@@ -40,8 +57,8 @@ const FIRST_SIGHT_PIN_FORMS: Record<FirstSightChannelPin, (value: string) => boo
 };
 
 /**
- * Checks that a value has the exact shape of a stored {@link ChannelPolicyRecord}. Unknown extra fields are tolerated.
- * @param value Value to check, typically freshly parsed JSON.
+ * Checks that a value is a stored {@link ChannelPolicyRecord}, extra fields tolerated.
+ * @param value Value to check.
  * @returns Whether the value is a valid channel policy record.
  */
 export function isChannelPolicyRecord(value: unknown): value is ChannelPolicyRecord {
@@ -49,17 +66,19 @@ export function isChannelPolicyRecord(value: unknown): value is ChannelPolicyRec
     return (
         value.version === CHANNEL_POLICY_RECORD_VERSION &&
         isNonEmptyString(value.channelId) &&
-        isContextCounterMap(value.lastSignedCommitmentNumbers) &&
+        isLaneCounterMap(value.lastSignedCommitmentNumbers) &&
         isSignedSessionMap(value.signedSessions) &&
-        isUnsignedInteger(value.lastStateVersion, Number.MAX_SAFE_INTEGER) &&
+        isNonceReuseMap(value.nonceReuse, value.signedSessions) &&
+        isCommitmentHashMap(value.commitmentHashes) &&
+        isRevocationEvidenceList(value.revocations) &&
         isChannelPins(value.pins) &&
         isViewSnapshotPair(value.views)
     );
 }
 
 /**
- * Checks that a value has the exact shape of a stored {@link DebitIntentRecord}. Unknown extra fields are tolerated.
- * @param value Value to check, typically freshly parsed JSON.
+ * Checks that a value is a stored {@link DebitIntentRecord}, extra fields tolerated.
+ * @param value Value to check.
  * @returns Whether the value is a valid debit intent record.
  */
 export function isDebitIntentRecord(value: unknown): value is DebitIntentRecord {
@@ -74,8 +93,8 @@ export function isDebitIntentRecord(value: unknown): value is DebitIntentRecord 
 }
 
 /**
- * Checks that a value has the exact shape of a stored {@link HoldInvoicePolicyRecord}. Unknown extra fields are tolerated.
- * @param value Value to check, typically freshly parsed JSON.
+ * Checks that a value is a stored {@link HoldInvoicePolicyRecord}, extra fields tolerated.
+ * @param value Value to check.
  * @returns Whether the value is a valid hold invoice record.
  */
 export function isHoldInvoicePolicyRecord(value: unknown): value is HoldInvoicePolicyRecord {
@@ -103,9 +122,9 @@ function isChannelPins(value: unknown): boolean {
         isNonEmptyHexBytes(value.localCloseScript) &&
         isReserveByLayout(value.localReservedCkbShannons) &&
         value.udtTypeScript === null &&
-        FIRST_SIGHT_CHANNEL_PINS.every((pin) => {
+        [...FIRST_SIGHT_CHANNEL_PINS, ...CHANNEL_TERMS_PINS].every((pin) => {
             const pinned = value[pin];
-            return pinned === undefined || (typeof pinned === "string" && FIRST_SIGHT_PIN_FORMS[pin](pinned));
+            return pinned === undefined || (typeof pinned === "string" && PIN_FORMS[pin](pinned));
         })
     );
 }
@@ -223,15 +242,13 @@ function isChannelIndexSet(value: unknown): boolean {
 }
 
 /**
- * Checks that a value maps known nonce contexts to commitment numbers within the chain.
+ * Checks that a value maps known signing lanes to commitment numbers within the chain.
  * @param value Value to check.
- * @returns Whether the value is a per-context counter map.
+ * @returns Whether the value is a per-lane counter map.
  */
-function isContextCounterMap(value: unknown): boolean {
+function isLaneCounterMap(value: unknown): boolean {
     if (!isPlainObject(value)) return false;
-    return Object.entries(value).every(
-        ([context, counter]) => CONTEXTS.includes(context) && isUnsignedInteger(counter, MAX_COMMITMENT_NUMBER),
-    );
+    return Object.entries(value).every(([lane, counter]) => LANES.includes(lane) && isCommitmentNumber(counter));
 }
 
 /**
@@ -256,4 +273,64 @@ function isSignSlot(value: string): boolean {
     const commitmentNumber = value.slice(separator + 1);
     // Canonical decimal: one slot key per number.
     return CONTEXTS.includes(context) && isCanonicalDecimal(commitmentNumber) && Number(commitmentNumber) <= MAX_COMMITMENT_NUMBER;
+}
+
+/**
+ * Checks that a value maps served slots to the second session each served, never the first one again.
+ * @param value Value to check.
+ * @param signedSessions The record's sign-once registry.
+ * @returns Whether the value is a nonce reuse log.
+ */
+function isNonceReuseMap(value: unknown, signedSessions: unknown): boolean {
+    if (!isPlainObject(value) || !isPlainObject(signedSessions)) return false;
+    return Object.entries(value).every(([slot, entry]) => {
+        if (!isSignSlot(slot) || !isPlainObject(entry)) return false;
+        const first = signedSessions[slot];
+        return (
+            isHexBytes(entry.sessionCommitment, MESSAGE_DIGEST_LENGTH) &&
+            isHexBytes(entry.message, MESSAGE_DIGEST_LENGTH) &&
+            typeof first === "string" &&
+            first !== entry.sessionCommitment
+        );
+    });
+}
+
+/**
+ * Checks that a value maps views to the last commitment signed in each.
+ * @param value Value to check.
+ * @returns Whether the value is a commitment hash map.
+ */
+function isCommitmentHashMap(value: unknown): boolean {
+    if (!isPlainObject(value)) return false;
+    return Object.entries(value).every(
+        ([view, entry]) =>
+            VIEWS.includes(view) &&
+            isPlainObject(entry) &&
+            isCommitmentNumber(entry.commitmentNumber) &&
+            isHexBytes(entry.txHash, MESSAGE_DIGEST_LENGTH),
+    );
+}
+
+/**
+ * Checks that a value lists revocation evidence in strictly ascending version order.
+ * @param value Value to check.
+ * @returns Whether the value is a revocation evidence list.
+ */
+function isRevocationEvidenceList(value: unknown): boolean {
+    if (!Array.isArray(value)) return false;
+    let previous = -1;
+    return value.every((entry: unknown) => {
+        if (!isPlainObject(entry) || !isUnsignedInteger(entry.version, MAX_REVOKED_VERSION) || entry.version <= previous) return false;
+        previous = entry.version;
+        return entry.forRemote === true && isHexBytes(entry.signature, SCHNORR_SIGNATURE_LENGTH);
+    });
+}
+
+/**
+ * Checks that a value is a commitment number within the chain.
+ * @param value Value to check.
+ * @returns Whether the value is one.
+ */
+function isCommitmentNumber(value: unknown): value is number {
+    return isUnsignedInteger(value, MAX_COMMITMENT_NUMBER);
 }

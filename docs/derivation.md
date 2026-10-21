@@ -27,18 +27,18 @@ fiber's `InMemorySigner` holds four secrets per channel. They are not equally da
 | `commitmentSeed`  | Root of the per-commitment revocation secret chain               | Old states can be revoked and penalised: the channel can be claimed                           |
 | `tlcBaseKey`      | Base key the per-commitment TLC settlement keys are tweaked from | Settlement of in-flight payments after a close can be skewed, but the funding cannot be spent |
 
-That last row is why the split matters. `fundingKey` never leaves the device under any circumstance. `tlcBaseKey` deliberately
-can: a watchtower needs it to settle TLCs if the channel is force-closed while the phone is off. It is a scoped delegation —
-power over post-close settlement, not over the channel's money.
+That last row is why the split matters. `fundingKey` never leaves the device under any circumstance, and neither does
+`tlcBaseKey`: a watchtower that settles TLCs after a force close while the phone is off asks the device for each
+signature instead of holding the key.
 
 The SDK adds a fifth key that is not part of fiber's scheme:
 
-| Secret              | What it is                                                                             |
-| ------------------- | -------------------------------------------------------------------------------------- |
-| `walletIdentityKey` | Wallet identity. Signs the challenge with which the LSP bridge authenticates a session |
+| Secret              | What it is                                                                    |
+| ------------------- | ----------------------------------------------------------------------------- |
+| `walletIdentityKey` | Wallet identity: the one key the LSP knows the wallet by, across its channels |
 
 It identifies the master seed, not the handset. Two devices restored from the same mnemonic derive the same key and are
-indistinguishable to the LSP — which is what makes a restored wallet reauthenticate on its own, and what makes telling two
+indistinguishable to the LSP, which is what makes a restored wallet known again on its own, and what makes telling two
 installations apart impossible with this derivation alone.
 
 ## The primitives
@@ -116,8 +116,10 @@ the secrets of every index that shares `I`'s high bits and only adds bits _below
 counting **downwards**, so revealing one state's secret never reveals future ones. The corollary matters: `secret(0)` is the seed
 itself, so from it every other secret follows. A channel that started at 0 and counted up would hand over the entire chain with
 its first revocation. The reference implementation (LDK) maps `real_index = INITIAL_COMMITMENT_NUMBER - n` with
-`INITIAL_COMMITMENT_NUMBER = 2⁴⁸ - 1` precisely for this reason. The function here is a pure function of the number it is given
-and is correct either way, but the convention is still an open item (see below).
+`INITIAL_COMMITMENT_NUMBER = 2⁴⁸ - 1` precisely for this reason. Fiber does not: its `INITIAL_COMMITMENT_NUMBER` is 0, it counts
+up and derives at the number unmapped (`fiber-types/src/channel.rs:328,1248-1258`), and a signing request's slot carries that
+number as is ([protocol.md](./protocol.md)). The function here is a pure function of the number it is given, so it derives
+what fiber derives; the property above is fiber's to weigh, not a convention the SDK chooses.
 
 ### musig2 nonces
 
@@ -125,7 +127,11 @@ fiber's 2-of-2 is not a multisig script: the two keys are aggregated into a sing
 final signature is indistinguishable from an ordinary one. Two facts drive the design here.
 
 **Aggregation is order-dependent.** `KeyAgg([A, B]) ≠ KeyAgg([B, A])`; each key carries a coefficient derived from the ordered
-list. fiber orders by role, `[local, remote]`, not lexicographically. The SDK must never sort on its own.
+list, and the aggregated key has to be the key of the cell the signature unlocks. fiber picks the order by what is spent: the two
+funding keys sorted ascending for the funding cell (commitments, the close) and for the announcement, the role order of the
+revoked lock for a revocation, `[remote, local]` when the device revokes and `[local, remote]` when the peer does. The device
+checks the order a request declares against that rule for its transition ([signing.md](./signing.md)); any other order makes a
+signature that unlocks nothing and burns the slot.
 
 **Every signature needs a single-use secret nonce.** Sign two different messages with the same nonce `k` and the private key
 falls out:
@@ -146,14 +152,18 @@ From which follows the decision that shapes the SDK:
 That reads like a violation of the golden rule, and it is not, provided the other half holds:
 
 > The **sign-once** policy guarantees a slot ever serves **one** signing session: one ordered key list, one aggregated nonce,
-> one message. A byte-identical repeat returns the same signature; anything else on an already-served slot is refused.
+> one message. A byte-identical repeat returns the same signature; anything else on an already-served slot is refused, unless
+> the host allows one second session ([signing.md](./signing.md)), which two partial signatures leave safe and a third would not.
 
 Deterministic nonce + sign-once = single-use nonce _per session_. Counting messages instead would not do: the challenge a
 partial signature answers is a function of the aggregated nonce too, so a node that re-asks for one slot and one message under
 three aggregates of its choosing recovers the funding key ([signing.md](./signing.md)). The payoff on mobile is large: if the
-connection drops mid-signature and the bridge redelivers, the device produces the same response byte for byte, so retries are
-idempotent without persisting the signature itself. The four contexts (`COMMITMENT`, `REVOKE`, `CLOSE`, `ANNOUNCEMENT`) exist so
-two different operations on the same commitment number cannot share a nonce.
+device stops between signing and submitting and the node asks again, the device produces the same response byte for byte, so
+retries are idempotent without persisting the signature itself. The three contexts (`COMMITMENT`, `REVOKE`, `ANNOUNCEMENT`) are
+fiber's three nonce purposes, so two operations fiber keeps apart on one commitment number never share a nonce. A cooperative
+close has no context of its own: fiber signs it in the `COMMITMENT` slot of the local commitment number, the one a commitment
+of that number would use, and sign-once is what keeps the two from sharing it. A channel announcement is signed once, so its
+context has one slot, number 0, the only one fiber's `validate_nonce_slot` takes (`fiber-lsp-sdk/src/signer.rs:1586-1593`).
 
 This module derives the nonce **seed**. The nonce itself (BIP-327 `nonceGen`) belongs to the signing engine.
 
@@ -171,7 +181,7 @@ user mnemonic                       (the SDK never sees it)
             └── masterSeed = BIP32 m/1017'/309'/{a}'  ───── enters once, through the constructor   [a = account]
                   │
                   ├── walletIdentityKey = ckbBlake2b(masterSeed ‖ "wallet identity")
-                  │      └─ signs the session challenge
+                  │      └─ the tenant's RootSigner: the key the LSP knows the wallet by
                   │
                   └── channelSeed(i) = ckbBlake2b(masterSeed ‖ "fiber channel {i}")     [i = channel index]
                         │
@@ -287,7 +297,7 @@ reading the two side by side.
 
 ## What the tests guarantee
 
-186 tests across the 5 suites of `test/tests/derivation/`, in four layers with different jobs. The input guards the module leans
+173 tests across the 5 suites of `test/tests/derivation/`, in four layers with different jobs. The input guards the module leans
 on are generic and live in `common/`, tested alongside them.
 
 **Cross-implementation vectors** (`test/tests/derivation/interop-vectors.spec.ts`) compare every derivation against
@@ -295,21 +305,22 @@ on are generic and live in `common/`, tested alongside them.
 independent implementation. It covers 4 hashing KATs; the 4 channel keys and 2 of their public halves; 9 commitment numbers
 (0, 1, 2, 5, 1000, 65535, 2³²−1, 2⁴⁷, 2⁴⁸−1) across secret, point, TLC key by both paths and nonce seckey; 3 master seeds at accounts
 0, 1 and 2³¹−1; the wallet identity key; 6 channel seeds including `MAX_SAFE_INTEGER`; the full master seed → channel → keys chain;
-and 36 nonce seeds (9 numbers × 4 contexts). The vector file is shape-checked when loaded, and a guard test demands the boundary
-cases are present so a regenerated, thinner file fails loudly instead of silently testing less.
+27 nonce seeds (9 numbers × 3 contexts); and the device of `signing.json`, derived from the master seed and channel index the
+signing vectors name it by. The vector file is shape-checked when loaded, and a guard test demands the boundary cases are
+present so a regenerated, thinner file fails loudly instead of silently testing less.
 
 The master seed half is worth a note: the Rust side implements BIP32 hardened derivation straight from the spec, so agreement
 with `@scure/bip32` is two independent implementations meeting, not one library checked against itself.
 
 **Invariants** hold whatever the input: the private and public derivation paths agree; the first 65 commitment secrets are all
-distinct; the first 101 channel seeds are all distinct; the four nonce seeds of one commitment differ; nothing mutates its
+distinct; the first 101 channel seeds are all distinct; the three nonce seeds of one commitment differ; nothing mutates its
 inputs; `getCommitmentSecret` returns a copy, accepts a view into a larger buffer, and reaches a later secret from an earlier one
 whenever the extra bits are lower — the property that lets the counterparty store every revealed secret in 48 values.
 
 **Refusal paths** get a test each — bad lengths, bad types, a value that is not a number, negative, fractional, `NaN`,
 `Infinity`, above the maximum, an uncompressed point, a point off the curve, the zero key, a key at the curve order, a tweak that
-cancels the key on either derivation path, malformed channel keys, an unknown context. The first group is exercised directly
-against the guards in `test/tests/common/utils/assert.utils.spec.ts`.
+cancels the key on either derivation path, malformed channel keys, an unknown context (the retired `CLOSE` among them). The
+first group is exercised directly against the guards in `test/tests/common/utils/assert.utils.spec.ts`.
 
 **Pinned outputs** hardcode results by hand, deliberately redundant with the vectors, because the vectors live in a generated
 file: a change made to the port and to the Rust harness at the same time regenerates them green, and only a hand-written value
@@ -354,22 +365,17 @@ Every one of them is exactly the kind of change a well-meaning refactor might ma
 These do not affect the functions, which are pure and correct for the inputs they are given, but the conventions around them must
 be fixed before integration against a real node.
 
-1. **Direction of the commitment number.** `secret(0)` is the whole seed, which is why Lightning's reference implementation
-   counts down from 2⁴⁸−1. Confirm, against fiber's channel actor, which number arrives in a sign request and whether it is
-   already mapped.
-2. **Commitment number for the `ANNOUNCEMENT` context.** A channel announcement is signed once, not per commitment. A convention
-   has to be frozen along with the wire format.
-3. **Account index convention.** `deriveMasterSeed` takes one and defaults to 0. Confirm whether the wallet keeps one Fiber
+1. **Account index convention.** `deriveMasterSeed` takes one and defaults to 0. Confirm whether the wallet keeps one Fiber
    account per wallet account, and whether that index is the same one it uses for its on-chain BIP44 accounts, since recovery has
    to know it as surely as it knows the channel index.
-4. **Nonce construction on both sides.** Only public nonces cross the wire, so the internal constructions may differ. Confirm
+2. **Nonce construction on both sides.** Only public nonces cross the wire, so the internal constructions may differ. Confirm
    during integration that fiber assumes nothing about how our secret nonce was built.
-5. **Channel index after a restore.** Re-deriving requires knowing which indexes existed. How an index is handed out is
+3. **Channel index after a restore.** Re-deriving requires knowing which indexes existed. How an index is handed out is
    settled, as the time of the open in seconds so that a wiped storage cannot hand one out twice ([sdk.md](./sdk.md));
    finding the indexes of a restored device's channels again is not, and depends on this scheme.
-6. **Telling two installations apart.** `walletIdentityKey` is a function of the master seed alone, so a wallet installed on two
-   devices presents one identity. If the session layer ever needs per-installation identity — revoking one device, warning about
-   a second login — it needs a component that is not derived from the seed, and therefore registered with the LSP rather than
+4. **Telling two installations apart.** `walletIdentityKey` is a function of the master seed alone, so a wallet installed on two
+   devices presents one identity. If the LSP ever needs per-installation identity (revoking one device, warning about
+   a second login), it needs a component that is not derived from the seed, and therefore registered with the LSP rather than
    rederived.
 
 ## Glossary
@@ -387,7 +393,7 @@ be fixed before integration against a real node.
 | **Nonce**                   | Single-use secret per signature; reusing one leaks the private key                         |
 | **Personalization**         | blake2b parameter altering the initial state; CKB uses `ckb-default-hash`                  |
 | **Shannon**                 | CKB's smallest unit: 1 CKB = 10⁸ shannons                                                  |
-| **Sign-once**               | Policy rule: a `(channel, number, context)` slot signs exactly one message                 |
+| **Sign-once**               | Policy rule: a `(channel, number, context)` slot serves one signing session                |
 | **TLC**                     | Fiber's equivalent of Lightning's HTLC                                                     |
 | **Tweak**                   | Scalar added to a key to derive another                                                    |
 | **Watchtower**              | Service that watches the channel and punishes fraudulent closes while the owner is offline |

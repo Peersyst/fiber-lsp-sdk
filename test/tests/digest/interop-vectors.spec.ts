@@ -1,25 +1,38 @@
 import { bytesToHex, hexToBytes } from "@noble/hashes/utils.js";
 import { deriveChannelKeys } from "../../../src/derivation/fiber-scheme";
 import { computeChannelAnnouncementDigest } from "../../../src/digest/channel-announcement";
-import { buildCommitmentLockArgs, computeCommitmentTxDigest, readCommitmentLockLayout } from "../../../src/digest/commitment-tx";
+import {
+    buildCommitmentLockArgs,
+    computeCommitmentTxDigest,
+    readCommitmentLockDelay,
+    readCommitmentLockLayout,
+    readCommitmentLockVersion,
+} from "../../../src/digest/commitment-tx";
 import { COMMITMENT_LOCK_TESTNET } from "../../../src/digest/digest.constants";
 import { calculateTxFee, commitmentTxSize, shutdownTxSize } from "../../../src/digest/fee";
 import { computeRevocationDigest } from "../../../src/digest/revocation";
+import { settlementToCommitmentInput } from "../../../src/digest/settlement-input";
 import { buildSettlementWitness } from "../../../src/digest/settlement-witness";
-import { computeShutdownTxDigest } from "../../../src/digest/shutdown-tx";
+import { computeClosingTxDigest, computeShutdownTxDigest, readClosingTx } from "../../../src/digest/shutdown-tx";
+import { computeRevocationContentMessage, computeTxMessage } from "../../../src/digest/tx-message";
+import { moleculeCellOutput } from "../../../src/digest/utils/molecule.utils";
 import { aggregateXOnlyPubkey } from "../../../src/digest/utils/digest.utils";
 import {
     toChannelAnnouncementInput,
+    toClosingTxInput,
+    toCommitmentSettlementTerms,
     toCommitmentTxInput,
     toLockLayout,
     toOutPoint,
     toRevocationInput,
+    toRevocationOutput,
     toScript,
     toScriptOrNull,
     toShutdownTxInput,
     toTlc,
+    toTransaction,
 } from "../../utils/digest-inputs";
-import { caseOf, loadInteropVectors } from "../../utils/interop-vectors";
+import { caseOf, loadInteropVectors, toVectorSettlement } from "../../utils/interop-vectors";
 
 const vectors = loadInteropVectors();
 const digest = vectors.digest;
@@ -96,8 +109,11 @@ describe("digest cross-implementation vectors", () => {
                     expect(bytesToHex(lockArgs)).toBe(kase.lock_args);
                 });
 
-                it("reads the layout back from the lock args", () => {
-                    expect(readCommitmentLockLayout(hexToBytes(kase.lock_args))).toBe(lockLayout);
+                it("reads the layout, the delay and the version back from the lock args", () => {
+                    const lockArgs = hexToBytes(kase.lock_args);
+                    expect(readCommitmentLockLayout(lockArgs)).toBe(lockLayout);
+                    expect(readCommitmentLockDelay(lockArgs)).toBe(BigInt(kase.delay_epoch));
+                    expect(readCommitmentLockVersion(lockArgs)).toBe(kase.commitment_number);
                 });
 
                 it("sizes the mock tx and its fee", () => {
@@ -113,6 +129,25 @@ describe("digest cross-implementation vectors", () => {
 
                 it("recomputes the digest", () => {
                     expect(bytesToHex(computeCommitmentTxDigest(keys, input))).toBe(kase.digest);
+                });
+
+                it("hashes the tx fiber built to the same message", () => {
+                    const tx = toTransaction(kase.transaction);
+                    expect(bytesToHex(computeTxMessage(tx))).toBe(kase.digest);
+                    expect(bytesToHex(tx.outputs[0]?.lock.args ?? new Uint8Array(0))).toBe(kase.lock_args);
+                });
+
+                it("recomputes the digest from the settlement snapshot fiber states for it", () => {
+                    const converted = settlementToCommitmentInput(
+                        keys,
+                        toVectorSettlement(kase.settlement),
+                        toCommitmentSettlementTerms(kase, digest.remote),
+                        kase.commitment_number,
+                    );
+                    // fiber lists the TLCs in its witness order, not the case's: the builder sorts them either way.
+                    expect(converted).toEqual({ ...input, tlcs: expect.arrayContaining(input.tlcs) });
+                    expect(converted.tlcs).toHaveLength(input.tlcs.length);
+                    expect(bytesToHex(computeCommitmentTxDigest(keys, converted))).toBe(kase.digest);
                 });
             });
         }
@@ -136,8 +171,41 @@ describe("digest cross-implementation vectors", () => {
                     expect(bytesToHex(recomputed)).toBe(kase.digest);
                 });
 
-                // Same channel seen from the peer: every local/remote input swaps, the wire tx is identical, and the
-                // opposite branch of the funding-pubkey output sort gets exercised against the same Rust digest.
+                it("hashes the tx fiber built to the same message", () => {
+                    expect(bytesToHex(computeTxMessage(toTransaction(kase.transaction)))).toBe(kase.digest);
+                });
+
+                if (kase.udt_type_script === null) {
+                    it("recomputes the digest from what the closing tx states, from both sides of the channel", () => {
+                        const closing = toClosingTxInput(kase, digest.remote);
+                        expect(bytesToHex(computeClosingTxDigest(keys, closing))).toBe(kase.digest);
+                        const fromPeer = computeClosingTxDigest(remoteKeys, {
+                            fundingOutPoint: closing.fundingOutPoint,
+                            remoteFundingPubkey: localFundingPubkey,
+                            localCloseScript: closing.remoteCloseScript,
+                            remoteCloseScript: closing.localCloseScript,
+                            localCapacityShannons: closing.remoteCapacityShannons,
+                            remoteCapacityShannons: closing.localCapacityShannons,
+                        });
+                        expect(bytesToHex(fromPeer)).toBe(kase.digest);
+                    });
+
+                    it("reads the closing input out of the tx fiber built, from both sides of the channel", () => {
+                        const closing = toClosingTxInput(kase, digest.remote);
+                        const tx = toTransaction(kase.transaction);
+                        expect(readClosingTx(keys, remoteFundingPubkey, tx)).toEqual(closing);
+                        expect(readClosingTx(remoteKeys, localFundingPubkey, tx)).toEqual({
+                            fundingOutPoint: closing.fundingOutPoint,
+                            remoteFundingPubkey: localFundingPubkey,
+                            localCloseScript: closing.remoteCloseScript,
+                            remoteCloseScript: closing.localCloseScript,
+                            localCapacityShannons: closing.remoteCapacityShannons,
+                            remoteCapacityShannons: closing.localCapacityShannons,
+                        });
+                    });
+                }
+
+                // The peer's view: every input swaps sides, the tx stays, and the output sort takes its other branch.
                 it("recomputes the same digest from the other side of the channel", () => {
                     const recomputed = computeShutdownTxDigest(remoteKeys, {
                         fundingOutPoint: toOutPoint(kase.funding_out_point),
@@ -161,9 +229,28 @@ describe("digest cross-implementation vectors", () => {
 
     describe("revocation", () => {
         for (const kase of digest.revocation_cases) {
-            it(`recomputes the "${kase.name}" digest`, () => {
-                const recomputed = computeRevocationDigest(keys, toRevocationInput(kase, digest.remote));
-                expect(bytesToHex(recomputed)).toBe(kase.digest);
+            describe(kase.name, () => {
+                it("recomputes the digest", () => {
+                    const recomputed = computeRevocationDigest(keys, toRevocationInput(kase, digest.remote));
+                    expect(bytesToHex(recomputed)).toBe(kase.digest);
+                });
+
+                it("hashes the content fiber built to the same message", () => {
+                    const output = toRevocationOutput(kase);
+                    expect(bytesToHex(moleculeCellOutput(output.capacityShannons, output.lock, output.type))).toBe(kase.output);
+                    const message = computeRevocationContentMessage(
+                        output,
+                        hexToBytes(kase.output_data),
+                        hexToBytes(kase.commitment_lock_script_args),
+                    );
+                    expect(bytesToHex(message)).toBe(kase.digest);
+                });
+
+                it("reads the revoked number and the delay back from the content's args", () => {
+                    const args = hexToBytes(kase.commitment_lock_script_args);
+                    expect(readCommitmentLockVersion(args)).toBe(kase.revoked_commitment_number);
+                    expect(readCommitmentLockDelay(args)).toBe(BigInt(kase.delay_epoch));
+                });
             });
         }
     });

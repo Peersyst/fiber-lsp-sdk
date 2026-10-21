@@ -1,13 +1,16 @@
 import type { TlcDirection, TlcHashAlgorithm } from "../common";
 import type { NonceContext } from "../derivation";
-import type { ChannelAnnouncementInput, CommitmentLockLayout, CommitmentTxInput, RevocationInput, ShutdownTxInput } from "../digest";
+import type { ChannelAnnouncementInput, ClosingTxInput, CommitmentLockLayout, CommitmentTxInput, RevocationInput } from "../digest";
 import type {
     CHANNEL_POLICY_RECORD_VERSION,
+    CHANNEL_TERMS_PINS,
     DEBIT_INTENT_ERROR_CODES,
     FIRST_SIGHT_CHANNEL_PINS,
     HOLD_INVOICE_ERROR_CODES,
+    NONCE_REUSE_MODES,
     PAYMENT_RECORD_VERSION,
     POLICY_VIEWS,
+    SIGNING_LANES,
 } from "./policy.constants";
 
 export type DebitIntentErrorCode = (typeof DEBIT_INTENT_ERROR_CODES)[number];
@@ -16,18 +19,67 @@ export type HoldInvoiceErrorCode = (typeof HOLD_INVOICE_ERROR_CODES)[number];
 
 export type SignSlot = `${NonceContext}:${number}`;
 
+export type NonceReuseMode = (typeof NONCE_REUSE_MODES)[number];
+
+export type NonceCounter = "local" | "remote";
+
+/**
+ * One monotonic sequence per fiber counter: the two revocation lanes advance on different events.
+ */
+export type SigningLane = (typeof SIGNING_LANES)[number];
+
+/**
+ * The last commitment signed in a view: its version floor, and the replacement a revocation needs.
+ */
+export type SignedCommitmentRecord = {
+    commitmentNumber: number;
+    /**
+     * Fiber's `compute_tx_message` of the tx as signed, lowercase hex: not the on-chain hash, since the tx fiber broadcasts
+     * adds the funding lock's cell deps.
+     */
+    txHash: string;
+};
+
+export type RevocationEvidence = {
+    version: number;
+    forRemote: true;
+    /**
+     * Aggregated schnorr signature, lowercase hex.
+     */
+    signature: string;
+};
+
+/**
+ * A session `allow` served on a slot after its first; at most one per slot, since a third session solves for the funding key.
+ */
+export type NonceReuseEntry = {
+    sessionCommitment: string;
+    /**
+     * Lowercase hex.
+     */
+    message: string;
+};
+
 export type ChannelPolicyRecord = {
     version: typeof CHANNEL_POLICY_RECORD_VERSION;
     /**
      * The channel's current name, which moves when the open handshake fixes it; the record's own key does not.
      */
     channelId: string;
-    lastSignedCommitmentNumbers: Partial<Record<NonceContext, number>>;
+    lastSignedCommitmentNumbers: Partial<Record<SigningLane, number>>;
     /**
      * Sign-once registry: the commitment to the session each slot served, not to its message alone.
      */
     signedSessions: Partial<Record<SignSlot, string>>;
-    lastStateVersion: number;
+    /**
+     * Written under `allow` only, so a sweep of the store shows what the permissive mode let through.
+     */
+    nonceReuse: Partial<Record<SignSlot, NonceReuseEntry>>;
+    commitmentHashes: Partial<Record<PolicyView, SignedCommitmentRecord>>;
+    /**
+     * Ascending by version, upserted by version.
+     */
+    revocations: RevocationEvidence[];
     pins: ChannelPins;
     /**
      * One per commitment: the two may list different TLCs.
@@ -36,6 +88,8 @@ export type ChannelPolicyRecord = {
 };
 
 export type FirstSightChannelPin = (typeof FIRST_SIGHT_CHANNEL_PINS)[number];
+
+export type ChannelTermsPin = (typeof CHANNEL_TERMS_PINS)[number];
 
 /**
  * Canonical strings, so pins compare by equality.
@@ -57,9 +111,11 @@ export type ChannelPins = {
      * CKB channels only, until the multi-asset shape is decided.
      */
     udtTypeScript: null;
-} & Partial<Record<FirstSightChannelPin, string>>;
+} & Partial<Record<FirstSightChannelPin | ChannelTermsPin, string>>;
 
-export type StatedChannelPins = Partial<Record<FirstSightChannelPin | "localCloseScript" | "localReservedCkbShannons", string>> & {
+export type StatedChannelPins = Partial<
+    Record<FirstSightChannelPin | ChannelTermsPin | "localCloseScript" | "localReservedCkbShannons", string>
+> & {
     udtTypeScript?: string | null;
 };
 
@@ -159,9 +215,6 @@ export type SignerRecordFormat<T> = {
     name: string;
     is: (value: unknown) => value is T;
     assert: (name: string, value: unknown) => asserts value is T;
-    /**
-     * Whether the record agrees with the key it is stored under.
-     */
     belongsAt: (key: string, record: T) => boolean;
 };
 
@@ -179,7 +232,7 @@ export type SignSession = {
 
 export type SignOperation =
     | { kind: "commitment_tx"; input: CommitmentTxInput }
-    | { kind: "shutdown_tx"; input: ShutdownTxInput }
+    | { kind: "closing_tx"; input: ClosingTxInput }
     | { kind: "revocation"; input: RevocationInput }
     | { kind: "channel_announcement"; input: ChannelAnnouncementInput };
 
@@ -187,12 +240,10 @@ export type SignOperationKind = SignOperation["kind"];
 
 export type PolicySignRequest = {
     channelId: string;
-    stateVersion: number;
     /**
-     * The number the nonce slot is keyed by, which is not always the number inside the message; absent for the
-     * announcement, whose slot `resolveSignSlot` fixes.
+     * Not always the number inside the message; the context follows from the operation.
      */
-    nonceCommitmentNumber?: number;
+    slot: { commitmentNumber: number; counter: NonceCounter | null };
     session: SignSession;
     operation: SignOperation;
 };
@@ -202,8 +253,33 @@ export type SignSlotRef = {
     commitmentNumber: number;
 };
 
+export type SignSlotClaim = SignSlotRef & {
+    lane: SigningLane;
+};
+
 export type PolicyVerdict = SignSlotRef & {
-    status: "fresh" | "already-signed";
+    status: "fresh" | "already-signed" | "reused";
+};
+
+export type PolicyEngineOptions = {
+    /**
+     * `refuse` unless set.
+     */
+    nonceReuse?: NonceReuseMode;
+};
+
+/**
+ * The terms no signing request states, pinned by the host from the node's `opening_context`.
+ */
+export type PolicyChannelTerms = {
+    commitmentFeeRate: bigint;
+    remoteReservedCkbShannons: string;
+    liquidCapacityShannons: string;
+};
+
+export type RevokedCommitmentSignature = {
+    version: number;
+    signature: Uint8Array;
 };
 
 export type BalanceRuleCommitment = {
@@ -211,9 +287,6 @@ export type BalanceRuleCommitment = {
     tlcs: PolicyViewTlc[];
 };
 
-/**
- * The device-wide records the balance rule reads.
- */
 export type BalanceRuleContext = {
     /**
      * Keyed by bound payment hash.

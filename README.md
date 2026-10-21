@@ -10,7 +10,7 @@ blind-signs.
 - **Runs anywhere**: framework-agnostic TypeScript, shipped as both ESM and CommonJS. The same code runs unmodified in Node,
   browsers, and React Native (Hermes).
 - **No I/O of its own**: the SDK performs no platform calls. The host injects every external effect: an `ISignerStorage` (key-value
-  persistence), a WebSocket factory, `fetch` and a timer, the last two defaulting to the runtime's own; the clock defaults to `Date.now`.
+  persistence), `fetch` and a timer, the last two defaulting to the runtime's own; the clock defaults to `Date.now`.
 - **Minimal, audited dependency surface**: the only runtime dependencies are `@noble/curves`, `@noble/hashes`, `@scure/bip32`, and
   `@scure/btc-signer`, accepted as `^2.2.0` so a host app on the same major converges on a single copy of each.
 - **Recoverable by design**: every derivation is a deterministic function of the master seed, so channel keys are recoverable from
@@ -27,20 +27,20 @@ These properties reflect the current specification and may evolve with it while 
 | [`derivation`](./src/derivation) | Fiber key scheme port + SDK-owned derivations (channel seed, wallet identity key, nonce seed)                |
 | [`digest`](./src/digest)         | Rebuilds the four messages fiber signs, so the device never blind-signs                                      |
 | [`invoice`](./src/invoice)       | Fiber's invoice string, read and written bit for bit, so the device knows what it pays and what it asked for |
-| [`signer`](./src/signer)         | Dispatches signer-protocol methods, musig2 signing engine                                                    |
+| [`signer`](./src/signer)         | The entry of a signing request: the checks before the claim, the musig2 engine, the public material          |
 | [`policy`](./src/policy)         | Policy engine + persisted per-channel records                                                                |
-| [`session`](./src/session)       | Signer session client: challenge auth, sequential processing, heartbeat, reconnect                           |
 | [`wire`](./src/wire)             | How fiber writes values in JSON, the readers that refuse anything else, and the writers that produce it      |
-| [`protocol`](./src/protocol)     | Frames, methods and results of the remote signing protocol                                                   |
+| [`protocol`](./src/protocol)     | Fiber's signing status read strictly: the transition, its slot, the plaintext, the peer's evidence           |
 | [`rpc`](./src/rpc)               | Typed fiber JSON-RPC client (Biscuit-authed)                                                                 |
 | [`sdk`](./src/sdk)               | Public facade wiring the above: `FiberLspSdk`, its lifecycle, events and errors, the time index, the poller  |
 
-`derivation`, `digest`, `invoice`, `signer`, `policy`, `wire`, `protocol`, `session` and `rpc` are implemented; `sdk` has its
+`derivation`, `digest`, `invoice`, `signer`, `policy`, `wire`, `protocol` and `rpc` are implemented; `sdk` has its
 core, construction, `connect`/`disconnect` and the events, while the operations a wallet calls (open a channel, create an
 invoice, pay one) land next, so the public API is not settled yet. The upstream reference is the head of Fiber's hosted-LSP
 PR (nervosnetwork/fiber#1623, `8db6a117`), whose polled signing protocol the modules under the facade are being aligned to:
-so far `digest` and `policy` know both commitment-lock layouts, `rpc` writes the tenant API's forms and `invoice` reads the
-trampoline route hint every tenant invoice carries.
+`digest` and `policy` know both commitment-lock layouts, `rpc` writes the tenant API's forms, `invoice` reads the
+trampoline route hint every tenant invoice carries, and `signer` answers the node's signing status; the poller that asks
+for it lands next.
 
 ## Repository layout
 
@@ -65,10 +65,8 @@ Full index in [docs/README.md](./docs/README.md). The load-bearing ones:
   make them safe, and the dispatch that gates every signature at one call site.
 - [What the device refuses](./docs/policy.md): the six checks every request passes, and the sign-once rule those
   conditions rest on.
-- [What crosses the wire](./docs/protocol.md): the remote signing protocol as proposed for review, its encodings, and
-  what a frame that does not decode is answered with.
-- [How the session stays up](./docs/session.md): the outbound socket, its states, one request at a time, and the
-  reconnect that runs only while the host wants it.
+- [What crosses the wire](./docs/protocol.md): the signing status the node publishes, each transition with its slot and
+  plaintext, and the forms it refuses.
 - [How an invoice is read](./docs/invoice.md): fiber's string decoded and written by the device itself, one string per
   invoice, and where the reader is stricter than fiber's.
 - [How the node is called](./docs/rpc.md): one POST per call over the host's fetch, the three errors a call fails
@@ -108,8 +106,8 @@ conditions resolve types through a single `index.d.ts`. The runtime dependencies
 CommonJS entry loads them through `require(esm)` — this is why the package requires Node >= 20.19.
 
 ```js
-import { PROTOCOL_VERSION } from "@peersyst/fiber-lsp-sdk";
-const { PROTOCOL_VERSION } = require("@peersyst/fiber-lsp-sdk");
+import { FiberLspSdk } from "@peersyst/fiber-lsp-sdk";
+const { FiberLspSdk } = require("@peersyst/fiber-lsp-sdk");
 ```
 
 ### Constructing the SDK
@@ -120,18 +118,15 @@ import { FiberLspSdk } from "@peersyst/fiber-lsp-sdk";
 const sdk = new FiberLspSdk(masterSeed, {
   network: "testnet",
   storage, // ISignerStorage or IAsyncSignerStorage: the host's key-value persistence
-  webSocketFactory: (url) => new WebSocket(url),
   rpcUrl: "https://lsp.example/rpc",
-  signerSessionUrl: "wss://lsp.example/signer",
   biscuitToken,
   lspPubkey, // the LSP node's key, 33 bytes
 });
 
 const unsubscribe = sdk.onEvent((event) => {
-  if (event.type === "SESSION") render(event.state);
   if (event.type === "ERROR") log(event.error.code, event.error.cause);
 });
-await sdk.connect(); // on foreground: the signer session and the polling of the node
+sdk.connect(); // on foreground: the polling of the node
 sdk.disconnect(); // on background
 ```
 

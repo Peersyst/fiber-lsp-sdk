@@ -8,7 +8,7 @@ export const MASTER_SEED_LENGTH = 32;
 export const BIP39_SEED_LENGTH = 64;
 
 /**
- * BIP43 purpose of the master seed path: 1017 is lnd's, and it is outside the purposes a wallet spends from.
+ * BIP43 purpose: lnd's, outside the purposes a wallet spends from.
  */
 export const MASTER_SEED_PURPOSE = 1017;
 
@@ -18,7 +18,7 @@ export const MASTER_SEED_PURPOSE = 1017;
 export const MASTER_SEED_COIN_TYPE = 309;
 
 /**
- * The account level of the path is hardened, and a hardened index is 31 bits.
+ * The account level is hardened: 31 bits.
  */
 export const MAX_ACCOUNT_INDEX = 2 ** 31 - 1;
 
@@ -28,13 +28,16 @@ export const MAX_ACCOUNT_INDEX = 2 ** 31 - 1;
 export const DERIVATION_SCHEME_VERSION = 1;
 
 /**
- * The commitment secret chain reads only the low 48 bits; above this it reuses a secret and its musig2 nonce.
+ * The commitment secret chain reads only the low 48 bits; above this a secret and its nonce repeat.
  */
 export const MAX_COMMITMENT_NUMBER = 2 ** 48 - 1;
 
 /**
- * The index is formatted into the seed string, so beyond this two indices collide onto one seed.
+ * The index is formatted into the seed string: beyond this two indices collide.
  */
 export const MAX_CHANNEL_INDEX = Number.MAX_SAFE_INTEGER;
 
-export const NONCE_CONTEXTS = ["COMMITMENT", "REVOKE", "CLOSE", "ANNOUNCEMENT"] as const;
+/**
+ * A cooperative close signs in the `COMMITMENT` slot of its number: fiber's nonce purposes have no close of their own.
+ */
+export const NONCE_CONTEXTS = ["COMMITMENT", "REVOKE", "ANNOUNCEMENT"] as const;

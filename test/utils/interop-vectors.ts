@@ -1,7 +1,9 @@
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
+import { hexToBytes } from "@noble/hashes/utils.js";
 import { NONCE_CONTEXTS } from "../../src/derivation/derivation.constants";
 import type { NonceContext } from "../../src/derivation/derivation.types";
+import type { SigningSettlement } from "../../src/digest/digest.types";
 import { asArray, asBoolean, asNullable, asNumber, asRecord, asString, asStringFields } from "./json-shape";
 
 export const CHANNEL_KEY_FIELDS = [
@@ -40,8 +42,8 @@ export type TlcVector = {
     amount: string;
     payment_hash: string;
     expiry_ms: string;
-    created_at_remote_commitment_number: number;
-    remote_commitment_point: string;
+    local_key_commitment_number: number;
+    remote_tlc_pubkey: string;
 };
 
 export type CommitmentCaseVector = {
@@ -65,6 +67,8 @@ export type CommitmentCaseVector = {
     lock_args: string;
     tx_size: number;
     fee: string;
+    transaction: Record<string, unknown>;
+    settlement: SettlementVector;
     digest: string;
 };
 
@@ -84,6 +88,7 @@ export type ShutdownCaseVector = {
     tx_size: number;
     local_fee: string;
     remote_fee: string;
+    transaction: Record<string, unknown>;
     digest: string;
 };
 
@@ -102,6 +107,9 @@ export type RevocationCaseVector = {
     local_reserved: string;
     remote_reserved: string;
     fee: string;
+    output: string;
+    output_data: string;
+    commitment_lock_script_args: string;
     digest: string;
 };
 
@@ -148,6 +156,28 @@ export type Vectors = {
     digest: DigestVectors;
 };
 
+// fiber's `SigningSettlementTlc` as its JSON writes it: hex integers, a 0x-prefixed hash, bare-hex pubkeys.
+export type SettlementTlcVector = {
+    tlc_id: string;
+    local_key_commitment_number: string;
+    inbound: boolean;
+    payment_hash: string;
+    payment_amount: string;
+    hash_algorithm: string;
+    expiry: string;
+    local_key_pubkey: string;
+    remote_key: string;
+};
+
+export type SettlementVector = {
+    local_amount: string;
+    remote_amount: string;
+    local_settlement_pubkey: string;
+    remote_settlement_pubkey: string;
+    for_remote: boolean;
+    tlcs: SettlementTlcVector[];
+};
+
 export function asScript(value: unknown, path: string): ScriptVector {
     return asStringFields(value, path, ["code_hash", "hash_type", "args"] as const);
 }
@@ -157,22 +187,72 @@ export function asOutPoint(value: unknown, path: string): OutPointVector {
     return { tx_hash: asString(record.tx_hash, `${path}.tx_hash`), index: asNumber(record.index, `${path}.index`) };
 }
 
-function asTlc(value: unknown, path: string): TlcVector {
+export function asTlc(value: unknown, path: string): TlcVector {
     const record = asRecord(value, path);
     return {
         id: asNumber(record.id, `${path}.id`),
-        created_at_remote_commitment_number: asNumber(
-            record.created_at_remote_commitment_number,
-            `${path}.created_at_remote_commitment_number`,
-        ),
+        local_key_commitment_number: asNumber(record.local_key_commitment_number, `${path}.local_key_commitment_number`),
         ...asStringFields(record, path, [
             "direction",
             "hash_algorithm",
             "amount",
             "payment_hash",
             "expiry_ms",
-            "remote_commitment_point",
+            "remote_tlc_pubkey",
         ] as const),
+    };
+}
+
+function asSettlement(value: unknown, path: string): SettlementVector {
+    const record = asRecord(value, path);
+    return {
+        for_remote: asBoolean(record.for_remote, `${path}.for_remote`),
+        tlcs: asArray(record.tlcs, `${path}.tlcs`).map((entry, index) => {
+            const at = `${path}.tlcs[${index}]`;
+            return {
+                inbound: asBoolean(asRecord(entry, at).inbound, `${at}.inbound`),
+                ...asStringFields(entry, at, [
+                    "tlc_id",
+                    "local_key_commitment_number",
+                    "payment_hash",
+                    "payment_amount",
+                    "hash_algorithm",
+                    "expiry",
+                    "local_key_pubkey",
+                    "remote_key",
+                ] as const),
+            };
+        }),
+        ...asStringFields(record, path, ["local_amount", "remote_amount", "local_settlement_pubkey", "remote_settlement_pubkey"] as const),
+    };
+}
+
+// fiber's JSON names the hash algorithms in snake case, the SDK in its own spelling.
+const SETTLEMENT_HASH_ALGORITHMS = { ckb_hash: "ckb-hash", sha256: "sha256" } as const;
+
+// The snapshot fiber's `to_rpc_signing_settlement` wrote for a commitment case, every field read from the vector.
+export function toVectorSettlement(vector: SettlementVector): SigningSettlement {
+    return {
+        localAmountShannons: BigInt(vector.local_amount),
+        remoteAmountShannons: BigInt(vector.remote_amount),
+        localSettlementPubkey: hexToBytes(vector.local_settlement_pubkey),
+        remoteSettlementPubkey: hexToBytes(vector.remote_settlement_pubkey),
+        forRemote: vector.for_remote,
+        tlcs: vector.tlcs.map((tlc) => {
+            const hashAlgorithm = Object.entries(SETTLEMENT_HASH_ALGORITHMS).find(([wire]) => wire === tlc.hash_algorithm)?.[1];
+            if (hashAlgorithm === undefined) throw new Error(`unknown settlement hash algorithm: ${tlc.hash_algorithm}`);
+            return {
+                tlcId: Number(BigInt(tlc.tlc_id)),
+                direction: tlc.inbound ? "received" : "offered",
+                hashAlgorithm,
+                amountShannons: BigInt(tlc.payment_amount),
+                paymentHash: hexToBytes(tlc.payment_hash.replace(/^0x/, "")),
+                expiryMs: BigInt(tlc.expiry),
+                localKeyCommitmentNumber: Number(BigInt(tlc.local_key_commitment_number)),
+                localKeyPubkey: hexToBytes(tlc.local_key_pubkey),
+                remoteTlcPubkey: hexToBytes(tlc.remote_key),
+            };
+        }),
     };
 }
 
@@ -192,6 +272,8 @@ function asDigestVectors(value: unknown): DigestVectors {
                 udt_type_script: asNullable(record.udt_type_script, `${path}.udt_type_script`, asScript),
                 tlcs: asArray(record.tlcs, `${path}.tlcs`).map((tlc, at) => asTlc(tlc, `${path}.tlcs[${at}]`)),
                 tx_size: asNumber(record.tx_size, `${path}.tx_size`),
+                transaction: asRecord(record.transaction, `${path}.transaction`),
+                settlement: asSettlement(record.settlement, `${path}.settlement`),
                 ...asStringFields(record, path, [
                     "name",
                     "lock_layout",
@@ -220,6 +302,7 @@ function asDigestVectors(value: unknown): DigestVectors {
                 cell_deps_count: asNumber(record.cell_deps_count, `${path}.cell_deps_count`),
                 udt_type_script: asNullable(record.udt_type_script, `${path}.udt_type_script`, asScript),
                 tx_size: asNumber(record.tx_size, `${path}.tx_size`),
+                transaction: asRecord(record.transaction, `${path}.transaction`),
                 ...asStringFields(record, path, [
                     "name",
                     "local_fee_rate",
@@ -253,6 +336,9 @@ function asDigestVectors(value: unknown): DigestVectors {
                     "local_reserved",
                     "remote_reserved",
                     "fee",
+                    "output",
+                    "output_data",
+                    "commitment_lock_script_args",
                     "digest",
                 ] as const),
             };
