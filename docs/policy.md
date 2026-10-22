@@ -32,7 +32,7 @@ nothing may move a record between the decision that files a channel on a payment
 | 1   | Known channel        | `unknown_channel` | The channel's name resolves to no channel index. Corrupt state throws instead, it never reads as absence            |
 | 2   | Digest recomputation | `malformed`       | The message must equal what the `digest` module rebuilds from the attached state: the no-blind-signing rule         |
 | 3   | Sign-once            | `policy_refusal`  | The slot must be free, or already served for this exact session; under `allow`, one more session (below)            |
-| 4   | Lanes and versions   | `stale_state`     | A fresh slot above its lane's last, a commitment's version above its view's, a revocation after its replacement     |
+| 4   | Lanes and versions   | `stale_state`     | A fresh slot above its lane's last, a commitment's version after its view's, a revocation after its replacement     |
 | 5   | Pins and bounds      | `policy_refusal`  | The channel's constant values, the terms the host pinned among them, and what a message takes from the funding cell |
 | 6   | Balance rule         | `policy_refusal`  | Per commitment view and per payment hash: growth needs an open intent, a fall a TLC that took it                    |
 
@@ -101,14 +101,40 @@ them meets a served slot, which is a second session (below).
 
 ## Versions per view
 
-A commitment carries its own number, the **version** in its lock args, and check 4 holds it strictly above the last
-version signed in the same view. The two views carry different counters (the local number in the peer's commitment, the
-remote one in the device's own), so neither the slot nor the other view orders them. The record keeps, per view, the last
+A commitment carries its own number, the **version** in its lock args, and check 4 holds it to the last version signed in
+the same view: strictly above it in the device's own view, exactly one above it in the peer's, behind a revocation (below).
+The two views carry different counters (the local number in the peer's commitment, the remote one in the device's own),
+so neither the slot nor the other view orders them. The record keeps, per view, the last
 commitment signed in it in `commitmentHashes`: its version, the view's floor, and the hash of its transaction, fiber's
 `compute_tx_message` (the raw transaction with its cell deps emptied). That hash is the digest the gate recomputed, which is
 the message of the transaction the node sent once the two match, so it costs nothing to keep. The transaction fiber
 broadcasts adds the funding lock's cell deps, so its on-chain hash is another one: whatever reads this hash compares it
 with the signed transaction rebuilt, not with a chain lookup.
+
+### The peer's view, one version at a time
+
+A remote commitment at version `v`, when the view's last is `w`, is signed only if `v` is `w + 1` and, unless `w` is the
+first commitment of the view, the lane `REVOKE:local` stands at `w` and the revocation evidence (below) holds version
+`w - 1`: the revocation of `w - 1`, which claims the slot `REVOKE:w`, has been served and its complete signature kept.
+Anything else is `stale_state`. The view's first commitment is exempt, signed at any
+version since nothing comes before it, and the one right after it waits on no revocation, since the one it would wait on
+is of a commitment the view never had. Whether `w` is the first is deduced from the registry: the dispatch holds a sent
+commitment's version to its slot's number ([signing.md](./signing.md)), so `w` follows another commitment of the view
+only if the slot `COMMITMENT:(w-1)` was served. A slot served by something else (the device's own commitment, a close)
+reads the same, so if the deduction errs it asks for one revocation too many, never one too few. The rule reads both
+the lane and the evidence. The lane alone is not enough: the claim is written before anything is signed and the evidence
+only after, so a crash between the two would leave the lane at `w` with no signature of the revocation, and a node that
+moved on to `w + 1` instead of asking for the revocation again would have it signed with nothing to punish `w - 1` with.
+The evidence alone is not enough either, since the evidence's own check only asks for the slot above it to be served,
+which the device's revocation of its own commitment also does. An honest fiber never meets the refusal: it holds one
+request at a time, so the revocation stays pending until it is applied, and the dispatch keeps the evidence before it
+answers.
+
+Without the rule, a peer's commitment could supersede its predecessor before that one's revocation was served. The
+replacement rule (below) would then refuse that revocation as `stale_state` for good, since its view has moved past it, and
+the older commitment, never revoked, would stay one the LSP could publish. An honest fiber never asks for it: it sends no
+`commitment_signed` while it waits for the peer's `revoke_and_ack` (`waiting_ack`, `channel.rs:2032`, cleared at `:6468`).
+The device's own view keeps the looser rule, `v` above `w`.
 
 ### A revocation follows its replacement
 
@@ -147,8 +173,9 @@ re-delivery charges nothing, files nothing and moves no counter, and the stale n
 ## Nonce reuse under `allow`
 
 Fiber's lifecycle, as it stands, asks for more than one signature per slot: at the open both commitment transitions land
-on one commitment slot, a payment the peer fulfils has one commitment slot serve three messages, and the two sides of a
-revocation round share the revocation slot at one number. Under the default rule the second message of each is refused,
+on one commitment slot, each round the peer starts puts its two commitments on one commitment slot (three messages
+when it follows a round of the device's: the known cost, below), and the two sides of a revocation round share the
+revocation slot at one number. Under the default rule the second message of each is refused,
 and no channel can open. `new PolicyEngine(store, { nonceReuse })` takes the mode: `refuse`, the default and the rule
 above, or `allow`, a compatibility mode for fiber's current nonces that goes once fiber fixes them. An absent mode is
 the default; any other value, `null` included, is a `TypeError` naming `options.nonceReuse`. The facade takes it as its
@@ -166,15 +193,19 @@ leave a nonce pair that answers both for every candidate key, which hides it, an
   `reused` again, so every delivery of a signature made under a reused nonce carries its warning. Both are answered in
   either mode, so a host that turns `allow` off keeps answering what was already served and refuses the rest.
 - The second session runs every check a first one does: the digest, its view's version, the pins and bounds, the balance
-  rule, and it updates the view and the commitment hash a first one would. It moves no lane, since its number was claimed
-  by the session the slot served first, and it may sit at its lane's last number but never below it: reuse serves fiber's
-  lifecycle, never a rollback to a slot the lane has left (`stale_state`). A reused revocation so leaves its own lane
-  below the number it signed, which is harmless: the replacement rule ties a revocation to its view's last commitment,
-  which only moves up, so no fresh slot below that number can be signed on the lane.
+  rule, and it updates the view and the commitment hash a first one would. It also moves its own lane up to its number,
+  as a first session does. In the round the peer starts, `SendRevokeAndAck` takes `REVOKE:2` fresh on `REVOKE:remote` and
+  `CompleteReceivedRevokeAndAck` arrives at `REVOKE:2` as its second session: that is the peer's revocation, the one the
+  peer's view waits on in `REVOKE:local` (above), and a lane left below it would refuse the peer's next commitment for
+  good. Lanes still only rise: a second session may sit at its lane's last number but never below it, since reuse serves
+  fiber's lifecycle, never a rollback to a slot the lane has left (`stale_state`).
 - The claim is written before anything is signed, as for a first session.
 
-The known cost: the payment fiber fulfils asks for a third message on one slot, which `allow` refuses, so that flow fails
-under it until fiber gives each message its own nonce.
+The known cost: a round the device starts leaves its own completed commitment on `Commitment@L`, after its
+`CompleteReceivedRevokeAndAck` moved L, and the peer's next round puts its two commitments on that same slot. That is a
+third message on one slot, which `allow` refuses, so after any round of the device's the peer's next round stalls: the
+fulfil of a payment the device sent, and a payment received after one it fulfilled. It lasts until fiber gives each message its own
+nonce ([signing.md](./signing.md) runs both sequences).
 
 ## The claim is written before anything is signed
 
@@ -433,7 +464,8 @@ and another signature of the same version replaces it. The dispatch records agai
 between signing and recording heals on the next delivery. The engine verifies nothing cryptographic here, the caller has;
 it refuses, as a host error, evidence for a version whose revocation slot (one above it) the channel never served, since
 evidence of a revocation the device never signed is none. The write runs in the record's own lane and not in the balance
-lane: no claim reads the evidence, and a claim that lands beside it writes the record it read, evidence included.
+lane: a claim only ever asks for evidence to be there, no write of the evidence takes any away, and a claim that lands
+beside it writes the record it read, evidence included.
 
 ## What this layer deliberately does not do
 
@@ -500,10 +532,17 @@ view's last commitment is at the slot's number, refused as stale with no commitm
 writing nothing, refused when only the other view is at the number, its repeat answered once the view moved past, and a
 second session under `allow` held to its own. The views: a version equal to and below its view's last refused,
 each view ordered apart from the slot and from the other view, and the hash of each view's last commitment kept, checked
-against `compute_tx_message` of the transactions fiber built. Under `allow`: the second session served, logged and
-reported as reused, the same one refused by default, a third refused, both repeats idempotent with no write, a logged
-session still answered once the mode is off and a third still refused, the other lane's revocation served without moving
-either lane, a second session at its lane's last served and below it refused as stale, a second session held to its
+against `compute_tx_message` of the transactions fiber built. The peer's view, one version at a time: its first
+commitment signed at any version and the one after it with no revocation signed, a version two above the last refused,
+the next one refused while its revocation slot is unsigned and signed once it is, refused while the lane stands one
+below and while only the device's own revocation took the slot, signed once the peer's took it as a second session, a
+second session on the view held to the rule like a first, the repeats of a version the view moved past answered as
+already signed and as reused, the one after the first asked for a revocation when a slot below the first was served
+(the deduction asking one too many), and the device's own view left free to skip versions, each refusal writing nothing.
+Under `allow`: the second session served, logged and reported as reused, the same one refused by default, a third
+refused, both repeats idempotent with no write, a logged session still answered once the mode is off and a third still
+refused, the other lane's revocation served on the slot one lane served, moving its own lane to the slot, a second
+session at its lane's last served and below it refused as stale, a second session held to its
 view's version, the pins, the balance rule and the close rule, its channel filed on its intents, and an unknown mode
 refused. The terms: pinned, at u64's maximum, repeated with no write under either name, each one conflicting with a
 `ChannelPinError` naming both values, each malformed argument refused by name, an unregistered channel and an alias with
@@ -757,6 +796,22 @@ checked by breaking the code on purpose:
 | The replacement may sit above the slot                             | 2                 |
 | A revocation out of order with its replacement is a policy refusal | 7                 |
 | A second session skips the replacement                             | 1                 |
+| The exemption reads the slot of the last instead of the one below  | 70                |
+| The first of the view is never exempt                              | 70                |
+| A fresh slot moves no lane                                         | 57                |
+| The rule reads the device's own revocation lane                    | 15                |
+| The evidence of the last version satisfies the rule                | 14                |
+| The remote view goes back to the local view's rule                 | 11                |
+| The revocation of the version before the last is never required    | 7                 |
+| The lane is never read                                             | 5                 |
+| A remote commitment at its view's last is signed                   | 2                 |
+| A reused slot moves no lane                                        | 2                 |
+| The evidence is never required                                     | 2                 |
+| The local view takes the remote view's rule                        | 2                 |
+| A remote commitment two versions above its view's last is signed   | 1                 |
+| A revocation one below the last satisfies the lane                 | 1                 |
+| Any evidence satisfies the rule                                    | 1                 |
+| Any revocation at or above the last satisfies the lane             | 0                 |
 | The evidence's slot is read at the version itself                  | 8                 |
 | The slot bound is one lower                                        | 8                 |
 | The verdict carries the lane                                       | 9                 |
@@ -810,7 +865,9 @@ checked by breaking the code on purpose:
 | The terms are not checked to be an object                          | 1                 |
 | A null nonce reuse mode is taken as the default                    | 1                 |
 
-Three mutants fail no test, and cannot. The host's pin of the funding cell given the terms' fields as well pins nothing
+Four mutants fail no test, and cannot. Letting any revocation at or above the remote view's last satisfy its rule is
+equivalent: `REVOKE:local` never passes that last, since the replacement rule holds a revocation at slot `n` to the view's
+commitment at `n`. The host's pin of the funding cell given the terms' fields as well pins nothing
 more, because the funding cell states none of them. Handing out the pins `readChannelPins` read without copying them, the
 reserve map or the whole object, changes nothing a caller sees: the store parses the stored string afresh on every read, so the
 copy is redundant behind it and only keeps the method's contract if the store ever caches.

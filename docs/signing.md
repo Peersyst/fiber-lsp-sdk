@@ -250,6 +250,104 @@ Two loops verify the engine against fiber's exact stack, each with a jest half a
 Those pins, like the vectors, are the idempotent re-delivery contract, not snapshots: a dependency bump that changed
 `NonceGen`'s output would break every in-flight signing round. A failing pin is investigated, never repinned.
 
+## The node double and the flows
+
+`InMemoryTenantNode` (`test/utils/tenant-node.ts`) is the node end of the tenant RPC. It answers the injected `fetch` for
+the three methods the poller calls, `list_channels`, `get_channel_signing_status` and `submit_channel_signature`, in
+fiber's shapes, and holds what fiber holds: the counters L and R (`CommitmentNumbers`, both 0 before the open), the sites
+that issue a request off them, the points and nonces the device published, and the peer's musig2 half. It issues one
+request at a time and queues the movements that arrive while one is pending, as fiber buffers them. A submission first
+meets the conversions of fiber's RPC layer, ahead of the channel lookup (`rpc/channel.rs:840-847`): the partial signature
+as a scalar and the next nonces as musig2 nonces. Then fiber's checks (`channel.rs:2208-2285`): `replay_or_pending`, which answers the exact receipt again `AlreadyApplied`; the
+partial signature, verified against the nonce the device published for the slot; and `next_material`, required on the
+four advancing transitions and installed at the slot's number plus one (`channel.rs:6009-6139`). The content it sends is
+built with digest's own builders ([digest.md](./digest.md)), from device keys the test derives from the seed: a shortcut,
+since a real node holds only the public parts, with the same result. The channel moves through methods of the double
+(open, send, receive, fulfil, shutdown), not through the RPC: the client methods for them come with the facade. Beside
+them, it can tamper with its next request, go past one as if the device had answered it, or keep a submission in the
+network until the next one.
+
+The flows, `test/tests/sdk/signing-step.flow.spec.ts`, run the poller's signing step over the double with the real
+dispatch, policy and rpc client and a mock timer. Under `nonceReuse: "allow"` the sequences run as below, each request
+named by its transition and fiber's nonce slot, and answered `signed`, or `warning` as a second session on its slot:
+
+- **The open**: `CompleteReceivedCommitment` at `Commitment@1` signed, then `SendCommitmentSigned` at `Commitment@1`
+  warning. Fiber may issue them in either order, and the flows run both. Under `refuse` the second is refused as
+  `policy_refusal`, on every tick.
+- **A payment received**, the peer's round: `CompleteReceivedCommitment` at `Commitment@2` signed, `SendRevokeAndAck` at
+  `Revocation@2` signed, `SendCommitmentSigned` at `Commitment@2` warning, `CompleteReceivedRevokeAndAck` at
+  `Revocation@2` warning. Then the tenant's round to fulfil it: `SendCommitmentSigned` at `Commitment@3` signed,
+  `CompleteReceivedRevokeAndAck` at `Revocation@3` signed, `CompleteReceivedCommitment` at `Commitment@4` (version 3)
+  signed, `SendRevokeAndAck` at `Revocation@3` warning. It ends at L = 4 and R = 4, with the revocation evidence of
+  versions 1 and 2.
+- **A payment sent**, the tenant's round: `SendCommitmentSigned` at `Commitment@2` signed, `CompleteReceivedRevokeAndAck`
+  at `Revocation@2` signed, `CompleteReceivedCommitment` at `Commitment@3` (version 2) signed, `SendRevokeAndAck` at
+  `Revocation@2` warning. Then the peer's round to fulfil it: `CompleteReceivedCommitment` at `Commitment@3` warning,
+  `SendRevokeAndAck` at `Revocation@3` signed, and `SendCommitmentSigned` at `Commitment@3` refused as `policy_refusal`,
+  a third session on one slot, on every tick, with nothing written.
+- **The cooperative close**: `SendClosingSigned` at `Commitment@L`, with no `next_material`. After the open it signs
+  `Commitment@2`; after a full payment received it lands on `Commitment@4`, which the device's own last commitment
+  (`CompleteReceivedCommitment`, version 3) already took, so it is a second session, served with a warning under
+  `allow`.
+
+What the sequences show:
+
+- **Revocation slots are shared too.** The slot key names no lane ([policy.md](./policy.md)), so `Revocation@n` serves
+  both `SendRevokeAndAck` and `CompleteReceivedRevokeAndAck` under one nonce, and the second of them is a second session.
+- **A commitment's version is not always its slot.** For `SendCommitmentSigned` the two are equal; for
+  `CompleteReceivedCommitment` the version is R, one below its slot when it follows a `CompleteReceivedRevokeAndAck` in
+  the tenant's own round (`Commitment@3` carries version 2 in the send flow) and equal to it otherwise.
+- **After any round the tenant starts, the peer's next round stalls**, even under `allow`, under fiber's current nonce
+  lifecycle. The tenant's round leaves its `CompleteReceivedCommitment` on `Commitment@L` once its
+  `CompleteReceivedRevokeAndAck` moved L, and the peer's next round asks for its two commitments on that slot: a third
+  session. So the fulfil of a payment sent stalls, and so does a second payment received, after the first's fulfil:
+  `CompleteReceivedCommitment` at `Commitment@4` warning, `SendRevokeAndAck` at `Revocation@4` signed,
+  `SendCommitmentSigned` at `Commitment@4` refused as `policy_refusal`. The cap stays: three signatures under one
+  deterministic nonce solve for the funding key (above).
+
+### Past the stall, under a test-only bypass
+
+To exercise what comes after the stall, four flows run past it: the payment sent completed and then a close, the second
+payment received completed, and a third payment sent after it. Before each third session the double calls
+`forgetSecondSession` (`test/utils/nonce-cap-bypass.ts`), which drops the slot's entry from the stored record's
+`nonceReuse` log so the policy serves the third as a second session. With the cap out of the way every later step is
+signed or warned: the peer's view rule, the replacement rule, the lanes and the balance rule accept each round, so the
+third session on `Commitment@L` is the only obstacle in fiber's current lifecycle. The bypass lives in `test/` alone and
+never in `src/`, where the cap stays: three signatures under one nonce solve for the funding key. **It goes when Fiber's
+nonces are strict, before the release**: the helper is deleted and the double moves to Fiber's new nonce lifecycle, so
+the flows run the real sequence end to end with the cap in force.
+
+Three more flows cover the host's effects. With the app closed, the requests wait on the node, and once the poller
+starts they are served in order. After a crash between signing and submitting, the restarted device signs the same bytes
+again with no write; the node answers `AlreadyApplied` only when the first submission lands after the restarted device
+read the status, since otherwise the status already names the next request. When the write of a revocation's evidence
+fails, the outcome is a fault and nothing is submitted; the node asks for the same revocation again, the device signs it
+and keeps the evidence, and the peer's next commitment is signed after it.
+
+The opening's sequence is asserted by fiber's own test (`fiber-lib/src/fiber/tests/external_signer_restart.rs:685-740`).
+The payments' are derived from fiber's counter rules, since no fiber test fixes them: R moves by one when the device's
+`revoke_and_ack` is sent (`channel.rs:6313`), L when the peer's is received (`channel.rs:6462`), and a `commitment_signed`
+moves neither, which is where the shared slots come from.
+
+The controls each end refused, on two ticks, with no submission and the record unchanged:
+
+| Control                                                                         | Refused as                              |
+| ------------------------------------------------------------------------------- | --------------------------------------- |
+| An aggregated nonce that is not the device's at the slot                        | `malformed`                             |
+| The peer's partial signature over another message than the content's            | `malformed`                             |
+| A settlement amount moved by one shannon                                        | `malformed`: the message does not match |
+| An offered TLC under a twin hash, the same 20 bytes as the debit intent's       | `policy_refusal`                        |
+| The delay epoch moved from its pin                                              | `policy_refusal`                        |
+| A close paying the device's side to another script                              | `policy_refusal`                        |
+| A skipped `CompleteReceivedRevokeAndAck` before the next `SendCommitmentSigned` | `stale_state`: the peer's view rule     |
+| A node that moves past a revocation whose evidence write failed                 | `stale_state`: the evidence is missing  |
+
+The double also reproduces fiber's own refusals of a submission, with fiber's messages, each leaving the request pending: a
+partial signature that does not verify or is no scalar, a next nonce of another length, another request id, an unknown
+channel, no next material on an advancing transition or a member of it missing, one nonce for both purposes, a point or a
+nonce that conflicts with the one already published, another signature for a request already applied, and a submission
+while nothing is pending; and jsonrpsee's answers to a method the node does not serve and to params it cannot read.
+
 ## Where it lives
 
 | File                                      | Contents                                                                                                                      |
@@ -291,6 +389,10 @@ signed under `allow` with its warning and a valid half, and a third refused; bot
 their bytes, the reused one with its warning, and a received revocation reused after the sent one of its round keeps its
 complete signature, byte for byte fiber's. The storage throwing, a corrupt record, a value whose reading throws and an
 alias with no record are faults that claim nothing, and no refusal names a secret.
+
+The flows over the node double (above) pin the sequences end to end: for each, the order of the RPC calls, the requests
+the node served with its answers, the host's `SIGNING` events, the counters and the material published, and the final
+record, its lanes, commitment hashes, reuse log, evidence and views.
 
 `test/tests/signer/utils/` pins the key orders with keys of both sort orders, since with the vectors' keys the sent
 revocation's role order coincides with the ascending one, and the input builder field by field. The engine's spec covers

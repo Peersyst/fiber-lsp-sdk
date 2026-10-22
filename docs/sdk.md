@@ -51,11 +51,13 @@ construction, with the error naming the field as the module that takes it calls 
 be exactly 32 bytes, checked first; of the effects, what can be checked before a call is checked (the storage's `get`
 and `set`, `fetch`, the clock and the timer's `schedule` are functions). The nonce reuse mode is the policy engine's
 ([policy.md](./policy.md)), which checks it and names it `options.nonceReuse`. `"allow"` exists because Fiber's current
-nonce lifecycle asks for a second session on the slots of a channel's opening, of a revocation round and of a fulfilled
-payment: under the default no channel opens against Fiber today, so a host that must work with it now sets `"allow"`,
-and the mode goes once Fiber's nonces are strict. Every effect that is a bare function (`fetch`, the clock, the
-runtime's timer functions) is called without a receiver, the storage and the timer as methods of the host's own object,
-so none sees an SDK object as `this`. Nothing schedules or reads the storage until `connect()`.
+nonce lifecycle asks for a second session on the slots of a channel's opening, of each round the peer starts and of
+each revocation round: under the default no channel opens against Fiber today, so a host that must work with it now sets
+`"allow"`, and the mode goes once Fiber's nonces are strict. Even under `"allow"`, a round the peer starts after one of
+the device's own asks for a third session on one slot, which is refused, so a channel stalls at the fulfil of a payment
+it sent or at a payment received after one it fulfilled ([policy.md](./policy.md), "The known cost"). Every effect
+that is a bare function (`fetch`, the clock, the runtime's timer functions) is called without a receiver, the storage
+and the timer as methods of the host's own object, so none sees an SDK object as `this`. Nothing schedules or reads the storage until `connect()`.
 
 ## What gets wired
 

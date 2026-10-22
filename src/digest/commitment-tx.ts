@@ -1,5 +1,5 @@
 import { bytesToHex, concatBytes } from "@noble/hashes/utils.js";
-import type { Script } from "../common";
+import type { Script, Transaction } from "../common";
 import {
     COMPRESSED_POINT_LENGTH,
     MAX_AMOUNT_SHANNONS,
@@ -137,6 +137,16 @@ function readLockArgsField(args: Uint8Array, offset: number, littleEndian: boole
  * @returns The 32-byte digest.
  */
 export function computeCommitmentTxDigest(keys: FiberChannelKeys, input: CommitmentTxInput): Uint8Array {
+    return computeTxMessage(buildCommitmentTx(keys, input));
+}
+
+/**
+ * The tx of fiber's `build_commitment_tx_and_settlement_data`.
+ * @param keys The channel's secrets.
+ * @param input What the tx is a function of.
+ * @returns The unsigned tx, without cell deps.
+ */
+export function buildCommitmentTx(keys: FiberChannelKeys, input: CommitmentTxInput): Transaction {
     assertOutPoint("fundingOutPoint", input.fundingOutPoint);
     assertBytes("remoteFundingPubkey", input.remoteFundingPubkey, COMPRESSED_POINT_LENGTH);
     assertUnsignedBigInt("liquidCapacityShannons", input.liquidCapacityShannons, MAX_AMOUNT_SHANNONS);
@@ -169,7 +179,7 @@ export function computeCommitmentTxDigest(keys: FiberChannelKeys, input: Commitm
     const lock: Script = { ...input.commitmentLock, args: lockArgs };
 
     const { capacityShannons, data } = commitmentCellValue(input, calculateCommitmentTxFee(input));
-    return computeTxMessage({
+    return {
         version: 0,
         cellDeps: [],
         headerDeps: [],
@@ -177,5 +187,5 @@ export function computeCommitmentTxDigest(keys: FiberChannelKeys, input: Commitm
         outputs: [{ capacityShannons, lock, type: input.udtTypeScript }],
         outputsData: [data],
         witnesses: [],
-    });
+    };
 }

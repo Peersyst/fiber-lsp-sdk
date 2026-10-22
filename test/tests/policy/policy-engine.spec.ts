@@ -250,10 +250,14 @@ function threeTlcRequest(overrides: Partial<PolicySignRequest> = {}): PolicySign
     };
 }
 
+// The remote view's first commitment, so 11 follows it with no revocation.
 async function openChannel(engine: PolicyEngine, channel: Channel = { keys: KEYS, channelId: CHANNEL_ID }): Promise<void> {
     await engine.checkAndClaim(
         channel.keys,
-        customCommitmentRequest({ forRemote: true, commitmentNumber: 0, settlementLocalShannons: OPENING_SETTLEMENT, tlcIds: [] }, channel),
+        customCommitmentRequest(
+            { forRemote: true, commitmentNumber: 10, settlementLocalShannons: OPENING_SETTLEMENT, tlcIds: [] },
+            channel,
+        ),
     );
 }
 
@@ -282,6 +286,14 @@ function receivedRevocation(slot: number, channel: Channel = { keys: KEYS, chann
 // The revocation of the device's own commitment one below the slot.
 function sentRevocation(slot: number): PolicySignRequest {
     return signedRequest({ kind: "revocation", input: { ...ckbRevocation(), revokedCommitmentNumber: slot - 1 } }, slot);
+}
+
+const SIGNATURE = Uint8Array.from({ length: 64 }, (_, index) => index);
+const OTHER_SIGNATURE = Uint8Array.from({ length: 64 }, (_, index) => 255 - index);
+
+async function peerRevokes(engine: PolicyEngine, slot: number, channel: Channel = { keys: KEYS, channelId: CHANNEL_ID }): Promise<void> {
+    await engine.checkAndClaim(channel.keys, receivedRevocation(slot, channel));
+    await engine.recordRevocation(channel.channelId, { version: slot - 1, signature: SIGNATURE });
 }
 
 // Never read by the revocation rule, which holds the replacement's version; the hash only records what was signed.
@@ -874,9 +886,6 @@ describe("pinChannelTerms", () => {
 });
 
 describe("recordRevocation", () => {
-    const SIGNATURE = Uint8Array.from({ length: 64 }, (_, index) => index);
-    const OTHER_SIGNATURE = Uint8Array.from({ length: 64 }, (_, index) => 255 - index);
-
     it("keeps the complete signature of a revoked peer commitment the device signed for", async () => {
         const { engine, store } = await registeredEngine();
         await engine.checkAndClaim(KEYS, await holdingReplacement(store, receivedRevocation(5)));
@@ -1148,6 +1157,7 @@ describe("debit intents", () => {
         const { engine } = await openedEngine();
         await recordThreeTlcIntents(engine);
         await engine.checkAndClaim(KEYS, threeTlcRequest());
+        await peerRevokes(engine, 11);
         // The first offered TLC leaves with its amount.
         await engine.checkAndClaim(
             KEYS,
@@ -1449,9 +1459,13 @@ describe("checkAndClaim", () => {
                 KEYS,
                 customCommitmentRequest({ forRemote: true, commitmentNumber: 11, settlementLocalShannons: OPENING_SETTLEMENT, tlcIds: [] }),
             );
-            await expect(engine.checkAndClaim(KEYS, commitmentRequest("ckb, no tlcs, for remote"))).resolves.toMatchObject({
-                status: "already-signed",
+            const opening = customCommitmentRequest({
+                forRemote: true,
+                commitmentNumber: 10,
+                settlementLocalShannons: OPENING_SETTLEMENT,
+                tlcIds: [],
             });
+            await expect(engine.checkAndClaim(KEYS, opening)).resolves.toMatchObject({ status: "already-signed" });
         });
 
         it("answers a repeat of a revocation, whatever the other lane signed since", async () => {
@@ -1760,13 +1774,13 @@ describe("checkAndClaim", () => {
             const stored = new Map(storage.map);
             const older = customCommitmentRequest({
                 forRemote: true,
-                commitmentNumber: 10,
+                commitmentNumber: 9,
                 settlementLocalShannons: OPENING_SETTLEMENT,
                 tlcIds: [],
             });
             const refusal = await refusalOf(engine.checkAndClaim(KEYS, older));
             expect(refusal.code).toBe("stale_state");
-            expect(refusal.message).toBe("commitment number 10 is not above the last COMMITMENT:local signed, 11");
+            expect(refusal.message).toBe("commitment number 9 is not above the last COMMITMENT:local signed, 11");
             expect(storage.map).toEqual(stored);
         });
 
@@ -1786,9 +1800,9 @@ describe("checkAndClaim", () => {
                 customCommitmentRequest({ forRemote: true, commitmentNumber: 11, settlementLocalShannons: OPENING_SETTLEMENT, tlcIds: [] }),
             );
             const refusal = await refusalOf(
-                engine.checkAndClaim(KEYS, closingRequest("ckb", { slot: { commitmentNumber: 10, counter: "local" } })),
+                engine.checkAndClaim(KEYS, closingRequest("ckb", { slot: { commitmentNumber: 9, counter: "local" } })),
             );
-            expect(refusal.message).toBe("commitment number 10 is not above the last COMMITMENT:local signed, 11");
+            expect(refusal.message).toBe("commitment number 9 is not above the last COMMITMENT:local signed, 11");
         });
 
         // The two lanes advance on different events: a SendRevokeAndAck and a CompleteReceivedRevokeAndAck.
@@ -1884,7 +1898,7 @@ describe("checkAndClaim", () => {
             await engine.checkAndClaim(KEYS, announcementRequest("ckb"));
             await engine.checkAndClaim(KEYS, await holdingReplacement(store, sentRevocation(1)));
             await expect(store.getChannelRecord(CHANNEL_INDEX)).resolves.toMatchObject({
-                lastSignedCommitmentNumbers: { "COMMITMENT:local": 0, ANNOUNCEMENT: 0, "REVOKE:remote": 1 },
+                lastSignedCommitmentNumbers: { "COMMITMENT:local": 10, ANNOUNCEMENT: 0, "REVOKE:remote": 1 },
             });
         });
 
@@ -1906,7 +1920,7 @@ describe("checkAndClaim", () => {
             }).operation as Extract<SignOperation, { kind: "commitment_tx" }>;
             const refusal = await refusalOf(engine.checkAndClaim(KEYS, signedRequest({ kind: "commitment_tx", input }, 12)));
             expect(refusal.code).toBe("stale_state");
-            expect(refusal.message).toBe(`the remote commitment's version ${version} is not above the last one signed in its view, 11`);
+            expect(refusal.message).toBe(`the remote commitment's version ${version} is not one above the last one signed in its view, 11`);
             expect(storage.map).toEqual(stored);
         });
 
@@ -1945,6 +1959,242 @@ describe("checkAndClaim", () => {
                     ),
                 },
                 local: { commitmentNumber: 3, txHash: bytesToHex(local(3, 13).session.message) },
+            });
+        });
+
+        // The peer holds at most two unrevoked commitments: with a third, the oldest's revocation is stale.
+        describe("the remote view", () => {
+            function remote(commitmentNumber: number): PolicySignRequest {
+                return customCommitmentRequest({
+                    forRemote: true,
+                    commitmentNumber,
+                    settlementLocalShannons: OPENING_SETTLEMENT,
+                    tlcIds: [],
+                });
+            }
+
+            it("signs the view's first commitment at any version", async () => {
+                const { engine, store } = await registered();
+                await expect(engine.checkAndClaim(KEYS, remote(7))).resolves.toEqual({
+                    status: "fresh",
+                    context: "COMMITMENT",
+                    commitmentNumber: 7,
+                });
+                expect((await store.getChannelRecord(CHANNEL_INDEX))?.commitmentHashes).toEqual({
+                    remote: { commitmentNumber: 7, txHash: bytesToHex(remote(7).session.message) },
+                });
+            });
+
+            it("signs the one after the view's first with no revocation signed", async () => {
+                const { engine, store } = await opened();
+                await expect(engine.checkAndClaim(KEYS, remote(11))).resolves.toMatchObject({ status: "fresh", commitmentNumber: 11 });
+                expect((await store.getChannelRecord(CHANNEL_INDEX))?.lastSignedCommitmentNumbers).toEqual({ "COMMITMENT:local": 11 });
+            });
+
+            it("refuses a version two above the view's last as stale, writing nothing", async () => {
+                const { engine, storage } = await opened();
+                const stored = new Map(storage.map);
+                const refusal = await refusalOf(engine.checkAndClaim(KEYS, remote(12)));
+                expect(refusal.code).toBe("stale_state");
+                expect(refusal.message).toBe("the remote commitment's version 12 is not one above the last one signed in its view, 10");
+                expect(storage.map).toEqual(stored);
+            });
+
+            it("refuses the one after the second as stale while the revocation of the first is not signed, writing nothing", async () => {
+                const { engine, storage } = await opened();
+                await engine.checkAndClaim(KEYS, remote(11));
+                const stored = new Map(storage.map);
+                const refusal = await refusalOf(engine.checkAndClaim(KEYS, remote(12)));
+                expect(refusal.code).toBe("stale_state");
+                expect(refusal.message).toBe(
+                    "the remote commitment's version 12 must follow the revocation of version 10, at slot REVOKE:11, and nothing has been signed on REVOKE:local",
+                );
+                expect(storage.map).toEqual(stored);
+            });
+
+            // What a delivery failing after the claim leaves.
+            it("refuses it as stale while the revocation of the first is claimed but its signature not recorded, writing nothing", async () => {
+                const { engine, storage } = await opened();
+                await engine.checkAndClaim(KEYS, remote(11));
+                await engine.checkAndClaim(KEYS, receivedRevocation(11));
+                const stored = new Map(storage.map);
+                const refusal = await refusalOf(engine.checkAndClaim(KEYS, remote(12)));
+                expect(refusal.code).toBe("stale_state");
+                expect(refusal.message).toBe(
+                    "the remote commitment's version 12 must follow the revocation of version 10, at slot REVOKE:11, and its complete signature has not been recorded",
+                );
+                expect(storage.map).toEqual(stored);
+            });
+
+            it("refuses the next one as stale while only an older revocation's signature is recorded, writing nothing", async () => {
+                const { engine, storage } = await opened();
+                await engine.checkAndClaim(KEYS, remote(11));
+                await peerRevokes(engine, 11);
+                await engine.checkAndClaim(KEYS, remote(12));
+                await engine.checkAndClaim(KEYS, receivedRevocation(12));
+                const stored = new Map(storage.map);
+                const refusal = await refusalOf(engine.checkAndClaim(KEYS, remote(13)));
+                expect(refusal.code).toBe("stale_state");
+                expect(refusal.message).toBe(
+                    "the remote commitment's version 13 must follow the revocation of version 11, at slot REVOKE:12, and its complete signature has not been recorded",
+                );
+                expect(storage.map).toEqual(stored);
+            });
+
+            it("signs it once the revocation of the first is claimed and its signature recorded", async () => {
+                const { engine, store } = await opened();
+                await engine.checkAndClaim(KEYS, remote(11));
+                await engine.checkAndClaim(KEYS, receivedRevocation(11));
+                await engine.recordRevocation(CHANNEL_ID, { version: 10, signature: SIGNATURE });
+                await expect(engine.checkAndClaim(KEYS, remote(12))).resolves.toMatchObject({ status: "fresh", commitmentNumber: 12 });
+                expect((await store.getChannelRecord(CHANNEL_INDEX))?.commitmentHashes.remote).toEqual({
+                    commitmentNumber: 12,
+                    txHash: bytesToHex(remote(12).session.message),
+                });
+            });
+
+            it("refuses the next one as stale while the last revocation signed is the one before, writing nothing", async () => {
+                const { engine, storage } = await opened();
+                await engine.checkAndClaim(KEYS, remote(11));
+                await peerRevokes(engine, 11);
+                await engine.checkAndClaim(KEYS, remote(12));
+                const stored = new Map(storage.map);
+                const refusal = await refusalOf(engine.checkAndClaim(KEYS, remote(13)));
+                expect(refusal.code).toBe("stale_state");
+                expect(refusal.message).toBe(
+                    "the remote commitment's version 13 must follow the revocation of version 11, at slot REVOKE:12, and the last REVOKE:local signed is 11",
+                );
+                expect(storage.map).toEqual(stored);
+            });
+
+            // The device's own revocation gives up none of the peer's commitments, whatever signature the slot records.
+            it("refuses it as stale when only the device's own revocation took that slot, writing nothing", async () => {
+                const { engine, store, storage } = await opened();
+                await engine.checkAndClaim(KEYS, remote(11));
+                await engine.checkAndClaim(KEYS, await holdingReplacement(store, sentRevocation(11)));
+                await engine.recordRevocation(CHANNEL_ID, { version: 10, signature: SIGNATURE });
+                const stored = new Map(storage.map);
+                const refusal = await refusalOf(engine.checkAndClaim(KEYS, remote(12)));
+                expect(refusal.code).toBe("stale_state");
+                expect(refusal.message).toBe(
+                    "the remote commitment's version 12 must follow the revocation of version 10, at slot REVOKE:11, and nothing has been signed on REVOKE:local",
+                );
+                expect(storage.map).toEqual(stored);
+            });
+
+            // Fiber's receiving round: the device's revocation first, the peer's as the slot's second session.
+            it("signs it once the peer's revocation took that slot as a second session", async () => {
+                const { engine, store } = await openedEngine(new InMemorySignerStorage(), { nonceReuse: "allow" });
+                await engine.checkAndClaim(KEYS, remote(11));
+                await engine.checkAndClaim(KEYS, await holdingReplacement(store, sentRevocation(11)));
+                await expect(engine.checkAndClaim(KEYS, receivedRevocation(11))).resolves.toMatchObject({ status: "reused" });
+                await engine.recordRevocation(CHANNEL_ID, { version: 10, signature: SIGNATURE });
+                await expect(engine.checkAndClaim(KEYS, remote(12))).resolves.toMatchObject({ status: "fresh", commitmentNumber: 12 });
+            });
+
+            it("holds a second session on the view to the revocation as a first one, writing nothing", async () => {
+                const { engine, storage } = await openedEngine(new InMemorySignerStorage(), { nonceReuse: "allow" });
+                await engine.checkAndClaim(KEYS, remote(11));
+                // The device's own commitment takes the slot first, as in fiber's rounds.
+                await engine.checkAndClaim(
+                    KEYS,
+                    customCommitmentRequest({
+                        forRemote: false,
+                        commitmentNumber: 12,
+                        settlementLocalShannons: OPENING_SETTLEMENT,
+                        tlcIds: [],
+                    }),
+                );
+                const stored = new Map(storage.map);
+                const refusal = await refusalOf(engine.checkAndClaim(KEYS, remote(12)));
+                expect(refusal.code).toBe("stale_state");
+                expect(refusal.message).toBe(
+                    "the remote commitment's version 12 must follow the revocation of version 10, at slot REVOKE:11, and nothing has been signed on REVOKE:local",
+                );
+                expect(storage.map).toEqual(stored);
+            });
+
+            it("answers the repeat of a version the view has moved past as already signed, writing nothing", async () => {
+                const { engine, storage } = await opened();
+                await engine.checkAndClaim(KEYS, remote(11));
+                await peerRevokes(engine, 11);
+                await engine.checkAndClaim(KEYS, remote(12));
+                storage.ops.length = 0;
+                await expect(engine.checkAndClaim(KEYS, remote(11))).resolves.toEqual({
+                    status: "already-signed",
+                    context: "COMMITMENT",
+                    commitmentNumber: 11,
+                });
+                expect(storage.ops.filter((operation) => operation.startsWith("set"))).toEqual([]);
+            });
+
+            it("answers the repeat of a second session the view has moved past as reused, writing nothing", async () => {
+                const { engine, storage } = await registeredEngine(new InMemorySignerStorage(), { nonceReuse: "allow" });
+                // Fiber's open: the device's own commitment, then the peer's on its slot.
+                await engine.checkAndClaim(
+                    KEYS,
+                    customCommitmentRequest({
+                        forRemote: false,
+                        commitmentNumber: 10,
+                        settlementLocalShannons: OPENING_SETTLEMENT,
+                        tlcIds: [],
+                    }),
+                );
+                await engine.checkAndClaim(KEYS, remote(10));
+                await engine.checkAndClaim(KEYS, remote(11));
+                storage.ops.length = 0;
+                await expect(engine.checkAndClaim(KEYS, remote(10))).resolves.toEqual({
+                    status: "reused",
+                    context: "COMMITMENT",
+                    commitmentNumber: 10,
+                });
+                expect(storage.ops.filter((operation) => operation.startsWith("set"))).toEqual([]);
+            });
+
+            // Fiber serves no slot below the view's first; one that is costs a revocation more, never one less.
+            it("asks the one after the view's first for a revocation when a slot below the first was served", async () => {
+                const { engine, storage } = await registered();
+                await engine.checkAndClaim(
+                    KEYS,
+                    customCommitmentRequest({
+                        forRemote: false,
+                        commitmentNumber: 0,
+                        settlementLocalShannons: OPENING_SETTLEMENT,
+                        tlcIds: [],
+                    }),
+                );
+                await engine.checkAndClaim(KEYS, remote(1));
+                const stored = new Map(storage.map);
+                const refusal = await refusalOf(engine.checkAndClaim(KEYS, remote(2)));
+                expect(refusal.code).toBe("stale_state");
+                expect(refusal.message).toBe(
+                    "the remote commitment's version 2 must follow the revocation of version 0, at slot REVOKE:1, and nothing has been signed on REVOKE:local",
+                );
+                expect(storage.map).toEqual(stored);
+            });
+
+            it("leaves the device's own view free to skip versions", async () => {
+                const { engine, store } = await opened();
+                await engine.checkAndClaim(
+                    KEYS,
+                    customCommitmentRequest({
+                        forRemote: false,
+                        commitmentNumber: 11,
+                        settlementLocalShannons: OPENING_SETTLEMENT,
+                        tlcIds: [],
+                    }),
+                );
+                const skipping = customCommitmentRequest({
+                    forRemote: false,
+                    commitmentNumber: 14,
+                    settlementLocalShannons: OPENING_SETTLEMENT,
+                    tlcIds: [],
+                });
+                await expect(engine.checkAndClaim(KEYS, skipping)).resolves.toMatchObject({ status: "fresh", commitmentNumber: 14 });
+                expect((await store.getChannelRecord(CHANNEL_INDEX))?.commitmentHashes.local).toEqual({
+                    commitmentNumber: 14,
+                    txHash: bytesToHex(skipping.session.message),
+                });
             });
         });
     });
@@ -2054,20 +2304,21 @@ describe("checkAndClaim", () => {
         });
 
         // The lockstep round: both sides of one revocation use the nonce at one number, each on its own lane.
-        it("serves the other lane's revocation on the slot one lane served, moving neither lane", async () => {
+        it("serves the other lane's revocation on the slot one lane served, moving its own lane to the slot", async () => {
             const { engine, store } = await registeredEngine(new InMemorySignerStorage(), ALLOW);
             await engine.checkAndClaim(KEYS, await holdingReplacement(store, sentRevocation(5)));
             await expect(engine.checkAndClaim(KEYS, await holdingReplacement(store, receivedRevocation(5)))).resolves.toMatchObject({
                 status: "reused",
                 context: "REVOKE",
             });
-            await expect(store.getChannelRecord(CHANNEL_INDEX)).resolves.toMatchObject({
-                lastSignedCommitmentNumbers: { "REVOKE:remote": 5 },
+            expect((await store.getChannelRecord(CHANNEL_INDEX))?.lastSignedCommitmentNumbers).toEqual({
+                "REVOKE:remote": 5,
+                "REVOKE:local": 5,
             });
-            // The local lane never took 5, so a lower slot of its own is still fresh.
-            await expect(engine.checkAndClaim(KEYS, await holdingReplacement(store, receivedRevocation(4)))).resolves.toMatchObject({
-                status: "fresh",
-            });
+            // The second session moved the local lane to 5, so 4 is a rollback.
+            const refusal = await refusalOf(engine.checkAndClaim(KEYS, await holdingReplacement(store, receivedRevocation(4))));
+            expect(refusal.code).toBe("stale_state");
+            expect(refusal.message).toBe("commitment number 4 is not above the last REVOKE:local signed, 5");
         });
 
         it("holds a second session on a revocation slot to its own replacement, logging nothing", async () => {
@@ -2105,9 +2356,16 @@ describe("checkAndClaim", () => {
                 customCommitmentRequest({ forRemote: true, commitmentNumber: 11, settlementLocalShannons: OPENING_SETTLEMENT, tlcIds: [] }),
             );
             const stored = new Map(storage.map);
-            const refusal = await refusalOf(engine.checkAndClaim(KEYS, ownOpening()));
+            // The opening's slot, which the lane has left.
+            const own = customCommitmentRequest({
+                forRemote: false,
+                commitmentNumber: 10,
+                settlementLocalShannons: OPENING_SETTLEMENT,
+                tlcIds: [],
+            });
+            const refusal = await refusalOf(engine.checkAndClaim(KEYS, own));
             expect(refusal.code).toBe("stale_state");
-            expect(refusal.message).toBe("commitment number 0 is below the last COMMITMENT:local signed, 11");
+            expect(refusal.message).toBe("commitment number 10 is below the last COMMITMENT:local signed, 11");
             expect(storage.map).toEqual(stored);
         });
 
@@ -2117,7 +2375,7 @@ describe("checkAndClaim", () => {
                 "its view's version",
                 thirdSession,
                 "stale_state",
-                "the remote commitment's version 0 is not above the last one signed in its view, 0",
+                "the remote commitment's version 0 is not one above the last one signed in its view, 0",
             ],
             [
                 "the pins",
@@ -2551,8 +2809,8 @@ describe("checkAndClaim", () => {
             ],
         ])("refuses %s whose cell deps alone push the pinned rate's fee past the bound", async (_, request) => {
             const { engine, store } = await registered(new InMemorySignerStorage(), FUNDED, { ...TERMS, commitmentFeeRate: 109_649_124n });
-            const opening = { ...ckbCommitment(), commitmentNumber: 0, commitmentFeeRate: 109_649_124n };
-            await engine.checkAndClaim(KEYS, signedRequest({ kind: "commitment_tx", input: opening }, 0));
+            const opening = { ...ckbCommitment(), commitmentNumber: 10, commitmentFeeRate: 109_649_124n };
+            await engine.checkAndClaim(KEYS, signedRequest({ kind: "commitment_tx", input: opening }, 10));
             const refusal = await refusalOf(engine.checkAndClaim(KEYS, await holdingReplacement(store, request())));
             expect(refusal.message).toBe("the commitment fee is 54057018 shannons, above the 50000000 the reserve keeps for it");
         });
@@ -2807,15 +3065,15 @@ describe("checkAndClaim", () => {
                     tlcIds: [],
                 }),
             );
-            await engine.checkAndClaim(
-                KEYS,
-                customCommitmentRequest({
-                    forRemote: true,
-                    commitmentNumber: 13,
-                    settlementLocalShannons: THREE_TLC_SETTLEMENT,
-                    tlcIds: [OFFERED_TLC_ID, OTHER_OFFERED_TLC_ID, RECEIVED_TLC_ID],
-                }),
-            );
+            await peerRevokes(engine, 11);
+            // Version 12 on slot 13: the device's own commitment took 12.
+            const { operation } = customCommitmentRequest({
+                forRemote: true,
+                commitmentNumber: 12,
+                settlementLocalShannons: THREE_TLC_SETTLEMENT,
+                tlcIds: [OFFERED_TLC_ID, OTHER_OFFERED_TLC_ID, RECEIVED_TLC_ID],
+            });
+            await engine.checkAndClaim(KEYS, signedRequest(operation, 13));
             await engine.checkAndClaim(
                 KEYS,
                 customCommitmentRequest({
@@ -2859,6 +3117,7 @@ describe("checkAndClaim", () => {
             const { engine, store } = await opened();
             await recordThreeTlcIntents(engine);
             await engine.checkAndClaim(KEYS, threeTlcRequest());
+            await peerRevokes(engine, 11);
             await engine.checkAndClaim(
                 KEYS,
                 customCommitmentRequest({
@@ -3040,7 +3299,7 @@ describe("checkAndClaim", () => {
         });
 
         describe("a released preimage", () => {
-            // A channel listing the received TLC alone.
+            // A channel listing the received TLC alone, whose opening the peer has revoked.
             async function holding() {
                 const context = await opened();
                 await recordThreeTlcIntents(context.engine);
@@ -3054,6 +3313,7 @@ describe("checkAndClaim", () => {
                         tlcIds: [RECEIVED_TLC_ID],
                     }),
                 );
+                await peerRevokes(context.engine, 11);
                 await context.engine.markHoldInvoiceReleased(RECEIVED_HASH);
                 return context;
             }
@@ -3072,6 +3332,7 @@ describe("checkAndClaim", () => {
                         tlcIds: [RECEIVED_TLC_ID],
                     }),
                 );
+                await peerRevokes(engine, 11);
                 await engine.checkAndClaim(
                     KEYS,
                     customCommitmentRequest({
@@ -3081,6 +3342,7 @@ describe("checkAndClaim", () => {
                         tlcIds: [],
                     }),
                 );
+                await peerRevokes(engine, 12);
                 await engine.checkAndClaim(
                     KEYS,
                     customCommitmentRequest({
@@ -3095,6 +3357,7 @@ describe("checkAndClaim", () => {
                     released: true,
                     channelIndexes: [CHANNEL_INDEX],
                 });
+                await peerRevokes(engine, 13);
                 // Safe: a part arriving now is refused beside the offered TLC.
                 const refusal = await refusalOf(
                     engine.checkAndClaim(
@@ -3281,17 +3544,22 @@ describe("checkAndClaim", () => {
                 await engine.checkAndClaim(OTHER_KEYS, customCommitmentRequest(holding(true, 11), other));
                 await engine.checkAndClaim(OTHER_KEYS, customCommitmentRequest(holding(false, 12), other));
                 await engine.markHoldInvoiceReleased(RECEIVED_HASH);
-                // The first channel's remote commitment pays the invoice; its local one does not yet.
-                await engine.checkAndClaim(
-                    KEYS,
-                    customCommitmentRequest({ forRemote: true, commitmentNumber: 13, settlementLocalShannons: "64250000000", tlcIds: [] }),
-                );
+                await peerRevokes(engine, 11);
+                await peerRevokes(engine, 11, other);
+                // The first channel's remote commitment pays the invoice; its local one does not yet. Slot 13: the device's own took 12.
+                const paid = customCommitmentRequest({
+                    forRemote: true,
+                    commitmentNumber: 12,
+                    settlementLocalShannons: "64250000000",
+                    tlcIds: [],
+                });
+                await engine.checkAndClaim(KEYS, signedRequest(paid.operation, 13));
 
                 const dropped = customCommitmentRequest(
-                    { forRemote: true, commitmentNumber: 13, settlementLocalShannons: OPENING_SETTLEMENT, tlcIds: [] },
+                    { forRemote: true, commitmentNumber: 12, settlementLocalShannons: OPENING_SETTLEMENT, tlcIds: [] },
                     other,
                 );
-                const refusal = await refusalOf(engine.checkAndClaim(OTHER_KEYS, dropped));
+                const refusal = await refusalOf(engine.checkAndClaim(OTHER_KEYS, signedRequest(dropped.operation, 13, other)));
                 expect(refusal.message).toBe(
                     `the remote commitment lowers the holdings by ${RECEIVED_AMOUNT} shannons, which no offered TLC took`,
                 );
@@ -3330,6 +3598,7 @@ describe("checkAndClaim", () => {
             const views = { ...(record as ChannelPolicyRecord).views, futureView: "x" } as unknown as ChannelPolicyRecord["views"];
             await store.setChannelRecord(CHANNEL_INDEX, { ...(record as ChannelPolicyRecord), views });
 
+            await peerRevokes(engine, 11);
             await engine.markHoldInvoiceReleased(RECEIVED_HASH);
             await engine.closeDebitIntent(OFFERED_HASH);
             await engine.recordDebitIntent(OFFERED_HASH, OFFERED_AMOUNT);
@@ -3441,9 +3710,11 @@ describe("checkAndClaim", () => {
             return context;
         }
 
+        // At the legacy opening's version, the remote view's first.
         async function openedFullHash() {
             const context = await registeredFullHash();
-            await context.engine.checkAndClaim(KEYS, commitmentRequest("ckb, no tlcs, for remote, full payment hash"));
+            const input = { ...fullHashCommitment(), commitmentNumber: 10 };
+            await context.engine.checkAndClaim(KEYS, signedRequest({ kind: "commitment_tx", input }, 10));
             return context;
         }
 

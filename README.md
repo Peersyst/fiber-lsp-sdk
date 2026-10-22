@@ -41,7 +41,9 @@ hosted-LSP PR (nervosnetwork/fiber#1623, `8db6a117`), whose polled signing proto
 being aligned to: `digest` and `policy` know both commitment-lock layouts, `rpc` writes the tenant API's forms,
 `invoice` reads the trampoline route hint every tenant invoice carries, and `signer` answers the node's signing status,
 which the facade's poller reads and answers on every tick; `signer` also holds the tenant identity that signs the
-registration.
+registration. A test double of the tenant's node runs fiber's sequences of signing requests through that poller, and
+shows that under Fiber's current nonces a channel still stalls at the settlement of a payment it sends and at its second
+payment received, even with `nonceReuse: "allow"` ([policy.md](./docs/policy.md), "The known cost").
 
 ## Repository layout
 

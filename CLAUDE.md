@@ -180,3 +180,6 @@ an upstream quirk, the reason a bound exists, an invariant a reader would otherw
 - The SDK-owned derivations are additionally pinned by hardcoded values in `test/tests/derivation/device-scheme.spec.ts`. They are
   the recoverability contract, not a snapshot to update: changing them strands existing channels.
 - Policy: test every refusal path and the idempotent already-signed path, not just the happy path.
+- `test/utils/nonce-cap-bypass.ts` lets the node double's flows run past Fiber's nonce stall by serving a third session
+  on a slot. It is test-only and never moves to `src/`; it is deleted, and the double moved to Fiber's new nonce
+  lifecycle, once Fiber's nonces are strict, before the release.
