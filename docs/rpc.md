@@ -48,10 +48,10 @@ header fails there and not on every call. No error the client throws carries it.
   id) is always refused by fiber, so there is none.
 - **The params are typed per method** by `RpcParamsWireByMethod`, which names all eighteen, so `call` cannot be handed
   the params of another method. The typed method of each RPC is what a caller uses; `call` is what they share. Of the
-  eight methods of the tenant API, the two the signing poller calls have their client methods
-  (`getChannelSigningStatus`, `submitChannelSignature`); the other six have their codecs and no client method yet: each
-  lands with the task that calls it, which is the one that observes what it sends, and until then a caller composes
-  `call` with the codec.
+  eight methods of the tenant API, four have their client methods: the two the signing poller calls
+  (`getChannelSigningStatus`, `submitChannelSignature`) and the two registration methods (`getTenantRegistryNonce`,
+  `registerTenant`); the other four have their codecs and no client method yet: each lands with the task that calls it,
+  which is the one that observes what it sends, and until then a caller composes `call` with the codec.
 
 The answer is read strictly, as `response`:
 
@@ -301,7 +301,11 @@ reached through `call` until its step lands.
 ## Registration methods
 
 Two methods register a device's root signer as a tenant of the hosted LSP, under the operator's token: the registration
-is the one exchange a tenant cannot make with its own token, which it does not have yet.
+is the one exchange a tenant cannot make with its own token, which it does not have yet. The client's `getTenantRegistryNonce` and
+`registerTenant` call them, on a client built with the operator's token: the host's backend or an agent makes them, never
+the facade, and the device only signs, through `TenantIdentity` ([signing.md](./signing.md)). `FiberRpcClient` is not
+published yet, so the two methods are within reach of the repo's code alone until the facade's operations settle
+what the package exports.
 
 | Method                          | Sends                                      | Reads                                        |
 | ------------------------------- | ------------------------------------------ | -------------------------------------------- |
@@ -447,8 +451,9 @@ inputs do, and the host hands it to its CKB signer as it is.
   before any fetch; the watchtower pair through `call`.
 - **The registration methods against fiber**: both params cases written as fiber's serde wrote them, the signature bare;
   both tenants decoded and compared with the vector's values, which carry both runtime statuses, a tenant without a root
-  signer or a channel and one with both; a literal cold and a literal active tenant read field by field; the operator's
-  token on the request through `call`.
+  signer or a channel and one with both; a literal cold and a literal active tenant read field by field; the exact body
+  of both methods through the client's own methods, every registration result, the node's refusal passed through, a
+  result it cannot read named by its path, and a bad param refused before any fetch.
 - **One refusal per field of the eight methods, written and read**: a point of the wrong length or given as hex, a nonce
   of 65 or 67 bytes, a partial signature of 31, 33 or 64 bytes, a registration signature of 63 or 65 and a watchtower
   signature of 64 or 66, a delay or a fee rate negative, past a u64, as a number or a string, an option given as `null`
@@ -466,15 +471,94 @@ Coverage of the module and of `wire` is 100% on all four metrics, and the assert
 | ------------------------------------------------------------ | ----------------- |
 | The envelope's version is not checked                        | 54                |
 | A response with both or neither of result and error is read  | 51                |
+| The ids reader takes the channels from another field         | 32                |
+| A payment's `created_at` is bounded to a u32                 | 28                |
 | Ids start at 0                                               | 23                |
+| The partial signature is checked at 64 bytes                 | 21                |
+| `created_at` is bounded to a u32                             | 19                |
+| The ids reader takes ids of 33 bytes                         | 19                |
+| A payment hash is written without its `0x`                   | 15                |
+| `encodeMapped` does not check the spelling                   | 15                |
+| The fee bound is written in decimal                          | 13                |
+| `get_invoice` does not read the invoice address              | 13                |
+| A pubkey is read with a `0x` prefix too                      | 12                |
+| The settle writes the hash in the preimage's place           | 12                |
+| An empty string is not the empty flag set                    | 11                |
+| A payment hash of any length is written                      | 11                |
+| `assertString` accepts anything                              | 11                |
 | An amount is written without checking its form               | 10                |
+| The status is read as the result's `type`, not handed over   | 10                |
+| The hash algorithm is written in the SDK's spelling          | 10                |
+| `last_updated_at` is read from `created_at`                  | 10                |
+| A submission outcome is read without checking its tag        | 9                 |
+| The ids reader reads each channel whole                      | 9                 |
+| The ids reader skips the hex check                           | 9                 |
 | The token is not checked at construction                     | 8                 |
+| The registration signature is checked at 65 bytes            | 8                 |
+| The runtime status is read without checking its name         | 8                 |
+| A preimage of any length is written                          | 8                 |
+| `encodeMapped` writes the SDK's spelling                     | 8                 |
+| The transaction encoder writes the members it read           | 7                 |
+| An invoice's expiry is bounded to a u32                      | 7                 |
+| The settle's answer is not checked to be an object           | 7                 |
+| A missing shutdown hash is read as no hash                   | 6                 |
+| A tenant id of any string is accepted                        | 6                 |
+| The getter's channel id is written without checking its form | 6                 |
+| The watchtower signature is checked at 64 bytes              | 6                 |
+| An empty invoice address is read                             | 6                 |
+| An invoice's status is not checked against fiber's           | 6                 |
+| A currency missing from the client's list                    | 6                 |
+| A state without flags may carry `state_flags`                | 5                 |
+| The remote balance is read from the local one                | 5                 |
+| The registry nonce is read as bare hex                       | 5                 |
+| The shutdown's `null` is not checked                         | 5                 |
+| `dry_run` is omitted when false                              | 5                 |
+| An invoice status missing from the client's list             | 5                 |
+| A channel signature is submitted as the watchtower's         | 5                 |
+| The registration is sent under the nonce's method            | 4                 |
 | The params are sent as the object, not as a positional array | 4                 |
+| An untyped output's `type` is omitted, not `null`            | 4                 |
+| The filter writes `false` for the other flag                 | 4                 |
+| The abandon's `null` is not checked                          | 4                 |
+| An absent delay is sent as `null`                            | 4                 |
+| The access token may be empty                                | 4                 |
+| The registration signature is written with a `0x` prefix     | 4                 |
+| The preimage is written without its `0x`                     | 4                 |
+| An empty invoice is sent to be paid                          | 4                 |
+| A payment's status is not checked against fiber's            | 4                 |
+| The registration's answer is handed over unread              | 3                 |
+| The registration params are sent unwritten                   | 3                 |
 | A `null` id is never accepted                                | 3                 |
 | `encodeUintHex` writes a value past its bound                | 3                 |
+| A pubkey is written with a `0x` prefix                       | 3                 |
+| A channel id is not checked before it is written             | 3                 |
+| The announcement nonce is sent as `null` when there is none  | 3                 |
+| The opening context's amounts are read as u64                | 3                 |
+| The shutdown's `force` is sent without checking it           | 3                 |
+| The shutdown's absent close script is sent as `null`         | 3                 |
+| An empty description is dropped                              | 3                 |
+| The currency is not checked before it is written             | 3                 |
+| A payment status fiber does not have                         | 3                 |
+| A channel signature is sent unchecked                        | 3                 |
+| The channel signing status is asked of the watchtower        | 3                 |
+| The nonce is asked for under the registration's method       | 2                 |
 | Every call is sent with the same id                          | 2                 |
 | An error code only has to be a number                        | 2                 |
 | The Bearer prefix is lowercase                               | 2                 |
+| Any state's flag is accepted in any state                    | 2                 |
+| A flag named twice is accepted                               | 2                 |
+| Flags are split with their padding trimmed                   | 2                 |
+| A `null` next material is sent as `null`                     | 2                 |
+| `public` is omitted when true                                | 2                 |
+| A transaction's byte lists are written unchecked             | 2                 |
+| A missing description is sent as `null`                      | 2                 |
+| The description is not checked to be a string                | 2                 |
+| `dryRun` is not checked to be a boolean                      | 2                 |
+| A payment's fee is read as a u64                             | 2                 |
+| `cancelInvoice` calls `get_invoice`                          | 2                 |
+| `getPayment` calls `send_payment`                            | 2                 |
+| Any submission result is read as Applied                     | 2                 |
+| The ids method ignores the filter                            | 2                 |
 | A `null` id is accepted on a result too                      | 1                 |
 | Status 300 is read as success                                | 1                 |
 | Status 199 is read as success                                | 1                 |
@@ -487,42 +571,8 @@ Coverage of the module and of `wire` is 100% on all four metrics, and the assert
 | An error without an id is read as the node's refusal         | 1                 |
 | The token pattern admits DEL                                 | 1                 |
 | The token pattern excludes `!` and `~`                       | 1                 |
-| `created_at` is bounded to a u32                             | 19                |
-| A pubkey is read with a `0x` prefix too                      | 12                |
-| An empty string is not the empty flag set                    | 11                |
-| The transaction encoder writes the members it read           | 7                 |
-| A missing shutdown hash is read as no hash                   | 6                 |
-| A state without flags may carry `state_flags`                | 5                 |
-| The remote balance is read from the local one                | 5                 |
-| An untyped output's `type` is omitted, not `null`            | 4                 |
-| The filter writes `false` for the other flag                 | 4                 |
-| The abandon's `null` is not checked                          | 4                 |
-| A pubkey is written with a `0x` prefix                       | 3                 |
-| A channel id is not checked before it is written             | 3                 |
-| Any state's flag is accepted in any state                    | 2                 |
-| A flag named twice is accepted                               | 2                 |
-| Flags are split with their padding trimmed                   | 2                 |
-| The partial signature is checked at 64 bytes                 | 21                |
-| The status is read as the result's `type`, not handed over   | 10                |
-| A submission outcome is read without checking its tag        | 9                 |
-| The registration signature is checked at 65 bytes            | 8                 |
-| The runtime status is read without checking its name         | 8                 |
-| A tenant id of any string is accepted                        | 6                 |
-| The getter's channel id is written without checking its form | 6                 |
-| The watchtower signature is checked at 64 bytes              | 6                 |
-| The registry nonce is read as bare hex                       | 5                 |
-| The shutdown's `null` is not checked                         | 5                 |
-| An absent delay is sent as `null`                            | 4                 |
-| The access token may be empty                                | 4                 |
-| The registration signature is written with a `0x` prefix     | 4                 |
-| The announcement nonce is sent as `null` when there is none  | 3                 |
-| The opening context's amounts are read as u64                | 3                 |
-| The shutdown's `force` is sent without checking it           | 3                 |
-| The shutdown's absent close script is sent as `null`         | 3                 |
-| A `null` next material is sent as `null`                     | 2                 |
 | A missing root signer on the tenant status is read as `null` | 1                 |
 | The opening context's reserves are read as u128              | 1                 |
-| `public` is omitted when true                                | 2                 |
 | A `since` is read as a u128                                  | 1                 |
 | A `capacity` is read as a u128                               | 1                 |
 | The dep type is not checked before it is written             | 1                 |
@@ -530,54 +580,14 @@ Coverage of the module and of `wire` is 100% on all four metrics, and the assert
 | An unknown filter is written                                 | 1                 |
 | An outpoint index past a u32 is written                      | 1                 |
 | Script args are not checked to be bytes                      | 1                 |
-| A transaction's byte lists are written unchecked             | 2                 |
 | A flag missing from a state's list                           | 1                 |
-| A payment's `created_at` is bounded to a u32                 | 28                |
-| A payment hash is written without its `0x`                   | 15                |
-| `encodeMapped` does not check the spelling                   | 15                |
-| The fee bound is written in decimal                          | 13                |
-| `get_invoice` does not read the invoice address              | 13                |
-| The settle writes the hash in the preimage's place           | 12                |
-| A payment hash of any length is written                      | 11                |
-| `assertString` accepts anything                              | 11                |
-| The hash algorithm is written in the SDK's spelling          | 10                |
-| `last_updated_at` is read from `created_at`                  | 10                |
-| A preimage of any length is written                          | 8                 |
-| `encodeMapped` writes the SDK's spelling                     | 8                 |
-| An invoice's expiry is bounded to a u32                      | 7                 |
-| The settle's answer is not checked to be an object           | 7                 |
-| An empty invoice address is read                             | 6                 |
-| An invoice's status is not checked against fiber's           | 6                 |
-| A currency missing from the client's list                    | 6                 |
-| `dry_run` is omitted when false                              | 5                 |
-| An invoice status missing from the client's list             | 5                 |
-| The preimage is written without its `0x`                     | 4                 |
-| An empty invoice is sent to be paid                          | 4                 |
-| A payment's status is not checked against fiber's            | 4                 |
-| An empty description is dropped                              | 3                 |
-| The currency is not checked before it is written             | 3                 |
-| A payment status fiber does not have                         | 3                 |
-| A missing description is sent as `null`                      | 2                 |
-| The description is not checked to be a string                | 2                 |
-| `dryRun` is not checked to be a boolean                      | 2                 |
-| A payment's fee is read as a u64                             | 2                 |
-| `cancelInvoice` calls `get_invoice`                          | 2                 |
-| `getPayment` calls `send_payment`                            | 2                 |
 | A missing `failed_error` is read as no error                 | 1                 |
 | `settleInvoice` does not read the answer                     | 1                 |
 | `newInvoice` reads the answer as an invoice with a status    | 1                 |
-| The ids reader takes the channels from another field         | 32                |
-| The ids reader takes ids of 33 bytes                         | 19                |
-| The ids reader reads each channel whole                      | 9                 |
-| The ids reader skips the hex check                           | 9                 |
-| A channel signature is submitted as the watchtower's         | 5                 |
-| A channel signature is sent unchecked                        | 3                 |
-| The channel signing status is asked of the watchtower        | 3                 |
-| Any submission result is read as Applied                     | 2                 |
-| The ids method ignores the filter                            | 2                 |
 | The ids method reads the full listing                        | 1                 |
 | The signing status params are sent unchecked                 | 1                 |
 | The signing status result is not read                        | 1                 |
+| The nonce's answer is handed over unread                     | 1                 |
 
 One mutant changes nothing observable and is left out: dropping the `public: false` the tenant's open writes after the
 spread, since the encoder it spreads already writes it; the member stays for the literal type the wire form states.

@@ -22,17 +22,17 @@ These properties reflect the current specification and may evolve with it while 
 
 ## Modules
 
-| Module                           | Responsibility                                                                                               |
-| -------------------------------- | ------------------------------------------------------------------------------------------------------------ |
-| [`derivation`](./src/derivation) | Fiber key scheme port + SDK-owned derivations (channel seed, wallet identity key, nonce seed)                |
-| [`digest`](./src/digest)         | Rebuilds the four messages fiber signs, so the device never blind-signs                                      |
-| [`invoice`](./src/invoice)       | Fiber's invoice string, read and written bit for bit, so the device knows what it pays and what it asked for |
-| [`signer`](./src/signer)         | The entry of a signing request: the checks before the claim, the musig2 engine, the public material          |
-| [`policy`](./src/policy)         | Policy engine + persisted per-channel records                                                                |
-| [`wire`](./src/wire)             | How fiber writes values in JSON, the readers that refuse anything else, and the writers that produce it      |
-| [`protocol`](./src/protocol)     | Fiber's signing status read strictly: the transition, its slot, the plaintext, the peer's evidence           |
-| [`rpc`](./src/rpc)               | Typed fiber JSON-RPC client (Biscuit-authed)                                                                 |
-| [`sdk`](./src/sdk)               | Public facade wiring the above: `FiberLspSdk`, its lifecycle, events and errors, the time index, the poller  |
+| Module                           | Responsibility                                                                                                           |
+| -------------------------------- | ------------------------------------------------------------------------------------------------------------------------ |
+| [`derivation`](./src/derivation) | Fiber key scheme port + SDK-owned derivations (channel seed, wallet identity key, nonce seed)                            |
+| [`digest`](./src/digest)         | Rebuilds the four messages fiber signs, so the device never blind-signs                                                  |
+| [`invoice`](./src/invoice)       | Fiber's invoice string, read and written bit for bit, so the device knows what it pays and what it asked for             |
+| [`signer`](./src/signer)         | The entry of a signing request: the checks before the claim, the musig2 engine, the public material, the tenant identity |
+| [`policy`](./src/policy)         | Policy engine + persisted per-channel records                                                                            |
+| [`wire`](./src/wire)             | How fiber writes values in JSON, the readers that refuse anything else, and the writers that produce it                  |
+| [`protocol`](./src/protocol)     | Fiber's signing status read strictly: the transition, its slot, the plaintext, the peer's evidence                       |
+| [`rpc`](./src/rpc)               | Typed fiber JSON-RPC client (Biscuit-authed)                                                                             |
+| [`sdk`](./src/sdk)               | Public facade wiring the above: `FiberLspSdk`, its lifecycle, events and errors, the time index, the poller              |
 
 `derivation`, `digest`, `invoice`, `signer`, `policy`, `wire`, `protocol` and `rpc` are implemented; `sdk` has its core,
 construction, `connect`/`disconnect` and the events, while the operations a wallet calls (open a channel, create an
@@ -40,7 +40,8 @@ invoice, pay one) land next, so the public API is not settled yet. The upstream 
 hosted-LSP PR (nervosnetwork/fiber#1623, `8db6a117`), whose polled signing protocol the modules under the facade are
 being aligned to: `digest` and `policy` know both commitment-lock layouts, `rpc` writes the tenant API's forms,
 `invoice` reads the trampoline route hint every tenant invoice carries, and `signer` answers the node's signing status,
-which the facade's poller reads and answers on every tick.
+which the facade's poller reads and answers on every tick; `signer` also holds the tenant identity that signs the
+registration.
 
 ## Repository layout
 
@@ -62,7 +63,8 @@ Full index in [docs/README.md](./docs/README.md). The load-bearing ones:
 - [What the device signs](./docs/digest.md): the four message constructions rebuilt on the device, and the trust model of
   the inputs they take.
 - [How signatures are produced](./docs/signing.md): the musig2 engine, its deterministic nonces, the conditions that
-  make them safe, and the dispatch that gates every signature at one call site.
+  make them safe, the dispatch that gates every musig2 signature at one call site, and the tenant identity's registration
+  signature.
 - [What the device refuses](./docs/policy.md): the six checks every request passes, and the sign-once rule those
   conditions rest on.
 - [What crosses the wire](./docs/protocol.md): the signing status the node publishes, each transition with its slot and

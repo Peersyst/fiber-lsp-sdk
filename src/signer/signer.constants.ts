@@ -12,3 +12,13 @@ export const SIGNING_KEY_ORDERS = {
     SendClosingSigned: "ascending",
     SignChannelAnnouncement: "ascending",
 } as const satisfies Record<ChannelSigningTransition, "ascending" | "peer-first" | "device-first">;
+
+/**
+ * Fiber's `TENANT_REGISTRY_PROTOCOL` (`fiber-types/src/hosted_lsp.rs:11`), the prefix of the registration payload.
+ */
+export const TENANT_REGISTRY_PROTOCOL = "fiber-hosted-lsp-tenant-registry/v1";
+
+/**
+ * Fiber's `TENANT_ID_DOMAIN` (`fiber-types/src/hosted_lsp.rs:14`), the salt of the tenant id's hash.
+ */
+export const TENANT_ID_DOMAIN = "fiber-hosted-lsp-tenant-id/v1";

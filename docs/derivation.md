@@ -33,9 +33,9 @@ signature instead of holding the key.
 
 The SDK adds a fifth key that is not part of fiber's scheme:
 
-| Secret              | What it is                                                                    |
-| ------------------- | ----------------------------------------------------------------------------- |
-| `walletIdentityKey` | Wallet identity: the one key the LSP knows the wallet by, across its channels |
+| Secret              | What it is                                                                                                                                              |
+| ------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `walletIdentityKey` | Wallet identity: the one key the LSP knows the wallet by, across its channels; the tenant's RootSigner ([signing.md](./signing.md#the-tenant-identity)) |
 
 It identifies the master seed, not the handset. Two devices restored from the same mnemonic derive the same key and are
 indistinguishable to the LSP, which is what makes a restored wallet known again on its own, and what makes telling two
@@ -281,16 +281,16 @@ must keep working forever.
 
 ## Where it lives
 
-| File                                     | Contents                                                                       |
-| ---------------------------------------- | ------------------------------------------------------------------------------ |
-| `src/derivation/fiber-scheme.ts`         | The literal port of `crates/fiber-types/src/channel.rs`                        |
-| `src/derivation/device-scheme.ts`        | The SDK-owned derivations: wallet identity key, channel seed, nonce seed       |
-| `src/derivation/master-seed.ts`          | The step above the tree: BIP39 seed to master seed, the boundary with the host |
-| `src/derivation/derivation.constants.ts` | Lengths, bounds, scheme version, nonce contexts                                |
-| `src/derivation/utils/ckb-hash.utils.ts` | CKB's blake2b-256 and the salted variant                                       |
-| `src/common/utils/assert.utils.ts`       | Input guards for lengths and ranges, shared with the rest of the SDK           |
-| `src/derivation/index.ts`                | The module surface; scheme internals stay unexported                           |
-| `interop/`                               | The Rust harness and the generated vectors ([README](../interop/README.md))    |
+| File                                     | Contents                                                                                                                      |
+| ---------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------- |
+| `src/derivation/fiber-scheme.ts`         | The literal port of `crates/fiber-types/src/channel.rs`                                                                       |
+| `src/derivation/device-scheme.ts`        | The SDK-owned derivations: wallet identity key, channel seed, nonce seed                                                      |
+| `src/derivation/master-seed.ts`          | The step above the tree: BIP39 seed to master seed, the boundary with the host                                                |
+| `src/derivation/derivation.constants.ts` | Lengths, bounds, scheme version, nonce contexts                                                                               |
+| `src/derivation/utils/ckb-hash.utils.ts` | CKB's blake2b-256 and the salted variant                                                                                      |
+| `src/common/utils/assert.utils.ts`       | Input guards for lengths and ranges, shared with the rest of the SDK                                                          |
+| `src/derivation/index.ts`                | The module surface: scheme internals stay unexported, but for `blake2bHashWithSalt`, which `signer` hashes the tenant id with |
+| `interop/`                               | The Rust harness and the generated vectors ([README](../interop/README.md))                                                   |
 
 Every function in `fiber-scheme.ts` carries the name of its Rust counterpart, so auditing against `channel.rs` is a matter of
 reading the two side by side.

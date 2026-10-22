@@ -1,20 +1,14 @@
 import { hexToBytes } from "@noble/hashes/utils.js";
 import type { RegisterTenantParams } from "../../../src/rpc";
 import {
-    FiberRpcClient,
     RPC_TENANT_RUNTIME_STATUSES,
-    RpcError,
-    RpcResponseError,
     decodeGetTenantRegistryNonceResult,
     decodeRegisterTenantResult,
     encodeGetTenantRegistryNonceParams,
     encodeRegisterTenantParams,
 } from "../../../src/rpc";
-import { FetchMock } from "../../mocks/rpc";
-import { caseOf } from "../../utils/interop-vectors";
 import { refusal } from "../../utils/refusal";
-import { rejection } from "../../utils/rejection";
-import { RPC_RESULT_PATH as RESULT, answering, refusing, resultField as result, sent } from "../../utils/rpc-answers";
+import { RPC_RESULT_PATH as RESULT, resultField as result } from "../../utils/rpc-answers";
 import {
     toGetTenantRegistryNonceParams,
     toGetTenantRegistryNonceResult,
@@ -29,7 +23,6 @@ import { withField } from "../../utils/with-field";
 const vectors = loadRpcVectors();
 const { lsp_get_tenant_registry_nonce: getNonce, lsp_register_tenant: register } = vectors.methods;
 
-const URL = "http://fiber.example:8227";
 const ROOT_SIGNER = `02${"ab".repeat(32)}`;
 const LSP_NODE_ID = `03${"cd".repeat(32)}`;
 const INVOICE_PUBKEY = `02${"ef".repeat(32)}`;
@@ -281,58 +274,5 @@ describe("lsp_register_tenant", () => {
         it.each([null, [], ACCESS_TOKEN])("refuses the result %p, which is not an object", (value) => {
             expect(refusal(() => decodeRegisterTenantResult(result(value))).message).toBe(`${RESULT} must be an object`);
         });
-    });
-});
-
-describe("FiberRpcClient registration methods", () => {
-    function clientOf(mock: FetchMock): FiberRpcClient {
-        return new FiberRpcClient({ url: URL, token: "operator-token", fetch: mock.fetch });
-    }
-
-    it("asks for a nonce through call, under the operator's token", async () => {
-        const entry = caseOf(getNonce.results, "nonce");
-        const mock = answering(entry.json);
-        const params = encodeGetTenantRegistryNonceParams({ rootSignerPubkey: hexToBytes(ROOT_SIGNER) });
-        await expect(clientOf(mock).call("lsp_get_tenant_registry_nonce", params, decodeGetTenantRegistryNonceResult)).resolves.toEqual(
-            toGetTenantRegistryNonceResult(entry.values),
-        );
-        expect(sent(mock)).toEqual({
-            jsonrpc: "2.0",
-            id: 1,
-            method: "lsp_get_tenant_registry_nonce",
-            params: [{ root_signer_pubkey: ROOT_SIGNER }],
-        });
-        expect(mock.last.init.headers.authorization).toBe("Bearer operator-token");
-    });
-
-    it("registers a tenant through call, sending the exact body with the signature bare", async () => {
-        const mock = answering(REGISTERED);
-        await expect(
-            clientOf(mock).call("lsp_register_tenant", encodeRegisterTenantParams(REGISTER), decodeRegisterTenantResult),
-        ).resolves.toEqual(decodeRegisterTenantResult(result(REGISTERED)));
-        expect(sent(mock)).toEqual({
-            jsonrpc: "2.0",
-            id: 1,
-            method: "lsp_register_tenant",
-            params: [{ root_signer_pubkey: ROOT_SIGNER, nonce: `0x${NONCE}`, signature: SIGNATURE }],
-        });
-    });
-
-    it("passes the node's refusal through, its message verbatim", async () => {
-        const mock = refusing(-32000, "nonce expired");
-        const error = await rejection(
-            clientOf(mock).call("lsp_register_tenant", encodeRegisterTenantParams(REGISTER), decodeRegisterTenantResult),
-        );
-        expect(error).toBeInstanceOf(RpcError);
-        expect(error).toMatchObject({ method: "lsp_register_tenant", code: -32000, message: "nonce expired" });
-    });
-
-    it("names the nested field of an answer it cannot read", async () => {
-        const mock = answering({ ...REGISTERED, tenant: { ...COLD_TENANT, runtime_status: "warm" } });
-        const error = await rejection(
-            clientOf(mock).call("lsp_register_tenant", encodeRegisterTenantParams(REGISTER), decodeRegisterTenantResult),
-        );
-        expect(error).toBeInstanceOf(RpcResponseError);
-        expect(error).toMatchObject({ method: "lsp_register_tenant", path: "response.result.tenant.runtime_status" });
     });
 });

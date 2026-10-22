@@ -19,11 +19,25 @@ export const COMMITMENT_FIELDS = ["secret", "point", "tlc_privkey", "tlc_pubkey"
 
 export const MUSIG_FIELDS = ["remote_seckey", "remote_pubkey", "remote_pubnonce", "message"] as const;
 
+export const TENANT_REGISTRY_FIELDS = [
+    "root_signer_secret_from",
+    "lsp_node_secret",
+    "lsp_node_id",
+    "root_signer_pubkey",
+    "nonce",
+    "payload",
+    "digest",
+    "signature",
+    "tenant_id",
+] as const;
+
 export type ChannelKeysVector = Record<(typeof CHANNEL_KEY_FIELDS)[number], string>;
 
 export type CommitmentVector = Record<(typeof COMMITMENT_FIELDS)[number], string> & { n: number };
 
 export type MusigVector = Record<(typeof MUSIG_FIELDS)[number], string>;
+
+export type TenantRegistryVector = Record<(typeof TENANT_REGISTRY_FIELDS)[number], string>;
 
 export type HashVector = { label: string; chunks: string[]; digest: string };
 
@@ -154,6 +168,7 @@ export type Vectors = {
     };
     musig: MusigVector;
     digest: DigestVectors;
+    tenant_registry: TenantRegistryVector;
 };
 
 // fiber's `SigningSettlementTlc` as its JSON writes it: hex integers, a 0x-prefixed hash, bare-hex pubkeys.
@@ -438,6 +453,7 @@ export function parseVectors(value: unknown): Vectors {
         },
         musig: asStringFields(root.musig, "musig", MUSIG_FIELDS),
         digest: asDigestVectors(root.digest),
+        tenant_registry: asStringFields(root.tenant_registry, "tenant_registry", TENANT_REGISTRY_FIELDS),
     };
 }
 

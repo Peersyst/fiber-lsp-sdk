@@ -23,16 +23,26 @@ import { decodeRpcPayment, encodeSendPaymentParams } from "./payments";
 import { RPC_BEARER_PREFIX, RPC_CONTENT_TYPE } from "./rpc.constants";
 import { RpcError, RpcResponseError, RpcTransportError } from "./rpc.error";
 import { decodeRpcSigningStatusResult, decodeRpcSubmissionResult, encodeSubmitChannelSignatureParams } from "./signing";
+import {
+    decodeGetTenantRegistryNonceResult,
+    decodeRegisterTenantResult,
+    encodeGetTenantRegistryNonceParams,
+    encodeRegisterTenantParams,
+} from "./tenants";
 import type {
     AbandonChannelParams,
     RpcChannel,
     RpcChannelIdParams,
     FiberRpcClientOptions,
+    GetTenantRegistryNonceParams,
+    GetTenantRegistryNonceResult,
     ListChannelsParams,
     NewInvoiceParams,
     NewInvoiceResult,
     OpenChannelWithExternalFundingParams,
     OpenChannelWithExternalFundingResult,
+    RegisterTenantParams,
+    RegisterTenantResult,
     RpcInvoice,
     RpcMethod,
     RpcParamsWireByMethod,
@@ -215,6 +225,24 @@ export class FiberRpcClient {
      */
     async submitChannelSignature(params: SubmitChannelSignatureParams): Promise<RpcSubmissionResult> {
         return this.call("submit_channel_signature", encodeSubmitChannelSignatureParams(params), decodeRpcSubmissionResult);
+    }
+
+    /**
+     * Fetches the nonce a root signer signs to register as a tenant; needs the operator's token.
+     * @param params The root signer's public key.
+     * @returns The node's id, the key it echoes and the nonce.
+     */
+    async getTenantRegistryNonce(params: GetTenantRegistryNonceParams): Promise<GetTenantRegistryNonceResult> {
+        return this.call("lsp_get_tenant_registry_nonce", encodeGetTenantRegistryNonceParams(params), decodeGetTenantRegistryNonceResult);
+    }
+
+    /**
+     * Registers a tenant with the root signer's signature over the nonce; needs the operator's token.
+     * @param params The root signer's public key, the nonce and the signature.
+     * @returns The tenant as registered and its access token.
+     */
+    async registerTenant(params: RegisterTenantParams): Promise<RegisterTenantResult> {
+        return this.call("lsp_register_tenant", encodeRegisterTenantParams(params), decodeRegisterTenantResult);
     }
 
     /**
