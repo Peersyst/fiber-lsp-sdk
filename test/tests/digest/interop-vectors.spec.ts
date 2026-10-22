@@ -3,6 +3,7 @@ import { deriveChannelKeys } from "../../../src/derivation/fiber-scheme";
 import { computeChannelAnnouncementDigest } from "../../../src/digest/channel-announcement";
 import {
     buildCommitmentLockArgs,
+    buildCommitmentTx,
     computeCommitmentTxDigest,
     readCommitmentLockDelay,
     readCommitmentLockLayout,
@@ -10,10 +11,10 @@ import {
 } from "../../../src/digest/commitment-tx";
 import { COMMITMENT_LOCK_TESTNET } from "../../../src/digest/digest.constants";
 import { calculateTxFee, commitmentTxSize, shutdownTxSize } from "../../../src/digest/fee";
-import { computeRevocationDigest } from "../../../src/digest/revocation";
+import { buildRevocationContent, computeRevocationDigest } from "../../../src/digest/revocation";
 import { settlementToCommitmentInput } from "../../../src/digest/settlement-input";
 import { buildSettlementWitness } from "../../../src/digest/settlement-witness";
-import { computeClosingTxDigest, computeShutdownTxDigest, readClosingTx } from "../../../src/digest/shutdown-tx";
+import { buildClosingTx, computeClosingTxDigest, computeShutdownTxDigest, readClosingTx } from "../../../src/digest/shutdown-tx";
 import { computeRevocationContentMessage, computeTxMessage } from "../../../src/digest/tx-message";
 import { moleculeCellOutput } from "../../../src/digest/utils/molecule.utils";
 import { aggregateXOnlyPubkey } from "../../../src/digest/utils/digest.utils";
@@ -137,6 +138,12 @@ describe("digest cross-implementation vectors", () => {
                     expect(bytesToHex(tx.outputs[0]?.lock.args ?? new Uint8Array(0))).toBe(kase.lock_args);
                 });
 
+                it("builds the tx fiber built, whose message is the digest", () => {
+                    const built = buildCommitmentTx(keys, input);
+                    expect(built).toEqual(toTransaction(kase.transaction));
+                    expect(bytesToHex(computeTxMessage(built))).toBe(kase.digest);
+                });
+
                 it("recomputes the digest from the settlement snapshot fiber states for it", () => {
                     const converted = settlementToCommitmentInput(
                         keys,
@@ -176,6 +183,12 @@ describe("digest cross-implementation vectors", () => {
                 });
 
                 if (kase.udt_type_script === null) {
+                    it("builds the tx fiber built from what it states, whose message is the digest", () => {
+                        const built = buildClosingTx(keys, toClosingTxInput(kase, digest.remote), null);
+                        expect(built).toEqual(toTransaction(kase.transaction));
+                        expect(bytesToHex(computeTxMessage(built))).toBe(kase.digest);
+                    });
+
                     it("recomputes the digest from what the closing tx states, from both sides of the channel", () => {
                         const closing = toClosingTxInput(kase, digest.remote);
                         expect(bytesToHex(computeClosingTxDigest(keys, closing))).toBe(kase.digest);
@@ -244,6 +257,14 @@ describe("digest cross-implementation vectors", () => {
                         hexToBytes(kase.commitment_lock_script_args),
                     );
                     expect(bytesToHex(message)).toBe(kase.digest);
+                });
+
+                it("builds the content fiber built, whose message is the digest", () => {
+                    const { output, outputData, commitmentLockArgs } = buildRevocationContent(keys, toRevocationInput(kase, digest.remote));
+                    expect(bytesToHex(moleculeCellOutput(output.capacityShannons, output.lock, output.type))).toBe(kase.output);
+                    expect(bytesToHex(outputData)).toBe(kase.output_data);
+                    expect(bytesToHex(commitmentLockArgs)).toBe(kase.commitment_lock_script_args);
+                    expect(bytesToHex(computeRevocationContentMessage(output, outputData, commitmentLockArgs))).toBe(kase.digest);
                 });
 
                 it("reads the revoked number and the delay back from the content's args", () => {

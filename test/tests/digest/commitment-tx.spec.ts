@@ -3,6 +3,7 @@ import { deriveChannelSeed } from "../../../src/derivation/device-scheme";
 import { deriveChannelKeys, pubkeyOf } from "../../../src/derivation/fiber-scheme";
 import {
     buildCommitmentLockArgs,
+    buildCommitmentTx,
     computeCommitmentTxDigest,
     readCommitmentLockDelay,
     readCommitmentLockLayout,
@@ -11,6 +12,7 @@ import {
 import { blake160 } from "../../../src/common/utils/ckb-hash.utils";
 import { COMMITMENT_LOCK_LAYOUTS, COMMITMENT_LOCK_TESTNET } from "../../../src/digest/digest.constants";
 import type { CommitmentTxInput, SettlementTlc } from "../../../src/digest/digest.types";
+import { aggregateXOnlyPubkey } from "../../../src/digest/utils/digest.utils";
 
 const MASTER_SEED = new Uint8Array(32).fill(0x24);
 const channelKeys = deriveChannelKeys(deriveChannelSeed(MASTER_SEED, 0));
@@ -276,33 +278,109 @@ describe("computeCommitmentTxDigest", () => {
         expect(udtDigest).not.toBe(baseDigest);
         expect(bytesToHex(computeCommitmentTxDigest(channelKeys, UDT_INPUT))).toBe(udtDigest);
     });
+});
 
-    it("refuses a fee the capacity cannot cover", () => {
-        expect(() => digestOf({ commitmentFeeRate: (1n << 63n) / 456n })).toThrow(RangeError);
+const localFundingPubkey = pubkeyOf(channelKeys.fundingKey);
+
+const ENTRY_POINTS: [string, (overrides: Partial<CommitmentTxInput>) => unknown][] = [
+    ["the digest", digestOf],
+    ["the builder", (overrides) => buildCommitmentTx(channelKeys, { ...BASE_INPUT, ...overrides })],
+];
+
+describe("buildCommitmentTx", () => {
+    // The liquid amount and both reserves, less the 456-shannon fee.
+    it("spends the funding cell into the one commitment cell, with no deps or witnesses", () => {
+        expect(buildCommitmentTx(channelKeys, BASE_INPUT)).toEqual({
+            version: 0,
+            cellDeps: [],
+            headerDeps: [],
+            inputs: [{ since: 0n, previousOutput: { txHash: new Uint8Array(32).fill(0xf0), index: 0 } }],
+            outputs: [
+                { capacityShannons: 90_999_999_544n, lock: { ...COMMITMENT_LOCK_TESTNET, args: expect.any(Uint8Array) }, type: null },
+            ],
+            outputsData: [new Uint8Array(0)],
+            witnesses: [],
+        });
     });
 
-    it("refuses malformed inputs, one field at a time", () => {
-        expect(() => digestOf({ remoteFundingPubkey: new Uint8Array(32) })).toThrow(TypeError);
-        expect(() => digestOf({ remoteTlcBasePubkey: new Uint8Array(34) })).toThrow(TypeError);
-        expect(() => digestOf({ commitmentNumber: 2 ** 48 })).toThrow(RangeError);
-        expect(() => digestOf({ commitmentDelayEpoch: 1n << 56n })).toThrow(RangeError);
-        expect(() => digestOf({ commitmentFeeRate: -1n })).toThrow(RangeError);
-        expect(() => digestOf({ cellDepsCount: 256 })).toThrow(RangeError);
-        expect(() => digestOf({ liquidCapacityShannons: undefined })).toThrow(RangeError);
-        expect(() => digestOf({ liquidCapacityShannons: -1n })).toThrow(RangeError);
-        expect(() => digestOf({ liquidCapacityShannons: 1n << 128n })).toThrow(RangeError);
-        expect(() => digestOf({ settlementLocalShannons: -1n })).toThrow(RangeError);
-        expect(() => digestOf({ localReservedCkbShannons: 1n << 64n })).toThrow(RangeError);
-        expect(() => digestOf({ fundingOutPoint: undefined })).toThrow(new TypeError("fundingOutPoint must be an object"));
-        expect(() => digestOf({ fundingOutPoint: { txHash: new Uint8Array(31), index: 0 } })).toThrow(
+    it.each<[string, Partial<CommitmentTxInput>, [Uint8Array, Uint8Array], number]>([
+        ["the peer's commitment, legacy", { forRemote: true, lockLayout: "legacy" }, [localFundingPubkey, remoteFundingPubkey], 57],
+        [
+            "the device's commitment, fullPaymentHash",
+            { forRemote: false, lockLayout: "fullPaymentHash" },
+            [remoteFundingPubkey, localFundingPubkey],
+            58,
+        ],
+    ])("locks %s under the role-ordered key, the delay, the version and the layout", (_, overrides, orderedPubkeys, length) => {
+        const args = buildCommitmentTx(channelKeys, { ...BASE_INPUT, ...overrides }).outputs[0]?.lock.args ?? new Uint8Array(0);
+        expect(args).toHaveLength(length);
+        expect(bytesToHex(args.subarray(0, 20))).toBe(bytesToHex(blake160(aggregateXOnlyPubkey(orderedPubkeys))));
+        expect(readCommitmentLockDelay(args)).toBe((1n << 40n) | 1n);
+        expect(readCommitmentLockVersion(args)).toBe(11);
+        expect(readCommitmentLockLayout(args)).toBe(overrides.lockLayout);
+    });
+
+    // Only the reserves, less the 594-shannon fee; the liquid amount is the u128 data.
+    it("carries the UDT as the cell's type and the liquid amount as its data", () => {
+        const tx = buildCommitmentTx(channelKeys, UDT_INPUT);
+        expect(tx.outputs).toEqual([
+            {
+                capacityShannons: 10_499_999_406n,
+                lock: { ...COMMITMENT_LOCK_TESTNET, args: expect.any(Uint8Array) },
+                type: { codeHash: hexToBytes("aa".repeat(32)), hashType: "type", args: hexToBytes("bb".repeat(32)) },
+            },
+        ]);
+        expect(tx.outputsData).toEqual([hexToBytes("000080186bf13a5e2b00000000000000")]);
+    });
+
+    it.each(ENTRY_POINTS)("refuses through %s a fee the capacity cannot cover", (_, entry) => {
+        expect(() => entry({ commitmentFeeRate: (1n << 63n) / 456n })).toThrow(RangeError);
+    });
+
+    it.each(ENTRY_POINTS)("refuses through %s malformed inputs, one field at a time", (_, entry) => {
+        expect(() => entry({ remoteFundingPubkey: new Uint8Array(32) })).toThrow(TypeError);
+        expect(() => entry({ remoteTlcBasePubkey: new Uint8Array(34) })).toThrow(TypeError);
+        expect(() => entry({ commitmentNumber: 2 ** 48 })).toThrow(RangeError);
+        expect(() => entry({ commitmentDelayEpoch: 1n << 56n })).toThrow(RangeError);
+        expect(() => entry({ commitmentFeeRate: -1n })).toThrow(RangeError);
+        expect(() => entry({ cellDepsCount: 256 })).toThrow(RangeError);
+        expect(() => entry({ liquidCapacityShannons: undefined })).toThrow(RangeError);
+        expect(() => entry({ liquidCapacityShannons: -1n })).toThrow(RangeError);
+        expect(() => entry({ liquidCapacityShannons: 1n << 128n })).toThrow(RangeError);
+        expect(() => entry({ settlementLocalShannons: -1n })).toThrow(RangeError);
+        expect(() => entry({ localReservedCkbShannons: 1n << 64n })).toThrow(RangeError);
+        expect(() => entry({ settlementRemoteShannons: undefined })).toThrow(
+            new RangeError(
+                "settlementRemoteShannons must be a bigint between 0 and 340282366920938463463374607431768211455, got undefined",
+            ),
+        );
+        expect(() => entry({ settlementRemoteShannons: -1n })).toThrow(
+            new RangeError("settlementRemoteShannons must be a bigint between 0 and 340282366920938463463374607431768211455, got -1"),
+        );
+        expect(() => entry({ settlementRemoteShannons: 1n << 128n })).toThrow(
+            new RangeError(
+                "settlementRemoteShannons must be a bigint between 0 and 340282366920938463463374607431768211455, got 340282366920938463463374607431768211456",
+            ),
+        );
+        expect(() => entry({ remoteReservedCkbShannons: undefined })).toThrow(
+            new RangeError("remoteReservedCkbShannons must be a bigint between 0 and 18446744073709551615, got undefined"),
+        );
+        expect(() => entry({ remoteReservedCkbShannons: -1n })).toThrow(
+            new RangeError("remoteReservedCkbShannons must be a bigint between 0 and 18446744073709551615, got -1"),
+        );
+        expect(() => entry({ remoteReservedCkbShannons: 1n << 64n })).toThrow(
+            new RangeError("remoteReservedCkbShannons must be a bigint between 0 and 18446744073709551615, got 18446744073709551616"),
+        );
+        expect(() => entry({ fundingOutPoint: undefined })).toThrow(new TypeError("fundingOutPoint must be an object"));
+        expect(() => entry({ fundingOutPoint: { txHash: new Uint8Array(31), index: 0 } })).toThrow(
             new TypeError("fundingOutPoint.txHash must be 32 bytes, got 31"),
         );
-        expect(() => digestOf({ fundingOutPoint: { txHash: new Uint8Array(32), index: 2 ** 32 } })).toThrow(
+        expect(() => entry({ fundingOutPoint: { txHash: new Uint8Array(32), index: 2 ** 32 } })).toThrow(
             new RangeError("fundingOutPoint.index must be an integer between 0 and 4294967295, got 4294967296"),
         );
-        expect(() => digestOf({ lockLayout: undefined })).toThrow(new TypeError("lockLayout must be one of legacy, fullPaymentHash"));
-        expect(() => digestOf({ lockLayout: null as never })).toThrow(new TypeError("lockLayout must be one of legacy, fullPaymentHash"));
-        expect(() => digestOf({ lockLayout: "full_payment_hash" as never })).toThrow(
+        expect(() => entry({ lockLayout: undefined })).toThrow(new TypeError("lockLayout must be one of legacy, fullPaymentHash"));
+        expect(() => entry({ lockLayout: null as never })).toThrow(new TypeError("lockLayout must be one of legacy, fullPaymentHash"));
+        expect(() => entry({ lockLayout: "full_payment_hash" as never })).toThrow(
             new TypeError("lockLayout must be one of legacy, fullPaymentHash"),
         );
     });

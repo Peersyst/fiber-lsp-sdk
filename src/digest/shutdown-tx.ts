@@ -147,7 +147,7 @@ export function computeShutdownTxDigest(keys: FiberChannelKeys, input: ShutdownT
  * @param udt The UDT and each side's amount, or `null` on a CKB channel.
  * @returns The unsigned tx, without cell deps.
  */
-function buildClosingTx(keys: FiberChannelKeys, input: ClosingTxInput, udt: ClosingTxUdt | null): Transaction {
+export function buildClosingTx(keys: FiberChannelKeys, input: ClosingTxInput, udt: ClosingTxUdt | null): Transaction {
     assertOutPoint("fundingOutPoint", input.fundingOutPoint);
     assertBytes("remoteFundingPubkey", input.remoteFundingPubkey, COMPRESSED_POINT_LENGTH);
     assertScript("localCloseScript", input.localCloseScript);

@@ -165,7 +165,7 @@ export class PolicyEngine {
         const { version } = evidence;
         const entry: RevocationEvidence = { version, forRemote: true, signature: bytesToHex(evidence.signature) };
         const channelIndex = await this.requireRegisteredIndex(channelId);
-        // Outside the balance lane: no claim reads the evidence, so the record's own lane is enough.
+        // Outside the balance lane: a claim only checks the evidence is there, which nothing here undoes, so the record's lane is enough.
         await this.store.updateChannelRecord(channelIndex, (current) => {
             if (current === null) throw missingRecord(channelId, channelIndex);
             const slot = signSlotKey({ context: "REVOKE", commitmentNumber: version + 1 });
@@ -607,12 +607,14 @@ function decideClaim(
     const commitmentHashes = nextCommitmentHashes(current, operation, claim.message);
     const pins = pinClaim(current.pins, operation);
     const views = applyBalanceRule(current, claim, context);
+    // A reused slot moves its lane too: a revocation round's second side is that lane's claim, and the remote view reads it.
+    const lastSignedCommitmentNumbers = { ...current.lastSignedCommitmentNumbers, [slot.lane]: slot.commitmentNumber };
     if (served !== undefined) {
-        // A reused slot moves no lane: its number was claimed by the session it served first.
         return {
             verdict: { ...ref, status: "reused" },
             record: {
                 ...current,
+                lastSignedCommitmentNumbers,
                 nonceReuse: { ...current.nonceReuse, [slotKey]: { sessionCommitment, message: claim.message } },
                 commitmentHashes,
                 pins,
@@ -624,7 +626,7 @@ function decideClaim(
         verdict: { ...ref, status: "fresh" },
         record: {
             ...current,
-            lastSignedCommitmentNumbers: { ...current.lastSignedCommitmentNumbers, [slot.lane]: slot.commitmentNumber },
+            lastSignedCommitmentNumbers,
             signedSessions: { ...current.signedSessions, [slotKey]: sessionCommitment },
             commitmentHashes,
             pins,
@@ -634,7 +636,7 @@ function decideClaim(
 }
 
 /**
- * Holds a commitment's version above its view's last one, and records it with the hash of the tx signed.
+ * Holds a commitment's version to its view's last one, and records it with the hash of the tx signed.
  * @param current The channel's record.
  * @param operation The operation, whose digest already matched.
  * @param message The digest, lowercase hex: a commitment's `compute_tx_message`.
@@ -649,13 +651,47 @@ function nextCommitmentHashes(
     const { commitmentNumber, forRemote } = operation.input;
     const view = viewOf(forRemote);
     const last = current.commitmentHashes[view];
-    if (last !== undefined && commitmentNumber <= last.commitmentNumber) {
-        refusePolicyRequest(
-            "stale_state",
-            `the ${view} commitment's version ${commitmentNumber} is not above the last one signed in its view, ${last.commitmentNumber}`,
-        );
+    if (last !== undefined) {
+        if (forRemote) {
+            assertRemoteSuccessor(current, commitmentNumber, last.commitmentNumber);
+        } else if (commitmentNumber <= last.commitmentNumber) {
+            refusePolicyRequest(
+                "stale_state",
+                `the local commitment's version ${commitmentNumber} is not above the last one signed in its view, ${last.commitmentNumber}`,
+            );
+        }
     }
     return { ...current.commitmentHashes, [view]: { commitmentNumber, txHash: message } };
+}
+
+/**
+ * Holds the peer's commitment to one above its view's last, and behind the revocation of the one before that last.
+ * @param current The channel's record.
+ * @param version The commitment's version.
+ * @param last The version of the last remote commitment signed.
+ */
+function assertRemoteSuccessor(current: ChannelPolicyRecord, version: number, last: number): void {
+    if (version !== last + 1) {
+        refusePolicyRequest(
+            "stale_state",
+            `the remote commitment's version ${version} is not one above the last one signed in its view, ${last}`,
+        );
+    }
+    // The dispatch ties a commitment's version to its slot, so no session below the last means the last followed none.
+    if (current.signedSessions[signSlotKey({ context: "COMMITMENT", commitmentNumber: last - 1 })] === undefined) return;
+    // The lane, not the slot, says the peer's revocation took it; the evidence, that the device holds the complete signature,
+    // which the claim alone does not once a delivery failed.
+    const revoked = current.lastSignedCommitmentNumbers["REVOKE:local"];
+    const recorded = current.revocations.some((revocation) => revocation.version === last - 1);
+    let missing: string | null = null;
+    if (revoked === undefined) missing = "nothing has been signed on REVOKE:local";
+    else if (revoked !== last) missing = `the last REVOKE:local signed is ${revoked}`;
+    else if (!recorded) missing = "its complete signature has not been recorded";
+    if (missing === null) return;
+    refusePolicyRequest(
+        "stale_state",
+        `the remote commitment's version ${version} must follow the revocation of version ${last - 1}, at slot REVOKE:${last}, and ${missing}`,
+    );
 }
 
 /**

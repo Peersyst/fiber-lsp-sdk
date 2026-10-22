@@ -55,17 +55,17 @@ index and its name at another.
 One record per channel, holding what the policy checks need. Everything else about a channel lives on the node, which stays
 the durable store for channel state.
 
-| Field                         | What it holds                                                                                                      |
-| ----------------------------- | ------------------------------------------------------------------------------------------------------------------ |
-| `version`                     | Format version of the record itself                                                                                |
-| `channelId`                   | The channel's current name, which the open handshake may still change                                              |
-| `lastSignedCommitmentNumbers` | Last number claimed fresh per lane (`COMMITMENT:local`, `REVOKE:remote`, `REVOKE:local`, `ANNOUNCEMENT`)           |
-| `signedSessions`              | Sign-once registry: the first session served in each `<context>:<number>` slot                                     |
-| `nonceReuse`                  | Under `allow` only: per slot, the second session it served, its session commitment and its message (hex)           |
-| `commitmentHashes`            | Per view, the last commitment signed in it: its version, the view's floor, and its `compute_tx_message` hash (hex) |
-| `revocations`                 | The complete revocation signature of each revoked peer commitment, `{ version, forRemote: true, signature }`       |
-| `pins`                        | The channel's constant values, each held to one value for the channel's life                                       |
-| `views`                       | One snapshot per commitment the device signs, `remote` (the peer's) and `local` (its own)                          |
+| Field                         | What it holds                                                                                                       |
+| ----------------------------- | ------------------------------------------------------------------------------------------------------------------- |
+| `version`                     | Format version of the record itself                                                                                 |
+| `channelId`                   | The channel's current name, which the open handshake may still change                                               |
+| `lastSignedCommitmentNumbers` | Last number claimed per lane, fresh or reused (`COMMITMENT:local`, `REVOKE:remote`, `REVOKE:local`, `ANNOUNCEMENT`) |
+| `signedSessions`              | Sign-once registry: the first session served in each `<context>:<number>` slot                                      |
+| `nonceReuse`                  | Under `allow` only: per slot, the second session it served, its session commitment and its message (hex)            |
+| `commitmentHashes`            | Per view, the last commitment signed in it: its version, the view's floor, and its `compute_tx_message` hash (hex)  |
+| `revocations`                 | The complete revocation signature of each revoked peer commitment, `{ version, forRemote: true, signature }`        |
+| `pins`                        | The channel's constant values, each held to one value for the channel's life                                        |
+| `views`                       | One snapshot per commitment the device signs, `remote` (the peer's) and `local` (its own)                           |
 
 `commitmentHashes` is read by more than the views' order: a revocation is signed only while the last commitment of the
 revoked one's view is its replacement, at the slot's number ([policy.md](./policy.md)). Its hash is the message the

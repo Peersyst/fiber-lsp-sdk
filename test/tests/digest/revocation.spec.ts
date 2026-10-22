@@ -1,11 +1,11 @@
-import { bytesToHex, hexToBytes } from "@noble/hashes/utils.js";
+import { bytesToHex, concatBytes, hexToBytes } from "@noble/hashes/utils.js";
 import { deriveChannelSeed } from "../../../src/derivation/device-scheme";
 import { deriveChannelKeys, pubkeyOf } from "../../../src/derivation/fiber-scheme";
 import { COMMITMENT_LOCK_TESTNET } from "../../../src/digest/digest.constants";
-import type { Script } from "../../../src/common";
+import type { CellOutput, Script } from "../../../src/common";
 import type { RevocationInput } from "../../../src/digest/digest.types";
 import { calculateCommitmentTxFee } from "../../../src/digest/fee";
-import { computeRevocationDigest } from "../../../src/digest/revocation";
+import { buildRevocationContent, computeRevocationDigest } from "../../../src/digest/revocation";
 import { computeRevocationContentMessage } from "../../../src/digest/tx-message";
 import { aggregateXOnlyPubkey } from "../../../src/digest/utils/digest.utils";
 import { blake160 } from "../../../src/common/utils/ckb-hash.utils";
@@ -39,20 +39,22 @@ function digestOf(overrides: Partial<RevocationInput>): string {
     return bytesToHex(computeRevocationDigest(channelKeys, { ...BASE_INPUT, ...overrides }));
 }
 
+// Fiber's revocation content for the send side.
+const PUNISHMENT_OUTPUT: CellOutput = { capacityShannons: 80_500_000_000n + 10_500_000_000n - 456n, lock: PAYOUT_SCRIPT, type: null };
+const REVOKED_ARGS = concatBytes(
+    blake160(aggregateXOnlyPubkey([remoteFundingPubkey, pubkeyOf(channelKeys.fundingKey)])),
+    hexToBytes("01000000000100a0"),
+    hexToBytes("0000000000000004"),
+);
+
 describe("computeRevocationDigest", () => {
     it("returns a deterministic 32-byte digest", () => {
         expect(computeRevocationDigest(channelKeys, BASE_INPUT)).toHaveLength(32);
         expect(digestOf({})).toBe(baseDigest);
     });
 
-    // The content fiber hands over for the send side: the payout output, its empty molecule data, and the revoked args.
     it("is the message of the revocation content fiber builds for it", () => {
-        const args = new Uint8Array(36);
-        args.set(blake160(aggregateXOnlyPubkey([remoteFundingPubkey, pubkeyOf(channelKeys.fundingKey)])), 0);
-        args.set(hexToBytes("01000000000100a0"), 20);
-        args.set(hexToBytes("0000000000000004"), 28);
-        const output = { capacityShannons: 80_500_000_000n + 10_500_000_000n - 456n, lock: PAYOUT_SCRIPT, type: null };
-        expect(digestOf({})).toBe(bytesToHex(computeRevocationContentMessage(output, hexToBytes("00000000"), args)));
+        expect(digestOf({})).toBe(bytesToHex(computeRevocationContentMessage(PUNISHMENT_OUTPUT, hexToBytes("00000000"), REVOKED_ARGS)));
     });
 
     it("commits to the direction through the role-ordered key aggregation", () => {
@@ -91,23 +93,69 @@ describe("computeRevocationDigest", () => {
         expect(digestOf({ commitmentLock: { ...COMMITMENT_LOCK_TESTNET, codeHash: new Uint8Array(32) } })).toBe(baseDigest);
     });
 
-    it("refuses a fee the capacity cannot cover", () => {
-        expect(() => digestOf({ commitmentFeeRate: (1n << 63n) / 456n })).toThrow(RangeError);
+    // Only the message checks the scripts, when it serializes them.
+    it("refuses a malformed payout script", () => {
+        expect(() => digestOf({ payoutScript: { ...PAYOUT_SCRIPT, codeHash: new Uint8Array(31) } })).toThrow(
+            new TypeError("output.lock.codeHash must be 32 bytes, got 31"),
+        );
+    });
+});
+
+const ENTRY_POINTS: [string, (overrides: Partial<RevocationInput>) => unknown][] = [
+    ["the digest", digestOf],
+    ["the builder", (overrides) => buildRevocationContent(channelKeys, { ...BASE_INPUT, ...overrides })],
+];
+
+describe("buildRevocationContent", () => {
+    it("builds the payout output, its empty molecule data and the revoked cell's 36 bytes of args", () => {
+        expect(buildRevocationContent(channelKeys, BASE_INPUT)).toEqual({
+            output: PUNISHMENT_OUTPUT,
+            outputData: hexToBytes("00000000"),
+            commitmentLockArgs: REVOKED_ARGS,
+        });
     });
 
-    it("refuses malformed inputs, one field at a time", () => {
-        expect(() => digestOf({ remoteFundingPubkey: new Uint8Array(32) })).toThrow(TypeError);
-        expect(() => digestOf({ revokedCommitmentNumber: 2 ** 48 })).toThrow(RangeError);
-        expect(() => digestOf({ commitmentDelayEpoch: 1n << 56n })).toThrow(RangeError);
-        expect(() => digestOf({ commitmentFeeRate: -1n })).toThrow(RangeError);
-        expect(() => digestOf({ liquidCapacityShannons: undefined })).toThrow(RangeError);
-        expect(() => digestOf({ liquidCapacityShannons: -1n })).toThrow(RangeError);
-        expect(() => digestOf({ liquidCapacityShannons: 1n << 128n })).toThrow(RangeError);
-        expect(() => digestOf({ localReservedCkbShannons: -1n })).toThrow(RangeError);
-        expect(() => digestOf({ payoutScript: { ...PAYOUT_SCRIPT, codeHash: new Uint8Array(31) } })).toThrow(TypeError);
-        expect(() => digestOf({ lockLayout: undefined })).toThrow(new TypeError("lockLayout must be one of legacy, fullPaymentHash"));
-        expect(() => digestOf({ lockLayout: null as never })).toThrow(new TypeError("lockLayout must be one of legacy, fullPaymentHash"));
-        expect(() => digestOf({ lockLayout: "full_payment_hash" as never })).toThrow(
+    it("hashes the device's funding key first into the args of the peer's revoked commitment", () => {
+        const { commitmentLockArgs } = buildRevocationContent(channelKeys, { ...BASE_INPUT, forRemote: true });
+        const keyHash = blake160(aggregateXOnlyPubkey([pubkeyOf(channelKeys.fundingKey), remoteFundingPubkey]));
+        expect(bytesToHex(commitmentLockArgs)).toBe(bytesToHex(concatBytes(keyHash, REVOKED_ARGS.subarray(20))));
+    });
+
+    // Only the reserves, less the 525-shannon fee; the data is the liquid amount's u128 behind a 4-byte length.
+    it("types the output by the UDT and carries the liquid amount as its molecule data", () => {
+        const udtTypeScript: Script = { codeHash: hexToBytes("aa".repeat(32)), hashType: "type", args: new Uint8Array(0) };
+        expect(buildRevocationContent(channelKeys, { ...BASE_INPUT, udtTypeScript })).toEqual({
+            output: { capacityShannons: 10_499_999_475n, lock: PAYOUT_SCRIPT, type: udtTypeScript },
+            outputData: hexToBytes("1000000000852cbe120000000000000000000000"),
+            commitmentLockArgs: REVOKED_ARGS,
+        });
+    });
+
+    it.each(ENTRY_POINTS)("refuses through %s a fee the capacity cannot cover", (_, entry) => {
+        expect(() => entry({ commitmentFeeRate: (1n << 63n) / 456n })).toThrow(RangeError);
+    });
+
+    it.each(ENTRY_POINTS)("refuses through %s malformed inputs, one field at a time", (_, entry) => {
+        expect(() => entry({ remoteFundingPubkey: new Uint8Array(32) })).toThrow(TypeError);
+        expect(() => entry({ revokedCommitmentNumber: 2 ** 48 })).toThrow(RangeError);
+        expect(() => entry({ commitmentDelayEpoch: 1n << 56n })).toThrow(RangeError);
+        expect(() => entry({ commitmentFeeRate: -1n })).toThrow(RangeError);
+        expect(() => entry({ liquidCapacityShannons: undefined })).toThrow(RangeError);
+        expect(() => entry({ liquidCapacityShannons: -1n })).toThrow(RangeError);
+        expect(() => entry({ liquidCapacityShannons: 1n << 128n })).toThrow(RangeError);
+        expect(() => entry({ localReservedCkbShannons: -1n })).toThrow(RangeError);
+        expect(() => entry({ remoteReservedCkbShannons: undefined })).toThrow(
+            new RangeError("remoteReservedCkbShannons must be a bigint between 0 and 18446744073709551615, got undefined"),
+        );
+        expect(() => entry({ remoteReservedCkbShannons: -1n })).toThrow(
+            new RangeError("remoteReservedCkbShannons must be a bigint between 0 and 18446744073709551615, got -1"),
+        );
+        expect(() => entry({ remoteReservedCkbShannons: 1n << 64n })).toThrow(
+            new RangeError("remoteReservedCkbShannons must be a bigint between 0 and 18446744073709551615, got 18446744073709551616"),
+        );
+        expect(() => entry({ lockLayout: undefined })).toThrow(new TypeError("lockLayout must be one of legacy, fullPaymentHash"));
+        expect(() => entry({ lockLayout: null as never })).toThrow(new TypeError("lockLayout must be one of legacy, fullPaymentHash"));
+        expect(() => entry({ lockLayout: "full_payment_hash" as never })).toThrow(
             new TypeError("lockLayout must be one of legacy, fullPaymentHash"),
         );
     });

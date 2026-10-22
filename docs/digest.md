@@ -172,6 +172,22 @@ over the plaintext a request carries.
 The message is not the transaction's on-chain hash: the transaction fiber broadcasts adds the funding lock's cell deps back
 (`get_latest_commitment_transaction`, `channel.rs:11567-11581`).
 
+## The content before its message
+
+Three constructions are exported beside their digests, so the content a message is computed over can be built on its own:
+
+- `buildCommitmentTx(keys, input)`, the tx of fiber's `build_commitment_tx_and_settlement_data`: the funding cell into the
+  commitment cell, unsigned and without cell deps. `computeCommitmentTxDigest` is `computeTxMessage` over it.
+- `buildClosingTx(keys, input, udt)`, the cooperative close of `build_shutdown_tx`, with the UDT's type script and each
+  side's amount or `null` on a CKB channel. Both close digests are `computeTxMessage` over it.
+- `buildRevocationContent(keys, input)`, fiber's `Musig2SignableContent::Revocation`: the punishment `output`, its
+  `outputData` as the molecule `Bytes` the message hashes, header included, and the revoked cell's 36 bytes of args,
+  `commitmentLockArgs`, fiber's `commitment_lock_script_args` under the name the protocol codecs read them by.
+  `computeRevocationDigest` is `computeRevocationContentMessage` over the three.
+
+None of them is in the barrel's list: the SDK only ever needs their messages. The tests' node double, which sends the
+device the content fiber would, imports them by file, as the module's specs do.
+
 ## Network pinning
 
 The commitment lock's code hash decides which script guards the funds after a force close, and on mainnet and testnet it
@@ -197,7 +213,9 @@ digest, so a divergence points at the exact stage that moved; the commitment and
 layout, and cover both layouts by name. The suite also recomputes each shutdown and announcement case from the peer's side
 of the fixture channel, which exercises both branches of the sorted orderings against the same Rust digest, rebuilds each
 CKB close from what its tx states, and each commitment from the settlement snapshot fiber's `to_rpc_signing_settlement`
-writes for it, through the converter.
+writes for it, through the converter. The builders are pinned to fiber's constructions themselves, not only to their
+digests (`test/tests/digest/interop-vectors.spec.ts`): the tx of each of the nine commitment cases and of the CKB close,
+and the output, data and args of each of the three revocations, come out equal to the ones the vectors carry.
 
 ## What the tests guarantee
 
@@ -229,15 +247,18 @@ breaking the code on purpose:
 | The input's version is one up                                            | 11                |
 | The snapshot's view is inverted                                          | 11                |
 | The peer's TLC base key is the device's                                  | 11                |
+| The revocation content's args leave out the revoked number               | 11                |
 | A CKB snapshot keeps the reserves                                        | 10                |
 | The feature byte is left out under the full-hash layout                  | 10                |
 | The feature byte is written as 0x00                                      | 10                |
 | The args reader takes any length                                         | 10                |
 | The input's cell dep count is one up                                     | 10                |
+| The commitment tx carries a witness the message leaves out               | 10                |
 | The remote amount loses the local reserve                                | 9                 |
 | The TLC groups are ordered offered first on both variants                | 9                 |
 | The TLC record binds the first 20 bytes under the full hash too          | 9                 |
 | The TLCs are not sorted by id inside their group                         | 9                 |
+| The revocation content's data loses its molecule header                  | 9                 |
 | A UDT cell counts its liquid amount as capacity                          | 8                 |
 | A snapshot TLC is always offered                                         | 7                 |
 | A snapshot TLC's peer key is the device's                                | 7                 |
@@ -245,12 +266,14 @@ breaking the code on purpose:
 | The outputs data are hashed in reverse                                   | 7                 |
 | The revocation content hashes the args before the data                   | 7                 |
 | The revocation content leaves out the data                               | 7                 |
+| The commitment tx's output drops the UDT type                            | 7                 |
 | The direction bit is not flipped on the local variant                    | 6                 |
 | A UDT cell writes no amount                                              | 6                 |
 | A close's outputs are read in reverse                                    | 6                 |
 | A delay with any flags passes                                            | 6                 |
 | The local amount is not bounded                                          | 6                 |
 | The remote amount is not bounded                                         | 6                 |
+| The revocation content names its args lockArgs                           | 6                 |
 | The per-TLC key hashes keep one order on both variants                   | 5                 |
 | The witness side blocks keep one order on both variants                  | 5                 |
 | The revocation's fee ignores the layout                                  | 4                 |

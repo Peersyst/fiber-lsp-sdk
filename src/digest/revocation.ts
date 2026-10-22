@@ -1,4 +1,5 @@
 import { concatBytes } from "@noble/hashes/utils.js";
+import type { CellOutput } from "../common";
 import {
     COMPRESSED_POINT_LENGTH,
     MAX_AMOUNT_SHANNONS,
@@ -24,6 +25,20 @@ import { aggregateXOnlyPubkey, commitmentCellValue, uint64Be } from "./utils";
  * @returns The 32-byte digest.
  */
 export function computeRevocationDigest(keys: FiberChannelKeys, input: RevocationInput): Uint8Array {
+    const { output, outputData, commitmentLockArgs } = buildRevocationContent(keys, input);
+    return computeRevocationContentMessage(output, outputData, commitmentLockArgs);
+}
+
+/**
+ * The content of fiber's `Musig2SignableContent::Revocation`.
+ * @param keys The channel's secrets.
+ * @param input What the content is a function of.
+ * @returns The output, its data as molecule `Bytes`, and the revoked cell's lock args.
+ */
+export function buildRevocationContent(
+    keys: FiberChannelKeys,
+    input: RevocationInput,
+): { output: CellOutput; outputData: Uint8Array; commitmentLockArgs: Uint8Array } {
     assertBytes("remoteFundingPubkey", input.remoteFundingPubkey, COMPRESSED_POINT_LENGTH);
     assertUnsignedInteger("revokedCommitmentNumber", input.revokedCommitmentNumber, MAX_COMMITMENT_NUMBER);
     assertUnsignedBigInt("commitmentDelayEpoch", input.commitmentDelayEpoch, MAX_SINCE_PAYLOAD);
@@ -38,11 +53,11 @@ export function computeRevocationDigest(keys: FiberChannelKeys, input: Revocatio
         : [input.remoteFundingPubkey, localFundingPubkey];
 
     const { capacityShannons, data } = commitmentCellValue(input, calculateCommitmentTxFee(input));
-    const output = { capacityShannons, lock: input.payoutScript, type: input.udtTypeScript };
-    const lockArgs = concatBytes(
+    const output: CellOutput = { capacityShannons, lock: input.payoutScript, type: input.udtTypeScript };
+    const commitmentLockArgs = concatBytes(
         blake160(aggregateXOnlyPubkey(orderedPubkeys)),
         uint64Le(SINCE_RELATIVE_EPOCH_FLAGS | input.commitmentDelayEpoch),
         uint64Be(BigInt(input.revokedCommitmentNumber)),
     );
-    return computeRevocationContentMessage(output, moleculeBytes(data), lockArgs);
+    return { output, outputData: moleculeBytes(data), commitmentLockArgs };
 }
