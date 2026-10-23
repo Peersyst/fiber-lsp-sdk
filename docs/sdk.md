@@ -3,8 +3,9 @@
 The facade: `FiberLspSdk`, the one object a wallet talks to. It is built once from the master seed and the host's
 effects, wires every other module behind it, and owns what none of them could: the lifecycle the host drives, the events
 the host listens to, the clock the device's indexes come from, and the list of what the device still has to ask the node
-about. This document covers that core. The four operations a wallet calls, opening a channel, listing channels, creating
-an invoice and paying one, are not built yet; each lands with its own section here.
+about. This document covers that core, the tenant's registration and token, and the evidence of a channel. The four
+operations a wallet calls, opening a channel, listing channels, creating an invoice and paying one, are not built yet;
+each lands with its own section here.
 
 ## The effects it is given
 
@@ -30,35 +31,40 @@ of them, since it is the first thing that lets a host construct any of the modul
 
 ## The options
 
-| Option           | What it is                                                                                                           |
-| ---------------- | -------------------------------------------------------------------------------------------------------------------- |
-| `network`        | `"mainnet"`, `"testnet"`, or `{ commitmentLock, invoiceCurrency, fundingLockCellDepsCount }` for a development chain |
-| `rpcUrl`         | The node's JSON-RPC address                                                                                          |
-| `biscuitToken`   | The RPC's Biscuit token; omitted when the node's RPC has no auth on, as a development chain's may                    |
-| `lspPubkey`      | The LSP node's key, the peer every channel opens to, as a compressed point on the curve; copied                      |
-| `pollIntervalMs` | How often the node is asked about what is watched; five seconds by default, at least one millisecond                 |
-| `nonceReuse`     | `"refuse"` by default, or `"allow"`: whether a slot already served may serve a second session, never a third         |
-| `watchtower`     | `{ destination, maxFeeShannons }`, what the watchtower's spends may pay; omitted, every spend is refused             |
+| Option           | What it is                                                                                                         |
+| ---------------- | ------------------------------------------------------------------------------------------------------------------ |
+| `network`        | `"mainnet"`, `"testnet"`, or `{ commitmentLock, invoiceCurrency, fundingLockCellDepsCount, millisecondsPerEpoch }` |
+| `rpcUrl`         | The node's JSON-RPC address                                                                                        |
+| `biscuitToken`   | The RPC's Biscuit token; omitted when the node's RPC has no auth on, or until the tenant registers                 |
+| `lspPubkey`      | The LSP node's key, the peer every channel opens to, as a compressed point on the curve; copied                    |
+| `pollIntervalMs` | How often the node is asked about what is watched; five seconds by default, at least one millisecond               |
+| `nonceReuse`     | `"refuse"` by default, or `"allow"`: whether a slot already served may serve a second session, never a third       |
+| `watchtower`     | `{ destination, maxFeeShannons }`, what the watchtower's spends may pay; omitted, every spend is refused           |
 
 A network preset is the commitment lock fiber ships in its node config for that chain ([digest.md](./digest.md)), the
 currency its invoices carry there, `Fibb` on mainnet and `Fibt` on testnet, and the number of cell deps of the funding
-lock, 2 on both. That last one is a network constant because the commitment tx carries no cell deps while fiber sizes
-its fee as if it carried the funding lock's, so the device cannot read it from anything it signs; a development chain
-passes all three, the count a positive integer up to `MAX_CELL_DEPS_COUNT` (255), and its code hash is copied so the
-host's bytes cannot move under the device. The token is optional for the same reason the rpc client's is: a hosted node
-without one fails at the first call, loudly, while a required one would make a development chain unreachable. Every
-value option (the network, the url, the token, the key, the poll interval and the nonce reuse mode) is checked at
-construction, with the error naming the field as the module that takes it calls it (`token`), and the master seed must
-be exactly 32 bytes, checked first; of the effects, what can be checked before a call is checked (the storage's `get`
-and `set`, `fetch`, the clock and the timer's `schedule` are functions). The nonce reuse mode is the policy engine's
-([policy.md](./policy.md)), which checks it and names it `options.nonceReuse`. `"allow"` exists because Fiber's current
-nonce lifecycle asks for a second session on the slots of a channel's opening, of each round the peer starts and of
-each revocation round: under the default no channel opens against Fiber today, so a host that must work with it now sets
-`"allow"`, and the mode goes once Fiber's nonces are strict. Even under `"allow"`, a round the peer starts after one of
-the device's own asks for a third session on one slot, which is refused, so a channel stalls at the fulfil of a payment
-it sent or at a payment received after one it fulfilled ([policy.md](./policy.md), "The known cost"). Every effect
-that is a bare function (`fetch`, the clock, the runtime's timer functions) is called without a receiver, the storage
-and the timer as methods of the host's own object, so none sees an SDK object as `this`. Nothing schedules or reads the storage until `connect()`.
+lock, 2 on both. That count is a network constant because the commitment tx carries no cell deps while fiber sizes its
+fee as if it carried the funding lock's, so the device cannot read it from anything it signs. So is the length of an
+epoch in milliseconds, fiber's `MILLI_SECONDS_PER_EPOCH`, which the signing deadline is computed with
+([signing.md](./signing.md)): fiber's build sets it, 4 hours in release (14,400,000, both presets) and 2 seconds in
+debug, which is what a development chain run from a debug build passes, and nothing the device reads states it. A
+development chain passes all four, the count a positive integer up to `MAX_CELL_DEPS_COUNT` (255), the epoch's length a
+positive integer up to `Number.MAX_SAFE_INTEGER`, and its code hash is copied so the host's bytes cannot move under the
+device. The token is optional for the same reason the rpc client's is: a hosted node without one fails at the first
+call, loudly, while a required one would make a development chain unreachable; and a device only gets its tenant token
+once it registers, which it may do after construction (`setBiscuitToken`, below). Every value option (the network, the
+url, the token, the key, the poll interval and the nonce reuse mode) is checked at construction, with the error naming
+the field as the module that takes it calls it (`token`), and the master seed must be exactly 32 bytes, checked first;
+of the effects, what can be checked before a call is checked (the storage's `get` and `set`, `fetch`, the clock and the
+timer's `schedule` are functions). The nonce reuse mode is the policy engine's ([policy.md](./policy.md)), which checks
+it and names it `options.nonceReuse`. `"allow"` exists because Fiber's current nonce lifecycle asks for a second session
+on the slots of a channel's opening, of each round the peer starts and of each revocation round: under the default no
+channel opens against Fiber today, so a host that must work with it now sets `"allow"`, and the mode goes once Fiber's
+nonces are strict. Even under `"allow"`, a round the peer starts after one of the device's own asks for a third session
+on one slot, which is refused, so a channel stalls at the fulfil of a payment it sent or at a payment received after one
+it fulfilled ([policy.md](./policy.md), "The known cost"). Every effect that is a bare function (`fetch`, the clock, the
+runtime's timer functions) is called without a receiver, the storage and the timer as methods of the host's own object,
+so none sees an SDK object as `this`. Nothing schedules or reads the storage until `connect()`.
 
 The `watchtower` option, `SdkWatchtowerOptions`, is what the host approves a watchtower's spends for after a force close:
 `destination`, the `Script` every spend must pay, and `maxFeeShannons`, decimal shannons within a u64, how far below what
@@ -71,15 +77,16 @@ fiber's watchtower pays today is the LSP node's own lock, and approving it is tr
 ## What gets wired
 
 Construction builds, in order, the typed store over the storage, the policy engine over the store, the nonce reuse mode
-and the watchtower's approval, the signer dispatch over the seed, the network's commitment lock and funding lock cell deps
-count, and the engine ([signing.md](./signing.md)), the rpc client over the url, the token and `fetch`, and the three
-pieces this document describes: the allocator and the activity tracker over the store, and the poller over the timer and
-its two steps. The dispatch copies the seed; the facade itself keeps
-nothing of it.
+and the watchtower's approval, the signer dispatch over the seed, the network's commitment lock, funding lock cell deps
+count and epoch length, and the engine ([signing.md](./signing.md)), the rpc client over the url, the token and `fetch`,
+the tenant identity over the seed ([signing.md](./signing.md)), and the three pieces this document describes: the
+allocator and the activity tracker over the store, and the poller over the timer and its two steps. The dispatch copies
+the seed, and the identity keeps only the key it derives from it; the facade itself keeps nothing of it.
 
-Everything built is held in one context the facade's operations will share: the network, the LSP's key, the clock, the
-rpc client, the engine, the dispatch, the allocator, the tracker, the poller and the facade's own `emit`. The operations
-are thin entry points over that context, which is what keeps each flow a function of what it needs.
+Everything built is held in one context the facade's operations share: the network, the LSP's key, the clock, the
+store, the rpc client, the engine, the dispatch, the identity, the allocator, the tracker, the poller and the facade's
+own `emit`. The operations are thin entry points over that context, which is what keeps each flow a function of what it
+needs.
 
 ## `connect()` and `disconnect()`
 
@@ -112,13 +119,22 @@ event's type and id. `ERROR` is neither recorded nor repeated: it is a diagnosti
 
 `SIGNING` carries `channelId`, `requestId` (the node's request id, `0x`-prefixed hex as fiber writes it, so it can be
 matched against the node's logs as it is; `null` when the status could not be read or answered for another channel),
-`transition` (fiber's name for it, `null` in the same case) and `outcome`: `"signed"` once the node took the signature,
+`transition` (fiber's name for it, `null` in the same case), `outcome`: `"signed"` once the node took the signature,
 `"warning"` when it was signed under `nonceReuse: "allow"` as a slot's second session, or `"refused"`, which alone
-carries `error`, the signer's `{ code, message }` ([signing.md](./signing.md)). Like `ERROR`, it is neither recorded nor
-deduplicated: a refused request stays pending on the node and is refused again, and reported again, on every tick until
-the node drops it. The same holds for a signed one: while fiber keeps offering a request it already took, or after a
-submission whose answer was lost, it is signed again with the same bytes, resubmitted and announced again, so a host
-that shows one notification per signature deduplicates on `requestId`.
+carries `error`, the signer's `{ code, message }` ([signing.md](./signing.md)), and, on any of the three, `deadlineMs`
+when there is one. `deadlineMs` is the moment, in milliseconds since the epoch and comparable with `now()`, from which
+fiber force-closes the channel if the request is still unanswered: present only on the two commitment transitions whose
+snapshot lists at least one TLC, with the channel's delay pinned. Its absence means the device cannot compute one, not
+that fiber has none: a revocation, the close, or a fulfil's commitment (which no longer lists the TLC it removes) still
+falls under fiber's deadline while a TLC's removal is unconfirmed. It is an upper bound, since fiber counts every TLC
+not confirmed removed and the request only the commitment's, so fiber may force-close earlier, never later; on a refused
+request the expiries are the node's own statement, which nothing checked, so the bound holds only as far as the node is
+honest. It is reported for a wallet to show, never acted on, and the dispatch computes it ([signing.md](./signing.md)).
+Past `Number.MAX_SAFE_INTEGER` it is the nearest number, a date some 285,000 years away. `SIGNING` is, like `ERROR`,
+neither recorded nor deduplicated: a refused request stays pending on the node and is refused again, and reported again,
+on every tick until the node drops it. The same holds for a signed one: while fiber keeps offering a request it already
+took, or after a submission whose answer was lost, it is signed again with the same bytes, resubmitted and announced
+again, so a host that shows one notification per signature deduplicates on `requestId`.
 
 `WATCHTOWER_SIGNING` carries `channelId`, `requestId` (in the same form, `null` in the same case), `purpose` (the key the
 spend needs, `{ kind: "settlement" }` or `{ kind: "tlc", commitmentNumber }`, `null` in the same case) and `outcome`:
@@ -139,16 +155,18 @@ event and nothing after.
 
 Every failure of the device's own is one `SdkError`, with a `code` a wallet can branch on and the module's own error
 underneath as its `cause`; a host's programming error, such as an option out of range, is a `TypeError` or a
-`RangeError`:
+`RangeError`. The one exception is `channelEvidence`, a read of the device's own storage: a storage that throws, or a
+record or alias it holds that the store refuses, comes through as its own error, unwrapped (below):
 
 | Code                 | When                                                              | Cause       |
 | -------------------- | ----------------------------------------------------------------- | ----------- |
 | `poll_failed`        | A step of a poll tick, or one channel of a step, failed           | What failed |
 | `clock_before_floor` | An index was asked of a clock reading before the allocation floor | None        |
+| `unknown_channel`    | An operation named a channel this device never registered         | None        |
 
-A message says what failed and then the cause's own words. The codes grow
-with the operations; a wrong argument at construction is a `TypeError` or a `RangeError` naming the field, as everywhere
-in the SDK, since it is the host's programming error and not a condition of the device's.
+A message says what failed and then the cause's own words. The codes grow with the operations; a wrong argument at
+construction is a `TypeError` or a `RangeError` naming the field, as everywhere in the SDK, since it is the host's
+programming error and not a condition of the device's.
 
 ## Indexes that a wipe cannot reset
 
@@ -229,7 +247,8 @@ A channel whose status read or submission fails, or whose dispatch faults (a sto
 `poll_failed` naming it, and the step goes on to the next channel. Only a `list_channels` that fails fails the step,
 which the poller reports as any other. The listing is read for its channel ids alone: a field the step does not use,
 such as a state or a flag a newer fiber adds, cannot stop the signing. A request is answered within one interval of
-being posted, against a deadline, when there is one, of TLC expiries; the step does not try to compute it. A call that
+being posted, against a deadline, when there is one, of TLC expiries; the step reports it on `SIGNING` and never waits
+on it or hurries for it. A call that
 never answers holds the whole step until its deadline, and the next tick starts from the same channel: the channels
 listed after it wait as long, which with fiber's one channel per tenant is no channel at all.
 
@@ -271,11 +290,55 @@ in the signing step, with one exception: the mark after a submission is written 
 fiber never serves an applied request again, so a mark skipped there would never come. A signature abandoned before its
 submission is not lost: the claim was written, and the next tick answers the same request with the signature recorded.
 
+## The tenant's registration
+
+A device is a tenant of the hosted LSP once its RootSigner, the key the master seed derives as the wallet identity
+([signing.md](./signing.md)), is registered there. The facade signs and the host calls: the two registration methods take
+the operator's token, so the host or its backend makes them ([rpc.md](./rpc.md)), never the facade.
+
+- `rootSignerPubkey`, the RootSigner's 33-byte compressed key, a copy on every read: the key the host asks
+  `lsp_get_tenant_registry_nonce` for.
+- `tenantId`, fiber's tenant id of that key (`TenantId::from_root_signer_pubkey`), 64 lowercase hex characters.
+- `signTenantRegistration(challenge)` takes the nonce's result decoded to bytes, `SdkTenantChallenge`
+  (`{ lspNodeId, rootSignerPubkey, nonce }`), and returns `SdkTenantRegistration`, the params of `lsp_register_tenant`
+  (`{ rootSignerPubkey, nonce, signature }`, the signature 64 bytes of compact ECDSA) plus `tenantId`, bytes of its own.
+  It is synchronous, calls nothing and writes nothing. It refuses, with a `TypeError` naming the field, a challenge that
+  is not an object; a `lspNodeId` absent, not bytes, not 33 bytes, not a point, or not the `lspPubkey` the facade was
+  built with (compared with its own copy), since a nonce another LSP issued is no registration with this one; then, as
+  the identity does, a `rootSignerPubkey` that is not this device's, and a nonce that is not 32 bytes. The LSP is checked
+  first, so a challenge wrong on both names the LSP.
+
+`setBiscuitToken(token)` hands the token `lsp_register_tenant` returned to the rpc client, which puts it on the next call
+on, the poller's included; a token the client refuses (not printable ASCII without spaces) throws its `TypeError` and
+leaves the previous one ([rpc.md](./rpc.md)). It takes no `null`: the token is replaced, never removed. Before handing it
+over, the host checks that the `tenant.tenant_id` the registration returned is the facade's `tenantId`, as fiber's own
+client does (`finish_registration`): the facade sees only the token, so it cannot tell a token issued to another tenant.
+
+## A channel's evidence
+
+`channelEvidence(channelId)` reads, from the device's own store, what the record keeps of a channel for a wallet to show
+or an agent to write out, `SdkChannelEvidence`, every hex value `0x`-prefixed and lowercase as fiber's JSON writes it:
+
+- `revocations`, the complete revocation signatures of the peer's commitments, `{ version, forRemote, signature }`,
+  ascending by version ([signing.md](./signing.md), "The revocation evidence"); `forRemote` is a `boolean` in the
+  published type though the record keeps only `true`, so the type survives a revocation of the device's own;
+- `commitments`, `{ local, remote }`, each view's last signed commitment as `{ commitmentNumber, txHash }` or `null`,
+  `txHash` being fiber's `compute_tx_message` of the tx as signed, not the hash the chain shows;
+- `watchtowerSignatures`, the watchtower's spends the device signed, `{ requestId, purpose, signature, applied }`, in the
+  order it claimed them, `applied` once fiber took the signature; a spend claimed and never signed is left out.
+
+The channel is named under any id the node gave it, as lowercase `0x` hex of 32 bytes; anything else is a `TypeError`. A
+channel the device never registered is an `SdkError` `unknown_channel`, and a name that resolves to an index holding no
+record, which only a broken store leaves, the policy's own `TypeError` for it. A storage that throws, or a record or
+alias the store refuses to read, comes through as its own error, not wrapped in an `SdkError`. Nothing is written, and
+the evidence is a copy: writing to it changes neither the record nor the next read.
+
 ## What is published
 
 `src/index.ts` exports the facade, `FiberLspSdk`, with its options, network and event types, `SdkError` with its codes,
 the event type list, the network names and the default poll interval, the nonce reuse mode, the watchtower option
-(`SdkWatchtowerOptions`), and what `SIGNING` and `WATCHTOWER_SIGNING` name (`SigningEventOutcome`,
+(`SdkWatchtowerOptions`), the registration's two forms (`SdkTenantChallenge`, `SdkTenantRegistration`) and the
+evidence (`SdkChannelEvidence`), and what `SIGNING` and `WATCHTOWER_SIGNING` name (`SigningEventOutcome`,
 `ChannelSigningTransition`, `WatchtowerKeyPurpose`, `SignerRefusal`); the injection interfaces of the modules behind it,
 `ISignerStorage`, `IAsyncSignerStorage`, `ITimer`, `IFetchLike` and their event and response types; the rpc client's
 three with the `RpcMethod` they name, which a wallet meets as causes; `decodeInvoice` with the invoice types and
@@ -285,7 +348,11 @@ the facade alone.
 
 ## What the facade deliberately does not do
 
-- **No operation yet.** Opening a channel, listing channels, creating an invoice and paying one are not built yet.
+- **No wallet operation yet.** Opening a channel, listing channels, creating an invoice and paying one are not built
+  yet.
+- **No operator call.** The facade signs the registration and takes the token; the two calls that need the operator's
+  token are the host's.
+- **No deadline acted on.** `SIGNING`'s `deadlineMs` is reported, and every request is answered when it is seen.
 - **No app state.** The host calls `connect()` and `disconnect()`; the facade does not know whether the app is open.
 - **No retry of a call.** Whether a lost answer is read back from the node is each operation's decision, with the
   rpc client's three errors telling it what it may conclude ([rpc.md](./rpc.md)).
@@ -297,8 +364,9 @@ the facade alone.
 
 | File                                     | Contents                                                                                                                                                            |
 | ---------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `src/sdk/fiber-lsp-sdk.ts`               | `FiberLspSdk`: the options checked, the wiring, `connect`, `disconnect`, the events                                                                                 |
-| `src/sdk/sdk.types.ts`                   | The options, the network, the events, the error codes, the activity record, the shared context                                                                      |
+| `src/sdk/fiber-lsp-sdk.ts`               | `FiberLspSdk`: the options checked, the wiring, `connect`, `disconnect`, the events, the registration, the token, the evidence                                      |
+| `src/sdk/channel-evidence.ts`            | `readSdkChannelEvidence`: a channel's record read and projected onto its evidence                                                                                   |
+| `src/sdk/sdk.types.ts`                   | The options, the network, the events, the error codes, the registration's forms, the evidence, the activity record, the context                                     |
 | `src/sdk/sdk.constants.ts`               | The network presets, the poll interval, the allocation floor, the storage keys, the event and error lists, the watchtower step's skipped flags and unwatched answer |
 | `src/sdk/sdk.error.ts`                   | `SdkError`                                                                                                                                                          |
 | `src/sdk/allocator.ts`                   | `IndexAllocator`: the channel and invoice indexes from the clock, the last one persisted                                                                            |
@@ -309,7 +377,7 @@ the facade alone.
 | `src/sdk/utils/poll-step.utils.ts`       | What both steps share under their run: each channel in turn, the guarded event, the `poll_failed` report, the refusal of another channel's status                   |
 | `src/sdk/utils/request-id.utils.ts`      | `encodeSdkRequestId`, a request id as both signing events carry it                                                                                                  |
 | `src/sdk/utils/runtime-timer.utils.ts`   | The timer over the runtime's `setTimeout` and `clearTimeout`                                                                                                        |
-| `src/sdk/utils/network.utils.ts`         | The network option resolved to its three constants                                                                                                                  |
+| `src/sdk/utils/network.utils.ts`         | The network option resolved to its four constants                                                                                                                   |
 | `src/sdk/utils/activity-record.utils.ts` | The activity record's guard, ids and statuses per kind                                                                                                              |
 | `src/sdk/utils/failure.utils.ts`         | An `SdkError`'s message from what failed and its cause; the guarded emit and the `poll_failed` report                                                               |
 | `src/policy/signer-store.ts`             | `getRecord` and `updateRecord`, the store's records of another module's format, used by the two above                                                               |
@@ -325,10 +393,10 @@ in-memory storage and a `fetch` double. Beyond a happy path per feature:
 
 - **Construction**: every option refused with the error naming the field (the seed's length and type, the url, the LSP
   key's length and type, the poll interval below one, fractional and past the timer ceiling, an unknown network, a
-  development chain with a short code hash, an unknown currency or no funding lock cell deps count, a token with a
-  space); the edges accepted (the default interval, the ceiling, no token, both presets, a development chain, no clock);
-  nothing scheduled or read before `connect()`; the timer defaulting to the runtime's, read once, and refused when the
-  runtime has none; `fetch` the same.
+  development chain with a short code hash, an unknown currency, no funding lock cell deps count or no epoch length, a
+  token with a space); the edges accepted (the default interval, the ceiling, no token, both presets, a development
+  chain, no clock); nothing scheduled or read before `connect()`; the timer defaulting to the runtime's, read once, and
+  refused when the runtime has none; `fetch` the same.
 - **`connect()` and the poller**: ticking at the call, then at the interval; starting nothing twice; stopping at
   `disconnect()` with no timer left behind, and starting over at the next `connect()`; `disconnect()` a no-op before any
   `connect()`, idempotent, and not throwing when the host's cancel does.
@@ -514,17 +582,18 @@ cancel called again on the next clear, are the slot's now; its other refusals st
 | A throwing cancel escapes                        | 1                 |
 | Clearing keeps the cancel                        | 1                 |
 
-The network's cell deps count and the dispatch's share one floor, `common`'s `assertPositiveInteger`, swept against
-`test/tests/common`:
+The network's cell deps count and epoch length and the dispatch's share one floor, `common`'s `assertPositiveInteger`,
+swept against `test/tests/common`:
 
 | Mutation                                | Tests that failed |
 | --------------------------------------- | ----------------- |
 | A positive integer may be 0             | 1                 |
 | A positive integer's bound is exclusive | 1                 |
 
-The wiring no operation reads yet (the dispatch's commitment lock, the rpc client, the LSP's key, the clock) is read
-where it lands, in the facade's internal context, until the operations, once built, observe it through what they
-send and sign.
+The wiring no operation reads yet (the dispatch's commitment lock, the clock) is read where it lands, in the facade's
+internal context, until the operations, once built, observe it through what they send and sign; the LSP's key and the
+identity are observed through the registration, the store through the evidence, and the rpc client's token through
+`setBiscuitToken` and the headers of the poller's calls.
 
 The rows of the facade, the network, the runtime timer, the listener set and the poller were measured again once the
 signer session and its socket left the facade, with the rows only the session exercised gone; the allocator's and the
@@ -587,3 +656,63 @@ it replaced:
 | Fiber's unwatched answer is nothing pending for a closed channel too | 1                 |
 | Fiber's unwatched message is nothing pending under any code          | 1                 |
 | The mark is skipped once the run is abandoned                        | 1                 |
+
+`fiber-lsp-sdk.spec.ts` pins the tenant's surface as well. The presets take the release epoch of 4 hours and a
+development chain its own, under which the deadline reported changes; the context keeps the store the engine writes and
+the identity of the seed. `tenantId` is fiber's of the seed's RootSigner and another seed's differs; `rootSignerPubkey`
+is a copy on every read. `signTenantRegistration` signs fiber's `tenant_registry` vector byte for byte, returns bytes of
+its own, checks the LSP against its own copy of `lspPubkey`, calls nothing and writes nothing, and refuses each field of
+the challenge (the challenge not an object, then each key absent, in hex, short or long, the LSP's node id not a point,
+another LSP's or the other parity of its x, the root signer another's, the nonce short or long), the LSP named first
+when both are wrong. `setBiscuitToken` puts the token on the poller's next calls, on an instance built with one and
+without, and a refused token keeps the previous one. `channelEvidence` reads a signed channel's evidence from the host's
+storage and refuses an unknown channel, and a bare hex id before reading anything. `utils/network.utils.spec.ts` adds
+the epoch to the network's refusals field by field (1, 2,000, 14,400,000 and `Number.MAX_SAFE_INTEGER` accepted; absent,
+`undefined`, `null`, 0, negative, fractional, one past the bound, the infinities, NaN, a string and a bigint refused).
+
+`channel-evidence.spec.ts` pins the projection over records written literally: a channel that signed nothing read as
+empty, every hash and signature as `0x` hex with the revocations' and the claims' order kept, a spend claimed and never
+signed left out, one view's commitment without the other's, the channel read under its old and its new name, copies
+that change neither the record nor the next read, nothing written; and the refusals: an unknown channel as
+`unknown_channel`, a name resolving to no record, a store failure passed through, and every malformed id.
+`channel-evidence.flow.spec.ts` reads it over the tenant node double: after the open, the two commitments and nothing
+else; after a payment received and fulfilled, the peer's two revocations, each verified as BIP-340 under the aggregate
+key and the message the node served, and each view's last commitment, its hash the message signed; after a force close
+with a TLC each way in flight, every spend the watchtower took in the device's claim order, signed as submitted, and a
+signature whose answer was lost kept as not applied until the restarted device hears fiber took it.
+
+`signing-step.spec.ts` carries the dispatch's deadline on the two commitment transitions and none on the revocations
+and the close, the field present on a signature, a warned second session and a refusal and absent from each without
+one, 0 as 0 and `u64::MAX` as the nearest number. `signing-step.flow.spec.ts` follows a payment received through its
+fulfil and the close, with fiber's deadline, the double's TLC expiry less two thirds of the pinned delay, on the add
+round's two commitments and on nothing else.
+
+The tenant's surface (the registration, the token, the evidence, the network's epoch length and the `SIGNING` event's
+`deadlineMs`) was broken the same way (`test/tests/sdk`, still 100% on all four metrics):
+
+| Mutation                                              | Tests that failed |
+| ----------------------------------------------------- | ----------------- |
+| The deadline is never reported                        | 24                |
+| The deadline is reported as a bigint                  | 23                |
+| A missing deadline is reported as null                | 15                |
+| A development chain's epoch is not checked            | 13                |
+| The channel id is not checked                         | 9                 |
+| The commitment number is lost                         | 9                 |
+| The hex carries no prefix                             | 9                 |
+| The views are swapped                                 | 9                 |
+| A development chain's epoch is not copied             | 7                 |
+| The presets use a debug build's epoch                 | 7                 |
+| No spends reads as a failure                          | 6                 |
+| The token is not handed to the client                 | 6                 |
+| A refusal carries no deadline                         | 5                 |
+| The LSP's node id is not checked as a point           | 5                 |
+| The revocations come out in reverse                   | 5                 |
+| A challenge that is not an object reaches the fields  | 4                 |
+| A spend's applied flag is always true                 | 4                 |
+| An unsigned spend is listed                           | 4                 |
+| The root signer's key is the LSP's                    | 4                 |
+| A challenge from another LSP is signed                | 3                 |
+| An unknown channel reads as empty evidence            | 2                 |
+| A lost record reads as an unknown channel             | 1                 |
+| The dispatch reads the release epoch on every network | 1                 |
+| The registration carries no tenant id                 | 1                 |

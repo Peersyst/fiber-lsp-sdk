@@ -9,9 +9,22 @@ export const SDK_NETWORK_NAMES = ["mainnet", "testnet"] as const;
 // The cell deps of fiber's funding lock on both presets: the lock's code cell and the auth library's.
 const FUNDING_LOCK_CELL_DEPS_COUNT = 2;
 
+// Fiber's `MILLI_SECONDS_PER_EPOCH` in a release build, 4 h, the one public nodes run; a debug build uses 2000.
+const RELEASE_MILLISECONDS_PER_EPOCH = 14_400_000;
+
 export const SDK_NETWORK_PRESETS = {
-    mainnet: { commitmentLock: COMMITMENT_LOCK_MAINNET, invoiceCurrency: "Fibb", fundingLockCellDepsCount: FUNDING_LOCK_CELL_DEPS_COUNT },
-    testnet: { commitmentLock: COMMITMENT_LOCK_TESTNET, invoiceCurrency: "Fibt", fundingLockCellDepsCount: FUNDING_LOCK_CELL_DEPS_COUNT },
+    mainnet: {
+        commitmentLock: COMMITMENT_LOCK_MAINNET,
+        invoiceCurrency: "Fibb",
+        fundingLockCellDepsCount: FUNDING_LOCK_CELL_DEPS_COUNT,
+        millisecondsPerEpoch: RELEASE_MILLISECONDS_PER_EPOCH,
+    },
+    testnet: {
+        commitmentLock: COMMITMENT_LOCK_TESTNET,
+        invoiceCurrency: "Fibt",
+        fundingLockCellDepsCount: FUNDING_LOCK_CELL_DEPS_COUNT,
+        millisecondsPerEpoch: RELEASE_MILLISECONDS_PER_EPOCH,
+    },
 } as const satisfies Record<SdkNetworkName, SdkNetworkConfig>;
 
 /**
@@ -66,4 +79,4 @@ export const WATCHTOWER_UNWATCHED_CLOSE_FLAGS = [
  */
 export const WATCHTOWER_UNWATCHED_ERROR = { code: RPC_CALL_FAILED_CODE, message: "watched channel not found" } as const;
 
-export const SDK_ERROR_CODES = ["poll_failed", "clock_before_floor"] as const;
+export const SDK_ERROR_CODES = ["poll_failed", "clock_before_floor", "unknown_channel"] as const;

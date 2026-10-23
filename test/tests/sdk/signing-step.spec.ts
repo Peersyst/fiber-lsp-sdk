@@ -4,12 +4,14 @@ import type { ChannelSigningTransition } from "../../../src/protocol";
 import { FiberRpcClient, RpcError, RpcResponseError, RpcTransportError } from "../../../src/rpc";
 import type { SdkEvent } from "../../../src/sdk";
 import { SdkError, buildChannelSigningStep } from "../../../src/sdk";
+import type { SignerDispatch } from "../../../src/signer";
 import { ScriptedNode } from "../../mocks/rpc";
 import { asRecord } from "../../utils/json-shape";
 import { resignPeerHalf } from "../../utils/peer-musig";
 import { LIST_CHANNELS_CALL, signingStatusCall } from "../../utils/rpc-answers";
 import type { SigningChannel } from "../../utils/signing-channel";
 import {
+    SIGNING_DEADLINE_MS,
     openSigningChannel,
     secondSessionStatus,
     signatureSubmissionCall,
@@ -18,6 +20,7 @@ import {
     signingPeerKeys,
     signingRequestIdOf,
     stageSecondSession,
+    withSigningDeadline,
 } from "../../utils/signing-channel";
 import type { SigningCaseVector } from "../../utils/signing-vectors";
 import { loadSigningVectors, signingCaseOf, signingStatusField } from "../../utils/signing-vectors";
@@ -79,19 +82,48 @@ function statusResult(status: unknown, channelId = CHANNEL_ID): unknown {
     return { channel_id: channelId, status: structuredClone(status) };
 }
 
+// The step reports the dispatch's deadline, it never computes one.
+function deadlineOverridden(dispatch: SignerDispatch, deadlineMs: bigint | null): void {
+    const handle = dispatch.handle.bind(dispatch);
+    jest.spyOn(dispatch, "handle").mockImplementationOnce(async (channelId, status) => {
+        const outcome = await handle(channelId, status);
+        if (outcome.kind !== "signed" && outcome.kind !== "refused") throw new Error(`the dispatch's outcome was ${outcome.kind}`);
+        return { ...outcome, deadlineMs };
+    });
+}
+
 describe("buildChannelSigningStep", () => {
     describe("a request the device signs", () => {
-        it.each(SIGNED)("submits %s with the vectors' signature and next material, then emits it signed", async (transition) => {
-            const kase = caseOf(transition);
-            const h = await harness(transition);
-            h.node
-                .result({ channels: [{ channel_id: CHANNEL_ID }] })
-                .result(statusResult(kase.result.status))
-                .result(APPLIED);
-            await h.step(live());
-            expect(h.node.calls()).toEqual([LIST_CHANNELS_CALL, signingStatusCall(CHANNEL_ID), signatureSubmissionCall(vectors, kase)]);
-            expect(h.events).toStrictEqual([signedEventOf(vectors, kase)]);
-        });
+        it.each(["SendCommitmentSigned", "CompleteReceivedCommitment"] as const)(
+            "submits %s with the vectors' signature and next material, then emits it signed with fiber's deadline",
+            async (transition) => {
+                const kase = caseOf(transition);
+                const h = await harness(transition);
+                h.node
+                    .result({ channels: [{ channel_id: CHANNEL_ID }] })
+                    .result(statusResult(kase.result.status))
+                    .result(APPLIED);
+                await h.step(live());
+                expect(h.node.calls()).toEqual([LIST_CHANNELS_CALL, signingStatusCall(CHANNEL_ID), signatureSubmissionCall(vectors, kase)]);
+                expect(h.events).toStrictEqual([withSigningDeadline(signedEventOf(vectors, kase))]);
+            },
+        );
+
+        // Fiber states no TLC in a revocation's status nor in a close's.
+        it.each(["SendRevokeAndAck", "CompleteReceivedRevokeAndAck", "SendClosingSigned"] as const)(
+            "submits %s with the vectors' signature and next material, then emits it signed with no deadline",
+            async (transition) => {
+                const kase = caseOf(transition);
+                const h = await harness(transition);
+                h.node
+                    .result({ channels: [{ channel_id: CHANNEL_ID }] })
+                    .result(statusResult(kase.result.status))
+                    .result(APPLIED);
+                await h.step(live());
+                expect(h.node.calls()).toEqual([LIST_CHANNELS_CALL, signingStatusCall(CHANNEL_ID), signatureSubmissionCall(vectors, kase)]);
+                expect(h.events).toStrictEqual([signedEventOf(vectors, kase)]);
+            },
+        );
 
         it("carries next material on every transition the vectors give one, and none on the close", () => {
             const carrying = SIGNED.filter((transition) => caseOf(transition).expected.next_material !== null);
@@ -126,7 +158,10 @@ describe("buildChannelSigningStep", () => {
                 signatureSubmissionCall(vectors, kase),
             ]);
             expect(writesOf(h.channel)).toEqual([]);
-            expect(h.events).toStrictEqual([signedEventOf(vectors, kase), signedEventOf(vectors, kase)]);
+            expect(h.events).toStrictEqual([
+                withSigningDeadline(signedEventOf(vectors, kase)),
+                withSigningDeadline(signedEventOf(vectors, kase)),
+            ]);
         });
 
         it("answers every registered channel the node lists, in its order, and no other", async () => {
@@ -165,7 +200,7 @@ describe("buildChannelSigningStep", () => {
                 signingStatusCall(CHANNEL_ID),
                 signatureSubmissionCall(vectors, kase),
             ]);
-            expect(h.events).toStrictEqual([signedEventOf(vectors, kase)]);
+            expect(h.events).toStrictEqual([withSigningDeadline(signedEventOf(vectors, kase))]);
         });
     });
 
@@ -278,8 +313,8 @@ describe("buildChannelSigningStep", () => {
             expect(sent?.method).toBe("submit_channel_signature");
             expect(asRecord(sent?.params, "params").request_id).toBe(signingRequestIdOf(caseOf("CompleteReceivedCommitment")));
             expect(h.events).toStrictEqual([
-                signedEventOf(vectors, caseOf("SendCommitmentSigned")),
-                signedEventOf(vectors, caseOf("CompleteReceivedCommitment"), "warning"),
+                withSigningDeadline(signedEventOf(vectors, caseOf("SendCommitmentSigned"))),
+                withSigningDeadline(signedEventOf(vectors, caseOf("CompleteReceivedCommitment"), "warning")),
             ]);
         });
 
@@ -300,6 +335,7 @@ describe("buildChannelSigningStep", () => {
                 channelId: CHANNEL_ID,
                 requestId: signingRequestIdOf(first),
                 transition: "SendCommitmentSigned",
+                deadlineMs: SIGNING_DEADLINE_MS,
                 outcome: "refused",
                 error: {
                     code: "policy_refusal",
@@ -318,8 +354,112 @@ describe("buildChannelSigningStep", () => {
                 channelId: CHANNEL_ID,
                 requestId: signingRequestIdOf(caseOf("CompleteReceivedCommitment")),
                 transition: "CompleteReceivedCommitment",
+                deadlineMs: SIGNING_DEADLINE_MS,
                 outcome: "refused",
                 error: { code: "policy_refusal", message: "slot COMMITMENT:4 has already served a different signing session" },
+            });
+        });
+    });
+
+    describe("the deadline", () => {
+        async function signedOnce(transition: ChannelSigningTransition, deadlineMs: bigint | null): Promise<SdkEvent[]> {
+            const h = await harness(transition);
+            deadlineOverridden(h.channel.dispatch, deadlineMs);
+            h.node
+                .result({ channels: [{ channel_id: CHANNEL_ID }] })
+                .result(statusResult(caseOf(transition).result.status))
+                .result(APPLIED);
+            await h.step(live());
+            return h.events;
+        }
+
+        it("carries a signature's deadline as a number of milliseconds", async () => {
+            const kase = caseOf("SendRevokeAndAck");
+            expect(await signedOnce("SendRevokeAndAck", 1_760_570_400_000n)).toStrictEqual([
+                { ...signedEventOf(vectors, kase), deadlineMs: 1_760_570_400_000 },
+            ]);
+        });
+
+        it("leaves the field out of a signature without a deadline", async () => {
+            const events = await signedOnce("SendCommitmentSigned", null);
+            expect(events).toStrictEqual([signedEventOf(vectors, caseOf("SendCommitmentSigned"))]);
+            expect(events[0]).not.toHaveProperty("deadlineMs");
+        });
+
+        it("carries a deadline of 0, which fiber's saturating subtraction gives an expiry within the delay", async () => {
+            expect(await signedOnce("SendRevokeAndAck", 0n)).toStrictEqual([
+                { ...signedEventOf(vectors, caseOf("SendRevokeAndAck")), deadlineMs: 0 },
+            ]);
+        });
+
+        // u64::MAX, to the nearest double: a deadline past 2^53 ms, the year 287396, loses only its precision.
+        it("carries a deadline past the largest safe integer as the nearest number", async () => {
+            const [event] = await signedOnce("SendRevokeAndAck", 18_446_744_073_709_551_615n);
+            expect(event).toHaveProperty("deadlineMs", 18_446_744_073_709_552_000);
+        });
+
+        describe("a warned second session", () => {
+            async function warned(deadlineMs: bigint | null): Promise<SdkEvent | undefined> {
+                const h = await harness("SendCommitmentSigned", { nonceReuse: "allow" });
+                await stageSecondSession(vectors, h.channel);
+                h.node
+                    .result({ channels: [{ channel_id: CHANNEL_ID }] })
+                    .result(statusResult(caseOf("SendCommitmentSigned").result.status))
+                    .result(APPLIED);
+                await h.step(live());
+                deadlineOverridden(h.channel.dispatch, deadlineMs);
+                h.node
+                    .result({ channels: [{ channel_id: CHANNEL_ID }] })
+                    .result(statusResult(secondSessionStatus(vectors).value))
+                    .result(APPLIED);
+                await h.step(live());
+                return h.events.at(-1);
+            }
+
+            it("carries the deadline", async () => {
+                expect(await warned(1_760_570_400_000n)).toStrictEqual({
+                    ...signedEventOf(vectors, caseOf("CompleteReceivedCommitment"), "warning"),
+                    deadlineMs: 1_760_570_400_000,
+                });
+            });
+
+            it("leaves the field out without one", async () => {
+                const event = await warned(null);
+                expect(event).toStrictEqual(signedEventOf(vectors, caseOf("CompleteReceivedCommitment"), "warning"));
+                expect(event).not.toHaveProperty("deadlineMs");
+            });
+        });
+
+        describe("a refusal", () => {
+            const kase = caseOf("SignChannelAnnouncement");
+            const refused = {
+                type: "SIGNING",
+                channelId: CHANNEL_ID,
+                requestId: signingRequestIdOf(kase),
+                transition: "SignChannelAnnouncement",
+                outcome: "refused",
+                error: {
+                    code: "policy_refusal",
+                    message: "a channel announcement is never signed: every channel of this device is private",
+                },
+            } as const;
+
+            async function refusedOnce(deadlineMs: bigint | null): Promise<SdkEvent[]> {
+                const h = await harness("SignChannelAnnouncement");
+                deadlineOverridden(h.channel.dispatch, deadlineMs);
+                h.node.result({ channels: [{ channel_id: CHANNEL_ID }] }).result(statusResult(kase.result.status));
+                await h.step(live());
+                return h.events;
+            }
+
+            it("carries the deadline", async () => {
+                expect(await refusedOnce(1_760_570_400_000n)).toStrictEqual([{ ...refused, deadlineMs: 1_760_570_400_000 }]);
+            });
+
+            it("leaves the field out without one", async () => {
+                const events = await refusedOnce(null);
+                expect(events).toStrictEqual([refused]);
+                expect(events[0]).not.toHaveProperty("deadlineMs");
             });
         });
     });
@@ -376,7 +516,7 @@ describe("buildChannelSigningStep", () => {
             ]);
             expect(summarized(h.events)).toStrictEqual([
                 pollFailedEvent(`the signing poll of ${OTHER_ID} failed: ${message}`, cause),
-                signedEventOf(vectors, kase),
+                withSigningDeadline(signedEventOf(vectors, kase)),
             ]);
         });
 
@@ -458,7 +598,7 @@ describe("buildChannelSigningStep", () => {
                     `the signing poll of ${OTHER_ID} failed: stored value at ${CHANNEL_ALIAS_KEY_PREFIX}${OTHER_ID} is not a channel index`,
                     expect.any(TypeError),
                 ),
-                signedEventOf(vectors, kase),
+                withSigningDeadline(signedEventOf(vectors, kase)),
             ]);
         });
 
@@ -498,7 +638,7 @@ describe("buildChannelSigningStep", () => {
                 signingStatusCall(CHANNEL_ID),
                 signatureSubmissionCall(vectors, kase),
             ]);
-            expect(h.events).toStrictEqual([signedEventOf(vectors, kase)]);
+            expect(h.events).toStrictEqual([withSigningDeadline(signedEventOf(vectors, kase))]);
         });
 
         it("submits nothing once abandoned during the signature, and the next tick submits the same bytes", async () => {

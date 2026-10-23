@@ -186,8 +186,7 @@ export class PolicyEngine {
         const entry: RevocationEvidence = { version, forRemote: true, signature: bytesToHex(evidence.signature) };
         const channelIndex = await this.requireRegisteredIndex(channelId);
         // Outside the balance lane: a claim only checks the evidence is there, which nothing here undoes, so the record's lane is enough.
-        await this.store.updateChannelRecord(channelIndex, (current) => {
-            if (current === null) throw missingRecord(channelId, channelIndex);
+        await this.updateRegisteredRecord(channelId, channelIndex, (current) => {
             const slot = signSlotKey({ context: "REVOKE", commitmentNumber: version + 1 });
             if (current.signedSessions[slot] === undefined) {
                 throw new TypeError(`channel ${channelId} never signed the revocation of version ${version}, at slot ${slot}`);
@@ -223,8 +222,7 @@ export class PolicyEngine {
         const channelIndex = await this.requireChannelIndex(channelId);
         let verdict: WatchtowerSpendVerdict = { status: "fresh" };
         // Outside the balance lane: the rules read the channel's record alone.
-        await this.store.updateChannelRecord(channelIndex, (current) => {
-            if (current === null) throw missingRecord(channelId, channelIndex);
+        await this.updateRegisteredRecord(channelId, channelIndex, (current) => {
             const decision = decideWatchtowerSpend(keys, current, approval, request);
             verdict = decision.verdict;
             return decision.record;
@@ -281,8 +279,7 @@ export class PolicyEngine {
     ): Promise<void> {
         const requestIdHex = bytesToHex(requestId);
         const channelIndex = await this.requireRegisteredIndex(channelId);
-        await this.store.updateChannelRecord(channelIndex, (current) => {
-            if (current === null) throw missingRecord(channelId, channelIndex);
+        await this.updateRegisteredRecord(channelId, channelIndex, (current) => {
             const spends = current.watchtowerSpends ?? [];
             const spend = spends.find((candidate) => candidate.requestId === requestIdHex);
             if (spend === undefined) throw new TypeError(`channel ${channelId} never claimed the watchtower request ${requestIdHex}`);
@@ -305,13 +302,42 @@ export class PolicyEngine {
     ): Promise<void> {
         const channelIndex = await this.requireRegisteredIndex(channelId);
         await this.store.withBalanceLock(async () => {
-            await this.store.updateChannelRecord(channelIndex, (current) => {
-                if (current === null) throw missingRecord(channelId, channelIndex);
+            await this.updateRegisteredRecord(channelId, channelIndex, (current) => {
                 const conflict = findChannelPinConflict(current.pins, stated);
                 if (conflict !== null) throw new ChannelPinError(channelId, conflict);
                 const pins = withChannelPins(current.pins, stated, fields);
                 return pins === current.pins ? current : { ...current, pins };
             });
+        });
+    }
+
+    /**
+     * Reads a registered channel's record, which a broken storage alone can have lost.
+     * @param channelId Channel identifier, named in the failure.
+     * @param channelIndex Index the record is keyed by.
+     * @returns The record.
+     */
+    private async readRegisteredRecord(channelId: string, channelIndex: number): Promise<ChannelPolicyRecord> {
+        const record = await this.store.getChannelRecord(channelIndex);
+        if (record === null) throw missingPolicyRecord(channelId, channelIndex);
+        return record;
+    }
+
+    /**
+     * Updates a registered channel's record in its lane, failing when a broken storage lost it.
+     * @param channelId Channel identifier, named in the failure.
+     * @param channelIndex Index the record is keyed by.
+     * @param update Synchronous updater over the record as stored.
+     * @returns The record the key now holds.
+     */
+    private updateRegisteredRecord(
+        channelId: string,
+        channelIndex: number,
+        update: (current: ChannelPolicyRecord) => ChannelPolicyRecord,
+    ): Promise<ChannelPolicyRecord> {
+        return this.store.updateChannelRecord(channelIndex, (current) => {
+            if (current === null) throw missingPolicyRecord(channelId, channelIndex);
+            return update(current);
         });
     }
 
@@ -322,7 +348,7 @@ export class PolicyEngine {
      */
     private async requireRegisteredIndex(channelId: string): Promise<number> {
         const channelIndex = await this.store.resolveChannelIndex(channelId);
-        if (channelIndex === null) throw new TypeError(`channel ${channelId} is not registered on this device`);
+        if (channelIndex === null) throw new TypeError(unregisteredPolicyChannelMessage(channelId));
         return channelIndex;
     }
 
@@ -334,7 +360,7 @@ export class PolicyEngine {
     async requireChannelIndex(channelId: string): Promise<number> {
         assertNonEmptyString("channelId", channelId);
         const channelIndex = await this.store.resolveChannelIndex(channelId);
-        if (channelIndex === null) refusePolicyRequest("unknown_channel", `channel ${channelId} is not registered on this device`);
+        if (channelIndex === null) refusePolicyRequest("unknown_channel", unregisteredPolicyChannelMessage(channelId));
         return channelIndex;
     }
 
@@ -345,8 +371,7 @@ export class PolicyEngine {
      */
     async readChannelPins(channelId: string): Promise<ChannelPins> {
         const channelIndex = await this.requireChannelIndex(channelId);
-        const record = await this.store.getChannelRecord(channelIndex);
-        if (record === null) throw missingRecord(channelId, channelIndex);
+        const record = await this.readRegisteredRecord(channelId, channelIndex);
         return { ...record.pins, localReservedCkbShannons: { ...record.pins.localReservedCkbShannons } };
     }
 
@@ -513,8 +538,7 @@ export class PolicyEngine {
         };
         // Serialized: channels share budgets, and nothing may move the record between deciding and claiming.
         return this.store.withBalanceLock(async () => {
-            const current = await this.store.getChannelRecord(channelIndex);
-            if (current === null) throw missingRecord(channelId, channelIndex);
+            const current = await this.readRegisteredRecord(channelId, channelIndex);
             const context = await this.loadBalanceContext(claim, current);
             // Decided before writing, so a refusal leaves the payment records untouched; a repeat writes nothing at all.
             if (decideClaim(claim, current, context).record !== current) {
@@ -532,8 +556,7 @@ export class PolicyEngine {
      */
     private async claim(claim: Claim, context: BalanceRuleContext): Promise<PolicyVerdict> {
         let verdict: PolicyVerdict = { context: claim.slot.context, commitmentNumber: claim.slot.commitmentNumber, status: "fresh" };
-        await this.store.updateChannelRecord(claim.channelIndex, (current) => {
-            if (current === null) throw missingRecord(claim.channelId, claim.channelIndex);
+        await this.updateRegisteredRecord(claim.channelId, claim.channelIndex, (current) => {
             const decision = decideClaim(claim, current, context);
             verdict = decision.verdict;
             return decision.record;
@@ -616,12 +639,21 @@ function assertUnservedRecord(channelIndex: number, record: ChannelPolicyRecord)
 }
 
 /**
+ * Writes the message of a channel this device has not registered.
+ * @param channelId Channel identifier that resolved to nothing.
+ * @returns The message.
+ */
+export function unregisteredPolicyChannelMessage(channelId: string): string {
+    return `channel ${channelId} is not registered on this device`;
+}
+
+/**
  * Builds the failure of a channel name that resolves to an index holding no record.
  * @param channelId Channel identifier the name came from.
  * @param channelIndex Index it resolved to.
  * @returns The error to throw, never a refusal: the storage lost a record it still has the name of.
  */
-function missingRecord(channelId: string, channelIndex: number): TypeError {
+export function missingPolicyRecord(channelId: string, channelIndex: number): TypeError {
     return new TypeError(`channel ${channelId} resolves to channel index ${channelIndex}, which holds no record`);
 }
 
