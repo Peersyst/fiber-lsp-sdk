@@ -1,6 +1,7 @@
 import { bytesToHex, hexToBytes } from "@noble/hashes/utils.js";
 import { deriveChannelKeys, pubkeyOf } from "../../../src/derivation";
 import { COMMITMENT_LOCK_MAINNET, COMMITMENT_LOCK_TESTNET } from "../../../src/digest";
+import { CHANNEL_ALIAS_KEY_PREFIX } from "../../../src/policy";
 import type { FiberLspSdkOptions, SdkContext, SdkEvent } from "../../../src/sdk";
 import { DEFAULT_POLL_INTERVAL_MS, FiberLspSdk, POLL_STEP_TIMEOUT_MS, SdkError } from "../../../src/sdk";
 import type { ChannelSigningTransition } from "../../../src/protocol";
@@ -14,6 +15,8 @@ import { rejection } from "../../utils/rejection";
 import { LIST_CHANNELS_CALL, LIST_CHANNELS_WITH_CLOSED_CALL, signingStatusCall, watchtowerStatusCall } from "../../utils/rpc-answers";
 import type { SigningChannel } from "../../utils/signing-channel";
 import {
+    SIGNING_DEBUG_DEADLINE_MS,
+    SIGNING_MILLISECONDS_PER_EPOCH,
     openSigningChannel,
     secondSessionStatus,
     signatureSubmissionCall,
@@ -21,6 +24,7 @@ import {
     signingCommitmentLock,
     signingRequestIdOf,
     stageSecondSession,
+    withSigningDeadline,
 } from "../../utils/signing-channel";
 import {
     loadSigningVectors,
@@ -47,6 +51,7 @@ const DEV_NETWORK = {
     commitmentLock: { codeHash: new Uint8Array(32).fill(0x5d), hashType: "data1" },
     invoiceCurrency: "Fibd",
     fundingLockCellDepsCount: 3,
+    millisecondsPerEpoch: 2_000,
 } as const;
 const APPROVAL = watchtowerApprovalOf(signing);
 const IDLE = { type: "NoSignatureRequired" };
@@ -124,6 +129,19 @@ async function tickOver(h: SigningHarness, status: unknown, submits: boolean, wa
 function refusedEvent(transition: ChannelSigningTransition, error: SignerRefusal): SdkEvent {
     const kase = signingCaseOf(signing, transition);
     return { type: "SIGNING", channelId: SIGNING_CHANNEL_ID, requestId: signingRequestIdOf(kase), transition, outcome: "refused", error };
+}
+
+const registry = vectors.tenant_registry;
+
+// The RootSigner of the master seed 0x25 repeated.
+const OTHER_ROOT_SIGNER_PUBKEY = "038abd41e20e2c0b61c0c2acfbbd2146d648f275165c3256d8116ee20c78c1f095";
+
+function challengeOf(): { lspNodeId: Uint8Array; rootSignerPubkey: Uint8Array; nonce: Uint8Array } {
+    return {
+        lspNodeId: hexToBytes(registry.lsp_node_id),
+        rootSignerPubkey: hexToBytes(registry.root_signer_pubkey),
+        nonce: hexToBytes(registry.nonce),
+    };
 }
 
 describe("FiberLspSdk", () => {
@@ -234,6 +252,18 @@ describe("FiberLspSdk", () => {
                 new RangeError("network.fundingLockCellDepsCount must be an integer between 1 and 255, got undefined"),
             ],
             [
+                "a development chain without an epoch",
+                { network: { ...DEV_NETWORK, millisecondsPerEpoch: undefined as unknown as number } },
+                MASTER_SEED,
+                new RangeError("network.millisecondsPerEpoch must be an integer between 1 and 9007199254740991, got undefined"),
+            ],
+            [
+                "a development chain with an epoch of 0 ms",
+                { network: { ...DEV_NETWORK, millisecondsPerEpoch: 0 } },
+                MASTER_SEED,
+                new RangeError("network.millisecondsPerEpoch must be an integer between 1 and 9007199254740991, got 0"),
+            ],
+            [
                 "a nonce reuse mode in another case",
                 { nonceReuse: "ALLOW" as never },
                 MASTER_SEED,
@@ -339,6 +369,19 @@ describe("FiberLspSdk", () => {
 
         it.each(["testnet", "mainnet"] as const)("takes the %s funding lock's two cell deps from the preset", (network) => {
             expect(contextOf(harness({ network }).sdk).network.fundingLockCellDepsCount).toBe(2);
+        });
+
+        it.each(["testnet", "mainnet"] as const)("takes the %s epoch of a release build, 4 h, from the preset", (network) => {
+            expect(contextOf(harness({ network }).sdk).network.millisecondsPerEpoch).toBe(14_400_000);
+        });
+
+        it("keeps the store the policy engine writes, and the identity of the master seed", async () => {
+            const h = harness();
+            const { store, policy, identity } = contextOf(h.sdk);
+            expect((policy as unknown as { store: unknown }).store).toBe(store);
+            await store.claimChannelAlias(CHANNEL_ID, 7);
+            expect(h.storage.map.get(`${CHANNEL_ALIAS_KEY_PREFIX}${CHANNEL_ID}`)).toBe("7");
+            expect(identity.tenantId).toBe(registry.tenant_id);
         });
 
         it("sends the rpc through the host's fetch, to the rpc url, under the token", async () => {
@@ -514,6 +557,7 @@ describe("FiberLspSdk", () => {
             commitmentLock: signingCommitmentLock(signing),
             invoiceCurrency: "Fibd",
             fundingLockCellDepsCount: signing.channel.funding_lock_cell_deps_count,
+            millisecondsPerEpoch: SIGNING_MILLISECONDS_PER_EPOCH,
         } as const;
 
         it("answers a signing request at the first tick of connect(), submitting the vectors' signature", async () => {
@@ -529,13 +573,20 @@ describe("FiberLspSdk", () => {
                 LIST_CHANNELS_WITH_CLOSED_CALL,
                 watchtowerStatusCall(SIGNING_CHANNEL_ID),
             ]);
-            expect(h.events).toStrictEqual([signedEventOf(signing, sent)]);
+            expect(h.events).toStrictEqual([withSigningDeadline(signedEventOf(signing, sent))]);
         });
 
         it("signs on a development chain with the vectors' network", async () => {
             const h = await signingHarness({ network: vectorsChain });
             await tickOver(h, sent.result.status, true);
-            expect(h.events).toStrictEqual([signedEventOf(signing, sent)]);
+            expect(h.events).toStrictEqual([withSigningDeadline(signedEventOf(signing, sent))]);
+        });
+
+        // The vectors' earliest TLC expiry, 1_760_576_400_000, less two thirds of one 2 s epoch, 1_333.
+        it("reports the deadline under a development chain's own epoch", async () => {
+            const h = await signingHarness({ network: { ...vectorsChain, millisecondsPerEpoch: 2_000 } });
+            await tickOver(h, sent.result.status, true);
+            expect(h.events).toStrictEqual([withSigningDeadline(signedEventOf(signing, sent), SIGNING_DEBUG_DEADLINE_MS)]);
         });
 
         it("signs over its copy of a development chain's code hash, whatever the host does to its bytes", async () => {
@@ -543,7 +594,7 @@ describe("FiberLspSdk", () => {
             const h = await signingHarness({ network: { ...vectorsChain, commitmentLock: { ...vectorsChain.commitmentLock, codeHash } } });
             codeHash.fill(0);
             await tickOver(h, sent.result.status, true);
-            expect(h.events).toStrictEqual([signedEventOf(signing, sent)]);
+            expect(h.events).toStrictEqual([withSigningDeadline(signedEventOf(signing, sent))]);
         });
 
         it("refuses a commitment under another network's commitment lock, submitting nothing", async () => {
@@ -602,7 +653,9 @@ describe("FiberLspSdk", () => {
                 "list_channels",
                 "get_watchtower_signing_status",
             ]);
-            expect(h.events).toStrictEqual([signedEventOf(signing, signingCaseOf(signing, "CompleteReceivedCommitment"), "warning")]);
+            expect(h.events).toStrictEqual([
+                withSigningDeadline(signedEventOf(signing, signingCaseOf(signing, "CompleteReceivedCommitment"), "warning")),
+            ]);
         });
 
         it.each([
@@ -618,10 +671,12 @@ describe("FiberLspSdk", () => {
                 watchtowerStatusCall(SIGNING_CHANNEL_ID),
             ]);
             expect(h.events).toStrictEqual([
-                refusedEvent("CompleteReceivedCommitment", {
-                    code: "policy_refusal",
-                    message: "slot COMMITMENT:4 has already served a different signing session",
-                }),
+                withSigningDeadline(
+                    refusedEvent("CompleteReceivedCommitment", {
+                        code: "policy_refusal",
+                        message: "slot COMMITMENT:4 has already served a different signing session",
+                    }),
+                ),
             ]);
         });
     });
@@ -701,6 +756,204 @@ describe("FiberLspSdk", () => {
                     },
                 },
             ]);
+        });
+    });
+
+    describe("the tenant identity", () => {
+        it("is fiber's tenant id of the master seed's RootSigner", () => {
+            expect(harness().sdk.tenantId).toBe(registry.tenant_id);
+        });
+
+        it("exposes the RootSigner's key, which the host asks the registry nonce for", () => {
+            expect(bytesToHex(harness().sdk.rootSignerPubkey)).toBe(registry.root_signer_pubkey);
+        });
+
+        it("hands out a copy of the key on every read: writing to one changes neither the key nor what it signs", () => {
+            const h = harness({ lspPubkey: hexToBytes(registry.lsp_node_id) });
+            const read = h.sdk.rootSignerPubkey;
+            expect(h.sdk.rootSignerPubkey).not.toBe(read);
+            read.fill(0);
+            expect(bytesToHex(h.sdk.rootSignerPubkey)).toBe(registry.root_signer_pubkey);
+            expect(bytesToHex(h.sdk.signTenantRegistration(challengeOf()).signature)).toBe(registry.signature);
+        });
+
+        it("is another tenant under another seed", () => {
+            const other = harness({}, new Uint8Array(32).fill(0x25)).sdk;
+            expect(other.tenantId).toBe("2bfb3edbb410cad1ea91e27bb0eee705749de74cf8a029c4bd24e3a92934448b");
+            expect(bytesToHex(other.rootSignerPubkey)).toBe(OTHER_ROOT_SIGNER_PUBKEY);
+        });
+    });
+
+    describe("signTenantRegistration()", () => {
+        function registering(): FiberLspSdk {
+            return harness({ lspPubkey: hexToBytes(registry.lsp_node_id) }).sdk;
+        }
+
+        it("signs fiber's registration byte for byte, with the params and the tenant id they register", () => {
+            const registration = registering().signTenantRegistration(challengeOf());
+            expect(Object.keys(registration).sort()).toEqual(["nonce", "rootSignerPubkey", "signature", "tenantId"]);
+            expect(bytesToHex(registration.signature)).toBe(registry.signature);
+            expect(bytesToHex(registration.rootSignerPubkey)).toBe(registry.root_signer_pubkey);
+            expect(bytesToHex(registration.nonce)).toBe(registry.nonce);
+            expect(registration.tenantId).toBe(registry.tenant_id);
+        });
+
+        it("returns bytes of its own: writing to the challenge or to the result changes neither, nor what it signs next", () => {
+            const sdk = registering();
+            const challenge = challengeOf();
+            const registration = sdk.signTenantRegistration(challenge);
+            expect(registration.rootSignerPubkey).not.toBe(challenge.rootSignerPubkey);
+            expect(registration.nonce).not.toBe(challenge.nonce);
+            challenge.rootSignerPubkey.fill(0);
+            challenge.nonce.fill(0);
+            expect(bytesToHex(registration.rootSignerPubkey)).toBe(registry.root_signer_pubkey);
+            expect(bytesToHex(registration.nonce)).toBe(registry.nonce);
+            registration.rootSignerPubkey.fill(0);
+            expect(bytesToHex(sdk.rootSignerPubkey)).toBe(registry.root_signer_pubkey);
+            expect(bytesToHex(sdk.signTenantRegistration(challengeOf()).signature)).toBe(registry.signature);
+        });
+
+        it("checks the challenge against its copy of the LSP's key, whatever the host does to its bytes", () => {
+            const lspPubkey = hexToBytes(registry.lsp_node_id);
+            const { sdk } = harness({ lspPubkey });
+            lspPubkey.fill(0);
+            expect(bytesToHex(sdk.signTenantRegistration(challengeOf()).signature)).toBe(registry.signature);
+        });
+
+        it("makes no call and writes nothing", () => {
+            const h = harness({ lspPubkey: hexToBytes(registry.lsp_node_id) });
+            h.sdk.signTenantRegistration(challengeOf());
+            expect(h.fetch.requests).toEqual([]);
+            expect(h.storage.ops).toEqual([]);
+        });
+
+        it.each([
+            ["null", null],
+            ["undefined", undefined],
+            ["an array", []],
+            ["a string", "challenge"],
+        ])("refuses a challenge that is %s", (_, challenge) => {
+            expect(() => registering().signTenantRegistration(challenge as never)).toThrow(new TypeError("challenge must be an object"));
+        });
+
+        it.each([
+            ["absent", undefined, "challenge.lspNodeId must be a Uint8Array"],
+            ["in hex", registry.lsp_node_id, "challenge.lspNodeId must be a Uint8Array"],
+            ["of 32 bytes", hexToBytes(registry.lsp_node_id).slice(0, 32), "challenge.lspNodeId must be 33 bytes, got 32"],
+            ["of 34 bytes", hexToBytes(`${registry.lsp_node_id}00`), "challenge.lspNodeId must be 33 bytes, got 34"],
+            ["33 zero bytes, no point", new Uint8Array(33), "challenge.lspNodeId must be a compressed point on secp256k1"],
+            ["another LSP's key", LSP_PUBKEY, "challenge.lspNodeId must be lspPubkey: the nonce was issued by another LSP"],
+            [
+                "the LSP's x under the other parity",
+                hexToBytes(`02${registry.lsp_node_id.slice(2)}`),
+                "challenge.lspNodeId must be lspPubkey: the nonce was issued by another LSP",
+            ],
+        ])("refuses an LSP node id %s", (_, lspNodeId, message) => {
+            expect(() => registering().signTenantRegistration({ ...challengeOf(), lspNodeId: lspNodeId as Uint8Array })).toThrow(
+                new TypeError(message),
+            );
+        });
+
+        it.each([
+            ["absent", undefined, "challenge.rootSignerPubkey must be a Uint8Array"],
+            ["in hex", registry.root_signer_pubkey, "challenge.rootSignerPubkey must be a Uint8Array"],
+            ["of 32 bytes", hexToBytes(registry.root_signer_pubkey).slice(0, 32), "challenge.rootSignerPubkey must be 33 bytes, got 32"],
+            ["of 34 bytes", hexToBytes(`${registry.root_signer_pubkey}00`), "challenge.rootSignerPubkey must be 33 bytes, got 34"],
+            [
+                "another RootSigner's key",
+                hexToBytes(OTHER_ROOT_SIGNER_PUBKEY),
+                "challenge.rootSignerPubkey must be this identity's public key: the nonce was issued to another RootSigner",
+            ],
+        ])("refuses a RootSigner key %s", (_, rootSignerPubkey, message) => {
+            const challenge = { ...challengeOf(), rootSignerPubkey: rootSignerPubkey as Uint8Array };
+            expect(() => registering().signTenantRegistration(challenge)).toThrow(new TypeError(message));
+        });
+
+        it.each([
+            ["absent", undefined, "challenge.nonce must be a Uint8Array"],
+            ["in hex", registry.nonce, "challenge.nonce must be a Uint8Array"],
+            ["of 31 bytes", new Uint8Array(31).fill(0x5a), "challenge.nonce must be 32 bytes, got 31"],
+            ["of 33 bytes", new Uint8Array(33).fill(0x5a), "challenge.nonce must be 32 bytes, got 33"],
+        ])("refuses a nonce %s", (_, nonce, message) => {
+            expect(() => registering().signTenantRegistration({ ...challengeOf(), nonce: nonce as Uint8Array })).toThrow(
+                new TypeError(message),
+            );
+        });
+
+        it("checks the LSP before the RootSigner, so a challenge wrong on both names the LSP", () => {
+            const challenge = { ...challengeOf(), lspNodeId: LSP_PUBKEY, rootSignerPubkey: hexToBytes(OTHER_ROOT_SIGNER_PUBKEY) };
+            expect(() => registering().signTenantRegistration(challenge)).toThrow(
+                new TypeError("challenge.lspNodeId must be lspPubkey: the nonce was issued by another LSP"),
+            );
+        });
+    });
+
+    describe("setBiscuitToken()", () => {
+        const NEXT_TOKEN = "En0KEwoEMTIzNBgDIgkKBwgKEgMYgAgSJAgAEiDs-next_token=";
+
+        async function pollHeaders(h: ReturnType<typeof harness>): Promise<unknown[]> {
+            const from = h.fetch.requests.length;
+            h.sdk.connect();
+            await flush();
+            h.sdk.disconnect();
+            return h.fetch.requests.slice(from).map((request) => request.init.headers);
+        }
+
+        it("puts the new token on the poller's next calls", async () => {
+            const h = harness();
+            expect(await pollHeaders(h)).toEqual(Array(2).fill({ "content-type": "application/json", authorization: `Bearer ${TOKEN}` }));
+            h.sdk.setBiscuitToken(NEXT_TOKEN);
+            expect(await pollHeaders(h)).toEqual(
+                Array(2).fill({ "content-type": "application/json", authorization: `Bearer ${NEXT_TOKEN}` }),
+            );
+        });
+
+        it("gives the token to an instance built without one, as a host registers after the first start", async () => {
+            const h = harness({ biscuitToken: undefined });
+            h.sdk.setBiscuitToken(NEXT_TOKEN);
+            expect(await pollHeaders(h)).toEqual(
+                Array(2).fill({ "content-type": "application/json", authorization: `Bearer ${NEXT_TOKEN}` }),
+            );
+        });
+
+        it.each([
+            ["with a space", "next token"],
+            ["empty", ""],
+            ["null", null],
+            ["a number", 7],
+        ])("refuses a token %s, keeping the previous one", async (_, token) => {
+            const h = harness();
+            expect(() => h.sdk.setBiscuitToken(token as string)).toThrow(new TypeError("token must be printable ASCII without spaces"));
+            expect(await pollHeaders(h)).toEqual(Array(2).fill({ "content-type": "application/json", authorization: `Bearer ${TOKEN}` }));
+        });
+    });
+
+    describe("channelEvidence()", () => {
+        it("reads the evidence of a channel the device signed for from the host's storage", async () => {
+            const sent = signingCaseOf(signing, "SendCommitmentSigned");
+            const h = await signingHarness({});
+            await tickOver(h, sent.result.status, true);
+            expect(await h.sdk.channelEvidence(SIGNING_CHANNEL_ID)).toStrictEqual({
+                revocations: [],
+                commitments: { local: null, remote: { commitmentNumber: 4, txHash: `0x${sent.expected.message}` } },
+                watchtowerSignatures: [],
+            });
+        });
+
+        it("refuses a channel this device never registered as unknown_channel", async () => {
+            const h = harness();
+            const error = await rejection(h.sdk.channelEvidence(CHANNEL_ID));
+            expect(error).toEqual(new SdkError("unknown_channel", `channel ${CHANNEL_ID} is not registered on this device`));
+            expect(error).toBeInstanceOf(SdkError);
+            expect((error as SdkError).code).toBe("unknown_channel");
+        });
+
+        it("refuses a channel id in bare hex, reading nothing", async () => {
+            const h = harness();
+            await expect(h.sdk.channelEvidence("1f".repeat(32))).rejects.toEqual(
+                new TypeError("channelId must be 32 bytes of 0x-prefixed lowercase hex"),
+            );
+            expect(h.storage.ops).toEqual([]);
         });
     });
 

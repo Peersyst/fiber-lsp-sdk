@@ -67,8 +67,21 @@ import type {
 } from "./rpc.types";
 import { encodeRpcChannelIdParams, encodeRpcPaymentHashParams } from "./utils";
 
-// A header value every runtime accepts, so a bad token fails at construction.
+// A header value every runtime accepts, so a bad token fails before it is held.
 const TOKEN_PATTERN = /^[\x21-\x7e]+$/;
+
+/**
+ * Builds the authorization header value of a token, refusing one a header cannot carry.
+ * @param token The Biscuit token.
+ * @returns The Bearer header value.
+ */
+function bearerOf(token: unknown): string {
+    // The pattern alone would read `null` as the token "null".
+    if (typeof token !== "string" || !TOKEN_PATTERN.test(token)) {
+        throw new TypeError("token must be printable ASCII without spaces");
+    }
+    return RPC_BEARER_PREFIX + token;
+}
 
 export class FiberRpcClient {
     private readonly url: string;
@@ -88,13 +101,17 @@ export class FiberRpcClient {
         this.url = options.url;
         this.headers = { "content-type": RPC_CONTENT_TYPE };
         if (options.token !== undefined) {
-            // The pattern alone would read `null` as the token "null".
-            if (typeof options.token !== "string" || !TOKEN_PATTERN.test(options.token)) {
-                throw new TypeError("token must be printable ASCII without spaces");
-            }
-            this.headers.authorization = RPC_BEARER_PREFIX + options.token;
+            this.headers.authorization = bearerOf(options.token);
         }
         this.fetch = options.fetch ?? this.runtimeFetch();
+    }
+
+    /**
+     * Replaces the token the next call carries; a refused token leaves the previous one.
+     * @param token The Biscuit token.
+     */
+    setToken(token: string): void {
+        this.headers.authorization = bearerOf(token);
     }
 
     /**

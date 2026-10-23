@@ -18,6 +18,8 @@ import {
 } from "./musig2-engine";
 import { signOnchain } from "./onchain-signature";
 import { buildChannelOpenMaterial, buildNextMaterial } from "./signer-material";
+import { MAX_MILLISECONDS_PER_EPOCH } from "./signer.constants";
+import { pendingTlcSignatureDeadline } from "./signing-deadline";
 import type {
     DispatchOutcome,
     PendingChannelOpen,
@@ -43,8 +45,13 @@ export class SignerDispatch {
         assertBytes("masterSeed", options.masterSeed, MASTER_SEED_LENGTH);
         assertScriptTemplate("commitmentLock", options.commitmentLock);
         assertPositiveInteger("fundingLockCellDepsCount", options.fundingLockCellDepsCount, MAX_CELL_DEPS_COUNT);
+        assertPositiveInteger("millisecondsPerEpoch", options.millisecondsPerEpoch, MAX_MILLISECONDS_PER_EPOCH);
         this.masterSeed = Uint8Array.from(options.masterSeed);
-        this.network = { commitmentLock: options.commitmentLock, fundingLockCellDepsCount: options.fundingLockCellDepsCount };
+        this.network = {
+            commitmentLock: options.commitmentLock,
+            fundingLockCellDepsCount: options.fundingLockCellDepsCount,
+            millisecondsPerEpoch: options.millisecondsPerEpoch,
+        };
         this.policy = options.policy;
     }
 
@@ -59,14 +66,14 @@ export class SignerDispatch {
         try {
             decoded = decodeChannelSigningStatus(status);
         } catch (error) {
-            if (error instanceof ProtocolError) return refusedOutcome(null, error);
+            if (error instanceof ProtocolError) return refusedOutcome(null, error, null);
             return { kind: "fault", cause: error };
         }
         if (decoded.kind === "none") return { kind: "idle" };
         try {
             return await this.sign(channelId, decoded);
         } catch (error) {
-            if (error instanceof PolicyRefusalError) return refusedOutcome(decoded, error);
+            if (error instanceof PolicyRefusalError) return refusedOutcome(decoded, error, await this.readDeadline(channelId, decoded));
             return { kind: "fault", cause: error };
         }
     }
@@ -187,7 +194,24 @@ export class SignerDispatch {
             nextMaterial: rule.nextMaterial ? buildNextMaterial(keys, slot.commitmentNumber + 1) : null,
             status: verdict.status,
             warnings,
+            deadlineMs: await this.readDeadline(channelId, request),
         };
+    }
+
+    /**
+     * Reads when fiber's node stops waiting for the request's signature, from the commitment's TLCs and the pinned delay.
+     * @param channelId The channel the status was read for.
+     * @param request The decoded request.
+     * @returns The deadline in ms since the epoch, or `null` with no TLC, no pinned delay, or pins that fail to read.
+     */
+    private async readDeadline(channelId: string, request: ChannelSigningRequest): Promise<bigint | null> {
+        const tlcs = request.settlement?.tlcs ?? [];
+        if (tlcs.length === 0) return null;
+        // A diagnostic: pins that fail to read never turn a signature or a refusal into a fault.
+        const pins = await this.policy.readChannelPins(channelId).catch(() => null);
+        const delay = pins?.commitmentDelayEpoch;
+        if (delay === undefined) return null;
+        return pendingTlcSignatureDeadline(tlcs, BigInt(delay), this.network.millisecondsPerEpoch);
     }
 
     /**
@@ -250,14 +274,20 @@ function slotKeyOf(request: ChannelSigningRequest): SigningWarning["slot"] {
  * Builds the outcome of a refused request.
  * @param request The decoded request, or `null` when the status could not be decoded.
  * @param error The refusal.
+ * @param deadlineMs The request's signing deadline, `null` when there is none to read.
  * @returns The outcome.
  */
-function refusedOutcome(request: ChannelSigningRequest | null, error: PolicyRefusalError | ProtocolError): DispatchOutcome {
+function refusedOutcome(
+    request: ChannelSigningRequest | null,
+    error: PolicyRefusalError | ProtocolError,
+    deadlineMs: bigint | null,
+): DispatchOutcome {
     return {
         kind: "refused",
         requestId: request?.requestId ?? null,
         transition: request?.transition ?? null,
         error: { code: error.code, message: error.message },
+        deadlineMs,
     };
 }
 

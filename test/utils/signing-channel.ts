@@ -23,6 +23,15 @@ const REPLACEMENT_VIEWS = { SendRevokeAndAck: "local", CompleteReceivedRevokeAnd
 // The commitment case of each view, whose message stands for the replacement's hash.
 const COMMITMENT_TRANSITIONS = { remote: "SendCommitmentSigned", local: "CompleteReceivedCommitment" } as const;
 
+// Fiber's `MILLI_SECONDS_PER_EPOCH` in a release build, 4 h: the vectors carry no constant of the node's build.
+export const SIGNING_MILLISECONDS_PER_EPOCH = 14_400_000;
+
+// The vectors' earliest TLC expiry, 1_760_576_400_000, less two thirds of one release epoch, 9_600_000.
+export const SIGNING_DEADLINE_MS = 1_760_566_800_000;
+
+// The same under a debug build's 2_000 ms per epoch: the reserve is 1_333.
+export const SIGNING_DEBUG_DEADLINE_MS = 1_760_576_398_667;
+
 export type SigningChannel = {
     dispatch: SignerDispatch;
     policy: PolicyEngine;
@@ -75,6 +84,7 @@ export async function openSigningChannel(
         masterSeed: hexToBytes(device.master_seed),
         commitmentLock: signingCommitmentLock(vectors),
         fundingLockCellDepsCount: channel.funding_lock_cell_deps_count,
+        millisecondsPerEpoch: SIGNING_MILLISECONDS_PER_EPOCH,
         policy,
     });
     const channelId = kase.result.channel_id;
@@ -103,6 +113,11 @@ export function signedEventOf(vectors: SigningVectors, kase: SigningCaseVector, 
         transition: kase.transition,
         outcome,
     };
+}
+
+export function withSigningDeadline(event: SdkEvent, deadlineMs: number = SIGNING_DEADLINE_MS): SdkEvent {
+    if (event.type !== "SIGNING") throw new Error("only a SIGNING event carries a deadline");
+    return { ...event, deadlineMs };
 }
 
 export function signatureSubmissionCall(vectors: SigningVectors, kase: SigningCaseVector): SentCall {

@@ -10,6 +10,7 @@ export type { FetchInit, FetchResponseLike, IFetchLike, RpcMethod } from "./rpc"
 export { DEFAULT_POLL_INTERVAL_MS, FiberLspSdk, SDK_ERROR_CODES, SDK_EVENT_TYPES, SDK_NETWORK_NAMES, SdkError } from "./sdk";
 export type {
     FiberLspSdkOptions,
+    SdkChannelEvidence,
     SdkErrorCode,
     SdkEvent,
     SdkEventListener,
@@ -17,6 +18,8 @@ export type {
     SdkNetwork,
     SdkNetworkConfig,
     SdkNetworkName,
+    SdkTenantChallenge,
+    SdkTenantRegistration,
     SdkWatchtowerOptions,
     SigningEventOutcome,
 } from "./sdk";

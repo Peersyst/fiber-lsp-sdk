@@ -29,8 +29,11 @@ Without one, the client takes the runtime's global `fetch`, which Node, the brow
 it once, at construction, so a runtime without one fails there with a `TypeError` and not on the first call. A host still
 passes its own when it needs another: a timeout, a proxy, a double in tests.
 
-The token is checked once, at construction, to be printable ASCII without spaces, so a token no runtime would put in a
-header fails there and not on every call. No error the client throws carries it.
+The token is checked to be printable ASCII without spaces, so a token no runtime would put in a header fails when it is
+given and not on every call. It is given at construction or, later, through `setToken(token)`, which replaces it from the
+next call on under the same check; a refused token leaves the previous one, and nothing removes it. A device learns its
+tenant token only after it registers, which is why it can arrive after construction. No error the client throws carries
+it.
 
 ## A call
 
@@ -381,7 +384,7 @@ inputs do, and the host hands it to its CKB signer as it is.
 
 | File                                  | Contents                                                                                                                                                                                               |
 | ------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `src/rpc/fiber-rpc-client.ts`         | `FiberRpcClient`: the request, the status, the three errors, the methods                                                                                                                               |
+| `src/rpc/fiber-rpc-client.ts`         | `FiberRpcClient`: the token and `setToken`, the request, the status, the three errors, the methods                                                                                                     |
 | `src/rpc/channels.ts`                 | The codecs of the four channel methods and the two tenant channel methods, the channel, its state, the listing read for its ids or its states, and the opening context                                 |
 | `src/rpc/invoices.ts`                 | The codecs of the four invoice methods                                                                                                                                                                 |
 | `src/rpc/payments.ts`                 | The codecs of the two payment methods                                                                                                                                                                  |
@@ -630,3 +633,17 @@ four metrics):
 | Null flags read as none                                       | 1                 |
 | The states are read by the full reader                        | 1                 |
 | The watchtower submission's result is not read                | 1                 |
+
+`setToken`, the token replaced after construction under the same check, was broken the same way (`test/tests/rpc`,
+still 100% on all four metrics):
+
+| Mutation                                | Tests that failed |
+| --------------------------------------- | ----------------- |
+| The header has no Bearer prefix         | 16                |
+| The token's characters are not checked  | 15                |
+| A token set later is not validated      | 10                |
+| A refused token clears the previous one | 9                 |
+| The token's type is not checked         | 6                 |
+| A token set later is ignored            | 4                 |
+| The printable range admits the space    | 3                 |
+| The printable range admits DEL          | 2                 |

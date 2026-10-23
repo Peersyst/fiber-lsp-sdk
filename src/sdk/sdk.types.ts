@@ -5,12 +5,21 @@ import type {
     ISignerStorage,
     NonceReuseMode,
     PolicyEngine,
+    SignerStore,
     WatchtowerApproval,
     WatchtowerKeyPurpose,
 } from "../policy";
 import type { ChannelSigningTransition } from "../protocol";
-import type { FiberRpcClient, IFetchLike, RpcChannelStateName, RpcInvoiceStatus, RpcPaymentStatus } from "../rpc";
-import type { SignerDispatch, SignerRefusal } from "../signer";
+import type {
+    FiberRpcClient,
+    GetTenantRegistryNonceResult,
+    IFetchLike,
+    RegisterTenantParams,
+    RpcChannelStateName,
+    RpcInvoiceStatus,
+    RpcPaymentStatus,
+} from "../rpc";
+import type { SignerDispatch, SignerRefusal, TenantIdentity } from "../signer";
 import type { ActivityTracker } from "./activity";
 import type { IndexAllocator } from "./allocator";
 import type { ActivityPoller } from "./poller";
@@ -33,6 +42,10 @@ export type SdkNetworkConfig = {
      * Fiber counts these into the commitment fee although the commitment tx carries none.
      */
     fundingLockCellDepsCount: number;
+    /**
+     * Fiber's `MILLI_SECONDS_PER_EPOCH`, which the node's build sets: 4 h in release, 2 s in debug.
+     */
+    millisecondsPerEpoch: number;
 };
 
 export type SdkNetwork = SdkNetworkName | SdkNetworkConfig;
@@ -85,6 +98,12 @@ type SigningEventPayload = {
      */
     requestId: string | null;
     transition: ChannelSigningTransition | null;
+    /**
+     * When fiber force-closes the channel still awaiting the signature, in ms since the epoch. An upper bound, over the node's
+     * unchecked expiries on a refusal. Absent when the device cannot compute it (no TLC, no pinned delay, a failed pin read),
+     * not when fiber has none.
+     */
+    deadlineMs?: number;
 } & ({ outcome: Exclude<SigningEventOutcome, "refused"> } | { outcome: "refused"; error: SignerRefusal });
 
 type WatchtowerSigningEventPayload = {
@@ -142,10 +161,36 @@ export type ActivityRecord = {
     invoices: Record<string, ActivityEntry<"invoice">>;
 };
 
+export type SdkTenantChallenge = GetTenantRegistryNonceResult;
+
+export type SdkTenantRegistration = RegisterTenantParams & { tenantId: string };
+
+type CommitmentEvidence = { commitmentNumber: number; txHash: string };
+
+/**
+ * Every hex value is `0x`-prefixed lowercase, as fiber's JSON writes it.
+ */
+export type SdkChannelEvidence = {
+    /**
+     * Ascending by version.
+     */
+    revocations: { version: number; forRemote: boolean; signature: string }[];
+    /**
+     * The last commitment signed in each view; `txHash` is fiber's `compute_tx_message`, not the hash the chain shows.
+     */
+    commitments: { local: CommitmentEvidence | null; remote: CommitmentEvidence | null };
+    /**
+     * In claim order; `applied` once fiber took the signature.
+     */
+    watchtowerSignatures: { requestId: string; purpose: WatchtowerKeyPurpose; signature: string; applied: boolean }[];
+};
+
 export type SdkContext = {
     network: SdkNetworkConfig;
     lspPubkey: Uint8Array;
     now: () => number;
+    store: SignerStore;
+    identity: TenantIdentity;
     rpc: FiberRpcClient;
     policy: PolicyEngine;
     dispatch: SignerDispatch;

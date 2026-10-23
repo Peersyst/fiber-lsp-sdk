@@ -7,7 +7,7 @@ import { moleculeCellOutput, readCommitmentLockSettlementHash } from "../../../s
 import type { ChannelPolicyRecord, ISignerStorage, PolicyEngineOptions } from "../../../src/policy";
 import { CHANNEL_ALIAS_KEY_PREFIX, CHANNEL_RECORD_KEY_PREFIX, PolicyEngine, SignerStore } from "../../../src/policy";
 import type { ChannelSigningTransition } from "../../../src/protocol";
-import type { DispatchOutcome, SignerRefusal, WatchtowerDispatchOutcome } from "../../../src/signer";
+import type { DispatchOutcome, SignerDispatchOptions, SignerRefusal, WatchtowerDispatchOutcome } from "../../../src/signer";
 import { SignerDispatch, buildChannelOpenMaterial, getPublicNonce } from "../../../src/signer";
 import * as musig2Engine from "../../../src/signer/musig2-engine";
 import * as onchainSignature from "../../../src/signer/onchain-signature";
@@ -20,6 +20,9 @@ import { resignPeerHalf } from "../../utils/peer-musig";
 import { WATCHTOWER_VARIANT_REFUSALS } from "../../utils/refusal";
 import type { SigningChannel } from "../../utils/signing-channel";
 import {
+    SIGNING_DEADLINE_MS,
+    SIGNING_DEBUG_DEADLINE_MS,
+    SIGNING_MILLISECONDS_PER_EPOCH,
     openSigningChannel,
     openWatchtowerChannel,
     secondSessionStatus,
@@ -155,6 +158,7 @@ describe("constructor", () => {
                     masterSeed: new Uint8Array(length),
                     commitmentLock: COMMITMENT_LOCK,
                     fundingLockCellDepsCount: 2,
+                    millisecondsPerEpoch: SIGNING_MILLISECONDS_PER_EPOCH,
                     policy,
                 }),
         ).toThrow(TypeError);
@@ -163,15 +167,29 @@ describe("constructor", () => {
     it("rejects a commitment lock that is not a script template", () => {
         const policy = new PolicyEngine(new SignerStore(new InMemorySignerStorage()));
         const commitmentLock = { codeHash: new Uint8Array(31), hashType: "type" as const };
-        expect(() => new SignerDispatch({ masterSeed: MASTER_SEED, commitmentLock, fundingLockCellDepsCount: 2, policy })).toThrow(
-            TypeError,
-        );
+        expect(
+            () =>
+                new SignerDispatch({
+                    masterSeed: MASTER_SEED,
+                    commitmentLock,
+                    fundingLockCellDepsCount: 2,
+                    millisecondsPerEpoch: SIGNING_MILLISECONDS_PER_EPOCH,
+                    policy,
+                }),
+        ).toThrow(TypeError);
     });
 
     it.each([1, 255])("takes a funding lock cell deps count of %p, the bounds included", (fundingLockCellDepsCount) => {
         const policy = new PolicyEngine(new SignerStore(new InMemorySignerStorage()));
         expect(
-            () => new SignerDispatch({ masterSeed: MASTER_SEED, commitmentLock: COMMITMENT_LOCK, fundingLockCellDepsCount, policy }),
+            () =>
+                new SignerDispatch({
+                    masterSeed: MASTER_SEED,
+                    commitmentLock: COMMITMENT_LOCK,
+                    fundingLockCellDepsCount,
+                    millisecondsPerEpoch: SIGNING_MILLISECONDS_PER_EPOCH,
+                    policy,
+                }),
         ).not.toThrow();
     });
 
@@ -179,8 +197,67 @@ describe("constructor", () => {
     it.each([0, -1, 1.5, 256])("rejects a funding lock cell deps count of %p", (fundingLockCellDepsCount) => {
         const policy = new PolicyEngine(new SignerStore(new InMemorySignerStorage()));
         expect(
-            () => new SignerDispatch({ masterSeed: MASTER_SEED, commitmentLock: COMMITMENT_LOCK, fundingLockCellDepsCount, policy }),
+            () =>
+                new SignerDispatch({
+                    masterSeed: MASTER_SEED,
+                    commitmentLock: COMMITMENT_LOCK,
+                    fundingLockCellDepsCount,
+                    millisecondsPerEpoch: SIGNING_MILLISECONDS_PER_EPOCH,
+                    policy,
+                }),
         ).toThrow(new RangeError(`fundingLockCellDepsCount must be an integer between 1 and 255, got ${fundingLockCellDepsCount}`));
+    });
+
+    it.each([1, Number.MAX_SAFE_INTEGER])("takes %p milliseconds per epoch, the bounds included", (millisecondsPerEpoch) => {
+        const policy = new PolicyEngine(new SignerStore(new InMemorySignerStorage()));
+        expect(
+            () =>
+                new SignerDispatch({
+                    masterSeed: MASTER_SEED,
+                    commitmentLock: COMMITMENT_LOCK,
+                    fundingLockCellDepsCount: 2,
+                    millisecondsPerEpoch,
+                    policy,
+                }),
+        ).not.toThrow();
+    });
+
+    // An epoch of no time is no network, and above 2^53 - 1 a number no longer states one integer.
+    it.each([
+        0,
+        -1,
+        1.5,
+        Number.MAX_SAFE_INTEGER + 1,
+        Number.NaN,
+        Number.POSITIVE_INFINITY,
+        Number.NEGATIVE_INFINITY,
+        "14400000",
+        undefined,
+    ])("rejects %p milliseconds per epoch", (millisecondsPerEpoch) => {
+        const policy = new PolicyEngine(new SignerStore(new InMemorySignerStorage()));
+        const options = {
+            masterSeed: MASTER_SEED,
+            commitmentLock: COMMITMENT_LOCK,
+            fundingLockCellDepsCount: 2,
+            millisecondsPerEpoch,
+            policy,
+        };
+        expect(() => new SignerDispatch(options as SignerDispatchOptions)).toThrow(
+            new RangeError(`millisecondsPerEpoch must be an integer between 1 and 9007199254740991, got ${String(millisecondsPerEpoch)}`),
+        );
+    });
+
+    it("rejects options without milliseconds per epoch", () => {
+        const policy = new PolicyEngine(new SignerStore(new InMemorySignerStorage()));
+        const options: Omit<SignerDispatchOptions, "millisecondsPerEpoch"> = {
+            masterSeed: MASTER_SEED,
+            commitmentLock: COMMITMENT_LOCK,
+            fundingLockCellDepsCount: 2,
+            policy,
+        };
+        expect(() => new SignerDispatch(options as SignerDispatchOptions)).toThrow(
+            new RangeError("millisecondsPerEpoch must be an integer between 1 and 9007199254740991, got undefined"),
+        );
     });
 
     it("keeps its own copy of the seed, so the host may discard its buffer", async () => {
@@ -190,6 +267,7 @@ describe("constructor", () => {
             masterSeed,
             commitmentLock: COMMITMENT_LOCK,
             fundingLockCellDepsCount: 2,
+            millisecondsPerEpoch: SIGNING_MILLISECONDS_PER_EPOCH,
             policy: channel.policy,
         });
         masterSeed.fill(0);
@@ -200,7 +278,13 @@ describe("constructor", () => {
 
 describe("prepareChannelOpen", () => {
     const policy = new PolicyEngine(new SignerStore(new InMemorySignerStorage()));
-    const dispatch = new SignerDispatch({ masterSeed: MASTER_SEED, commitmentLock: COMMITMENT_LOCK, fundingLockCellDepsCount: 2, policy });
+    const dispatch = new SignerDispatch({
+        masterSeed: MASTER_SEED,
+        commitmentLock: COMMITMENT_LOCK,
+        fundingLockCellDepsCount: 2,
+        millisecondsPerEpoch: SIGNING_MILLISECONDS_PER_EPOCH,
+        policy,
+    });
 
     it("derives the opening material of the index, the one the channel signs under later", () => {
         const pending = dispatch.prepareChannelOpen(CHANNEL_INDEX, FUNDED, LOCAL_CLOSE_SCRIPT);
@@ -874,6 +958,7 @@ describe("re-delivery", () => {
             masterSeed: MASTER_SEED,
             commitmentLock: COMMITMENT_LOCK,
             fundingLockCellDepsCount: 2,
+            millisecondsPerEpoch: SIGNING_MILLISECONDS_PER_EPOCH,
             policy: new PolicyEngine(new SignerStore(crashing)),
         });
         expect(faultOf(await dispatch.handle(channel.channelId, statusOf("CompleteReceivedRevokeAndAck")))).toEqual(
@@ -971,6 +1056,171 @@ describe("a second session on a served slot", () => {
     });
 });
 
+describe("the signing deadline", () => {
+    const DEADLINE_MS = BigInt(SIGNING_DEADLINE_MS);
+    // The vectors' delay, one epoch: what a commitment's lock args state, flags stripped.
+    const DELAY_EPOCH = "1099511627777";
+
+    async function pinDelay(channel: SigningChannel, commitmentDelayEpoch: string): Promise<void> {
+        await updateRecord(channel, (record) => ({ ...record, pins: { ...record.pins, commitmentDelayEpoch } }));
+    }
+
+    // Refused at the gate, after every pin is read: the snapshot no longer rebuilds the tx.
+    function unrebuilt(): WireField {
+        return mutated(statusOf("SendCommitmentSigned"), "settlement.local_amount", "0x103d6c8981");
+    }
+
+    it.each(["SendCommitmentSigned", "CompleteReceivedCommitment"] as const)(
+        "reports on %s fiber's deadline, under the delay its own claim pinned",
+        async (transition) => {
+            const channel = await openSigningChannel(vectors, caseOf(transition));
+            expect((await recordOf(channel)).pins.commitmentDelayEpoch).toBeUndefined();
+            const signed = signedOf(await channel.dispatch.handle(channel.channelId, statusOf(transition)));
+            expect(signed.deadlineMs).toBe(DEADLINE_MS);
+            expect((await recordOf(channel)).pins.commitmentDelayEpoch).toBe(DELAY_EPOCH);
+        },
+    );
+
+    // 1_760_576_400_000 less two thirds of one 2 s epoch, 1_333.
+    it("reserves the delay under the network's epoch", async () => {
+        const channel = await openSigningChannel(vectors, caseOf("SendCommitmentSigned"));
+        const dispatch = new SignerDispatch({
+            masterSeed: MASTER_SEED,
+            commitmentLock: COMMITMENT_LOCK,
+            fundingLockCellDepsCount: 2,
+            millisecondsPerEpoch: 2_000,
+            policy: channel.policy,
+        });
+        expect(signedOf(await dispatch.handle(channel.channelId, statusOf("SendCommitmentSigned"))).deadlineMs).toBe(
+            BigInt(SIGNING_DEBUG_DEADLINE_MS),
+        );
+    });
+
+    // Fiber states no TLC in a revocation's status nor in a close's: the pins are read once, for the signature alone.
+    it.each(["SendRevokeAndAck", "CompleteReceivedRevokeAndAck", "SendClosingSigned"] as const)(
+        "reports no deadline on %s, the delay pinned, reading no pins for it",
+        async (transition) => {
+            const channel = await openSigningChannel(vectors, caseOf(transition));
+            await pinDelay(channel, DELAY_EPOCH);
+            const read = jest.spyOn(channel.policy, "readChannelPins");
+            try {
+                expect(signedOf(await channel.dispatch.handle(channel.channelId, statusOf(transition))).deadlineMs).toBeNull();
+                expect(read).toHaveBeenCalledTimes(1);
+            } finally {
+                read.mockRestore();
+            }
+        },
+    );
+
+    it("reports on a refused commitment the deadline under the pinned delay", async () => {
+        const channel = await openSigningChannel(vectors, caseOf("SendCommitmentSigned"));
+        await pinDelay(channel, DELAY_EPOCH);
+        const refused = refusedOf(await channel.dispatch.handle(channel.channelId, unrebuilt()));
+        expect(refused.error.message).toBe("the message does not match the attached channel state");
+        expect(refused.deadlineMs).toBe(DEADLINE_MS);
+    });
+
+    // The request states one epoch; two thirds of the pinned two are 19_200_000.
+    it.each(["SendCommitmentSigned", "CompleteReceivedCommitment"] as const)(
+        "reads the delay of a refused %s from the pin, never from the content it refuses",
+        async (transition) => {
+            const channel = await openSigningChannel(vectors, caseOf(transition));
+            await pinDelay(channel, "1099511627778");
+            const refused = refusedOf(await channel.dispatch.handle(channel.channelId, statusOf(transition)));
+            expect(refused.error).toEqual({
+                code: "policy_refusal",
+                message: `the request states commitmentDelayEpoch ${DELAY_EPOCH}, but the channel pinned 1099511627778`,
+            });
+            expect(refused.deadlineMs).toBe(1_760_557_200_000n);
+        },
+    );
+
+    it("reports no deadline on a refused commitment while the channel has pinned no delay", async () => {
+        const channel = await openSigningChannel(vectors, caseOf("SendCommitmentSigned"));
+        expect(refusedOf(await channel.dispatch.handle(channel.channelId, unrebuilt())).deadlineMs).toBeNull();
+    });
+
+    it("reports no deadline on a commitment that states no TLC, the delay pinned", async () => {
+        const channel = await openSigningChannel(vectors, caseOf("SendCommitmentSigned"));
+        await pinDelay(channel, DELAY_EPOCH);
+        const status = mutated(statusOf("SendCommitmentSigned"), "settlement.tlcs", []);
+        const refused = refusedOf(await channel.dispatch.handle(channel.channelId, status));
+        expect(refused.error.message).toBe("the message does not match the attached channel state");
+        expect(refused.deadlineMs).toBeNull();
+    });
+
+    it("reports no deadline on a status it refuses before decoding it", async () => {
+        const channel = await openSigningChannel(vectors, caseOf("SendCommitmentSigned"));
+        await pinDelay(channel, DELAY_EPOCH);
+        const status = mutated(statusOf("SendCommitmentSigned"), "content.commitment_counter", "Remote");
+        const refused = refusedOf(await channel.dispatch.handle(channel.channelId, status));
+        expect(refused.requestId).toBeNull();
+        expect(refused.deadlineMs).toBeNull();
+    });
+
+    it("reports no deadline for a channel the device never registered", async () => {
+        const channel = await openSigningChannel(vectors, caseOf("SendCommitmentSigned"));
+        await pinDelay(channel, DELAY_EPOCH);
+        const refused = refusedOf(await channel.dispatch.handle(UNKNOWN_CHANNEL_ID, statusOf("SendCommitmentSigned")));
+        expect(refused.error.code).toBe("unknown_channel");
+        expect(refused.deadlineMs).toBeNull();
+    });
+
+    describe("pins that fail to read", () => {
+        it("leave a signature as it was, its deadline null", async () => {
+            const reference = await openSigningChannel(vectors, caseOf("SendCommitmentSigned"));
+            const expected = signedOf(await reference.dispatch.handle(reference.channelId, statusOf("SendCommitmentSigned")));
+
+            const channel = await openSigningChannel(vectors, caseOf("SendCommitmentSigned"));
+            const recordKey = `${CHANNEL_RECORD_KEY_PREFIX}${CHANNEL_INDEX}`;
+            let claimed = false;
+            const failing: ISignerStorage = {
+                get: (key) => {
+                    // The claim is the record's one write: every read after it is the deadline's.
+                    if (claimed) throw new Error("the storage went away");
+                    return channel.storage.get(key);
+                },
+                set: (key, value) => {
+                    channel.storage.set(key, value);
+                    if (key === recordKey) claimed = true;
+                },
+            };
+            const dispatch = new SignerDispatch({
+                masterSeed: MASTER_SEED,
+                commitmentLock: COMMITMENT_LOCK,
+                fundingLockCellDepsCount: 2,
+                millisecondsPerEpoch: SIGNING_MILLISECONDS_PER_EPOCH,
+                policy: new PolicyEngine(new SignerStore(failing)),
+            });
+            const signed = signedOf(await dispatch.handle(channel.channelId, statusOf("SendCommitmentSigned")));
+            expect(claimed).toBe(true);
+            expect(signed).toEqual({ ...expected, deadlineMs: null });
+        });
+
+        // Refused at the aggregated nonce, ahead of the pins the signature reads: the deadline's read is the only one.
+        it("leave a refusal as it was, its deadline null", async () => {
+            const channel = await openSigningChannel(vectors, caseOf("SendCommitmentSigned"));
+            await pinDelay(channel, DELAY_EPOCH);
+            const status = mutated(
+                statusOf("SendCommitmentSigned"),
+                "session_evidence.peer_public_nonce",
+                caseOfPeerNonce("SendClosingSigned"),
+            );
+            const expected = refusedOf(await channel.dispatch.handle(channel.channelId, status));
+            expect(expected.deadlineMs).toBe(DEADLINE_MS);
+
+            const read = jest.spyOn(channel.policy, "readChannelPins").mockRejectedValue(new Error("the storage went away"));
+            try {
+                const refused = refusedOf(await channel.dispatch.handle(channel.channelId, status));
+                expect(read).toHaveBeenCalledTimes(1);
+                expect(refused).toEqual({ ...expected, deadlineMs: null });
+            } finally {
+                read.mockRestore();
+            }
+        });
+    });
+});
+
 describe("faults", () => {
     // The aggregated nonce was checked at the request's slot, so a claim of another one is the device's own bug.
     it.each([
@@ -1004,6 +1254,7 @@ describe("faults", () => {
             masterSeed: MASTER_SEED,
             commitmentLock: COMMITMENT_LOCK,
             fundingLockCellDepsCount: 2,
+            millisecondsPerEpoch: SIGNING_MILLISECONDS_PER_EPOCH,
             policy: new PolicyEngine(new SignerStore(storage)),
         });
         expect(await dispatch.handle(vectors.channel.channel_id, statusOf("SendCommitmentSigned"))).toEqual({
@@ -1049,6 +1300,7 @@ describe("faults", () => {
             masterSeed: MASTER_SEED,
             commitmentLock: COMMITMENT_LOCK,
             fundingLockCellDepsCount: 2,
+            millisecondsPerEpoch: SIGNING_MILLISECONDS_PER_EPOCH,
             policy: new PolicyEngine(new SignerStore(storage)),
         });
         expect(faultOf(await dispatch.handle(vectors.channel.channel_id, statusOf("SendCommitmentSigned")))).toBeInstanceOf(TypeError);
@@ -1364,6 +1616,7 @@ describe("handleWatchtower", () => {
                 masterSeed: MASTER_SEED,
                 commitmentLock: COMMITMENT_LOCK,
                 fundingLockCellDepsCount: 2,
+                millisecondsPerEpoch: SIGNING_MILLISECONDS_PER_EPOCH,
                 policy: new PolicyEngine(new SignerStore(crashing), { watchtower: APPROVAL }),
             });
             expect(await dispatch.handleWatchtower(channel.channelId, spendStatusOf(INBOUND_TLC))).toEqual({

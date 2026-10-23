@@ -52,6 +52,21 @@ function clientOf(mock: FetchMock, token?: string): FiberRpcClient {
     return new FiberRpcClient({ url: URL, token, fetch: mock.fetch });
 }
 
+// The pattern alone would read `null` or a number as text.
+const REFUSED_TOKENS: [string, unknown][] = [
+    ["empty", ""],
+    ["with a space, the bound below the range", "abc def"],
+    ["with a newline", "abc\ndef"],
+    ["with a carriage return", "abc\r\ndef"],
+    ["with a tab", "abc\tdef"],
+    ["non-ASCII", "abcé"],
+    ["with a control character", "abc\x00"],
+    ["with the delete character, the bound above the range", "abc\x7f"],
+    ["null", null],
+    ["a number", 12345],
+    ["an array of one token", [TOKEN]],
+];
+
 describe("FiberRpcClient", () => {
     it("takes the host's fetch as it is", () => {
         // The assignment is the assertion, checked by tsc.
@@ -66,24 +81,7 @@ describe("FiberRpcClient", () => {
             );
         });
 
-        it.each([
-            ["an empty token", ""],
-            ["a space", "abc def"],
-            ["a newline", "abc\ndef"],
-            ["a carriage return", "abc\r\ndef"],
-            ["a tab", "abc\tdef"],
-            ["a non-ASCII character", "abcé"],
-            ["a control character", "abc\x00"],
-            ["a delete character", "abc\x7f"],
-        ])("refuses a token with %s, without echoing it", (_, token) => {
-            expect(() => clientOf(new FetchMock(), token)).toThrow(new TypeError("token must be printable ASCII without spaces"));
-        });
-
-        it.each([
-            ["null", null],
-            ["a number", 12345],
-            ["an array of one token", [TOKEN]],
-        ])("refuses a token that is %s, which the pattern alone would read as text", (_, token) => {
+        it.each(REFUSED_TOKENS)("refuses a token that is %s, without echoing it", (_, token) => {
             expect(() => clientOf(new FetchMock(), token as never)).toThrow(new TypeError("token must be printable ASCII without spaces"));
         });
 
@@ -112,6 +110,60 @@ describe("FiberRpcClient", () => {
             expect(() => withRuntime({ fetch: runtimeFetch }, () => new FiberRpcClient({ url: URL }))).toThrow(
                 new TypeError("this runtime has no fetch: pass one in the options"),
             );
+        });
+    });
+
+    describe("setToken", () => {
+        const OK = '{"jsonrpc":"2.0","id":1,"result":null}';
+        const OK2 = '{"jsonrpc":"2.0","id":2,"result":null}';
+
+        it("sets the header of the next call on a client built without a token", async () => {
+            const mock = new FetchMock().answer(ok(OK));
+            const client = clientOf(mock);
+            client.setToken(TOKEN);
+            await client.call("abandon_channel", PARAMS, passThrough);
+            expect(mock.last.init.headers).toEqual({ "content-type": "application/json", authorization: `Bearer ${TOKEN}` });
+        });
+
+        it("replaces the token of the client", async () => {
+            const mock = new FetchMock().answer(ok(OK), ok(OK2));
+            const client = clientOf(mock, TOKEN);
+            await client.call("abandon_channel", PARAMS, passThrough);
+            client.setToken("second-token");
+            await client.call("abandon_channel", PARAMS, passThrough);
+            expect(mock.requests[0]?.init.headers.authorization).toBe(`Bearer ${TOKEN}`);
+            expect(mock.requests[1]?.init.headers.authorization).toBe("Bearer second-token");
+        });
+
+        // `undefined` is a refusal here alone: at construction it means no token.
+        it.each([...REFUSED_TOKENS, ["undefined", undefined]])(
+            "refuses a token that is %s, leaving the previous header",
+            async (_, token) => {
+                const mock = new FetchMock().answer(ok(OK));
+                const client = clientOf(mock, TOKEN);
+                expect(() => client.setToken(token as never)).toThrow(new TypeError("token must be printable ASCII without spaces"));
+                await client.call("abandon_channel", PARAMS, passThrough);
+                expect(mock.last.init.headers.authorization).toBe(`Bearer ${TOKEN}`);
+            },
+        );
+
+        it("leaves a client without a token without one when the token is refused", async () => {
+            const mock = new FetchMock().answer(ok(OK));
+            const client = clientOf(mock);
+            expect(() => client.setToken("")).toThrow(new TypeError("token must be printable ASCII without spaces"));
+            await client.call("abandon_channel", PARAMS, passThrough);
+            expect(mock.last.init.headers).toEqual({ "content-type": "application/json" });
+        });
+
+        it.each([
+            ["0x21", "!"],
+            ["0x7e", "~"],
+        ])("accepts the bound of the printable range %s", async (_, token) => {
+            const mock = new FetchMock().answer(ok(OK));
+            const client = clientOf(mock);
+            client.setToken(token);
+            await client.call("abandon_channel", PARAMS, passThrough);
+            expect(mock.last.init.headers.authorization).toBe(`Bearer ${token}`);
         });
     });
 

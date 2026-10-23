@@ -7,7 +7,7 @@ import { decodeChannelSigningStatus } from "../../../../src/protocol";
 import type { SigningNetwork } from "../../../../src/signer/signer.types";
 import { buildSignOperation, computeSigningMessage } from "../../../../src/signer/utils/signing-terms.utils";
 import { policyRefusal } from "../../../utils/refusal";
-import { signingDeviceKeys, signingPeerKeys } from "../../../utils/signing-channel";
+import { SIGNING_MILLISECONDS_PER_EPOCH, signingDeviceKeys, signingPeerKeys } from "../../../utils/signing-channel";
 import { loadSigningVectors, signingCaseOf, signingStatusField } from "../../../utils/signing-vectors";
 import { pubkeyOf } from "../../../../src/derivation";
 
@@ -18,6 +18,7 @@ const PEER_FUNDING_PUBKEY = hexToBytes(vectors.peer.funding_pubkey);
 const NETWORK: SigningNetwork = {
     commitmentLock: { codeHash: hexToBytes("740dee83f87c6f309824d8fd3fbdd3c8380ee6fc9acc90b1a748438afcdf81d8"), hashType: "type" },
     fundingLockCellDepsCount: 2,
+    millisecondsPerEpoch: SIGNING_MILLISECONDS_PER_EPOCH,
 };
 
 // The vectors' channel as registered, its terms pinned by the host and its layout by a commitment.
