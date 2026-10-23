@@ -250,6 +250,11 @@ export type ListChannelsParams = { filter?: ListChannelsFilter };
 
 export type RpcChannelStateFlag<Name extends RpcChannelStateName> = (typeof RPC_CHANNEL_STATE_FLAGS)[Name][number];
 
+/**
+ * A state or flag this SDK does not know still reads.
+ */
+export type RpcListedChannelState = { channelId: string; stateName: string; stateFlags: string[] };
+
 export type RpcChannelState = { [Name in RpcChannelStateName]: { name: Name; flags: RpcChannelStateFlag<Name>[] } }[RpcChannelStateName];
 
 export type RpcChannel = {

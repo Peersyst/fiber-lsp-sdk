@@ -1,7 +1,7 @@
 import type { CellOutput, Transaction } from "../common";
 import type { NonceContext } from "../derivation";
 import type { SigningSettlement } from "../digest";
-import type { NonceCounter, SignSlotRef } from "../policy";
+import type { NonceCounter, SignSlotRef, WatchtowerSpendRequest } from "../policy";
 import type { BareHexWire, HexWire, TlcHashAlgorithmWire, TransactionWire, UintHexWire } from "../wire";
 import type {
     CHANNEL_SIGNING_CONTENT_KINDS,
@@ -157,3 +157,14 @@ export type ChannelSigningRequest = {
 };
 
 export type ChannelSigningStatus = { kind: "none" } | ChannelSigningRequest;
+
+export type OnchainKeyPurposeWire = { type: "Settlement" } | { type: "Tlc"; commitment_number: UintHexWire };
+
+export type OnchainSigningContentWire = { key_purpose: OnchainKeyPurposeWire; transaction: TransactionWire };
+
+export type WatchtowerSigningStatusWire =
+    { type: "NoSignatureRequired" } | { type: "SignatureRequired"; request_id: HexWire; content: OnchainSigningContentWire };
+
+export type WatchtowerSigningRequest = WatchtowerSpendRequest & { kind: "required" };
+
+export type WatchtowerSigningStatus = { kind: "none" } | WatchtowerSigningRequest;

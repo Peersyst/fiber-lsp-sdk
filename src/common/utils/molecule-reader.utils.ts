@@ -57,6 +57,15 @@ function readUint32Le(bytes: Uint8Array, offset: number): number {
 }
 
 /**
+ * Reads little-endian bytes as an unsigned integer.
+ * @param bytes The bytes.
+ * @returns The value.
+ */
+export function readUintLe(bytes: Uint8Array): bigint {
+    return bytes.reduceRight((value, byte) => (value << 8n) | BigInt(byte), 0n);
+}
+
+/**
  * Checks a table's or a dynvec's size and header, as molecule's strict verifier does.
  * @param bytes The whole table or dynvec.
  * @param path Path named in a refusal.
@@ -159,7 +168,7 @@ export function readMoleculeBytes(bytes: Uint8Array, path: string, refuse: Molec
  * @returns The value.
  */
 export function readMoleculeUint(bytes: Uint8Array, length: number, path: string, refuse: MoleculeRefuse): bigint {
-    return readMoleculeFixed(bytes, length, path, refuse).reduceRight((value, byte) => (value << 8n) | BigInt(byte), 0n);
+    return readUintLe(readMoleculeFixed(bytes, length, path, refuse));
 }
 
 /**

@@ -1,14 +1,19 @@
+import { equalBytes } from "@noble/curves/utils.js";
+import { hexToBytes } from "@noble/hashes/utils.js";
+import type { CellOutput } from "../../common";
 import {
     COMPRESSED_POINT_LENGTH,
     HASH256_LENGTH,
     MESSAGE_DIGEST_LENGTH,
     PAYMENT_HASH_LENGTH,
+    RECOVERABLE_ECDSA_SIGNATURE_LENGTH,
     SCHNORR_SIGNATURE_LENGTH,
     TLC_DIRECTIONS,
     TLC_HASH_ALGORITHMS,
     TRUNCATED_PAYMENT_HASH_LENGTH,
     UINT32_MAX,
     UINT64_MAX,
+    blake160,
     isCanonicalDecimal,
     isDecimalShannons,
     isHexBytes,
@@ -18,12 +23,21 @@ import {
     isUnsignedInteger,
 } from "../../common";
 import { MAX_CHANNEL_INDEX, MAX_COMMITMENT_NUMBER, NONCE_CONTEXTS } from "../../derivation";
-import { COMMITMENT_LOCK_LAYOUTS } from "../../digest";
+import {
+    COMMITMENT_LOCK_LAYOUTS,
+    readCommitmentLockLayout,
+    readCommitmentLockSettled,
+    readCommitmentLockSettlementHash,
+    readSettlementBody,
+    settlementTlcEntryLength,
+} from "../../digest";
+import { WIRE_HEX_PREFIX, decodeMoleculeCellOutput } from "../../wire";
 import {
     CHANNEL_POLICY_RECORD_VERSION,
     CHANNEL_TERMS_PINS,
     FIRST_SIGHT_CHANNEL_PINS,
     MAX_REVOKED_VERSION,
+    MAX_WATCHTOWER_SPENDS,
     PAYMENT_RECORD_VERSION,
     POLICY_VIEWS,
     SIGNING_LANES,
@@ -34,7 +48,10 @@ import type {
     DebitIntentRecord,
     FirstSightChannelPin,
     HoldInvoicePolicyRecord,
+    WatchtowerKeyPurpose,
+    WatchtowerSpendRecord,
 } from "../policy.types";
+import { assertWatchtowerKeyPurpose } from "../watchtower-spend";
 
 const CONTEXTS: readonly string[] = NONCE_CONTEXTS;
 const LANES: readonly string[] = SIGNING_LANES;
@@ -70,9 +87,13 @@ export function isChannelPolicyRecord(value: unknown): value is ChannelPolicyRec
         isSignedSessionMap(value.signedSessions) &&
         isNonceReuseMap(value.nonceReuse, value.signedSessions) &&
         isCommitmentHashMap(value.commitmentHashes) &&
+        (value.previousRemoteCommitment === undefined ||
+            isPreviousRemoteCommitment(value.previousRemoteCommitment, value.commitmentHashes)) &&
         isRevocationEvidenceList(value.revocations) &&
         isChannelPins(value.pins) &&
-        isViewSnapshotPair(value.views)
+        isViewSnapshotPair(value.views) &&
+        (value.watchtowerSpends === undefined ||
+            isWatchtowerSpendList(value.watchtowerSpends, value.commitmentHashes, value.pins.lockLayout))
     );
 }
 
@@ -114,7 +135,7 @@ export function isHoldInvoicePolicyRecord(value: unknown): value is HoldInvoiceP
  * @param value Value to check.
  * @returns Whether the value holds the pins.
  */
-function isChannelPins(value: unknown): boolean {
+function isChannelPins(value: unknown): value is Record<string, unknown> {
     if (!isPlainObject(value)) return false;
     return (
         typeof value.fundedShannons === "string" &&
@@ -300,15 +321,152 @@ function isNonceReuseMap(value: unknown, signedSessions: unknown): boolean {
  * @param value Value to check.
  * @returns Whether the value is a commitment hash map.
  */
-function isCommitmentHashMap(value: unknown): boolean {
+function isCommitmentHashMap(value: unknown): value is Record<string, unknown> {
     if (!isPlainObject(value)) return false;
-    return Object.entries(value).every(
-        ([view, entry]) =>
-            VIEWS.includes(view) &&
-            isPlainObject(entry) &&
-            isCommitmentNumber(entry.commitmentNumber) &&
-            isHexBytes(entry.txHash, MESSAGE_DIGEST_LENGTH),
+    return Object.entries(value).every(([view, entry]) => VIEWS.includes(view) && isSignedCommitment(entry));
+}
+
+/**
+ * Checks that a value is a signed commitment record.
+ * @param value Value to check.
+ * @returns Whether the value is one.
+ */
+function isSignedCommitment(value: unknown): boolean {
+    if (!isPlainObject(value) || !isCommitmentNumber(value.commitmentNumber) || !isHexBytes(value.txHash, MESSAGE_DIGEST_LENGTH))
+        return false;
+    // Both absent from a commitment signed before the record kept them.
+    if (value.source === undefined && value.settlementWitness === undefined) return true;
+    return isCommitmentSource(value.source, value.settlementWitness);
+}
+
+/**
+ * Checks that a value is the remote commitment signed before the record's last remote one.
+ * @param value Value to check.
+ * @param commitmentHashes The record's signed commitments, already checked.
+ * @returns Whether the value is one.
+ */
+function isPreviousRemoteCommitment(value: unknown, commitmentHashes: Record<string, unknown>): boolean {
+    if (!isPlainObject(value) || !isCommitmentNumber(value.commitmentNumber)) return false;
+    const last = commitmentHashes.remote;
+    return (
+        isPlainObject(last) &&
+        last.commitmentNumber === value.commitmentNumber + 1 &&
+        isCommitmentSource(value.source, value.settlementWitness)
     );
+}
+
+/**
+ * Checks that a value is a commitment's cell whose lock args commit the settlement body given.
+ * @param value Value to check.
+ * @param settlementWitness The settlement body recorded with it.
+ * @returns Whether they match.
+ */
+function isCommitmentSource(value: unknown, settlementWitness: unknown): boolean {
+    const output = readCommitmentLockCell(value, false);
+    return output !== null && isCommittedSettlementBody(settlementWitness, output.lock.args);
+}
+
+/**
+ * Reads a recorded cell that is a commitment lock's with no type and no data, the only cells the device signs a spend of.
+ * @param value Value to check.
+ * @param settled Whether it must be a remainder.
+ * @returns Its output, or `null` when the value is no such cell.
+ */
+function readCommitmentLockCell(value: unknown, settled: boolean): CellOutput | null {
+    if (!isPlainObject(value) || !isNonEmptyHexBytes(value.output) || value.outputData !== "") return null;
+    try {
+        const output = decodeMoleculeCellOutput({ value: WIRE_HEX_PREFIX + value.output, path: "output" });
+        return output.type === null && readCommitmentLockSettled(output.lock.args) === settled ? output : null;
+    } catch {
+        return null;
+    }
+}
+
+/**
+ * Checks that a value is the settlement body a commitment lock's args commit.
+ * @param value Value to check.
+ * @param args The lock args, a commitment lock's.
+ * @returns Whether it is.
+ */
+function isCommittedSettlementBody(value: unknown, args: Uint8Array): boolean {
+    if (!isNonEmptyHexBytes(value)) return false;
+    const body = hexToBytes(value);
+    try {
+        readSettlementBody(body, readCommitmentLockLayout(args));
+    } catch {
+        return false;
+    }
+    return equalBytes(blake160(body), readCommitmentLockSettlementHash(args));
+}
+
+/**
+ * Checks that a value lists the watchtower spends claimed, one per request and one per commitment and unlock.
+ * @param value Value to check.
+ * @param commitmentHashes The record's signed commitments, already checked.
+ * @param lockLayout The record's pinned lock layout, already checked, `undefined` before the pin.
+ * @returns Whether the value is a watchtower spend list.
+ */
+function isWatchtowerSpendList(value: unknown, commitmentHashes: Record<string, unknown>, lockLayout: unknown): boolean {
+    if (!Array.isArray(value) || value.length > MAX_WATCHTOWER_SPENDS) return false;
+    const tlcEntryLengths = COMMITMENT_LOCK_LAYOUTS.filter((layout) => lockLayout === undefined || layout === lockLayout).map(
+        settlementTlcEntryLength,
+    );
+    const requestIds = new Set<string>();
+    const keys = new Set<string>();
+    return value.every((entry: unknown) => {
+        if (!isWatchtowerSpend(entry, commitmentHashes, tlcEntryLengths)) return false;
+        const key = `${entry.view}:${entry.commitmentNumber}:${entry.tlcEntry ?? ""}`;
+        if (requestIds.has(entry.requestId) || keys.has(key)) return false;
+        requestIds.add(entry.requestId);
+        keys.add(key);
+        return true;
+    });
+}
+
+/**
+ * Checks that a value is a watchtower spend record.
+ * @param value Value to check.
+ * @param commitmentHashes The record's signed commitments, already checked.
+ * @param tlcEntryLengths The lengths a TLC entry may have under the record's layout.
+ * @returns Whether the value is a watchtower spend.
+ */
+function isWatchtowerSpend(
+    value: unknown,
+    commitmentHashes: Record<string, unknown>,
+    tlcEntryLengths: number[],
+): value is WatchtowerSpendRecord {
+    if (!isPlainObject(value)) return false;
+    return (
+        isHexBytes(value.requestId, HASH256_LENGTH) &&
+        isWatchtowerKeyPurpose(value.purpose) &&
+        typeof value.view === "string" &&
+        VIEWS.includes(value.view) &&
+        commitmentHashes[value.view] !== undefined &&
+        isCommitmentNumber(value.commitmentNumber) &&
+        (value.tlcEntry === null
+            ? value.purpose.kind === "settlement"
+            : value.purpose.kind === "tlc" && tlcEntryLengths.some((length) => isHexBytes(value.tlcEntry, length))) &&
+        isHexBytes(value.txHash, HASH256_LENGTH) &&
+        (value.remainder === null || readCommitmentLockCell(value.remainder, true) !== null) &&
+        (value.signature === null || isHexBytes(value.signature, RECOVERABLE_ECDSA_SIGNATURE_LENGTH)) &&
+        // Fiber applies a signature the device recorded before submitting it.
+        typeof value.applied === "boolean" &&
+        (!value.applied || value.signature !== null)
+    );
+}
+
+/**
+ * Checks that a value is a watchtower key purpose.
+ * @param value Value to check.
+ * @returns Whether it is one.
+ */
+function isWatchtowerKeyPurpose(value: unknown): value is WatchtowerKeyPurpose {
+    try {
+        assertWatchtowerKeyPurpose("purpose", value);
+        return true;
+    } catch {
+        return false;
+    }
 }
 
 /**

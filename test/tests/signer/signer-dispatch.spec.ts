@@ -1,28 +1,42 @@
 import { bytesToHex, hexToBytes } from "@noble/hashes/utils.js";
 import { Session } from "@scure/btc-signer/musig2.js";
-import type { Script } from "../../../src/common";
-import { moleculeScript, moleculeScriptOpt, moleculeTable, uint64Le } from "../../../src/common";
+import type { CellOutput, Script } from "../../../src/common";
+import { blake160, moleculeScript, moleculeScriptOpt, moleculeTable, uint64Le } from "../../../src/common";
 import { deriveChannelKeys, deriveChannelSeed, deriveNonceSeed, deriveTlcKey, pubkeyOf } from "../../../src/derivation";
-import type { ChannelPolicyRecord, ISignerStorage } from "../../../src/policy";
+import { moleculeCellOutput, readCommitmentLockSettlementHash } from "../../../src/digest";
+import type { ChannelPolicyRecord, ISignerStorage, PolicyEngineOptions } from "../../../src/policy";
 import { CHANNEL_ALIAS_KEY_PREFIX, CHANNEL_RECORD_KEY_PREFIX, PolicyEngine, SignerStore } from "../../../src/policy";
 import type { ChannelSigningTransition } from "../../../src/protocol";
-import type { DispatchOutcome, SignerRefusal } from "../../../src/signer";
+import type { DispatchOutcome, SignerRefusal, WatchtowerDispatchOutcome } from "../../../src/signer";
 import { SignerDispatch, buildChannelOpenMaterial, getPublicNonce } from "../../../src/signer";
 import * as musig2Engine from "../../../src/signer/musig2-engine";
+import * as onchainSignature from "../../../src/signer/onchain-signature";
 import type { WireField } from "../../../src/wire";
+import { decodeTransaction } from "../../../src/wire";
 import { InMemorySignerStorage } from "../../mocks/policy";
 import { toScript } from "../../utils/digest-inputs";
+import { asRecord } from "../../utils/json-shape";
 import { resignPeerHalf } from "../../utils/peer-musig";
+import { WATCHTOWER_VARIANT_REFUSALS } from "../../utils/refusal";
 import type { SigningChannel } from "../../utils/signing-channel";
 import {
     openSigningChannel,
+    openWatchtowerChannel,
     secondSessionStatus,
     signingDeviceKeys,
     signingPeerKeys,
     stageSecondSession,
 } from "../../utils/signing-channel";
 import type { SigningCaseVector } from "../../utils/signing-vectors";
-import { loadSigningVectors, signingCaseOf, signingStatusField } from "../../utils/signing-vectors";
+import {
+    loadSigningVectors,
+    signingCaseOf,
+    signingStatusField,
+    toWatchtowerKeyPurpose,
+    watchtowerApprovalOf,
+    watchtowerSpendOf,
+    watchtowerStatusField,
+} from "../../utils/signing-vectors";
 import { withField } from "../../utils/with-field";
 
 const vectors = loadSigningVectors();
@@ -284,10 +298,23 @@ describe("each transition", () => {
             const channel = await openSigningChannel(vectors, caseOf(transition));
             const signed = signedOf(await channel.dispatch.handle(channel.channelId, statusOf(transition)));
             const view = signed.view ?? "remote";
-            expect((await recordOf(channel)).commitmentHashes[view]).toEqual({
+            const status = asRecord(caseOf(transition).result.status, "status");
+            const signable = asRecord(asRecord(status.content, "status.content").content, "status.content.content");
+            const tx = decodeTransaction({ value: signable.transaction, path: "status.content.content.transaction" });
+            const [cell] = tx.outputs as [CellOutput];
+            const entry = (await recordOf(channel)).commitmentHashes[view];
+            expect(entry).toEqual({
                 commitmentNumber: signed.commitmentNumber,
                 txHash: caseOf(transition).expected.message,
+                source: {
+                    output: bytesToHex(moleculeCellOutput(cell.capacityShannons, cell.lock, cell.type)),
+                    outputData: "",
+                },
+                settlementWitness: expect.any(String),
             });
+            expect(bytesToHex(blake160(hexToBytes(entry?.settlementWitness ?? "")))).toBe(
+                bytesToHex(readCommitmentLockSettlementHash(cell.lock.args)),
+            );
         },
     );
 
@@ -1073,3 +1100,325 @@ describe("secret hygiene", () => {
 function caseOfPeerNonce(transition: ChannelSigningTransition): string {
     return (caseOf(transition).result.status as { session_evidence: { peer_public_nonce: string } }).session_evidence.peer_public_nonce;
 }
+
+describe("handleWatchtower", () => {
+    const { watchtower } = vectors;
+    const APPROVAL = watchtowerApprovalOf(vectors);
+    const DEVICE_SPENDS = watchtower.views.flatMap((view) => view.spends);
+    const INBOUND_TLC = "peer's commitment: inbound TLC by preimage";
+    const SETTLEMENT = "own commitment: settlement";
+    const RECORD_KEY = `${CHANNEL_RECORD_KEY_PREFIX}${CHANNEL_INDEX}`;
+    const STATUS_PATH = "response.result.status";
+
+    async function watchtowerChannel(options: PolicyEngineOptions = { watchtower: APPROVAL }): Promise<SigningChannel> {
+        return openWatchtowerChannel(vectors, options);
+    }
+
+    function spendStatusOf(name: string): WireField {
+        return watchtowerStatusField(watchtowerSpendOf(vectors, name));
+    }
+
+    function watchtowerSignedOf(outcome: WatchtowerDispatchOutcome): Extract<WatchtowerDispatchOutcome, { kind: "signed" }> {
+        if (outcome.kind !== "signed") throw new Error(`expected a signature, got ${outcome.kind}`);
+        return outcome;
+    }
+
+    function watchtowerRefusedOf(outcome: WatchtowerDispatchOutcome): Extract<WatchtowerDispatchOutcome, { kind: "refused" }> {
+        if (outcome.kind !== "refused") throw new Error(`expected a refusal, got ${outcome.kind}`);
+        return outcome;
+    }
+
+    async function spendSignatureOf(channel: SigningChannel, requestId: string): Promise<string | null | undefined> {
+        const spends = (await recordOf(channel)).watchtowerSpends ?? [];
+        return spends.find((spend) => spend.requestId === requestId.slice(2))?.signature;
+    }
+
+    async function refusedUnsigned(
+        channel: SigningChannel,
+        status: WireField,
+        channelId = channel.channelId,
+    ): Promise<Extract<WatchtowerDispatchOutcome, { kind: "refused" }>> {
+        const before = [...channel.storage.map.entries()];
+        channel.storage.ops.length = 0;
+        const sign = jest.spyOn(onchainSignature, "signOnchain");
+        try {
+            const outcome = watchtowerRefusedOf(await channel.dispatch.handleWatchtower(channelId, status));
+            expect(sign).not.toHaveBeenCalled();
+            expect(writesOf(channel.storage)).toEqual([]);
+            expect([...channel.storage.map.entries()]).toEqual(before);
+            return outcome;
+        } finally {
+            sign.mockRestore();
+        }
+    }
+
+    it("is idle on no request, reading nothing, even for a channel the device never registered", async () => {
+        const channel = await watchtowerChannel();
+        channel.storage.ops.length = 0;
+        const status: WireField = { value: { type: "NoSignatureRequired" }, path: STATUS_PATH };
+        expect(await channel.dispatch.handleWatchtower(UNKNOWN_CHANNEL_ID, status)).toEqual({ kind: "idle" });
+        expect(channel.storage.ops).toEqual([]);
+    });
+
+    it.each(DEVICE_SPENDS.map((spend) => [spend.name, spend] as const))(
+        "signs %s fresh to fiber's bytes, recording the signature against its claim",
+        async (_, spend) => {
+            const channel = await watchtowerChannel();
+            expect(await channel.dispatch.handleWatchtower(channel.channelId, watchtowerStatusField(spend))).toEqual({
+                kind: "signed",
+                requestId: hexToBytes(spend.request_id.slice(2)),
+                purpose: toWatchtowerKeyPurpose(spend.key_purpose),
+                signature: hexToBytes(spend.signature.slice(2)),
+                claimed: true,
+            });
+            await expect(spendSignatureOf(channel, spend.request_id)).resolves.toBe(spend.signature.slice(2));
+        },
+    );
+
+    it("claims the spend before it signs it", async () => {
+        const channel = await watchtowerChannel();
+        const spend = watchtowerSpendOf(vectors, INBOUND_TLC);
+        const sign = onchainSignature.signOnchain;
+        let claimed: unknown;
+        const spy = jest.spyOn(onchainSignature, "signOnchain").mockImplementation((...args) => {
+            claimed = (JSON.parse(channel.storage.map.get(RECORD_KEY) ?? "{}") as ChannelPolicyRecord).watchtowerSpends;
+            return sign(...args);
+        });
+        try {
+            watchtowerSignedOf(await channel.dispatch.handleWatchtower(channel.channelId, spendStatusOf(INBOUND_TLC)));
+            expect(spy).toHaveBeenCalledTimes(1);
+            expect(claimed).toEqual([expect.objectContaining({ requestId: spend.request_id.slice(2), signature: null })]);
+        } finally {
+            spy.mockRestore();
+        }
+    });
+
+    describe("a repeat", () => {
+        it("answers it with the signature recorded, signing nothing and writing nothing", async () => {
+            const channel = await watchtowerChannel();
+            const first = watchtowerSignedOf(await channel.dispatch.handleWatchtower(channel.channelId, spendStatusOf(SETTLEMENT)));
+            channel.storage.ops.length = 0;
+            const sign = jest.spyOn(onchainSignature, "signOnchain");
+            try {
+                expect(await channel.dispatch.handleWatchtower(channel.channelId, spendStatusOf(SETTLEMENT))).toEqual(first);
+                expect(sign).not.toHaveBeenCalled();
+                expect(writesOf(channel.storage)).toEqual([]);
+            } finally {
+                sign.mockRestore();
+            }
+        });
+
+        it("signs a claim whose signature was never recorded again, to the same bytes, and records them", async () => {
+            const channel = await watchtowerChannel();
+            const spend = watchtowerSpendOf(vectors, SETTLEMENT);
+            watchtowerSignedOf(await channel.dispatch.handleWatchtower(channel.channelId, spendStatusOf(SETTLEMENT)));
+            await updateRecord(channel, (record) => ({
+                ...record,
+                watchtowerSpends: (record.watchtowerSpends ?? []).map((claim) => ({ ...claim, signature: null })),
+            }));
+            const sign = jest.spyOn(onchainSignature, "signOnchain");
+            try {
+                const again = watchtowerSignedOf(await channel.dispatch.handleWatchtower(channel.channelId, spendStatusOf(SETTLEMENT)));
+                expect(bytesToHex(again.signature)).toBe(spend.signature.slice(2));
+                expect(sign).toHaveBeenCalledTimes(1);
+            } finally {
+                sign.mockRestore();
+            }
+            await expect(spendSignatureOf(channel, spend.request_id)).resolves.toBe(spend.signature.slice(2));
+            expect((await recordOf(channel)).watchtowerSpends).toHaveLength(1);
+        });
+    });
+
+    // Fiber keeps the requests a rebuild superseded: one may come after the spend of its unlock the device signed.
+    it("signs a request for the unlock of a spend it signed already unclaimed, recording nothing", async () => {
+        const channel = await watchtowerChannel();
+        const spend = watchtowerSpendOf(vectors, SETTLEMENT);
+        watchtowerSignedOf(await channel.dispatch.handleWatchtower(channel.channelId, spendStatusOf(SETTLEMENT)));
+        const before = [...channel.storage.map.entries()];
+        channel.storage.ops.length = 0;
+        const superseded = mutated(spendStatusOf(SETTLEMENT), "request_id", `0x${"0d".repeat(32)}`);
+        expect(await channel.dispatch.handleWatchtower(channel.channelId, superseded)).toEqual({
+            kind: "signed",
+            requestId: hexToBytes("0d".repeat(32)),
+            purpose: { kind: "settlement" },
+            signature: hexToBytes(spend.signature.slice(2)),
+            claimed: false,
+        });
+        expect(writesOf(channel.storage)).toEqual([]);
+        expect([...channel.storage.map.entries()]).toEqual(before);
+    });
+
+    describe("refusals, in the order of the steps", () => {
+        describe("1. the decode", () => {
+            it("refuses what the decoder refuses as malformed, with no request to name", async () => {
+                const channel = await watchtowerChannel();
+                const status = mutated(spendStatusOf(INBOUND_TLC), "request_id", "0x00");
+                expect(await refusedUnsigned(channel, status)).toEqual({
+                    kind: "refused",
+                    requestId: null,
+                    purpose: null,
+                    error: {
+                        code: "malformed",
+                        message: "response.result.status.request_id must be 32 bytes of 0x-prefixed lowercase hex",
+                    },
+                });
+            });
+
+            it("refuses a key purpose fiber does not write", async () => {
+                const channel = await watchtowerChannel();
+                const status = mutated(spendStatusOf(INBOUND_TLC), "content.key_purpose.type", "Funding");
+                expect((await refusedUnsigned(channel, status)).error.code).toBe("malformed");
+            });
+
+            it("refuses a status that is not one", async () => {
+                const channel = await watchtowerChannel();
+                expect((await refusedUnsigned(channel, { value: undefined, path: STATUS_PATH })).error.code).toBe("malformed");
+            });
+
+            it("refuses a malformed status as malformed even for a channel the device never registered", async () => {
+                const channel = await watchtowerChannel();
+                const status = mutated(spendStatusOf(INBOUND_TLC), "request_id", "0x00");
+                expect((await refusedUnsigned(channel, status, UNKNOWN_CHANNEL_ID)).error.code).toBe("malformed");
+            });
+        });
+
+        describe("2. the channel", () => {
+            it("refuses a spend for a channel the device never registered, naming the request", async () => {
+                const channel = await watchtowerChannel();
+                const spend = watchtowerSpendOf(vectors, INBOUND_TLC);
+                expect(await refusedUnsigned(channel, spendStatusOf(INBOUND_TLC), UNKNOWN_CHANNEL_ID)).toEqual({
+                    kind: "refused",
+                    requestId: hexToBytes(spend.request_id.slice(2)),
+                    purpose: { kind: "tlc", commitmentNumber: 6 },
+                    error: { code: "unknown_channel", message: `channel ${UNKNOWN_CHANNEL_ID} is not registered on this device` },
+                });
+            });
+
+            it("refuses a spend for an empty channel id as malformed, naming the request", async () => {
+                const channel = await watchtowerChannel();
+                const spend = watchtowerSpendOf(vectors, INBOUND_TLC);
+                expect(await refusedUnsigned(channel, spendStatusOf(INBOUND_TLC), "")).toEqual({
+                    kind: "refused",
+                    requestId: hexToBytes(spend.request_id.slice(2)),
+                    purpose: { kind: "tlc", commitmentNumber: 6 },
+                    error: { code: "malformed", message: "channelId must be a non-empty string" },
+                });
+            });
+        });
+
+        describe("3. the policy", () => {
+            it("refuses every spend when the host approved none", async () => {
+                const channel = await watchtowerChannel({});
+                const spend = watchtowerSpendOf(vectors, SETTLEMENT);
+                expect(await refusedUnsigned(channel, spendStatusOf(SETTLEMENT))).toEqual({
+                    kind: "refused",
+                    requestId: hexToBytes(spend.request_id.slice(2)),
+                    purpose: { kind: "settlement" },
+                    error: {
+                        code: "policy_refusal",
+                        message: "watchtower option: the host approved no destination, so the device signs no watchtower spend",
+                    },
+                });
+            });
+
+            it.each(watchtower.variants.map((variant) => [variant.name, variant] as const))(
+                "refuses the variant with %s, as fiber does",
+                async (_, variant) => {
+                    const channel = await watchtowerChannel();
+                    const outcome = await refusedUnsigned(channel, watchtowerStatusField(variant));
+                    expect(outcome.error).toEqual({ code: "policy_refusal", message: WATCHTOWER_VARIANT_REFUSALS[variant.name] });
+                    expect(outcome.requestId).toEqual(hexToBytes(variant.request_id.slice(2)));
+                    expect(outcome.purpose).toEqual(toWatchtowerKeyPurpose(variant.key_purpose));
+                },
+            );
+
+            it("refuses as malformed what the policy finds malformed, naming the request", async () => {
+                const channel = await watchtowerChannel();
+                const status = spendStatusOf(SETTLEMENT);
+                const [witness] = (status.value as { content: { transaction: { witnesses: string[] } } }).content.transaction.witnesses;
+                const signedWitness = `${(witness ?? "").slice(0, -2)}01`;
+                const outcome = await refusedUnsigned(channel, mutated(status, "content.transaction.witnesses[0]", signedWitness));
+                expect(outcome.requestId).toEqual(hexToBytes(watchtowerSpendOf(vectors, SETTLEMENT).request_id.slice(2)));
+                expect(outcome.error).toEqual({
+                    code: "malformed",
+                    message: "watchtower placeholder: the unlock's signature must be the 65 zero bytes of an unsigned spend",
+                });
+            });
+        });
+    });
+
+    describe("faults", () => {
+        it("leaves a signature it failed to record a fault that hands nothing over, healed by the next delivery", async () => {
+            const channel = await watchtowerChannel();
+            const spend = watchtowerSpendOf(vectors, INBOUND_TLC);
+            let recordWrites = 0;
+            const crashing: ISignerStorage = {
+                get: (key) => channel.storage.get(key),
+                set: (key, value) => {
+                    // The claim is the first write of the record, the signature the second.
+                    if (key === RECORD_KEY && ++recordWrites === 2) throw new Error("the device lost power");
+                    channel.storage.set(key, value);
+                },
+            };
+            const dispatch = new SignerDispatch({
+                masterSeed: MASTER_SEED,
+                commitmentLock: COMMITMENT_LOCK,
+                fundingLockCellDepsCount: 2,
+                policy: new PolicyEngine(new SignerStore(crashing), { watchtower: APPROVAL }),
+            });
+            expect(await dispatch.handleWatchtower(channel.channelId, spendStatusOf(INBOUND_TLC))).toEqual({
+                kind: "fault",
+                cause: new Error("the device lost power"),
+            });
+            await expect(spendSignatureOf(channel, spend.request_id)).resolves.toBeNull();
+
+            const healed = watchtowerSignedOf(await dispatch.handleWatchtower(channel.channelId, spendStatusOf(INBOUND_TLC)));
+            expect(bytesToHex(healed.signature)).toBe(spend.signature.slice(2));
+            await expect(spendSignatureOf(channel, spend.request_id)).resolves.toBe(spend.signature.slice(2));
+        });
+
+        it("leaves a status that fails to read for a reason no codec names as a fault, not a refusal", async () => {
+            const channel = await watchtowerChannel();
+            const failure = new Error("the host handed over a value whose fields throw");
+            const value = Object.defineProperty({}, "type", {
+                enumerable: true,
+                get() {
+                    throw failure;
+                },
+            });
+            channel.storage.ops.length = 0;
+            expect(await channel.dispatch.handleWatchtower(channel.channelId, { value, path: STATUS_PATH })).toEqual({
+                kind: "fault",
+                cause: failure,
+            });
+            expect(channel.storage.ops).toEqual([]);
+        });
+
+        it("reports a corrupt record as a fault that claims nothing", async () => {
+            const channel = await watchtowerChannel();
+            channel.storage.map.set(RECORD_KEY, "garbage");
+            channel.storage.ops.length = 0;
+            const outcome = await channel.dispatch.handleWatchtower(channel.channelId, spendStatusOf(INBOUND_TLC));
+            expect(outcome).toEqual({ kind: "fault", cause: expect.any(TypeError) });
+            expect(writesOf(channel.storage)).toEqual([]);
+        });
+    });
+
+    it("names no key material in any refusal", async () => {
+        const secrets = [
+            MASTER_SEED,
+            KEYS.fundingKey,
+            KEYS.tlcBaseKey,
+            KEYS.commitmentSeed,
+            deriveTlcKey(KEYS, 5),
+            deriveTlcKey(KEYS, 6),
+        ].map(bytesToHex);
+        const channel = await watchtowerChannel();
+        const refusals = await Promise.all([
+            channel.dispatch.handleWatchtower(UNKNOWN_CHANNEL_ID, spendStatusOf(INBOUND_TLC)),
+            ...watchtower.variants.map((variant) => channel.dispatch.handleWatchtower(channel.channelId, watchtowerStatusField(variant))),
+        ]);
+        for (const outcome of refusals)
+            for (const secret of secrets) expect(watchtowerRefusedOf(outcome).error.message).not.toContain(secret);
+    });
+});

@@ -4,10 +4,33 @@ import type {
     DebitIntentRecord,
     HoldInvoicePolicyRecord,
     PolicyViewSnapshot,
+    SignedCommitmentRecord,
+    WatchtowerSpendRecord,
 } from "../../../../src/policy";
 import { isChannelPolicyRecord, isDebitIntentRecord, isHoldInvoicePolicyRecord } from "../../../../src/policy/utils/validate.utils";
 
 const MAX_COMMITMENT_NUMBER = 2 ** 48 - 1;
+
+// The "ckb, no tlcs, for remote" commitment cell: molecule written by hand, its lock args committing the body below.
+const COMMITMENT_ARGS = "7ff980b4d180ee128bbfc295ef936f8d73a5dea501000000000100a00000000000000000d192bbc331c35aebda34ea9953c40f79a54bab89";
+const COMMITMENT_OUTPUT =
+    "8600000010000000180000008600000038e5c483160000006e000000100000003000000031000000740dee83f87c6f309824d8fd3fbdd3c8380ee6fc9acc" +
+    `90b1a748438afcdf81d80139000000${COMMITMENT_ARGS}00`;
+// The same cell flagged as a settlement unlock's remainder.
+const REMAINDER_OUTPUT = COMMITMENT_OUTPUT.slice(0, -2) + "01";
+const TYPED_OUTPUT =
+    "cf00000010000000180000008600000038e5c483160000006e000000100000003000000031000000740dee83f87c6f309824d8fd3fbdd3c8380ee6fc9acc" +
+    `90b1a748438afcdf81d80139000000${COMMITMENT_ARGS}00` +
+    "490000001000000030000000310000009bd7e06f3ecf4be0f2fcd2188b23f1b9fcc88e5d4b65a8637b17723bbda3cce80114000000b502c4a25f89b69ac44329eed55950843ab24495";
+// Args of 20 bytes: a secp256k1 lock's, no commitment lock's.
+const SHORT_ARGS_OUTPUT =
+    "6100000010000000180000006100000038e5c4831600000049000000100000003000000031000000740dee83f87c6f309824d8fd3fbdd3c8380ee6fc9acc" +
+    "90b1a748438afcdf81d801140000007ff980b4d180ee128bbfc295ef936f8d73a5dea5";
+const SETTLEMENT_WITNESS =
+    "00e5b099614920970b0ec3c35f979f4d1a070336d600f831c60500000000000000000000006b5e8d9ad1828550472e07fe80b39585cc0837d600ef92bd10" +
+    "0000000000000000000000";
+// 85 bytes: an entry of the legacy layout the record pins.
+const TLC_ENTRY = "cd".repeat(85);
 
 describe("isChannelPolicyRecord", () => {
     function record(): ChannelPolicyRecord {
@@ -397,6 +420,254 @@ describe("isChannelPolicyRecord", () => {
 
     it("accepts a TLC binding the whole hash its bound hash is the prefix of", () => {
         expect(isChannelPolicyRecord(withTlc({ fullPaymentHash: "33".repeat(20) + "ab".repeat(12) }))).toBe(true);
+    });
+
+    function commitment(): SignedCommitmentRecord {
+        return {
+            commitmentNumber: 0,
+            txHash: "02".repeat(32),
+            source: { output: COMMITMENT_OUTPUT, outputData: "" },
+            settlementWitness: SETTLEMENT_WITNESS,
+        };
+    }
+
+    function spend(): WatchtowerSpendRecord {
+        return {
+            requestId: "cc".repeat(32),
+            purpose: { kind: "tlc", commitmentNumber: 6 },
+            view: "remote",
+            commitmentNumber: 5,
+            tlcEntry: TLC_ENTRY,
+            txHash: "5f".repeat(32),
+            remainder: { output: REMAINDER_OUTPUT, outputData: "" },
+            signature: "b4".repeat(65),
+            applied: false,
+        };
+    }
+
+    function withCommitment(override: Record<string, unknown>): Record<string, unknown> {
+        return { ...record(), commitmentHashes: { remote: { ...commitment(), ...override } } };
+    }
+
+    function withSource(override: Record<string, unknown>): Record<string, unknown> {
+        return withCommitment({ source: { ...commitment().source, ...override } });
+    }
+
+    function withSpend(override: Record<string, unknown>): Record<string, unknown> {
+        return { ...record(), watchtowerSpends: [{ ...spend(), ...override }] };
+    }
+
+    function previous(): Record<string, unknown> {
+        const { source, settlementWitness } = commitment();
+        return { commitmentNumber: 4, source, settlementWitness };
+    }
+
+    function withPrevious(override: Record<string, unknown>): Record<string, unknown> {
+        return { ...record(), previousRemoteCommitment: { ...previous(), ...override } };
+    }
+
+    it("accepts a commitment with its cell and settlement body, and one without, signed before the record kept them", () => {
+        expect(
+            isChannelPolicyRecord({
+                ...record(),
+                commitmentHashes: { remote: commitment(), local: { commitmentNumber: 5, txHash: "34".repeat(32) } },
+            }),
+        ).toBe(true);
+    });
+
+    it.each([
+        ["a cell without its settlement body", { settlementWitness: undefined }],
+        ["a settlement body without its cell", { source: undefined }],
+        ["a cell that is not an object", { source: COMMITMENT_OUTPUT }],
+        ["a settlement body that is not hex", { settlementWitness: "zz" }],
+        ["an empty settlement body", { settlementWitness: "" }],
+        ["a settlement body its layout does not read", { settlementWitness: SETTLEMENT_WITNESS.slice(0, -2) }],
+        [
+            "a settlement body its layout does not read, which the lock args commit",
+            {
+                source: {
+                    output: COMMITMENT_OUTPUT.replace(
+                        "d192bbc331c35aebda34ea9953c40f79a54bab89",
+                        "555e6d27ea3c664b1aec27d6b30dbc42de99abbb",
+                    ),
+                    outputData: "",
+                },
+                settlementWitness: SETTLEMENT_WITNESS.slice(0, -2),
+            },
+        ],
+        // A balance's amount moved by one: a body, but not the one the args commit.
+        ["a settlement body the lock args do not commit", { settlementWitness: SETTLEMENT_WITNESS.replace("00ef92bd10", "01ef92bd10") }],
+    ])("rejects a commitment with %s", (_, override) => {
+        expect(isChannelPolicyRecord(withCommitment(override))).toBe(false);
+    });
+
+    it.each([
+        ["no output", { output: undefined }],
+        ["an empty output", { output: "" }],
+        ["an output that is not hex", { output: "zz" }],
+        ["an output no molecule reader takes", { output: COMMITMENT_OUTPUT.slice(0, -2) }],
+        ["an output with a type", { output: TYPED_OUTPUT }],
+        ["an output whose lock is no commitment lock's", { output: SHORT_ARGS_OUTPUT }],
+        ["the output of a remainder", { output: REMAINDER_OUTPUT }],
+        ["output data", { outputData: "00" }],
+        ["no output data", { outputData: undefined }],
+    ])("rejects a commitment cell with %s", (_, override) => {
+        expect(isChannelPolicyRecord(withSource(override))).toBe(false);
+    });
+
+    it("accepts the remote commitment signed before the last remote one, one below it", () => {
+        expect(isChannelPolicyRecord({ ...record(), previousRemoteCommitment: previous() })).toBe(true);
+    });
+
+    it.each([
+        ["no remote commitment after it", { ...record(), commitmentHashes: {}, previousRemoteCommitment: previous() }],
+        ["a previous remote commitment that is not an object", { ...record(), previousRemoteCommitment: "04" }],
+        ["a previous remote commitment at the last one's version", withPrevious({ commitmentNumber: 5 })],
+        ["a previous remote commitment two below the last one", withPrevious({ commitmentNumber: 3 })],
+        ["a previous remote commitment without its version", withPrevious({ commitmentNumber: undefined })],
+        [
+            "a previous remote commitment at a negative version, below a last one at 0",
+            {
+                ...record(),
+                commitmentHashes: { remote: { commitmentNumber: 0, txHash: "34".repeat(32) } },
+                previousRemoteCommitment: { ...previous(), commitmentNumber: -1 },
+            },
+        ],
+        ["a previous remote commitment above the chain's last number", withPrevious({ commitmentNumber: MAX_COMMITMENT_NUMBER + 1 })],
+        ["a previous remote commitment without its cell", withPrevious({ source: undefined })],
+        ["a previous remote commitment without its settlement body", withPrevious({ settlementWitness: undefined })],
+        [
+            "a previous remote commitment whose cell's lock args do not commit its settlement body",
+            withPrevious({ settlementWitness: SETTLEMENT_WITNESS.replace("00ef92bd10", "01ef92bd10") }),
+        ],
+    ])("rejects %s", (_, value) => {
+        expect(isChannelPolicyRecord(value)).toBe(false);
+    });
+
+    it("accepts the spends a watchtower was signed, with and without their remainder and signature", () => {
+        const last = {
+            ...spend(),
+            requestId: "dd".repeat(32),
+            purpose: { kind: "settlement" },
+            tlcEntry: null,
+            remainder: null,
+            signature: null,
+        };
+        expect(isChannelPolicyRecord({ ...record(), watchtowerSpends: [spend(), last] })).toBe(true);
+        expect(isChannelPolicyRecord({ ...record(), watchtowerSpends: [] })).toBe(true);
+    });
+
+    // One per TLC and one for the balance, in each of the three commitments a watchtower settles.
+    it("accepts 768 spends, and no more", () => {
+        const spends = (count: number) =>
+            Array.from({ length: count }, (_, index) => ({
+                ...spend(),
+                requestId: index.toString(16).padStart(64, "0"),
+                commitmentNumber: index,
+            }));
+        expect(isChannelPolicyRecord({ ...record(), watchtowerSpends: spends(768) })).toBe(true);
+        expect(isChannelPolicyRecord({ ...record(), watchtowerSpends: spends(769) })).toBe(false);
+    });
+
+    it.each([
+        ["another commitment's", { commitmentNumber: 4 }],
+        ["another TLC's", { tlcEntry: "ce".repeat(85) }],
+        ["the balance's", { purpose: { kind: "settlement" }, tlcEntry: null }],
+    ])("accepts a second spend of %s unlock", (_, override) => {
+        const second = { ...spend(), requestId: "dd".repeat(32), ...override };
+        expect(isChannelPolicyRecord({ ...record(), watchtowerSpends: [spend(), second] })).toBe(true);
+    });
+
+    it("accepts a second spend of the same unlock in the other view's commitment", () => {
+        const commitmentHashes = {
+            remote: { commitmentNumber: 5, txHash: "34".repeat(32) },
+            local: { commitmentNumber: 5, txHash: "35".repeat(32) },
+        };
+        const second = { ...spend(), requestId: "dd".repeat(32), view: "local" };
+        expect(isChannelPolicyRecord({ ...record(), commitmentHashes, watchtowerSpends: [spend(), second] })).toBe(true);
+    });
+
+    it.each([
+        ["spends that are not an array", { watchtowerSpends: {} }],
+        ["a spend that is not an object", { watchtowerSpends: ["cc".repeat(32)] }],
+        ["two spends of one request", { watchtowerSpends: [spend(), { ...spend(), commitmentNumber: 4 }] }],
+        ["two spends of one commitment's unlock", { watchtowerSpends: [spend(), { ...spend(), requestId: "dd".repeat(32) }] }],
+    ])("rejects a record with %s", (_, override) => {
+        expect(isChannelPolicyRecord({ ...record(), ...override })).toBe(false);
+    });
+
+    it("rejects a spend of a view no commitment was signed in", () => {
+        expect(isChannelPolicyRecord(withSpend({ view: "local" }))).toBe(false);
+    });
+
+    it.each(Object.keys(spend()))("rejects a spend missing %s", (field) => {
+        const value = spend() as unknown as Record<string, unknown>;
+        delete value[field];
+        expect(isChannelPolicyRecord({ ...record(), watchtowerSpends: [value] })).toBe(false);
+    });
+
+    it.each([
+        ["a request id of 31 bytes", { requestId: "cc".repeat(31) }],
+        ["an uppercase request id", { requestId: "CC".repeat(32) }],
+        ["a purpose that is not an object", { purpose: "settlement" }],
+        ["a purpose of another kind", { purpose: { kind: "revocation" } }],
+        ["a TLC purpose without its number", { purpose: { kind: "tlc" } }],
+        ["a TLC purpose above the chain's last number", { purpose: { kind: "tlc", commitmentNumber: MAX_COMMITMENT_NUMBER + 1 } }],
+        ["an unknown view", { view: "forRemote" }],
+        ["a view the prototype names", { view: "toString" }],
+        ["a numeric view", { view: 1 }],
+        ["a commitment number above the chain's last", { commitmentNumber: MAX_COMMITMENT_NUMBER + 1 }],
+        ["a fractional commitment number", { commitmentNumber: 4.5 }],
+        ["an empty TLC entry", { tlcEntry: "" }],
+        ["an uppercase TLC entry", { tlcEntry: "CD".repeat(85) }],
+        ["a TLC entry a byte short of its layout's", { tlcEntry: "cd".repeat(84) }],
+        ["a TLC entry a byte past its layout's", { tlcEntry: "cd".repeat(86) }],
+        ["a TLC entry of the layout the record did not pin", { tlcEntry: "cd".repeat(97) }],
+        ["a TLC entry of half a byte", { tlcEntry: "c" }],
+        ["no TLC entry under a TLC key", { tlcEntry: null }],
+        ["a TLC entry under the settlement key", { purpose: { kind: "settlement" } }],
+        ["a tx hash of 31 bytes", { txHash: "5f".repeat(31) }],
+        ["a remainder that is not an object", { remainder: REMAINDER_OUTPUT }],
+        ["the commitment's own cell as its remainder", { remainder: { output: COMMITMENT_OUTPUT, outputData: "" } }],
+        ["a remainder with a type", { remainder: { output: TYPED_OUTPUT, outputData: "" } }],
+        ["a remainder with data", { remainder: { output: REMAINDER_OUTPUT, outputData: "00" } }],
+        ["a remainder no molecule reader takes", { remainder: { output: REMAINDER_OUTPUT.slice(2), outputData: "" } }],
+        ["a compact signature", { signature: "b4".repeat(64) }],
+        ["an uppercase signature", { signature: "B4".repeat(65) }],
+        ["an applied flag in a string", { applied: "true" }],
+        ["a null applied flag", { applied: null }],
+        ["an applied flag of 1", { applied: 1 }],
+        ["no signature once applied", { applied: true, signature: null }],
+    ])("rejects a spend with %s", (_, override) => {
+        expect(isChannelPolicyRecord(withSpend(override))).toBe(false);
+    });
+
+    it("accepts a TLC entry of the full payment hash layout once the record pins it", () => {
+        const value = withSpend({ tlcEntry: "cd".repeat(97) });
+        expect(isChannelPolicyRecord({ ...value, pins: { ...pins(), lockLayout: "fullPaymentHash" } })).toBe(true);
+        expect(
+            isChannelPolicyRecord({ ...value, pins: { ...pins(), lockLayout: "fullPaymentHash" }, watchtowerSpends: [{ ...spend() }] }),
+        ).toBe(false);
+    });
+
+    it.each([
+        [85, true],
+        [97, true],
+        [96, false],
+    ])("takes a TLC entry of %s bytes before the record pins a layout: %s", (length, accepted) => {
+        expect(isChannelPolicyRecord({ ...withSpend({ tlcEntry: "cd".repeat(length) }), pins: { ...pins(), lockLayout: undefined } })).toBe(
+            accepted,
+        );
+    });
+
+    it("accepts a spend fiber applied, with its signature", () => {
+        expect(isChannelPolicyRecord(withSpend({ applied: true }))).toBe(true);
+    });
+
+    it("accepts the settlement purpose and the chain's last TLC number and commitment number", () => {
+        expect(isChannelPolicyRecord(withSpend({ purpose: { kind: "settlement" }, tlcEntry: null }))).toBe(true);
+        expect(isChannelPolicyRecord(withSpend({ purpose: { kind: "tlc", commitmentNumber: MAX_COMMITMENT_NUMBER } }))).toBe(true);
+        expect(isChannelPolicyRecord(withSpend({ commitmentNumber: MAX_COMMITMENT_NUMBER }))).toBe(true);
     });
 });
 

@@ -41,12 +41,15 @@ key derivation is byte for byte the one of `b71a61c3` (v0.9.0-rc7). The key deri
 src/
   common/         Input guards, and the chain and protocol vocabulary that belongs to no single module
   derivation/     Fiber key scheme port + SDK-owned derivations
-  digest/         Rebuilds the four messages fiber signs (no-blind-signing); the transaction serializers
+  digest/         Rebuilds the four messages fiber signs (no-blind-signing); the transaction serializers, CKB's tx hash and the
+                  settlement unlock a watchtower's spend carries
   invoice/        Fiber's invoice string, read and written bit for bit: bech32m, the arithmetic coder, the molecule, the signature
-  signer/         The entry of a signing request over fiber's status, musig2 signing engine, the public material, the tenant identity
+  signer/         The entry of a signing request over fiber's status, musig2 signing engine, the public material, the tenant identity,
+                  the watchtower's on-chain signature
   policy/         Policy engine + persisted per-channel records
   wire/           How fiber writes values in JSON, the readers that refuse anything else, and the writers that produce it
-  protocol/       Fiber's signing status, read strictly: transitions, slots, plaintexts, the peer's evidence
+  protocol/       Fiber's two signing statuses, read strictly: the channel's transitions, slots, plaintexts and peer's evidence,
+                  and the watchtower's spends
   rpc/            Typed fiber JSON-RPC client
   sdk/            Public facade wiring the above
   index.ts        Public entrypoint; every export here is a published commitment
@@ -130,7 +133,7 @@ and `SignerStore` are `policy`'s. And `session` and `digest` name things other m
 Every folder has an `index.ts`, and it is imported as the folder (`../common`), never as `../common/index`. Barrels re-export
 wholesale with `export *`. Five exceptions list their exports one by one: `src/derivation/index.ts`, `src/digest/index.ts` and
 `src/invoice/index.ts`, which keep the internals of their fiber ports out of reach of the other modules,
-`src/protocol/index.ts`, which keeps the decoders behind its entry point out of reach of them too, and `src/index.ts`,
+`src/protocol/index.ts`, which keeps the decoders behind its two entry points out of reach of them too, and `src/index.ts`,
 which is the published surface. Those lists are read as code, not pinned by a test: a test that restates a list of names only
 asks to be updated alongside it.
 

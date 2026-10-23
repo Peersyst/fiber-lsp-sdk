@@ -9,6 +9,7 @@ import {
     readMoleculeTable,
     readMoleculeUint,
     readMoleculeUnion,
+    readUintLe,
 } from "../../../../src/common";
 
 class Refused extends Error {
@@ -175,6 +176,14 @@ describe("readMoleculeUint", () => {
             path: "u",
             fault: { kind: "fixedSize", bytes: 8 },
         });
+    });
+});
+
+describe("readUintLe", () => {
+    it("reads the whole width, least significant first", () => {
+        expect(readUintLe(hexToBytes("0001"))).toBe(256n);
+        expect(readUintLe(hexToBytes(`${"00".repeat(15)}80`))).toBe(1n << 127n);
+        expect(readUintLe(new Uint8Array(0))).toBe(0n);
     });
 });
 

@@ -1,13 +1,16 @@
 # Protocol
 
-How the device reads a signing request: the `status` of fiber's `get_channel_signing_status`, which the RPC client hands on
-as the field it arrived in ([rpc.md](./rpc.md)), decoded into a typed request with every value in the one form fiber writes
-and every transition held to what it must carry. What the device then does with the request, the key order, the aggregate
-nonce, the peer's signature and the message, is the dispatch of [signing.md](./signing.md); the gate it passes is
-[policy.md](./policy.md); the message it rebuilds from the content is [digest.md](./digest.md).
+How the device reads a signing request. Fiber has two statuses, read by two decoders: the channel's, the `status` of
+`get_channel_signing_status`, a musig2 session over one of six transitions; and the watchtower's, the `status` of
+`get_watchtower_signing_status`, a spend of a force-closed commitment ([The watchtower's status](#the-watchtowers-status)).
+The RPC client hands each on as the field it arrived in ([rpc.md](./rpc.md)), and the decoder turns it into a typed request
+with every value in the one form fiber writes and every transition held to what it must carry. What the device then does
+with the request, the key order, the aggregate nonce, the peer's signature and the message, is the dispatch of
+[signing.md](./signing.md); the gate it passes is [policy.md](./policy.md); the message it rebuilds from the content is
+[digest.md](./digest.md).
 
-The protocol is fiber's, not the SDK's: the types are `fiber-json-types/src/channel.rs:650-870` at the hosted-LSP PR, and
-nothing here proposes a form of its own.
+The protocol is fiber's, not the SDK's: the types are `fiber-json-types/src/channel.rs:650-870` and `:948-1027` at the
+hosted-LSP PR, and nothing here proposes a form of its own.
 
 ## The status
 
@@ -144,6 +147,24 @@ reads the content; `CHANNEL_SIGNING_RULES` is the table, and the dispatch reads 
 Fiber's device SDK verifies a peer signature where one is present on a sending transition; the node never writes one there,
 so the device refuses it instead, and a settlement on a transition that builds no commitment likewise.
 
+## The watchtower's status
+
+`decodeWatchtowerSigningStatus` reads the second status, the same union under the same two tags, which the two decoders
+share (`SIGNING_STATUS_TYPES`): `NoSignatureRequired` decodes to `{ kind: "none" }`, and `SignatureRequired` to the spend
+the watchtower waits on:
+
+| Member                | Form                                                            | Decoded                                                                    |
+| --------------------- | --------------------------------------------------------------- | -------------------------------------------------------------------------- |
+| `request_id`          | `Hash256`                                                       | `requestId`, 32 bytes                                                      |
+| `content.key_purpose` | `OnchainKeyPurpose`, tagged with `type`: `Settlement`, or `Tlc` | `purpose`: `{ kind: "settlement" }` or `{ kind: "tlc", commitmentNumber }` |
+| `content.transaction` | CKB's JSON `Transaction`                                        | `transaction`                                                              |
+
+`Tlc` carries `commitment_number`, a `U64Hex` at most `2^48 - 1`, the derivation's bound, decoded to the purpose's
+`commitmentNumber`: the number of the TLC key the spend needs. A `type` of either union that fiber does not write is
+refused. The request id is fiber's hash of the molecule transaction, and the decoder takes it as an opaque name: what the
+device signs is the message it computes from the transaction ([signing.md](./signing.md)). The transaction is read as any
+other, and judged by the watchtower's rules ([policy.md](./policy.md)).
+
 ## What a refusal looks like
 
 Every refusal is a `ProtocolError`, code `malformed`, naming the field by its path from the field the decoder was given
@@ -151,7 +172,8 @@ Every refusal is a `ProtocolError`, code `malformed`, naming the field by its pa
 names the value: a refusal reaches the host's logs, and a value can be a key. The decoder refuses at the first field that
 fails, reading in the order of the wire: the envelope, the slot, the counter, the key aggregation, the aggregate nonce, the
 content, the evidence, the settlement; inside the settlement and each TLC too, member by member as the tables above list
-them, the view held to the transition where `for_remote` is read and the TLC count checked before any TLC.
+them, the view held to the transition where `for_remote` is read and the TLC count checked before any TLC. The
+watchtower's decoder reads the envelope, the request id, the purpose and the transaction, in that order.
 
 The decoder checks what a status says on its own. What needs the channel, its keys, its nonces, its pins, is the dispatch's:
 that the keys are fiber's order of the channel's funding keys, that the aggregate is the device's nonce plus the peer's, that
@@ -160,18 +182,20 @@ the codes beyond it are policy's ([signing.md](./signing.md), [policy.md](./poli
 
 ## Where it lives
 
-| File                                     | Contents                                                                                                                                 |
-| ---------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------- |
-| `src/protocol/protocol.constants.ts`     | The status types, the transitions, fiber's purposes and counters mapped to the SDK's, the content kinds, the rules table, the slot bound |
-| `src/protocol/protocol.types.ts`         | The status in its wire form (`*Wire`), the rule, and the decoded request                                                                 |
-| `src/protocol/protocol.error.ts`         | `ProtocolError`: a wire refusal restated as `malformed`                                                                                  |
-| `src/protocol/channel-signing-status.ts` | `decodeChannelSigningStatus`, the entry point                                                                                            |
-| `src/protocol/key-agg-context.ts`        | The `KeyAggContext` reader, kept out of the barrel                                                                                       |
-| `src/wire/`                              | The forms of the table above, and the field reader whose paths the refusals are written in                                               |
+| File                                        | Contents                                                                                                                                                   |
+| ------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `src/protocol/protocol.constants.ts`        | The status types, the transitions, fiber's purposes and counters mapped to the SDK's, the content kinds, the rules table, the slot bound, the key purposes |
+| `src/protocol/protocol.types.ts`            | The two statuses in their wire forms (`*Wire`), the rule, and the decoded requests                                                                         |
+| `src/protocol/protocol.error.ts`            | `ProtocolError`: a wire refusal restated as `malformed`                                                                                                    |
+| `src/protocol/channel-signing-status.ts`    | `decodeChannelSigningStatus`, the channel's entry point                                                                                                    |
+| `src/protocol/watchtower-signing-status.ts` | `decodeWatchtowerSigningStatus`, the watchtower's                                                                                                          |
+| `src/protocol/key-agg-context.ts`           | The `KeyAggContext` reader, kept out of the barrel                                                                                                         |
+| `src/wire/`                                 | The forms of the table above, and the field reader whose paths the refusals are written in                                                                 |
 
-Two of the wire readers exist for this decoder: `readTagged`, which reads serde's internally tagged unions (the status and
-the content) and narrows the members a variant can be read for, and `decodeMoleculeCellOutput`, the strict molecule table
-reader behind `EntityHex`. The wire readers refuse with a `WireError`; the entry point restates it as the `ProtocolError`.
+Two of the wire readers exist for the channel's decoder: `readTagged`, which reads serde's internally tagged unions (the
+statuses, the content and the key purpose) and narrows the members a variant can be read for, and
+`decodeMoleculeCellOutput`, the strict molecule table reader behind `EntityHex`. The wire readers refuse with a
+`WireError`; the entry point restates it as the `ProtocolError`.
 
 ## What the tests guarantee
 
@@ -185,6 +209,12 @@ reader behind `EntityHex`. The wire readers refuse with a `WireError`; the entry
   `2^48 - 1`, the TLC id at `Number.MAX_SAFE_INTEGER`, the amounts and expiries at their widths, 255 TLCs, 36 bytes of lock
   args, the peer signature one below the curve order, an aggregate nonce half at infinity.
 - **The `KeyAggContext` reader** on its own: every length, header, count and key it refuses, and both key orders.
+- **The watchtower's status** (`test/tests/protocol/watchtower-signing-status.spec.ts`): both purposes read into the
+  typed request, written out literally; every case of `rpc.json` and the status of every spend of `signing.json`'s
+  `watchtower` section, which carry both purposes; a refusal per field, in each form and absent, the envelope, the request
+  id, the purpose's tag and its number (absent, `null`, a number, bare, padded, uppercase, empty) read at `0` and at
+  `2^48 - 1` and refused past it and past a u64, and the transaction field by field; and the refusal at the first field
+  that fails, in the wire's order.
 
 Coverage of the module is 100% on all four metrics, and the assertions were checked by breaking the code on purpose
 (`test/tests/protocol`):
@@ -251,6 +281,22 @@ breaks every member of the wire at once and repairs them from the front, asserti
 the same gap one level down, the settlement read with its TLC count first and each TLC out of the wire's order, so two
 more specs do the same over the settlement's members and over a TLC's, and a third refuses at the count an oversized list
 whose TLCs would refuse too.
+
+The watchtower's decoder, `decodeWatchtowerSigningStatus`, was broken the same way (`test/tests/protocol`, still 100% on all
+four metrics):
+
+| Mutation                                   | Tests that failed |
+| ------------------------------------------ | ----------------- |
+| The request id is read at 31 bytes         | 64                |
+| A refusal escapes as the wire's error      | 55                |
+| A TLC purpose is refused by its tag        | 41                |
+| A settlement purpose is read as a TLC's    | 8                 |
+| Any purpose tag reads as a TLC's           | 7                 |
+| The TLC key number bound is one lower      | 4                 |
+| NoSignatureRequired is read as a request   | 3                 |
+| The TLC key number bound is one higher     | 3                 |
+| The transaction is read before the purpose | 1                 |
+| The content is read before the request id  | 1                 |
 
 ### The readers it relies on
 

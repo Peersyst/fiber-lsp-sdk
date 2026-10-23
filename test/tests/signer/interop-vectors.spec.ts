@@ -3,13 +3,13 @@ import { bytesToHex, hexToBytes } from "@noble/hashes/utils.js";
 import { Session, nonceAggregate } from "@scure/btc-signer/musig2.js";
 import { deriveChannelKeys, pubkeyOf } from "../../../src/derivation/fiber-scheme";
 import type { ChannelSigningRequest } from "../../../src/protocol";
-import { decodeChannelSigningStatus } from "../../../src/protocol";
+import { decodeChannelSigningStatus, decodeWatchtowerSigningStatus } from "../../../src/protocol";
 import type { DispatchOutcome } from "../../../src/signer";
-import { computeSigningMessage, getPublicNonce, partialSign } from "../../../src/signer";
+import { computeSigningMessage, getPublicNonce, partialSign, signOnchain } from "../../../src/signer";
 import { loadInteropVectors } from "../../utils/interop-vectors";
 import { openSigningChannel, signingDeviceKeys } from "../../utils/signing-channel";
-import type { SigningCaseVector } from "../../utils/signing-vectors";
-import { loadSigningVectors, signingStatusField } from "../../utils/signing-vectors";
+import type { SigningCaseVector, SigningWatchtowerSpendVector } from "../../utils/signing-vectors";
+import { loadSigningVectors, signingStatusField, watchtowerStatusField } from "../../utils/signing-vectors";
 
 // The jest half of the musig loop; `verify-ts` aggregates it under fiber's crate. Aggregating here is impossible: fiber's
 // `SecNonceBuilder` omits the public key scure's `nonceGen` takes, so the remote secret nonce cannot be regenerated.
@@ -59,6 +59,8 @@ describe("signing interop vectors", () => {
 
     type DeviceHalf = { name: string; public_nonce: string; partial_signature: string };
 
+    type OnchainSignature = { name: string; signature: string };
+
     function requestOf(kase: SigningCaseVector): ChannelSigningRequest {
         const status = decodeChannelSigningStatus(signingStatusField(kase));
         if (status.kind !== "required") throw new Error(`${kase.name} asks for no signature`);
@@ -89,6 +91,14 @@ describe("signing interop vectors", () => {
         return { name: kase.name, public_nonce: publicNonce, partial_signature: bytesToHex(signed.partialSignature) };
     }
 
+    function onchainSignatureOf(spend: SigningWatchtowerSpendVector): OnchainSignature {
+        const status = decodeWatchtowerSigningStatus(watchtowerStatusField(spend));
+        if (status.kind !== "required") throw new Error(`${spend.name} asks for no signature`);
+        return { name: spend.name, signature: bytesToHex(signOnchain(keys, status.purpose, status.transaction)) };
+    }
+
+    const watchtowerSpends = vectors.watchtower.views.flatMap((view) => view.spends);
+
     it("signs with the funding key the vectors name for the device", () => {
         expect(bytesToHex(pubkeyOf(keys.fundingKey))).toBe(vectors.device.funding_pubkey);
     });
@@ -107,13 +117,14 @@ describe("signing interop vectors", () => {
         expect(half.partial_signature).toBe(kase.expected.partial_signature);
     });
 
-    // The Rust half's input, every case once. See interop/README.md.
+    // The Rust half's input, every case and every watchtower spend once. See interop/README.md.
     const signingOutPath = process.env.INTEROP_SIGNING_OUT;
     if (signingOutPath) {
         it("emits the device half of every case for the rust half", async () => {
             const cases: DeviceHalf[] = [];
             for (const kase of vectors.cases) cases.push(await deviceHalfOf(kase));
-            writeFileSync(signingOutPath, `${JSON.stringify({ cases }, null, 2)}\n`);
+            const watchtower = watchtowerSpends.map(onchainSignatureOf);
+            writeFileSync(signingOutPath, `${JSON.stringify({ cases, watchtower }, null, 2)}\n`);
         });
     }
 });

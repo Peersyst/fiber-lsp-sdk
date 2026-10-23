@@ -1,4 +1,4 @@
-import type { TlcDirection, TlcHashAlgorithm } from "../common";
+import type { Script, TlcDirection, TlcHashAlgorithm, Transaction } from "../common";
 import type { NonceContext } from "../derivation";
 import type { ChannelAnnouncementInput, ClosingTxInput, CommitmentLockLayout, CommitmentTxInput, RevocationInput } from "../digest";
 import type {
@@ -29,7 +29,15 @@ export type NonceCounter = "local" | "remote";
 export type SigningLane = (typeof SIGNING_LANES)[number];
 
 /**
- * The last commitment signed in a view: its version floor, and the replacement a revocation needs.
+ * Lowercase hex: the molecule `CellOutput` and the data.
+ */
+export type RecordedCell = {
+    output: string;
+    outputData: string;
+};
+
+/**
+ * The last commitment signed in a view: its version floor, the replacement a revocation needs, and the cell a watchtower spends.
  */
 export type SignedCommitmentRecord = {
     commitmentNumber: number;
@@ -38,6 +46,64 @@ export type SignedCommitmentRecord = {
      * adds the funding lock's cell deps.
      */
     txHash: string;
+    /**
+     * Absent, with `settlementWitness`, from a commitment signed before the record kept them: no watchtower spend starts there.
+     */
+    source?: RecordedCell;
+    /**
+     * Lowercase hex; the cell's lock args carry its blake160.
+     */
+    settlementWitness?: string;
+};
+
+/**
+ * The remote commitment signed before the last one, which the peer may still broadcast and fiber's watchtower settles.
+ */
+export type PreviousRemoteCommitmentRecord = {
+    commitmentNumber: number;
+    source: RecordedCell;
+    /**
+     * Lowercase hex.
+     */
+    settlementWitness: string;
+};
+
+export type WatchtowerKeyPurpose = { kind: "settlement" } | { kind: "tlc"; commitmentNumber: number };
+
+/**
+ * A watchtower spend the device claimed, one per commitment and unlock: a later request for both replaces it while it is unsigned.
+ */
+export type WatchtowerSpendRecord = {
+    /**
+     * Lowercase hex.
+     */
+    requestId: string;
+    purpose: WatchtowerKeyPurpose;
+    /**
+     * The view whose commitment the spend descends from.
+     */
+    view: PolicyView;
+    commitmentNumber: number;
+    /**
+     * The unlocked TLC's settlement entry, lowercase hex, `null` for the device's balance.
+     */
+    tlcEntry: string | null;
+    /**
+     * CKB's `calc_tx_hash`, lowercase hex: what tells a repeat of the same spend.
+     */
+    txHash: string;
+    /**
+     * The commitment lock cell the spend leaves at output 0, `null` once no party is left to settle.
+     */
+    remainder: RecordedCell | null;
+    /**
+     * Lowercase hex, `null` until the signer records it.
+     */
+    signature: string | null;
+    /**
+     * Set once fiber answers the submission of its signature `Applied` or `AlreadyApplied`.
+     */
+    applied: boolean;
 };
 
 export type RevocationEvidence = {
@@ -77,6 +143,10 @@ export type ChannelPolicyRecord = {
     nonceReuse: Partial<Record<SignSlot, NonceReuseEntry>>;
     commitmentHashes: Partial<Record<PolicyView, SignedCommitmentRecord>>;
     /**
+     * Absent until a remote commitment is signed after one the record kept the cell of.
+     */
+    previousRemoteCommitment?: PreviousRemoteCommitmentRecord;
+    /**
      * Ascending by version, upserted by version.
      */
     revocations: RevocationEvidence[];
@@ -85,6 +155,10 @@ export type ChannelPolicyRecord = {
      * One per commitment: the two may list different TLCs.
      */
     views: Record<PolicyView, PolicyViewSnapshot>;
+    /**
+     * In the order claimed, one per request and one per commitment and unlock; absent until the first.
+     */
+    watchtowerSpends?: WatchtowerSpendRecord[];
 };
 
 export type FirstSightChannelPin = (typeof FIRST_SIGHT_CHANNEL_PINS)[number];
@@ -261,12 +335,39 @@ export type PolicyVerdict = SignSlotRef & {
     status: "fresh" | "already-signed" | "reused";
 };
 
+/**
+ * What the host lets the device sign a watchtower's spend for.
+ */
+export type WatchtowerApproval = {
+    destination: Script;
+    /**
+     * Decimal shannons: how far below what the unlock releases the destination may be paid.
+     */
+    maxFeeShannons: string;
+};
+
 export type PolicyEngineOptions = {
     /**
      * `refuse` unless set.
      */
     nonceReuse?: NonceReuseMode;
+    watchtower?: WatchtowerApproval;
 };
+
+export type WatchtowerSpendRequest = {
+    requestId: Uint8Array;
+    purpose: WatchtowerKeyPurpose;
+    /**
+     * As fiber's watchtower built it, the unlock's signature still 65 zero bytes.
+     */
+    transaction: Transaction;
+};
+
+/**
+ * A repeat carries its recorded signature, `null` if none was; `unclaimed` passed the rules on an unlock the record signed already.
+ */
+export type WatchtowerSpendVerdict =
+    { status: "fresh" } | { status: "already-signed"; signature: Uint8Array | null } | { status: "unclaimed" };
 
 /**
  * The terms no signing request states, pinned by the host from the node's `opening_context`.

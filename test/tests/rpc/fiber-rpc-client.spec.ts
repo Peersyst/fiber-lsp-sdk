@@ -15,6 +15,7 @@ import {
     toRpcSigningStatusResult,
     toRpcSubmissionResult,
     toSubmitChannelSignatureParams,
+    toSubmitWatchtowerSignatureParams,
     withoutNulls,
 } from "../../utils/rpc-typed";
 import { loadRpcVectors } from "../../utils/rpc-vectors";
@@ -24,6 +25,8 @@ const vectors = loadRpcVectors();
 const {
     get_channel_signing_status: getStatus,
     submit_channel_signature: submit,
+    get_watchtower_signing_status: getWatchtowerStatus,
+    submit_watchtower_signature: submitWatchtower,
     lsp_get_tenant_registry_nonce: getNonce,
     lsp_register_tenant: register,
 } = vectors.methods;
@@ -378,6 +381,37 @@ describe("FiberRpcClient", () => {
             expect(error).toMatchObject({ method: "submit_channel_signature", path: "response.result.type" });
         });
 
+        it.each(getWatchtowerStatus.results.map((entry) => [entry.name, entry] as const))(
+            "reads a channel's watchtower signing status with %s, sending the method and the vector's params",
+            async (_, entry) => {
+                const params = caseOf(getWatchtowerStatus.params, "channel id");
+                const mock = answering(entry.json);
+                await expect(clientOf(mock).getWatchtowerSigningStatus(toRpcChannelIdParams(params.values))).resolves.toEqual(
+                    toRpcSigningStatusResult(entry.values),
+                );
+                expect(sent(mock)).toEqual({ jsonrpc: "2.0", id: 1, method: "get_watchtower_signing_status", params: [params.json] });
+            },
+        );
+
+        it.each(submitWatchtower.results.map((entry) => [entry.name, entry] as const))(
+            "submits a watchtower signature, reading the %s result",
+            async (_, entry) => {
+                const params = caseOf(submitWatchtower.params, "recoverable signature");
+                const mock = answering(entry.json);
+                await expect(clientOf(mock).submitWatchtowerSignature(toSubmitWatchtowerSignatureParams(params.values))).resolves.toBe(
+                    toRpcSubmissionResult(entry.values),
+                );
+                expect(sent(mock)).toEqual({ jsonrpc: "2.0", id: 1, method: "submit_watchtower_signature", params: [params.json] });
+            },
+        );
+
+        it("names the field of a watchtower submission result it cannot read", async () => {
+            const params = toSubmitWatchtowerSignatureParams(caseOf(submitWatchtower.params, "recoverable signature").values);
+            const error = await rejection(clientOf(answering({ type: "Rejected" })).submitWatchtowerSignature(params));
+            expect(error).toBeInstanceOf(RpcResponseError);
+            expect(error).toMatchObject({ method: "submit_watchtower_signature", path: "response.result.type" });
+        });
+
         it.each<[string, (client: FiberRpcClient) => Promise<unknown>]>([
             ["getChannelSigningStatus", (client) => client.getChannelSigningStatus({ channelId: "0x11" })],
             [
@@ -386,6 +420,15 @@ describe("FiberRpcClient", () => {
                     client.submitChannelSignature({
                         ...toSubmitChannelSignatureParams(caseOf(submit.params, "with next material").values),
                         partialSignature: new Uint8Array(31),
+                    }),
+            ],
+            ["getWatchtowerSigningStatus", (client) => client.getWatchtowerSigningStatus({ channelId: "0x11" })],
+            [
+                "submitWatchtowerSignature",
+                (client) =>
+                    client.submitWatchtowerSignature({
+                        ...toSubmitWatchtowerSignatureParams(caseOf(submitWatchtower.params, "recoverable signature").values),
+                        signature: new Uint8Array(64),
                     }),
             ],
         ])("%s refuses params it cannot write before sending anything", async (_, run) => {
@@ -401,6 +444,14 @@ describe("FiberRpcClient", () => {
                 (client) =>
                     client.submitChannelSignature(toSubmitChannelSignatureParams(caseOf(submit.params, "with next material").values)),
             ],
+            ["get_watchtower_signing_status", (client) => client.getWatchtowerSigningStatus({ channelId: CHANNEL_ID })],
+            [
+                "submit_watchtower_signature",
+                (client) =>
+                    client.submitWatchtowerSignature(
+                        toSubmitWatchtowerSignatureParams(caseOf(submitWatchtower.params, "recoverable signature").values),
+                    ),
+            ],
         ])("%s surfaces the node's refusal as an RpcError", async (method, run) => {
             const error = await rejection(run(clientOf(refusing(-32000, "no pending signature request"))));
             expect(error).toBeInstanceOf(RpcError);
@@ -413,6 +464,14 @@ describe("FiberRpcClient", () => {
                 "submit_channel_signature",
                 (client) =>
                     client.submitChannelSignature(toSubmitChannelSignatureParams(caseOf(submit.params, "with next material").values)),
+            ],
+            ["get_watchtower_signing_status", (client) => client.getWatchtowerSigningStatus({ channelId: CHANNEL_ID })],
+            [
+                "submit_watchtower_signature",
+                (client) =>
+                    client.submitWatchtowerSignature(
+                        toSubmitWatchtowerSignatureParams(caseOf(submitWatchtower.params, "recoverable signature").values),
+                    ),
             ],
         ])("%s surfaces a fetch that rejects as an RpcTransportError", async (method, run) => {
             const cause = new TypeError("fetch failed");

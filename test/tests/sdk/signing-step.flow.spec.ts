@@ -1,38 +1,38 @@
 import { bytesToHex, hexToBytes } from "@noble/hashes/utils.js";
 import type { Script } from "../../../src/common";
-import { moleculeScript } from "../../../src/common";
-import type { ChannelPolicyRecord, NonceReuseMode, PolicyChannelTerms } from "../../../src/policy";
-import { CHANNEL_RECORD_KEY_PREFIX, PolicyEngine, SignerStore } from "../../../src/policy";
+import { blake160, moleculeScript } from "../../../src/common";
+import { computeTxMessage, readCommitmentLockSettlementHash } from "../../../src/digest";
+import type { ChannelPolicyRecord, NonceReuseMode, PolicyView } from "../../../src/policy";
+import { CHANNEL_RECORD_KEY_PREFIX, POLICY_VIEWS } from "../../../src/policy";
 import type { SubmitChannelSignatureParams } from "../../../src/rpc";
 import { FiberRpcClient, RpcError } from "../../../src/rpc";
-import type { SdkEvent } from "../../../src/sdk";
-import { ActivityPoller, buildChannelSigningStep } from "../../../src/sdk";
-import { SignerDispatch, buildNextMaterial, getPublicNonce } from "../../../src/signer";
-import { TimerMock } from "../../mocks/common";
+import { buildNextMaterial, getPublicNonce } from "../../../src/signer";
+import { decodeMoleculeCellOutput } from "../../../src/wire";
 import { InMemorySignerStorage } from "../../mocks/policy";
-import { flush } from "../../utils/flush";
-import { signingDeviceKeys, signingPeerKeys } from "../../utils/signing-channel";
+import { signingDeviceKeys } from "../../utils/signing-channel";
 import { forgetSecondSession } from "../../utils/nonce-cap-bypass";
 import { loadSigningVectors } from "../../utils/signing-vectors";
-import type { TenantNodePayment } from "../../utils/tenant-node";
-import { InMemoryTenantNode, tenantNodeChannelOf } from "../../utils/tenant-node";
+import { writesOf } from "../../utils/step-run";
+import type { TenantDevice, TenantFlow } from "../../utils/tenant-flow";
+import {
+    CHANNEL,
+    CHANNEL_ID,
+    CHANNEL_INDEX,
+    OTHER_CHANNEL_ID,
+    TENANT_NODE_URL,
+    methods,
+    openChannel,
+    post,
+    recordOf,
+    start,
+    tenantDevice,
+    tenantNode,
+    tick,
+    ticks,
+} from "../../utils/tenant-flow";
+import type { InMemoryTenantNode, TenantNodePayment } from "../../utils/tenant-node";
 
 const vectors = loadSigningVectors();
-const CHANNEL = tenantNodeChannelOf(vectors);
-const CHANNEL_ID = CHANNEL.channelId;
-const CHANNEL_INDEX = vectors.device.channel_index;
-const OTHER_CHANNEL_ID = `0x${"2e".repeat(32)}`;
-// What the user pays in, reserve included.
-const FUNDED = (CHANNEL.localShannons + CHANNEL.localReservedCkbShannons).toString();
-const TERMS: PolicyChannelTerms = {
-    commitmentFeeRate: CHANNEL.commitmentFeeRate,
-    remoteReservedCkbShannons: CHANNEL.remoteReservedCkbShannons.toString(),
-    liquidCapacityShannons: (CHANNEL.localShannons + CHANNEL.remoteShannons).toString(),
-};
-const URL = "http://127.0.0.1:8227";
-const INTERVAL_MS = 5_000;
-const STEP_TIMEOUT_MS = 60_000;
-
 const SIGNED_TICK = ["list_channels", "get_channel_signing_status", "submit_channel_signature"];
 const UNSIGNED_TICK = ["list_channels", "get_channel_signing_status"];
 
@@ -65,83 +65,24 @@ const SENT_AGAIN_BUDGET = "900000000";
 // The bound 20 bytes of SENT's hash, another tail.
 const SENT_TWIN_HASH = "b570807ecd66dbcebb2947e7406032a30e8cf3aa0000000000000000000000ff";
 
-type Device = {
-    storage: InMemorySignerStorage;
-    store: SignerStore;
-    policy: PolicyEngine;
-    dispatch: SignerDispatch;
-    poller: ActivityPoller;
-    timer: TimerMock;
-    events: SdkEvent[];
-};
-
-type Flow = { node: InMemoryTenantNode; device: Device };
-
-function tenantNode(): InMemoryTenantNode {
-    return new InMemoryTenantNode({ channel: CHANNEL, deviceKeys: signingDeviceKeys(vectors), peerKeys: signingPeerKeys(vectors) });
+function device(node: InMemoryTenantNode, nonceReuse: NonceReuseMode, storage: InMemorySignerStorage): TenantDevice {
+    return tenantDevice(node, { policy: { nonceReuse }, watchtower: false, storage });
 }
 
-// As the facade wires it.
-function device(node: InMemoryTenantNode, nonceReuse: NonceReuseMode, storage = new InMemorySignerStorage()): Device {
-    const store = new SignerStore(storage);
-    const policy = new PolicyEngine(store, { nonceReuse });
-    const dispatch = new SignerDispatch({
-        masterSeed: hexToBytes(vectors.device.master_seed),
-        commitmentLock: CHANNEL.commitmentLock,
-        fundingLockCellDepsCount: CHANNEL.fundingLockCellDepsCount,
-        policy,
-    });
-    const events: SdkEvent[] = [];
-    const emit = (event: SdkEvent): void => {
-        events.push(event);
-    };
-    const timer = new TimerMock();
-    const step = buildChannelSigningStep({ rpc: new FiberRpcClient({ url: URL, fetch: node.fetch }), store, dispatch, emit });
-    const poller = new ActivityPoller({ timer, intervalMs: INTERVAL_MS, stepTimeoutMs: STEP_TIMEOUT_MS, steps: [step], emit });
-    return { storage, store, policy, dispatch, poller, timer, events };
-}
-
-function flow(nonceReuse: NonceReuseMode): Flow {
+function flow(nonceReuse: NonceReuseMode): TenantFlow {
     const node = tenantNode();
-    return { node, device: device(node, nonceReuse) };
+    return { node, device: device(node, nonceReuse, new InMemorySignerStorage()) };
 }
 
-async function open(h: Flow, first: "CompleteReceivedCommitment" | "SendCommitmentSigned" = "CompleteReceivedCommitment"): Promise<void> {
-    const pending = h.device.dispatch.prepareChannelOpen(CHANNEL_INDEX, FUNDED, CHANNEL.localCloseScript);
-    const channelId = h.node.openTenantChannel(pending.material, first);
-    await h.device.policy.registerChannel(channelId, pending.channelIndex, pending.fundedShannons, pending.localCloseScript);
-    await h.device.policy.pinChannelTerms(channelId, TERMS);
-}
-
-async function start(device: Device): Promise<void> {
-    device.poller.start();
-    await flush();
-}
-
-async function tick(device: Device, count = 1): Promise<void> {
-    for (let index = 0; index < count; index++) {
-        device.timer.advance(INTERVAL_MS);
-        await flush();
-    }
-}
-
-async function openedUnderAllow(): Promise<Flow> {
+async function openedUnderAllow(): Promise<TenantFlow> {
     const h = flow("allow");
-    await open(h);
+    await openChannel(h, "CompleteReceivedCommitment");
     await start(h.device);
     await tick(h.device);
     return h;
 }
 
-function methods(h: Flow): string[] {
-    return h.node.calls.map((call) => call.method);
-}
-
-function ticks(shape: string[], count: number): string[] {
-    return Array.from({ length: count }, () => shape).flat();
-}
-
-function signings(h: Flow, device = h.device): string[] {
+function signings(h: TenantFlow, device = h.device): string[] {
     const served = h.node.served;
     return device.events.map((event) => {
         if (event.type !== "SIGNING") return event.type === "ERROR" ? `ERROR ${event.error.code}` : event.type;
@@ -152,33 +93,51 @@ function signings(h: Flow, device = h.device): string[] {
     });
 }
 
-function requests(h: Flow): string[] {
+function requests(h: TenantFlow): string[] {
     return h.node.served.map((request) => `${request.transition} ${request.slot} ${request.answers.join("+") || "unanswered"}`);
 }
 
-function refusalOf(h: Flow): string {
+function refusalOf(h: TenantFlow): string {
     const last = h.device.events.at(-1);
     if (last?.type !== "SIGNING" || last.outcome !== "refused") throw new Error("the last event is no refusal");
     return last.error.message;
 }
 
-function messageOf(h: Flow, index: number): string {
+function messageOf(h: TenantFlow, index: number): string {
     const request = h.node.served[index];
     if (request === undefined) throw new Error(`the node served no request ${index}`);
     return request.message;
 }
 
-async function recordOf(device: Device): Promise<ChannelPolicyRecord> {
-    const record = await device.store.getChannelRecord(CHANNEL_INDEX);
-    if (record === null) throw new Error("the channel holds no record");
-    return record;
+// Each view's last commitment, once its kept cell is the one the kept message signs.
+function signedCommitmentsOf(record: ChannelPolicyRecord): Partial<Record<PolicyView, { commitmentNumber: number; txHash: string }>> {
+    const signed: Partial<Record<PolicyView, { commitmentNumber: number; txHash: string }>> = {};
+    for (const view of POLICY_VIEWS) {
+        const entry = record.commitmentHashes[view];
+        if (entry === undefined) continue;
+        expect(Object.keys(entry)).toEqual(["commitmentNumber", "txHash", "source", "settlementWitness"]);
+        const { commitmentNumber, txHash, source, settlementWitness } = entry;
+        if (source === undefined || settlementWitness === undefined) throw new Error(`the ${view} commitment keeps no cell`);
+        expect(Object.keys(source)).toEqual(["output", "outputData"]);
+        expect(source.outputData).toBe("");
+        const cell = decodeMoleculeCellOutput({ value: `0x${source.output}`, path: `${view}.source.output` });
+        const signedTx = {
+            version: 0,
+            cellDeps: [],
+            headerDeps: [],
+            inputs: [{ since: 0n, previousOutput: CHANNEL.fundingOutPoint }],
+            outputs: [cell],
+            outputsData: [new Uint8Array(0)],
+            witnesses: [],
+        };
+        expect(bytesToHex(computeTxMessage(signedTx))).toBe(txHash);
+        expect(bytesToHex(blake160(hexToBytes(settlementWitness)))).toBe(bytesToHex(readCommitmentLockSettlementHash(cell.lock.args)));
+        signed[view] = { commitmentNumber, txHash };
+    }
+    return signed;
 }
 
-function writesOf(device: Device): string[] {
-    return device.storage.ops.filter((op) => op.startsWith("set "));
-}
-
-async function expectRefused(h: Flow, served: string, refusal: string): Promise<void> {
+async function expectRefused(h: TenantFlow, served: string, refusal: string): Promise<void> {
     const before = await recordOf(h.device);
     const sent = h.node.calls.length;
     h.device.storage.ops.length = 0;
@@ -205,7 +164,7 @@ describe("the signing step over the tenant node", () => {
             });
             const record = await recordOf(h.device);
             expect(record.lastSignedCommitmentNumbers).toEqual({ "COMMITMENT:local": 1 });
-            expect(record.commitmentHashes).toEqual({
+            expect(signedCommitmentsOf(record)).toEqual({
                 local: { commitmentNumber: 1, txHash: messageOf(h, 0) },
                 remote: { commitmentNumber: 1, txHash: messageOf(h, 1) },
             });
@@ -215,7 +174,7 @@ describe("the signing step over the tenant node", () => {
 
         it("signs the sent commitment first when fiber sends before the peer's arrives, the received one second", async () => {
             const h = flow("allow");
-            await open(h, "SendCommitmentSigned");
+            await openChannel(h, "SendCommitmentSigned");
             await start(h.device);
             await tick(h.device);
             expect(methods(h)).toEqual(ticks(SIGNED_TICK, 2));
@@ -224,7 +183,7 @@ describe("the signing step over the tenant node", () => {
             expect(h.node.counters).toEqual({ local: 2, remote: 2 });
             const record = await recordOf(h.device);
             expect(record.lastSignedCommitmentNumbers).toEqual({ "COMMITMENT:local": 1 });
-            expect(record.commitmentHashes).toEqual({
+            expect(signedCommitmentsOf(record)).toEqual({
                 remote: { commitmentNumber: 1, txHash: messageOf(h, 0) },
                 local: { commitmentNumber: 1, txHash: messageOf(h, 1) },
             });
@@ -282,7 +241,7 @@ describe("the signing step over the tenant node", () => {
             });
             const record = await recordOf(h.device);
             expect(record.lastSignedCommitmentNumbers).toEqual({ "COMMITMENT:local": 4, "REVOKE:local": 3, "REVOKE:remote": 3 });
-            expect(record.commitmentHashes).toEqual({
+            expect(signedCommitmentsOf(record)).toEqual({
                 local: { commitmentNumber: 3, txHash: messageOf(h, 8) },
                 remote: { commitmentNumber: 3, txHash: messageOf(h, 6) },
             });
@@ -348,7 +307,7 @@ describe("the signing step over the tenant node", () => {
             expect(h.node.counters).toEqual({ local: 3, remote: 3 });
             const record = await recordOf(h.device);
             expect(record.lastSignedCommitmentNumbers).toEqual({ "COMMITMENT:local": 2, "REVOKE:local": 2, "REVOKE:remote": 2 });
-            expect(record.commitmentHashes).toEqual({
+            expect(signedCommitmentsOf(record)).toEqual({
                 local: { commitmentNumber: 2, txHash: messageOf(h, 2) },
                 remote: { commitmentNumber: 2, txHash: messageOf(h, 4) },
             });
@@ -395,7 +354,7 @@ describe("the signing step over the tenant node", () => {
             expect(h.node.counters).toEqual({ local: 3, remote: 4 });
             const record = await recordOf(h.device);
             expect(record.lastSignedCommitmentNumbers).toEqual({ "COMMITMENT:local": 3, "REVOKE:local": 2, "REVOKE:remote": 3 });
-            expect(record.commitmentHashes).toEqual({
+            expect(signedCommitmentsOf(record)).toEqual({
                 remote: { commitmentNumber: 2, txHash: messageOf(h, 2) },
                 local: { commitmentNumber: 3, txHash: messageOf(h, 6) },
             });
@@ -410,11 +369,11 @@ describe("the signing step over the tenant node", () => {
     });
 
     describe("past Fiber's nonce stall, under a test-only bypass of the cap", () => {
-        function bypassing(h: Flow): void {
+        function bypassing(h: TenantFlow): void {
             h.node.bypassNonceCap((slot) => forgetSecondSession(h.device.storage, CHANNEL_INDEX, slot));
         }
 
-        async function sentToTheEnd(h: Flow): Promise<void> {
+        async function sentToTheEnd(h: TenantFlow): Promise<void> {
             bypassing(h);
             await h.device.policy.recordDebitIntent(SENT.paymentHash, SENT_BUDGET);
             h.node.sendPayment(SENT);
@@ -423,7 +382,7 @@ describe("the signing step over the tenant node", () => {
             await tick(h.device, 4);
         }
 
-        async function receivedTwice(h: Flow): Promise<void> {
+        async function receivedTwice(h: TenantFlow): Promise<void> {
             bypassing(h);
             h.node.receivePayment(RECEIVED);
             await tick(h.device, 4);
@@ -463,7 +422,7 @@ describe("the signing step over the tenant node", () => {
             expect(h.node.counters).toEqual({ local: 4, remote: 4 });
             const record = await recordOf(h.device);
             expect(record.lastSignedCommitmentNumbers).toEqual({ "COMMITMENT:local": 3, "REVOKE:local": 3, "REVOKE:remote": 3 });
-            expect(record.commitmentHashes).toEqual({
+            expect(signedCommitmentsOf(record)).toEqual({
                 local: { commitmentNumber: 3, txHash: messageOf(h, 6) },
                 remote: { commitmentNumber: 3, txHash: messageOf(h, 8) },
             });
@@ -490,7 +449,7 @@ describe("the signing step over the tenant node", () => {
             expect(signings(h).filter((line) => line.includes("refused"))).toEqual([]);
             const record = await recordOf(h.device);
             expect(record.lastSignedCommitmentNumbers).toEqual({ "COMMITMENT:local": 4, "REVOKE:local": 3, "REVOKE:remote": 3 });
-            expect(record.commitmentHashes).toEqual({
+            expect(signedCommitmentsOf(record)).toEqual({
                 local: { commitmentNumber: 3, txHash: messageOf(h, 6) },
                 remote: { commitmentNumber: 3, txHash: messageOf(h, 8) },
             });
@@ -526,7 +485,7 @@ describe("the signing step over the tenant node", () => {
             expect(h.node.counters).toEqual({ local: 6, remote: 6 });
             const record = await recordOf(h.device);
             expect(record.lastSignedCommitmentNumbers).toEqual({ "COMMITMENT:local": 6, "REVOKE:local": 5, "REVOKE:remote": 5 });
-            expect(record.commitmentHashes).toEqual({
+            expect(signedCommitmentsOf(record)).toEqual({
                 local: { commitmentNumber: 5, txHash: messageOf(h, 16) },
                 remote: { commitmentNumber: 5, txHash: messageOf(h, 14) },
             });
@@ -567,7 +526,7 @@ describe("the signing step over the tenant node", () => {
             expect(h.node.counters).toEqual({ local: 8, remote: 8 });
             const record = await recordOf(h.device);
             expect(record.lastSignedCommitmentNumbers).toEqual({ "COMMITMENT:local": 7, "REVOKE:local": 7, "REVOKE:remote": 7 });
-            expect(record.commitmentHashes).toEqual({
+            expect(signedCommitmentsOf(record)).toEqual({
                 local: { commitmentNumber: 7, txHash: messageOf(h, 22) },
                 remote: { commitmentNumber: 7, txHash: messageOf(h, 24) },
             });
@@ -585,8 +544,8 @@ describe("the signing step over the tenant node", () => {
     describe("a crash between signing and submitting", () => {
         it("signs the same bytes again after the restart, and takes the node's AlreadyApplied as success", async () => {
             const node = tenantNode();
-            const crashed = device(node, "allow");
-            await open({ node, device: crashed });
+            const crashed = device(node, "allow", new InMemorySignerStorage());
+            await openChannel({ node, device: crashed }, "CompleteReceivedCommitment");
             node.parkNextSubmission();
             await start(crashed);
             crashed.poller.stop();
@@ -608,7 +567,7 @@ describe("the signing step over the tenant node", () => {
             expect(node.counters).toEqual({ local: 2, remote: 2 });
             const record = await recordOf(restarted);
             expect(record.lastSignedCommitmentNumbers).toEqual({ "COMMITMENT:local": 1 });
-            expect(record.commitmentHashes).toEqual({
+            expect(signedCommitmentsOf(record)).toEqual({
                 local: { commitmentNumber: 1, txHash: messageOf(h, 0) },
                 remote: { commitmentNumber: 1, txHash: messageOf(h, 1) },
             });
@@ -627,7 +586,7 @@ describe("the signing step over the tenant node", () => {
             expect(h.node.counters).toEqual({ local: 2, remote: 2 });
             const record = await recordOf(h.device);
             expect(record.lastSignedCommitmentNumbers).toEqual({ "COMMITMENT:local": 2 });
-            expect(record.commitmentHashes).toEqual({
+            expect(signedCommitmentsOf(record)).toEqual({
                 local: { commitmentNumber: 1, txHash: messageOf(h, 0) },
                 remote: { commitmentNumber: 1, txHash: messageOf(h, 1) },
             });
@@ -660,7 +619,7 @@ describe("the signing step over the tenant node", () => {
 
     describe("a received revocation whose evidence write failed", () => {
         // The receive's add round up to its CompleteReceivedRevokeAndAck, whose claim lands and evidence write throws.
-        async function failedEvidence(): Promise<Flow> {
+        async function failedEvidence(): Promise<TenantFlow> {
             const h = await openedUnderAllow();
             h.node.receivePayment(RECEIVED);
             await tick(h.device, 3);
@@ -712,14 +671,14 @@ describe("the signing step over the tenant node", () => {
             const record = await recordOf(h.device);
             expect(record.lastSignedCommitmentNumbers).toEqual({ "COMMITMENT:local": 3, "REVOKE:local": 2, "REVOKE:remote": 2 });
             expect(record.revocations.map(({ version, forRemote }) => ({ version, forRemote }))).toEqual([{ version: 1, forRemote: true }]);
-            expect(record.commitmentHashes.remote).toEqual({ commitmentNumber: 3, txHash: messageOf(h, 6) });
+            expect(signedCommitmentsOf(record).remote).toEqual({ commitmentNumber: 3, txHash: messageOf(h, 6) });
         });
     });
 
     describe("the controls", () => {
         it("refuses a second message on a slot under refuse: the open's second commitment", async () => {
             const h = flow("refuse");
-            await open(h);
+            await openChannel(h, "CompleteReceivedCommitment");
             await start(h.device);
             await expectRefused(h, "SendCommitmentSigned Commitment@1", "refused policy_refusal");
             expect(refusalOf(h)).toBe("slot COMMITMENT:1 has already served a different signing session");
@@ -730,7 +689,7 @@ describe("the signing step over the tenant node", () => {
             ]);
             expect(h.node.counters).toEqual({ local: 1, remote: 1 });
             const record = await recordOf(h.device);
-            expect(record.commitmentHashes).toEqual({ local: { commitmentNumber: 1, txHash: messageOf(h, 0) } });
+            expect(signedCommitmentsOf(record)).toEqual({ local: { commitmentNumber: 1, txHash: messageOf(h, 0) } });
             expect(record.nonceReuse).toEqual({});
         });
 
@@ -828,10 +787,10 @@ describe("the signing step over the tenant node", () => {
     });
 
     describe("the node's checks on a submission", () => {
-        async function pendingAnswer(): Promise<{ h: Flow; rpc: FiberRpcClient; valid: SubmitChannelSignatureParams }> {
+        async function pendingAnswer(): Promise<{ h: TenantFlow; rpc: FiberRpcClient; valid: SubmitChannelSignatureParams }> {
             const h = flow("allow");
-            await open(h);
-            const rpc = new FiberRpcClient({ url: URL, fetch: h.node.fetch });
+            await openChannel(h, "CompleteReceivedCommitment");
+            const rpc = new FiberRpcClient({ url: TENANT_NODE_URL, fetch: h.node.fetch });
             const { status } = await rpc.getChannelSigningStatus({ channelId: CHANNEL_ID });
             const outcome = await h.device.dispatch.handle(CHANNEL_ID, status);
             if (outcome.kind !== "signed" || outcome.nextMaterial === null) throw new Error("the open's first request was not signed");
@@ -936,7 +895,7 @@ describe("the signing step over the tenant node", () => {
         it("checks and installs next material sent with a close, which needs none", async () => {
             const h = await openedUnderAllow();
             h.node.shutdown();
-            const rpc = new FiberRpcClient({ url: URL, fetch: h.node.fetch });
+            const rpc = new FiberRpcClient({ url: TENANT_NODE_URL, fetch: h.node.fetch });
             const { status } = await rpc.getChannelSigningStatus({ channelId: CHANNEL_ID });
             const outcome = await h.device.dispatch.handle(CHANNEL_ID, status);
             if (outcome.kind !== "signed") throw new Error("the close was not signed");
@@ -981,7 +940,7 @@ describe("the signing step over the tenant node", () => {
         it("installs only the members of partial next material sent with a close", async () => {
             const h = await openedUnderAllow();
             h.node.shutdown();
-            const rpc = new FiberRpcClient({ url: URL, fetch: h.node.fetch });
+            const rpc = new FiberRpcClient({ url: TENANT_NODE_URL, fetch: h.node.fetch });
             const { status } = await rpc.getChannelSigningStatus({ channelId: CHANNEL_ID });
             const outcome = await h.device.dispatch.handle(CHANNEL_ID, status);
             if (outcome.kind !== "signed") throw new Error("the close was not signed");
@@ -1045,7 +1004,7 @@ describe("the signing step over the tenant node", () => {
 
         it("refuses a submission while no request is pending", async () => {
             const h = await openedUnderAllow();
-            const rpc = new FiberRpcClient({ url: URL, fetch: h.node.fetch });
+            const rpc = new FiberRpcClient({ url: TENANT_NODE_URL, fetch: h.node.fetch });
             const request = h.node.served[0];
             if (request === undefined) throw new Error("the node served no request");
             await expect(
@@ -1068,11 +1027,6 @@ function rawSubmission(answer: { requestId: Uint8Array; partialSignature: Uint8A
         next_material: nextMaterial,
     };
     return { jsonrpc: "2.0", id: 4, method: "submit_channel_signature", params: [params] };
-}
-
-async function post(node: InMemoryTenantNode, body: unknown): Promise<unknown> {
-    const response = await node.fetch(URL, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
-    return JSON.parse(await response.text()) as unknown;
 }
 
 function material(valid: SubmitChannelSignatureParams): NonNullable<SubmitChannelSignatureParams["nextMaterial"]> {

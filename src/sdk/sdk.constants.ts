@@ -1,5 +1,7 @@
 import { COMMITMENT_LOCK_MAINNET, COMMITMENT_LOCK_TESTNET } from "../digest";
 import { STORAGE_KEY_NAMESPACE } from "../policy";
+import type { RpcChannelStateFlag } from "../rpc";
+import { RPC_CALL_FAILED_CODE } from "../rpc";
 import type { SdkNetworkConfig, SdkNetworkName } from "./sdk.types";
 
 export const SDK_NETWORK_NAMES = ["mainnet", "testnet"] as const;
@@ -46,7 +48,22 @@ export const SDK_EVENT_TYPES = [
     "PAYMENT_PENDING",
     "PAYMENT_RECEIVED",
     "SIGNING",
+    "WATCHTOWER_SIGNING",
     "ERROR",
 ] as const;
+
+/**
+ * Fiber deletes the watch row on a cooperative close and on a failed opening, which may hold one since TxComplete: others are polled.
+ */
+export const WATCHTOWER_UNWATCHED_CLOSE_FLAGS = [
+    "COOPERATIVE",
+    "ABANDONED",
+    "FUNDING_ABORTED",
+] as const satisfies readonly RpcChannelStateFlag<"Closed">[];
+
+/**
+ * Fiber's answer while no watch row exists, which `RemoteTxComplete` creates (`rpc/watchtower.rs:386-391`, `event_handler.rs:41-67`).
+ */
+export const WATCHTOWER_UNWATCHED_ERROR = { code: RPC_CALL_FAILED_CODE, message: "watched channel not found" } as const;
 
 export const SDK_ERROR_CODES = ["poll_failed", "clock_before_floor"] as const;

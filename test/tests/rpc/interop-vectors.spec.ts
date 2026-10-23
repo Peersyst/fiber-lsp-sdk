@@ -219,13 +219,18 @@ describe("rpc interop vectors", () => {
         it.each(["get_channel_signing_status", "get_watchtower_signing_status"] as const)(
             "cover NoSignatureRequired on %s, written as its tag",
             (method) => {
-                const results = vectors.methods[method].results;
-                expect(results.map((entry) => entry.values.status)).toContain("NoSignatureRequired");
-                for (const entry of results) {
-                    expect((entry.json as { status: unknown }).status).toEqual({ type: entry.values.status });
-                }
+                const idle = vectors.methods[method].results.filter((entry) => entry.values.status === "NoSignatureRequired");
+                expect(idle).not.toHaveLength(0);
+                for (const entry of idle) expect((entry.json as { status: unknown }).status).toEqual({ type: entry.values.status });
             },
         );
+
+        it("cover SignatureRequired on get_watchtower_signing_status under both key purposes", () => {
+            const purposes = vectors.methods.get_watchtower_signing_status.results.flatMap((entry) =>
+                entry.values.status === "SignatureRequired" ? [entry.values.key_purpose.name] : [],
+            );
+            expect(new Set(purposes)).toEqual(new Set(["Settlement", "Tlc"]));
+        });
 
         it.each(["submit_channel_signature", "submit_watchtower_signature"] as const)(
             "cover both outcomes of %s, and no other",

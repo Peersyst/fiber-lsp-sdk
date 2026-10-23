@@ -1,5 +1,6 @@
 import { SHANNONS_PER_CKB } from "../common";
 import { MAX_COMMITMENT_NUMBER } from "../derivation";
+import { MAX_SETTLEMENT_TLCS } from "../digest";
 
 /**
  * Namespaced: the host may back the storage with a store it also uses for its own keys.
@@ -91,6 +92,16 @@ export const ANNOUNCEMENT_SLOT_NUMBER = 0;
  * The revocation that revokes a version claims the slot one above it, so the chain's last number is never revoked.
  */
 export const MAX_REVOKED_VERSION = MAX_COMMITMENT_NUMBER - 1;
+
+/**
+ * One spend per TLC and one for the balance, in each of the three commitments a watchtower settles.
+ */
+export const MAX_WATCHTOWER_SPENDS = 3 * (MAX_SETTLEMENT_TLCS + 1);
+
+/**
+ * Fiber's device SDK's bound: its watchtower pays one output, and a second one to the same destination is tolerated.
+ */
+export const MAX_WATCHTOWER_DESTINATION_OUTPUTS = 2;
 
 /**
  * Stored format: changing it reopens every slot a device has already served.

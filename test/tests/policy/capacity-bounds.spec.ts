@@ -1,7 +1,7 @@
-import { PolicyRefusalError } from "../../../src/policy";
 import { judgeCapacityBounds } from "../../../src/policy/capacity-bounds";
 import { toChannelAnnouncementInput, toClosingTxInput, toCommitmentTxInput, toRevocationInput } from "../../utils/digest-inputs";
 import { caseOf, loadInteropVectors } from "../../utils/interop-vectors";
+import { policyRefusal } from "../../utils/refusal";
 
 const digest = loadInteropVectors().digest;
 
@@ -16,16 +16,6 @@ const FULL_HASH_COMMITMENT = toCommitmentTxInput(
     digest.remote,
 );
 const FULL_HASH_REVOCATION = toRevocationInput(caseOf(digest.revocation_cases, "ckb, send side, full payment hash"), digest.remote);
-
-function refusalOf(judge: () => unknown): PolicyRefusalError {
-    try {
-        judge();
-    } catch (error) {
-        if (error instanceof PolicyRefusalError) return error;
-        throw error;
-    }
-    throw new Error("expected a policy refusal");
-}
 
 describe("judgeCapacityBounds", () => {
     it.each([
@@ -50,7 +40,7 @@ describe("judgeCapacityBounds", () => {
             ["a revocation", (rate: bigint) => ({ kind: "revocation" as const, input: { ...REVOCATION, commitmentFeeRate: rate } })],
         ])("passes %s whose fee is exactly half the reserve's margin, and refuses one shannon more", (_, operation) => {
             expect(() => judgeCapacityBounds(operation(109_649_124n))).not.toThrow();
-            const refusal = refusalOf(() => judgeCapacityBounds(operation(109_649_125n)));
+            const refusal = policyRefusal(() => judgeCapacityBounds(operation(109_649_125n)));
             expect(refusal.code).toBe("policy_refusal");
             expect(refusal.message).toBe("the commitment fee is 50000001 shannons, above the 50000000 the reserve keeps for it");
         });
@@ -69,7 +59,7 @@ describe("judgeCapacityBounds", () => {
             ],
         ])("reaches the bound one byte sooner for %s under the full-hash layout", (_, fullHash, legacy) => {
             expect(() => judgeCapacityBounds(fullHash(109_409_192n))).not.toThrow();
-            const refusal = refusalOf(() => judgeCapacityBounds(fullHash(109_409_193n)));
+            const refusal = policyRefusal(() => judgeCapacityBounds(fullHash(109_409_193n)));
             expect(refusal.code).toBe("policy_refusal");
             expect(refusal.message).toBe("the commitment fee is 50000001 shannons, above the 50000000 the reserve keeps for it");
             expect(() => judgeCapacityBounds(legacy(109_409_193n))).not.toThrow();
@@ -80,7 +70,7 @@ describe("judgeCapacityBounds", () => {
                 kind: "commitment_tx" as const,
                 input: { ...COMMITMENT, commitmentFeeRate: 109_649_124n, cellDepsCount: 3 },
             };
-            expect(refusalOf(() => judgeCapacityBounds(operation)).message).toBe(
+            expect(policyRefusal(() => judgeCapacityBounds(operation)).message).toBe(
                 "the commitment fee is 54057018 shannons, above the 50000000 the reserve keeps for it",
             );
         });
@@ -107,7 +97,7 @@ describe("judgeCapacityBounds", () => {
                 { tlcs: THREE_TLCS.tlcs.map((tlc, index) => (index === 0 ? { ...tlc, amountShannons: tlc.amountShannons + 1n } : tlc)) },
             ],
         ])("refuses one shannon more in %s than the liquid capacity holds", (_, override) => {
-            const refusal = refusalOf(() => judgeCapacityBounds({ kind: "commitment_tx", input: { ...THREE_TLCS, ...override } }));
+            const refusal = policyRefusal(() => judgeCapacityBounds({ kind: "commitment_tx", input: { ...THREE_TLCS, ...override } }));
             expect(refusal.message).toBe(
                 "the commitment's settlement pays 80500000001 shannons with its TLCs, above the channel's liquid capacity of 80500000000",
             );
@@ -121,7 +111,7 @@ describe("judgeCapacityBounds", () => {
 
         it("refuses a liquid capacity that holds less than the settlement pays", () => {
             const input = { ...COMMITMENT, liquidCapacityShannons: 0n };
-            expect(refusalOf(() => judgeCapacityBounds({ kind: "commitment_tx", input })).message).toBe(
+            expect(policyRefusal(() => judgeCapacityBounds({ kind: "commitment_tx", input })).message).toBe(
                 "the commitment's settlement pays 80500000000 shannons with its TLCs, above the channel's liquid capacity of 0",
             );
         });

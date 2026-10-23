@@ -1,0 +1,132 @@
+import { hexToBytes } from "@noble/hashes/utils.js";
+import type { ChannelPolicyRecord, PolicyChannelTerms, PolicyEngineOptions } from "../../src/policy";
+import { PolicyEngine, SignerStore } from "../../src/policy";
+import type { FetchInit } from "../../src/rpc";
+import { FiberRpcClient } from "../../src/rpc";
+import type { PollStep, SdkEvent } from "../../src/sdk";
+import { ActivityPoller, buildChannelSigningStep, buildWatchtowerSigningStep } from "../../src/sdk";
+import { SignerDispatch } from "../../src/signer";
+import { TimerMock } from "../mocks/common";
+import type { InMemorySignerStorage } from "../mocks/policy";
+import { flush } from "./flush";
+import { signingDeviceKeys, signingPeerKeys } from "./signing-channel";
+import { loadSigningVectors } from "./signing-vectors";
+import { InMemoryTenantNode, tenantNodeChannelOf } from "./tenant-node";
+
+const vectors = loadSigningVectors();
+
+const INTERVAL_MS = 5_000;
+
+const STEP_TIMEOUT_MS = 60_000;
+
+export const TENANT_NODE_URL = "http://127.0.0.1:8227";
+
+export const CHANNEL = tenantNodeChannelOf(vectors);
+
+export const CHANNEL_ID = CHANNEL.channelId;
+
+export const CHANNEL_INDEX = vectors.device.channel_index;
+
+export const OTHER_CHANNEL_ID = `0x${"2e".repeat(32)}`;
+
+// What the user pays in, reserve included.
+export const FUNDED = (CHANNEL.localShannons + CHANNEL.localReservedCkbShannons).toString();
+
+export const TERMS: PolicyChannelTerms = {
+    commitmentFeeRate: CHANNEL.commitmentFeeRate,
+    remoteReservedCkbShannons: CHANNEL.remoteReservedCkbShannons.toString(),
+    liquidCapacityShannons: (CHANNEL.localShannons + CHANNEL.remoteShannons).toString(),
+};
+
+export type TenantDevice = {
+    storage: InMemorySignerStorage;
+    store: SignerStore;
+    policy: PolicyEngine;
+    dispatch: SignerDispatch;
+    poller: ActivityPoller;
+    timer: TimerMock;
+    events: SdkEvent[];
+};
+
+export type TenantFlow = { node: InMemoryTenantNode; device: TenantDevice };
+
+export type TenantDeviceOptions = {
+    policy: PolicyEngineOptions;
+    // The channel signing step polls alone, or the watchtower's after it, as the facade runs both.
+    watchtower: boolean;
+    storage: InMemorySignerStorage;
+};
+
+export function tenantNode(): InMemoryTenantNode {
+    return new InMemoryTenantNode({ channel: CHANNEL, deviceKeys: signingDeviceKeys(vectors), peerKeys: signingPeerKeys(vectors) });
+}
+
+// As the facade wires it.
+export function tenantDevice(node: InMemoryTenantNode, options: TenantDeviceOptions): TenantDevice {
+    const { storage } = options;
+    const store = new SignerStore(storage);
+    const policy = new PolicyEngine(store, options.policy);
+    const dispatch = new SignerDispatch({
+        masterSeed: hexToBytes(vectors.device.master_seed),
+        commitmentLock: CHANNEL.commitmentLock,
+        fundingLockCellDepsCount: CHANNEL.fundingLockCellDepsCount,
+        policy,
+    });
+    const events: SdkEvent[] = [];
+    const emit = (event: SdkEvent): void => {
+        events.push(event);
+    };
+    const timer = new TimerMock();
+    const rpc = new FiberRpcClient({ url: TENANT_NODE_URL, fetch: node.fetch });
+    const steps: PollStep[] = [buildChannelSigningStep({ rpc, store, dispatch, emit })];
+    if (options.watchtower) steps.push(buildWatchtowerSigningStep({ rpc, store, policy, dispatch, emit }));
+    const poller = new ActivityPoller({ timer, intervalMs: INTERVAL_MS, stepTimeoutMs: STEP_TIMEOUT_MS, steps, emit });
+    return { storage, store, policy, dispatch, poller, timer, events };
+}
+
+export async function openChannel(h: TenantFlow, first: "CompleteReceivedCommitment" | "SendCommitmentSigned"): Promise<void> {
+    const pending = h.device.dispatch.prepareChannelOpen(CHANNEL_INDEX, FUNDED, CHANNEL.localCloseScript);
+    const channelId = h.node.openTenantChannel(pending.material, first);
+    await h.device.policy.registerChannel(channelId, pending.channelIndex, pending.fundedShannons, pending.localCloseScript);
+    await h.device.policy.pinChannelTerms(channelId, TERMS);
+}
+
+// The device registers while the node still collaborates on the funding tx, before fiber watches the channel.
+export async function negotiateChannel(h: TenantFlow): Promise<void> {
+    const pending = h.device.dispatch.prepareChannelOpen(CHANNEL_INDEX, FUNDED, CHANNEL.localCloseScript);
+    const channelId = h.node.negotiateTenantChannel(pending.material);
+    await h.device.policy.registerChannel(channelId, pending.channelIndex, pending.fundedShannons, pending.localCloseScript);
+    await h.device.policy.pinChannelTerms(channelId, TERMS);
+}
+
+export async function start(device: TenantDevice): Promise<void> {
+    device.poller.start();
+    await flush();
+}
+
+export async function tick(device: TenantDevice, count = 1): Promise<void> {
+    for (let index = 0; index < count; index++) {
+        device.timer.advance(INTERVAL_MS);
+        await flush();
+    }
+}
+
+export function methods(h: TenantFlow, from = 0): string[] {
+    return h.node.calls.slice(from).map((call) => call.method);
+}
+
+export function ticks<Item>(shape: Item[], count: number): Item[] {
+    return Array.from({ length: count }, () => shape).flat();
+}
+
+export async function recordOf(device: TenantDevice): Promise<ChannelPolicyRecord> {
+    const record = await device.store.getChannelRecord(CHANNEL_INDEX);
+    if (record === null) throw new Error("the channel holds no record");
+    return record;
+}
+
+export async function post(node: InMemoryTenantNode, body: unknown): Promise<unknown> {
+    const init: FetchInit = { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) };
+    const response = await node.fetch(TENANT_NODE_URL, init);
+    return JSON.parse(await response.text()) as unknown;
+}

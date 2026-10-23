@@ -201,3 +201,49 @@ export type CommitmentSettlementTerms = {
     commitmentLock: ScriptTemplate;
     lockLayout: CommitmentLockLayout;
 };
+
+export type SettlementBalance = {
+    /**
+     * The blake160 of a TLC base key, zeroed with the amount once settled.
+     */
+    pubkeyHash: Uint8Array;
+    amountShannons: bigint;
+};
+
+export type SettlementBody = {
+    /**
+     * Raw, `65 + h` bytes each, `h` the layout's payment hash length.
+     */
+    tlcEntries: Uint8Array[];
+    /**
+     * The device's sits at `deviceSettlementIndex(forRemote)`.
+     */
+    balances: [SettlementBalance, SettlementBalance];
+};
+
+export type SettlementUnlockTarget = { kind: "tlc"; index: number } | { kind: "balance"; index: 0 | 1 };
+
+export type SettlementUnlock = SettlementBody & {
+    /**
+     * Raw, its blake160 in the spent cell's lock args.
+     */
+    body: Uint8Array;
+    target: SettlementUnlockTarget;
+    /**
+     * Zeroed in an unsigned spend.
+     */
+    signature: Uint8Array;
+    preimage: Uint8Array | null;
+};
+
+export type SettlementTlcEntry = {
+    /**
+     * From the device's side.
+     */
+    direction: TlcDirection;
+    amountShannons: bigint;
+    /**
+     * The device's, whatever the view.
+     */
+    localKeyHash: Uint8Array;
+};

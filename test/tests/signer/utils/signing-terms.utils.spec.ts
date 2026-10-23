@@ -2,11 +2,11 @@ import { bytesToHex, hexToBytes } from "@noble/hashes/utils.js";
 import type { Script } from "../../../../src/common";
 import { computeClosingTxDigest, computeCommitmentTxDigest, computeRevocationDigest } from "../../../../src/digest";
 import type { ChannelPins, SignOperation } from "../../../../src/policy";
-import { PolicyRefusalError } from "../../../../src/policy";
 import type { ChannelSigningRequest, ChannelSigningTransition } from "../../../../src/protocol";
 import { decodeChannelSigningStatus } from "../../../../src/protocol";
 import type { SigningNetwork } from "../../../../src/signer/signer.types";
 import { buildSignOperation, computeSigningMessage } from "../../../../src/signer/utils/signing-terms.utils";
+import { policyRefusal } from "../../../utils/refusal";
 import { signingDeviceKeys, signingPeerKeys } from "../../../utils/signing-channel";
 import { loadSigningVectors, signingCaseOf, signingStatusField } from "../../../utils/signing-vectors";
 import { pubkeyOf } from "../../../../src/derivation";
@@ -81,16 +81,6 @@ function withoutPin(field: keyof ChannelPins): ChannelPins {
     const pins = { ...PINS };
     delete pins[field];
     return pins;
-}
-
-function policyRefusal(step: () => unknown): PolicyRefusalError {
-    try {
-        step();
-    } catch (error) {
-        if (error instanceof PolicyRefusalError) return error;
-        throw error;
-    }
-    throw new Error("the step did not refuse");
 }
 
 const SIGNED_TRANSITIONS = [

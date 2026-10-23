@@ -14,6 +14,7 @@ import {
     RpcResponseError,
     decodeAbandonChannelResult,
     decodeListChannelIdsResult,
+    decodeListChannelStatesResult,
     decodeListChannelsResult,
     decodeOpenChannelWithExternalFundingResult,
     decodeOpenTenantChannelResult,
@@ -499,6 +500,106 @@ describe("list_channels", () => {
 
         it("refuses a result that is not an object", () => {
             expect(refusal(() => decodeListChannelIdsResult(result([READY_CHANNEL]))).message).toBe(`${RESULT} must be an object`);
+        });
+    });
+
+    describe("decodeListChannelStatesResult", () => {
+        it.each(list.results.map((entry) => [entry.name, entry] as const))(
+            "reads the ids and states of the %s listing as the full reader does",
+            (_, entry) => {
+                const listed = decodeListChannelStatesResult(result(entry.json));
+                expect(listed).toEqual(
+                    entry.values.channels.map((channel) => ({
+                        channelId: toChannel(channel).channelId,
+                        stateName: channel.state.name,
+                        stateFlags: channel.state.flags,
+                    })),
+                );
+                expect(listed).toEqual(
+                    decodeListChannelsResult(result(entry.json)).map((channel) => ({
+                        channelId: channel.channelId,
+                        stateName: channel.state.name,
+                        stateFlags: channel.state.flags,
+                    })),
+                );
+            },
+        );
+
+        it("reads a literal listing in the node's order, the flags split and none for a state that carries none", () => {
+            expect(decodeListChannelStatesResult(result(LISTING))).toEqual([
+                { channelId: CHANNEL_ID, stateName: "ChannelReady", stateFlags: [] },
+                { channelId: CHANNEL_ID, stateName: "Closed", stateFlags: ["UNCOOPERATIVE_LOCAL", "WAITING_ONCHAIN_SETTLEMENT"] },
+                { channelId: CHANNEL_ID, stateName: "Closed", stateFlags: ["FUNDING_ABORTED"] },
+            ]);
+        });
+
+        it("reads empty flags as none", () => {
+            const listing = { channels: [{ channel_id: CHANNEL_ID, state: { state_name: "NegotiatingFunding", state_flags: "" } }] };
+            expect(decodeListChannelStatesResult(result(listing))).toEqual([
+                { channelId: CHANNEL_ID, stateName: "NegotiatingFunding", stateFlags: [] },
+            ]);
+        });
+
+        it("reads an empty listing as no channels", () => {
+            expect(decodeListChannelStatesResult(result({ channels: [] }))).toEqual([]);
+        });
+
+        it.each([
+            ["a state name it does not know", "channels[0].state", { state_name: "Splicing" }, { stateName: "Splicing", stateFlags: [] }],
+            [
+                "a flag it does not know",
+                "channels[0].state",
+                { state_name: "Closed", state_flags: "UNCOOPERATIVE_LOCAL|SPLICE_SENT" },
+                { stateName: "Closed", stateFlags: ["UNCOOPERATIVE_LOCAL", "SPLICE_SENT"] },
+            ],
+            [
+                "flags on a state that carries none",
+                "channels[0].state",
+                { state_name: "ChannelReady", state_flags: "CHANNEL_READY" },
+                { stateName: "ChannelReady", stateFlags: ["CHANNEL_READY"] },
+            ],
+            ["no balance", "channels[0].local_balance", undefined, { stateName: "ChannelReady", stateFlags: [] }],
+            ["a prefixed pubkey", "channels[0].pubkey", `0x${PEER}`, { stateName: "ChannelReady", stateFlags: [] }],
+        ])("reads a channel with %s, which the full reader refuses", (_, path, value, state) => {
+            const listing = withField(LISTING, path, value);
+            expect(refusal(() => decodeListChannelsResult(result(listing))).path).toMatch(`${RESULT}.${path}`);
+            expect(decodeListChannelStatesResult(result(listing))[0]).toEqual({ channelId: CHANNEL_ID, ...state });
+        });
+
+        it("reads an entry that carries its id and state alone", () => {
+            const listing = { channels: [{ channel_id: CHANNEL_ID, state: { state_name: "Closed", state_flags: "COOPERATIVE" } }] };
+            expect(decodeListChannelStatesResult(result(listing))).toEqual([
+                { channelId: CHANNEL_ID, stateName: "Closed", stateFlags: ["COOPERATIVE"] },
+            ]);
+        });
+
+        it.each([
+            ["channels", undefined],
+            ["channels", null],
+            ["channels", {}],
+            ["channels[1]", "channel"],
+            ["channels[1]", null],
+            ["channels[0].channel_id", undefined],
+            ["channels[0].channel_id", `0x${"11".repeat(31)}`],
+            ["channels[0].channel_id", "11".repeat(32)],
+            ["channels[0].channel_id", `0x${"AB".repeat(32)}`],
+            ["channels[2].channel_id", 17],
+            ["channels[0].state", undefined],
+            ["channels[0].state", null],
+            ["channels[0].state", "ChannelReady"],
+            ["channels[0].state", ["ChannelReady"]],
+            ["channels[0].state.state_name", undefined],
+            ["channels[0].state.state_name", null],
+            ["channels[0].state.state_name", 3],
+            ["channels[1].state.state_flags", null],
+            ["channels[1].state.state_flags", 6],
+            ["channels[1].state.state_flags", ["UNCOOPERATIVE_LOCAL"]],
+        ])("refuses %s = %p, naming the field from the result", (path, value) => {
+            expect(refusal(() => decodeListChannelStatesResult(result(withField(LISTING, path, value)))).path).toBe(`${RESULT}.${path}`);
+        });
+
+        it("refuses a result that is not an object", () => {
+            expect(refusal(() => decodeListChannelStatesResult(result([READY_CHANNEL]))).message).toBe(`${RESULT} must be an object`);
         });
     });
 });
@@ -1040,6 +1141,39 @@ describe("FiberRpcClient channel methods", () => {
             new TypeError("filter must be one of include_closed, only_pending"),
         );
         expect(mock.requests).toHaveLength(0);
+    });
+
+    it("lists the channel states in the default mode when given nothing", async () => {
+        const mock = answering(withField(LISTING, "channels[1].state.state_name", "Splicing"));
+        await expect(new FiberRpcClient({ url: URL, fetch: mock.fetch }).listChannelStates()).resolves.toEqual([
+            { channelId: CHANNEL_ID, stateName: "ChannelReady", stateFlags: [] },
+            { channelId: CHANNEL_ID, stateName: "Splicing", stateFlags: ["UNCOOPERATIVE_LOCAL", "WAITING_ONCHAIN_SETTLEMENT"] },
+            { channelId: CHANNEL_ID, stateName: "Closed", stateFlags: ["FUNDING_ABORTED"] },
+        ]);
+        expect(sent(mock)).toEqual({ jsonrpc: "2.0", id: 1, method: "list_channels", params: [{}] });
+    });
+
+    it("lists the channel states with the filter's flag", async () => {
+        const mock = answering({ channels: [] });
+        const client = new FiberRpcClient({ url: URL, fetch: mock.fetch });
+        await expect(client.listChannelStates({ filter: "include_closed" })).resolves.toEqual([]);
+        expect(sent(mock)).toEqual({ jsonrpc: "2.0", id: 1, method: "list_channels", params: [{ include_closed: true }] });
+    });
+
+    it("refuses a filter it cannot write before listing the channel states", async () => {
+        const mock = new FetchMock();
+        const client = new FiberRpcClient({ url: URL, fetch: mock.fetch });
+        await expect(client.listChannelStates({ filter: "closed" as "include_closed" })).rejects.toThrow(
+            new TypeError("filter must be one of include_closed, only_pending"),
+        );
+        expect(mock.requests).toHaveLength(0);
+    });
+
+    it("names the state of a listing it cannot read", async () => {
+        const mock = answering(withField(LISTING, "channels[1].state", undefined));
+        const error = await rejection(new FiberRpcClient({ url: URL, fetch: mock.fetch }).listChannelStates());
+        expect(error).toBeInstanceOf(RpcResponseError);
+        expect(error).toMatchObject({ method: "list_channels", path: "response.result.channels[1].state" });
     });
 
     it("names the channel id of a listing it cannot read", async () => {

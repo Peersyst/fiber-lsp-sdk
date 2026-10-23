@@ -7,7 +7,7 @@ import {
     assertOneOf,
     isPlainObject,
 } from "../common";
-import type { WireField } from "../wire";
+import type { WireField, WireFieldReader } from "../wire";
 import {
     assertWireHexBytes,
     decodeBareHexBytes,
@@ -30,6 +30,7 @@ import {
     readArray,
     readObject,
     requireHexBytes,
+    WIRE_FLAG_SEPARATOR,
 } from "../wire";
 import { LIST_CHANNELS_FILTERS, RPC_CHANNEL_STATE_FLAGS, RPC_CHANNEL_STATE_NAMES } from "./rpc.constants";
 import type {
@@ -52,6 +53,7 @@ import type {
     RpcChannelStateName,
     RpcChannelStateWire,
     RpcChannelWire,
+    RpcListedChannelState,
     ShutdownChannelParams,
     ShutdownChannelParamsWire,
     SubmitSignedFundingTxParams,
@@ -272,9 +274,46 @@ export function decodeListChannelsResult(field: WireField): RpcChannel[] {
  * @returns The channel ids, in the node's order.
  */
 export function decodeListChannelIdsResult(field: WireField): string[] {
-    return readArray(readObject<ListChannelsResultWire>(field)("channels")).map((channel) =>
-        requireHexBytes(readObject<RpcChannelWire>(channel)("channel_id"), HASH256_LENGTH),
-    );
+    return readListedChannels(field).map((channel) => readListedChannelId(readObject<RpcChannelWire>(channel)));
+}
+
+/**
+ * Reads only the ids and states of a `list_channels` result, the states as strings fiber may add to.
+ * @param field The result field.
+ * @returns The channels' ids and states, in the node's order.
+ */
+export function decodeListChannelStatesResult(field: WireField): RpcListedChannelState[] {
+    return readListedChannels(field).map((channel) => {
+        const at = readObject<RpcChannelWire>(channel);
+        const channelId = readListedChannelId(at);
+        const state = readObject<RpcChannelStateWire>(at("state"));
+        const flagsField = state("state_flags");
+        // Fiber's unit variants carry no `state_flags`.
+        const flags = flagsField.value === undefined ? "" : decodeString(flagsField);
+        return {
+            channelId,
+            stateName: decodeString(state("state_name")),
+            stateFlags: flags === "" ? [] : flags.split(WIRE_FLAG_SEPARATOR),
+        };
+    });
+}
+
+/**
+ * Reads the entries of a `list_channels` result.
+ * @param field The result field.
+ * @returns The entries' fields.
+ */
+function readListedChannels(field: WireField): WireField[] {
+    return readArray(readObject<ListChannelsResultWire>(field)("channels"));
+}
+
+/**
+ * Reads a listed channel's id.
+ * @param at The channel's reader.
+ * @returns The id, as wire hex.
+ */
+function readListedChannelId(at: WireFieldReader<RpcChannelWire>): string {
+    return requireHexBytes(at("channel_id"), HASH256_LENGTH);
 }
 
 /**

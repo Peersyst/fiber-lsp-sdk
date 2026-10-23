@@ -1,8 +1,10 @@
 import { equalBytes } from "@noble/curves/utils.js";
 import { bytesToHex } from "@noble/hashes/utils.js";
-import type { OutPoint, Script, SignerErrorCode, TlcHashAlgorithm } from "../common";
+import type { CellOutput, OutPoint, Script, TlcHashAlgorithm } from "../common";
 import {
+    HASH256_LENGTH,
     PAYMENT_HASH_LENGTH,
+    RECOVERABLE_ECDSA_SIGNATURE_LENGTH,
     SCHNORR_SIGNATURE_LENGTH,
     TLC_HASH_ALGORITHMS,
     TRUNCATED_PAYMENT_HASH_LENGTH,
@@ -13,13 +15,22 @@ import {
     assertNonEmptyString,
     assertOneOf,
     assertOutPoint,
+    assertScript,
+    assertString,
     assertUnsignedBigInt,
     assertUnsignedInteger,
     isPlainObject,
 } from "../common";
 import type { FiberChannelKeys } from "../derivation";
 import { MAX_CHANNEL_INDEX } from "../derivation";
-import { computeChannelAnnouncementDigest, computeClosingTxDigest, computeCommitmentTxDigest, computeRevocationDigest } from "../digest";
+import {
+    buildCommitmentTxAndSettlement,
+    computeChannelAnnouncementDigest,
+    computeClosingTxDigest,
+    computeRevocationDigest,
+    computeTxMessage,
+    moleculeCellOutput,
+} from "../digest";
 import { judgeClosingTx, judgeCommitment, judgeOpeningCommitment, toPolicyViewTlcs } from "./balance-rule";
 import { judgeCapacityBounds } from "./capacity-bounds";
 import { openingChannelPins } from "./channel-opening";
@@ -33,7 +44,7 @@ import {
     PAYMENT_RECORD_VERSION,
     POLICY_VIEWS,
 } from "./policy.constants";
-import { ChannelPinError, DebitIntentError, HoldInvoiceError, refusePolicyRequest } from "./policy.error";
+import { ChannelPinError, DebitIntentError, HoldInvoiceError, refusePolicyRequest, withPolicyRefusal } from "./policy.error";
 import type {
     BalanceRuleContext,
     ChannelPins,
@@ -54,20 +65,28 @@ import type {
     RevokedCommitmentSignature,
     SignOperation,
     SignSlotClaim,
+    SignedCommitmentRecord,
     StatedChannelPins,
+    WatchtowerApproval,
+    WatchtowerSpendRecord,
+    WatchtowerSpendRequest,
+    WatchtowerSpendVerdict,
 } from "./policy.types";
 import type { SignerStore } from "./signer-store";
 import { assertSignSession, boundPaymentHashOf, buildSessionCommitment, isTlcOfPaymentRecord, resolveSignSlot, signSlotKey } from "./utils";
+import { decideWatchtowerSpend } from "./watchtower-spend";
 
 export class PolicyEngine {
     private readonly store: SignerStore;
 
     private readonly nonceReuse: NonceReuseMode;
 
+    private readonly watchtower: WatchtowerApproval | null;
+
     /**
      * Creates the gate over a store.
      * @param store Typed persistence the checks read and claim slots in.
-     * @param options The nonce reuse mode.
+     * @param options The nonce reuse mode, and what the host approved watchtower spends for.
      */
     constructor(store: SignerStore, options: PolicyEngineOptions = {}) {
         if (!isPlainObject(options)) throw new TypeError("options must be an object");
@@ -76,6 +95,7 @@ export class PolicyEngine {
         assertOneOf("options.nonceReuse", nonceReuse, NONCE_REUSE_MODES);
         this.store = store;
         this.nonceReuse = nonceReuse;
+        this.watchtower = options.watchtower === undefined ? null : readWatchtowerApproval(options.watchtower);
     }
 
     /**
@@ -177,6 +197,98 @@ export class PolicyEngine {
             if (recorded?.signature === entry.signature) return current;
             const others = current.revocations.filter((revocation) => revocation !== recorded);
             return { ...current, revocations: [...others, entry].sort((a, b) => a.version - b.version) };
+        });
+    }
+
+    /**
+     * Runs the watchtower rules on a spend and claims it.
+     * @param keys The channel's four secrets.
+     * @param channelId Channel identifier, any name the channel was registered under.
+     * @param request The spend as fiber's watchtower asks for it.
+     * @returns Fresh, a repeat, or unclaimed.
+     */
+    async checkWatchtowerSpend(
+        keys: FiberChannelKeys,
+        channelId: string,
+        request: WatchtowerSpendRequest,
+    ): Promise<WatchtowerSpendVerdict> {
+        const approval = this.watchtower;
+        if (approval === null) {
+            refusePolicyRequest(
+                "policy_refusal",
+                "watchtower option: the host approved no destination, so the device signs no watchtower spend",
+            );
+        }
+        withPolicyRefusal("malformed", () => assertNonEmptyString("channelId", channelId));
+        const channelIndex = await this.requireChannelIndex(channelId);
+        let verdict: WatchtowerSpendVerdict = { status: "fresh" };
+        // Outside the balance lane: the rules read the channel's record alone.
+        await this.store.updateChannelRecord(channelIndex, (current) => {
+            if (current === null) throw missingRecord(channelId, channelIndex);
+            const decision = decideWatchtowerSpend(keys, current, approval, request);
+            verdict = decision.verdict;
+            return decision.record;
+        });
+        return verdict;
+    }
+
+    /**
+     * Records the signature of a claimed watchtower spend.
+     * @param channelId Channel identifier, any name the channel was registered under.
+     * @param requestId The request the spend was claimed for.
+     * @param signature The 65-byte recoverable signature.
+     */
+    async recordWatchtowerSignature(channelId: string, requestId: Uint8Array, signature: Uint8Array): Promise<void> {
+        assertBytes("requestId", requestId, HASH256_LENGTH);
+        assertBytes("signature", signature, RECOVERABLE_ECDSA_SIGNATURE_LENGTH);
+        const signatureHex = bytesToHex(signature);
+        await this.updateWatchtowerSpend(channelId, requestId, (spend, requestIdHex) => {
+            if (spend.signature === signatureHex) return spend;
+            // The signature is deterministic: another one is a signer's bug, never a node's.
+            if (spend.signature !== null) {
+                throw new TypeError(`channel ${channelId} already records another signature for the watchtower request ${requestIdHex}`);
+            }
+            return { ...spend, signature: signatureHex };
+        });
+    }
+
+    /**
+     * Marks a claimed watchtower spend applied; no rule reads the mark.
+     * @param channelId Channel identifier, any name the channel was registered under.
+     * @param requestId The request the spend was claimed for.
+     */
+    async markWatchtowerSpendApplied(channelId: string, requestId: Uint8Array): Promise<void> {
+        assertBytes("requestId", requestId, HASH256_LENGTH);
+        await this.updateWatchtowerSpend(channelId, requestId, (spend, requestIdHex) => {
+            if (spend.applied) return spend;
+            if (spend.signature === null) {
+                throw new TypeError(`channel ${channelId} records no signature for the watchtower request ${requestIdHex}`);
+            }
+            return { ...spend, applied: true };
+        });
+    }
+
+    /**
+     * Rewrites the spend a watchtower request claimed.
+     * @param channelId Channel identifier, any name the channel was registered under.
+     * @param requestId The request.
+     * @param update Synchronous updater; returning the spend unchanged skips the write.
+     */
+    private async updateWatchtowerSpend(
+        channelId: string,
+        requestId: Uint8Array,
+        update: (spend: WatchtowerSpendRecord, requestIdHex: string) => WatchtowerSpendRecord,
+    ): Promise<void> {
+        const requestIdHex = bytesToHex(requestId);
+        const channelIndex = await this.requireRegisteredIndex(channelId);
+        await this.store.updateChannelRecord(channelIndex, (current) => {
+            if (current === null) throw missingRecord(channelId, channelIndex);
+            const spends = current.watchtowerSpends ?? [];
+            const spend = spends.find((candidate) => candidate.requestId === requestIdHex);
+            if (spend === undefined) throw new TypeError(`channel ${channelId} never claimed the watchtower request ${requestIdHex}`);
+            const updated = update(spend, requestIdHex);
+            if (updated === spend) return current;
+            return { ...current, watchtowerSpends: spends.map((candidate) => (candidate === spend ? updated : candidate)) };
         });
     }
 
@@ -376,15 +488,15 @@ export class PolicyEngine {
      */
     async checkAndClaim(keys: FiberChannelKeys, request: PolicySignRequest): Promise<PolicyVerdict> {
         const { channelId, session, operation, slot } = request;
-        const claimed = refusing("malformed", () => {
+        const claimed = withPolicyRefusal("malformed", () => {
             assertNonEmptyString("channelId", channelId);
             assertSignSession(keys, session);
             return resolveSignSlot(operation, slot);
         });
         const channelIndex = await this.requireChannelIndex(channelId);
 
-        const expected = refusing("malformed", () => recomputeDigest(keys, operation));
-        if (!equalBytes(expected, session.message)) {
+        const rebuilt = withPolicyRefusal("malformed", () => rebuildOperation(keys, operation));
+        if (!equalBytes(rebuilt.message, session.message)) {
             refusePolicyRequest("malformed", "the message does not match the attached channel state");
         }
 
@@ -396,6 +508,7 @@ export class PolicyEngine {
             message: bytesToHex(session.message),
             nonceReuse: this.nonceReuse,
             operation,
+            commitment: rebuilt.commitment,
             tlcs: operation.kind === "commitment_tx" ? toPolicyViewTlcs(operation.input.tlcs, operation.input.lockLayout) : [],
         };
         // Serialized: channels share budgets, and nothing may move the record between deciding and claiming.
@@ -529,22 +642,40 @@ function unlistedRecord(channelIndex: number): TypeError {
     return new TypeError(`a payment record lists channel index ${channelIndex}, which holds no record`);
 }
 
+type SignedCommitment = { view: PolicyView; record: SignedCommitmentRecord };
+
 /**
  * Rebuilds the message the request asks the device to sign, from the state the node attached to it.
  * @param keys The channel's four secrets.
  * @param operation Operation the request asks for, carrying its own inputs.
- * @returns The 32-byte digest a compliant request must carry.
+ * @returns The 32-byte digest a compliant request must carry, and for a commitment what its view records once signed.
  */
-function recomputeDigest(keys: FiberChannelKeys, operation: SignOperation): Uint8Array {
+function rebuildOperation(keys: FiberChannelKeys, operation: SignOperation): { message: Uint8Array; commitment: SignedCommitment | null } {
     switch (operation.kind) {
-        case "commitment_tx":
-            return computeCommitmentTxDigest(keys, operation.input);
+        case "commitment_tx": {
+            const { input } = operation;
+            const { transaction: tx, settlementWitness } = buildCommitmentTxAndSettlement(keys, input);
+            const message = computeTxMessage(tx);
+            // The builder writes one output and its data.
+            const [output] = tx.outputs as [CellOutput];
+            const [outputData] = tx.outputsData as [Uint8Array];
+            const record: SignedCommitmentRecord = {
+                commitmentNumber: input.commitmentNumber,
+                txHash: bytesToHex(message),
+                source: {
+                    output: bytesToHex(moleculeCellOutput(output.capacityShannons, output.lock, output.type)),
+                    outputData: bytesToHex(outputData),
+                },
+                settlementWitness: bytesToHex(settlementWitness),
+            };
+            return { message, commitment: { view: viewOf(input.forRemote), record } };
+        }
         case "closing_tx":
-            return computeClosingTxDigest(keys, operation.input);
+            return { message: computeClosingTxDigest(keys, operation.input), commitment: null };
         case "revocation":
-            return computeRevocationDigest(keys, operation.input);
+            return { message: computeRevocationDigest(keys, operation.input), commitment: null };
         case "channel_announcement":
-            return computeChannelAnnouncementDigest(keys, operation.input);
+            return { message: computeChannelAnnouncementDigest(keys, operation.input), commitment: null };
     }
 }
 
@@ -557,6 +688,8 @@ type Claim = {
     message: string;
     nonceReuse: NonceReuseMode;
     operation: SignOperation;
+    // `null` for any operation but a commitment.
+    commitment: SignedCommitment | null;
     // Empty for any operation but a commitment.
     tlcs: PolicyViewTlc[];
 };
@@ -604,7 +737,7 @@ function decideClaim(
     }
 
     assertReplacementSigned(current, operation, slot.commitmentNumber);
-    const commitmentHashes = nextCommitmentHashes(current, operation, claim.message);
+    const commitments = nextCommitments(current, claim.commitment);
     const pins = pinClaim(current.pins, operation);
     const views = applyBalanceRule(current, claim, context);
     // A reused slot moves its lane too: a revocation round's second side is that lane's claim, and the remote view reads it.
@@ -616,7 +749,7 @@ function decideClaim(
                 ...current,
                 lastSignedCommitmentNumbers,
                 nonceReuse: { ...current.nonceReuse, [slotKey]: { sessionCommitment, message: claim.message } },
-                commitmentHashes,
+                ...commitments,
                 pins,
                 views,
             },
@@ -628,7 +761,7 @@ function decideClaim(
             ...current,
             lastSignedCommitmentNumbers,
             signedSessions: { ...current.signedSessions, [slotKey]: sessionCommitment },
-            commitmentHashes,
+            ...commitments,
             pins,
             views,
         },
@@ -636,32 +769,41 @@ function decideClaim(
 }
 
 /**
- * Holds a commitment's version to its view's last one, and records it with the hash of the tx signed.
+ * Holds a commitment's version to its view's last one, and records it.
  * @param current The channel's record.
- * @param operation The operation, whose digest already matched.
- * @param message The digest, lowercase hex: a commitment's `compute_tx_message`.
- * @returns The commitment hashes once the operation is signed, the ones given for any other operation.
+ * @param commitment The commitment the operation signs, `null` for any other operation.
+ * @returns The commitments once the operation is signed, the ones given for any other operation.
  */
-function nextCommitmentHashes(
+function nextCommitments(
     current: ChannelPolicyRecord,
-    operation: SignOperation,
-    message: string,
-): ChannelPolicyRecord["commitmentHashes"] {
-    if (operation.kind !== "commitment_tx") return current.commitmentHashes;
-    const { commitmentNumber, forRemote } = operation.input;
-    const view = viewOf(forRemote);
-    const last = current.commitmentHashes[view];
-    if (last !== undefined) {
-        if (forRemote) {
-            assertRemoteSuccessor(current, commitmentNumber, last.commitmentNumber);
-        } else if (commitmentNumber <= last.commitmentNumber) {
+    commitment: SignedCommitment | null,
+): Pick<ChannelPolicyRecord, "commitmentHashes" | "previousRemoteCommitment"> {
+    const { commitmentHashes, previousRemoteCommitment } = current;
+    if (commitment === null) return { commitmentHashes, previousRemoteCommitment };
+    const { view, record } = commitment;
+    const { commitmentNumber } = record;
+    const last = commitmentHashes[view];
+    const next = { ...commitmentHashes, [view]: record };
+    if (view === "local") {
+        if (last !== undefined && commitmentNumber <= last.commitmentNumber) {
             refusePolicyRequest(
                 "stale_state",
                 `the local commitment's version ${commitmentNumber} is not above the last one signed in its view, ${last.commitmentNumber}`,
             );
         }
+        return { commitmentHashes: next, previousRemoteCommitment };
     }
-    return { ...current.commitmentHashes, [view]: { commitmentNumber, txHash: message } };
+    if (last === undefined) return { commitmentHashes: next, previousRemoteCommitment };
+    assertRemoteSuccessor(current, commitmentNumber, last.commitmentNumber);
+    // Until the peer revokes it, the peer may broadcast the last one instead, and fiber's watchtower settles either.
+    const { source, settlementWitness } = last;
+    return {
+        commitmentHashes: next,
+        previousRemoteCommitment:
+            source === undefined || settlementWitness === undefined
+                ? undefined
+                : { commitmentNumber: last.commitmentNumber, source, settlementWitness },
+    };
 }
 
 /**
@@ -826,15 +968,19 @@ function assertUint64Shannons(name: string, value: string): void {
 }
 
 /**
- * Runs a step over node-supplied input, turning anything it throws into a wire refusal.
- * @param code Wire error code the refusal carries.
- * @param step Step to run.
- * @returns Whatever the step returned.
+ * Reads the host's watchtower approval into a copy.
+ * @param value The option.
+ * @returns The approval.
  */
-function refusing<T>(code: SignerErrorCode, step: () => T): T {
-    try {
-        return step();
-    } catch (error) {
-        refusePolicyRequest(code, String(error));
-    }
+function readWatchtowerApproval(value: unknown): WatchtowerApproval {
+    if (!isPlainObject(value)) throw new TypeError("options.watchtower must be an object");
+    const { destination, maxFeeShannons } = value;
+    assertScript("options.watchtower.destination", destination);
+    assertString("options.watchtower.maxFeeShannons", maxFeeShannons);
+    // A fee is capacity, so a cell's u64 bounds it.
+    assertUint64Shannons("options.watchtower.maxFeeShannons", maxFeeShannons);
+    return {
+        destination: { codeHash: destination.codeHash.slice(), hashType: destination.hashType, args: destination.args.slice() },
+        maxFeeShannons,
+    };
 }
