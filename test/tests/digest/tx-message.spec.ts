@@ -1,6 +1,6 @@
 import { bytesToHex, hexToBytes } from "@noble/hashes/utils.js";
 import type { CellOutput, Transaction } from "../../../src/common";
-import { computeRevocationContentMessage, computeTxMessage } from "../../../src/digest/tx-message";
+import { computeRevocationContentMessage, computeTxMessage, serializeRawTransaction } from "../../../src/digest/tx-message";
 
 const PLAIN_OUTPUT: CellOutput = {
     capacityShannons: 6_100_000_000n,
@@ -149,6 +149,57 @@ describe("computeTxMessage", () => {
         );
         expect(() => messageOf({ outputsData: [undefined as never] })).toThrow(
             new TypeError("transaction.outputsData[0] must be a Uint8Array"),
+        );
+    });
+});
+
+// The molecule RawTransaction of TX, written out by hand: its fields after the cell deps, then the table without and with them.
+const RAW_TAIL = [
+    // header_deps
+    "01000000" + "22".repeat(32),
+    // inputs: the since, then the out point.
+    "01000000" + "0100000000000020" + "33".repeat(32) + "02000000",
+    // outputs: a dynvec of two CellOutput tables.
+    "0f010000" + "0c000000" + "6d000000",
+    "61000000" + "10000000" + "18000000" + "61000000" + "009d966b01000000",
+    "49000000" + "10000000" + "30000000" + "31000000" + "44".repeat(32) + "01" + "14000000" + "55".repeat(20),
+    "a2000000" + "10000000" + "18000000" + "4d000000" + "00ce624e03000000",
+    "35000000" + "10000000" + "30000000" + "31000000" + "66".repeat(32) + "02" + "00000000",
+    "55000000" + "10000000" + "30000000" + "31000000" + "77".repeat(32) + "00" + "20000000" + "88".repeat(32),
+    // outputs_data: a dynvec of two Bytes.
+    "24000000" + "0c000000" + "10000000" + "00000000" + "10000000" + "99".repeat(16),
+].join("");
+const RAW_WITHOUT_DEPS =
+    "ab010000" + "1c000000" + "20000000" + "24000000" + "48000000" + "78000000" + "87010000" + "00000000" + "00000000" + RAW_TAIL;
+const RAW_WITH_DEPS =
+    "d0010000" +
+    "1c000000" +
+    "20000000" +
+    "49000000" +
+    "6d000000" +
+    "9d000000" +
+    "ac010000" +
+    "00000000" +
+    "01000000" +
+    "11".repeat(32) +
+    "01000000" +
+    "01" +
+    RAW_TAIL;
+
+describe("serializeRawTransaction", () => {
+    it("writes the cell deps when asked", () => {
+        expect(bytesToHex(serializeRawTransaction(TX, true))).toBe(RAW_WITH_DEPS);
+    });
+
+    it("writes none without, not even reading them", () => {
+        expect(bytesToHex(serializeRawTransaction(TX, false))).toBe(RAW_WITHOUT_DEPS);
+        expect(bytesToHex(serializeRawTransaction({ ...TX, cellDeps: [null as never] }, false))).toBe(RAW_WITHOUT_DEPS);
+        expect(bytesToHex(serializeRawTransaction({ ...TX, cellDeps: undefined as never }, false))).toBe(RAW_WITHOUT_DEPS);
+    });
+
+    it("reads the cell deps it writes", () => {
+        expect(() => serializeRawTransaction({ ...TX, cellDeps: undefined as never }, true)).toThrow(
+            new TypeError("transaction.cellDeps must be an array"),
         );
     });
 });

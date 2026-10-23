@@ -2,32 +2,44 @@ import { secp256k1 } from "@noble/curves/secp256k1.js";
 import { bytesToNumberBE, equalBytes } from "@noble/curves/utils.js";
 import { bytesToHex, concatBytes, hexToBytes, utf8ToBytes } from "@noble/hashes/utils.js";
 import { Session } from "@scure/btc-signer/musig2.js";
-import type { OutPoint, Script, ScriptTemplate, TlcDirection, TlcHashAlgorithm } from "../../src/common";
+import type { CellDep, OutPoint, Script, ScriptTemplate, TlcDirection, TlcHashAlgorithm, Transaction } from "../../src/common";
 import {
     COMPRESSED_POINT_LENGTH,
     HASH256_LENGTH,
     PARTIAL_SIGNATURE_LENGTH,
     PUBLIC_NONCE_LENGTH,
+    RECOVERABLE_ECDSA_SIGNATURE_LENGTH,
     UINT128_MAX,
     UINT64_MAX,
+    blake160,
     ckbBlake2b,
     compareBytes,
 } from "../../src/common";
 import type { FiberChannelKeys } from "../../src/derivation";
 import { MAX_COMMITMENT_NUMBER, derivePublicKey, getCommitmentPoint, pubkeyOf } from "../../src/derivation";
 import type { CommitmentLockLayout, CommitmentTxInput, RevocationInput } from "../../src/digest";
-import { REVOCATION_LOCK_ARGS_LENGTH, calculateShutdownTxFee, computeRevocationContentMessage, computeTxMessage } from "../../src/digest";
-import { buildCommitmentTx } from "../../src/digest/commitment-tx";
+import {
+    REVOCATION_LOCK_ARGS_LENGTH,
+    buildCommitmentSettlementWitness,
+    buildCommitmentTx,
+    calculateShutdownTxFee,
+    computeRevocationContentMessage,
+    computeTxHash,
+    computeTxMessage,
+    moleculeCellOutput,
+    readCommitmentLockVersion,
+} from "../../src/digest";
 import { buildRevocationContent } from "../../src/digest/revocation";
 import { buildClosingTx } from "../../src/digest/shutdown-tx";
-import { moleculeCellOutput } from "../../src/digest/utils/molecule.utils";
-import type { SignSlot } from "../../src/policy";
+import type { PolicyView, SignSlot, WatchtowerKeyPurpose } from "../../src/policy";
 import type { ChannelSigningTransition } from "../../src/protocol";
 import type {
     ChannelSigningStatusWire,
+    OnchainKeyPurposeWire,
     SignableContentWire,
     SigningSettlementTlcWire,
     SigningSettlementWire,
+    WatchtowerSigningStatusWire,
 } from "../../src/protocol/protocol.types";
 import type {
     ChannelOpenSignerMaterial,
@@ -36,8 +48,10 @@ import type {
     IFetchLike,
     NextChannelSignerMaterialWire,
     RpcChannelIdParamsWire,
+    RpcChannelStateWire,
     RpcSubmissionResult,
     SubmitChannelSignatureParamsWire,
+    SubmitWatchtowerSignatureParamsWire,
 } from "../../src/rpc";
 import { RPC_CALL_FAILED_CODE } from "../../src/rpc";
 import type { TlcHashAlgorithmWire, WireField } from "../../src/wire";
@@ -60,6 +74,14 @@ import { toLockLayout, toOutPoint, toScript } from "./digest-inputs";
 import { signPeerHalf } from "./peer-musig";
 import { signingCommitmentLock } from "./signing-channel";
 import type { SigningVectors } from "./signing-vectors";
+import type { WatchtowerCell, WatchtowerParty, WatchtowerSpendContext, WatchtowerTlc } from "./tenant-watchtower";
+import {
+    buildWatchtowerSpend,
+    pickWatchtowerUnlock,
+    trackWatchtowerTlcs,
+    verifyWatchtowerSignature,
+    watchtowerRequestId,
+} from "./tenant-watchtower";
 import { HASH_ALGORITHM_WIRE } from "./wire-spellings";
 
 // jsonrpsee's refusals, before any fiber handler.
@@ -120,6 +142,7 @@ type PendingRequest = {
     message: Uint8Array;
     status: ChannelSigningStatusWire;
     served: TenantNodeServed;
+    commitment: SignedCommitment | null;
 };
 
 type NextMaterial = { point: Uint8Array | null; commitmentNonce: Uint8Array | null; revocationNonce: Uint8Array | null };
@@ -127,6 +150,37 @@ type NextMaterial = { point: Uint8Array | null; commitmentNonce: Uint8Array | nu
 type Submission = { channelId: string; requestId: string; partialSignature: Uint8Array; nextMaterial: NextMaterial | null };
 
 type RpcAnswer = { result: unknown } | { error: { code: number; message: string; data?: string } };
+
+type SubmitMethod = "submit_channel_signature" | "submit_watchtower_signature";
+
+type SignedCommitment = { forRemote: boolean; transaction: Transaction; body: Uint8Array; tlcs: WatchtowerTlc[] };
+
+type ForceClosed = {
+    forRemote: boolean;
+    settlementCellDeps: CellDep[];
+    nodeLock: Script;
+    medianTimeMs: bigint;
+    preimages: Uint8Array[];
+    tlcs: WatchtowerTlc[];
+    // The commitment lock cell on chain, `null` once no party is left to settle.
+    live: WatchtowerCell | null;
+};
+
+// A spend fiber's watchtower built, before it waits as a request.
+type NodeSpend = {
+    requestId: string;
+    purpose: WatchtowerKeyPurpose;
+    transaction: Transaction;
+    commitmentNumber: number;
+    tlcEntry: string | null;
+    unlock: string;
+    txHash: string;
+    next: WatchtowerCell | null;
+};
+
+type WatchtowerRequest = { purpose: WatchtowerKeyPurpose; transaction: Transaction; served: TenantNodeWatchtowerServed };
+
+type WatchtowerSubmission = { channelId: string; requestId: string; signature: Uint8Array };
 
 export type TenantNodeChannel = {
     channelId: string;
@@ -170,6 +224,52 @@ export type TenantNodeServed = {
     message: string;
     answers: RpcSubmissionResult[];
 };
+
+export type TenantNodeForceClose = {
+    // The funding lock's, which fiber adds to the commitment it broadcasts (`fiber/channel.rs:11567-11581`).
+    fundingCellDeps: CellDep[];
+    // The commitment lock's, ckb-auth's and the secp256k1 dep group's, which every spend carries (`watchtower/actor.rs:1726-1729`).
+    settlementCellDeps: CellDep[];
+    // The node's secp256k1 lock: its watchtower pays every spend there, and takes the fee from its cells (`actor.rs:1303-1306`).
+    nodeLock: Script;
+    // The chain's median time, which tells what has expired; the tip is past every delay of the lock.
+    medianTimeMs: string;
+    // What the node's watchtower holds through `CreatePreimage`, lowercase hex.
+    preimages: string[];
+    // How many commitments before the view's last one the broadcast one is. Fiber's watchtower settles one it holds the snapshot
+    // of (`watchtower/actor.rs:571-579`): the last local one, the last remote one and, until the peer revokes it, the remote one
+    // before (`fiber/onchain_tlc_reconcile.rs:128-160`).
+    commitmentsBack: number;
+};
+
+// Each holds for every spend built once it is set.
+export type TenantNodeSpendTamper =
+    // Pays the node's output to another lock.
+    | { kind: "destination"; lock: Script }
+    // Keeps so many shannons of the remainder for the node's output.
+    | { kind: "remainder"; shannons: string }
+    // Names another key than the one the unlock needs.
+    | { kind: "purpose"; purpose: WatchtowerKeyPurpose };
+
+export type TenantNodeWatchtowerServed = {
+    requestId: string;
+    purpose: WatchtowerKeyPurpose;
+    // The version of the commitment the spend descends from.
+    commitmentNumber: number;
+    // Lowercase hex, `null` for a balance.
+    tlcEntry: string | null;
+    // As the interop vectors name the spend.
+    unlock: string;
+    // CKB's `calc_tx_hash`, lowercase hex.
+    txHash: string;
+    // Output 0, molecule `CellOutput` in lowercase hex, when it is the remainder.
+    remainder: string | null;
+    answers: RpcSubmissionResult[];
+    // The one fiber applied, lowercase hex.
+    signature: string | null;
+};
+
+export type TenantNodeOnchainTx = { by: "node" | "peer"; what: string; txHash: string };
 
 export type TenantNodeOptions = {
     channel: TenantNodeChannel;
@@ -245,9 +345,35 @@ export class InMemoryTenantNode {
 
     private forgetSecondSession: ((slot: SignSlot) => Promise<void>) | null = null;
 
-    private parkNext = false;
+    private parkNext: SubmitMethod | null = null;
 
-    private readonly parked: unknown[] = [];
+    private readonly parked: Record<SubmitMethod, unknown[]> = { submit_channel_signature: [], submit_watchtower_signature: [] };
+
+    // Each view's commitments the device signed, in order: fiber's node broadcasts the latest.
+    private readonly signedCommitments: Record<PolicyView, SignedCommitment[]> = { local: [], remote: [] };
+
+    private forceClosed: ForceClosed | null = null;
+
+    // Fiber's `ChannelState` as `list_channels` writes it (`fiber-json-types/src/channel.rs:430-462`), each name whose bits
+    // overlap joined by `|` (`serde_utils.rs:475-506`). The handshake's states but the funding tx's collaboration are not modeled.
+    private channelState: RpcChannelStateWire = { state_name: "ChannelReady" };
+
+    private watchRow = false;
+
+    private readonly spendTampers: TenantNodeSpendTamper[] = [];
+
+    // Names the node's cell a spend's fee comes from.
+    private sponsorLabel = "node";
+
+    // Fiber's `WatchtowerExternalSignerState` (`fiber-types/src/watchtower.rs:141-154`) less its `last_applied`, which names a
+    // request `signed_signatures` keeps too, so both answer a resubmission alike (`rpc/watchtower.rs:424-447`).
+    private readonly watchtowerPending = new Map<string, WatchtowerRequest>();
+
+    private readonly watchtowerSigned = new Map<string, WatchtowerRequest>();
+
+    private readonly watchtowerLog: TenantNodeWatchtowerServed[] = [];
+
+    private readonly onchainLog: TenantNodeOnchainTx[] = [];
 
     constructor(options: TenantNodeOptions) {
         this.channel = options.channel;
@@ -259,9 +385,10 @@ export class InMemoryTenantNode {
             const request = JSON.parse(init.body) as { id: number; method: string; params: unknown[] };
             const params = request.params[0];
             this.sent.push({ method: request.method, params });
-            if (request.method === "submit_channel_signature" && this.parkNext) {
-                this.parkNext = false;
-                this.parked.push(params);
+            const parkNext = this.parkNext;
+            if (parkNext !== null && request.method === parkNext) {
+                this.parkNext = null;
+                this.parked[parkNext].push(params);
                 // Its sender is gone: the answer reaches no one.
                 return new Promise<FetchResponseLike>(() => undefined);
             }
@@ -287,7 +414,23 @@ export class InMemoryTenantNode {
         return { nonces: [...this.nonces.keys()].sort(), points: [...this.points.keys()].sort((a, b) => a - b) };
     }
 
+    get watchtowerServed(): TenantNodeWatchtowerServed[] {
+        return structuredClone(this.watchtowerLog);
+    }
+
+    get onchain(): TenantNodeOnchainTx[] {
+        return structuredClone(this.onchainLog);
+    }
+
     openTenantChannel(material: ChannelOpenSignerMaterial, first: "CompleteReceivedCommitment" | "SendCommitmentSigned"): string {
+        const channelId = this.negotiateTenantChannel(material);
+        this.completeTxCollaboration(first);
+        return channelId;
+    }
+
+    // The open up to the funding tx's collaboration: listed already, but fiber creates the tenant's watch row only at
+    // `RemoteTxComplete` (`event_handler.rs:41-67`, fired at `fiber/channel.rs:9520-9530`).
+    negotiateTenantChannel(material: ChannelOpenSignerMaterial): string {
         if (this.material !== null) throw new Error("the node already opened its channel");
         this.material = material;
         // Installed as fiber's `apply_open_signer_material` does (`channel.rs:5958-6005`); a tenant channel has no announcement.
@@ -296,6 +439,15 @@ export class InMemoryTenantNode {
         this.nonces.set(slotKey({ purpose: "Commitment", commitmentNumber: 0 }), material.commitmentNonce);
         this.nonces.set(slotKey({ purpose: "Commitment", commitmentNumber: 1 }), material.nextCommitmentNonce);
         this.nonces.set(slotKey({ purpose: "Revocation", commitmentNumber: 2 }), material.revocationNonce);
+        this.channelState = { state_name: "CollaboratingFundingTx", state_flags: "AWAITING_REMOTE_TX_COLLABORATION_MSG" };
+        return this.channel.channelId;
+    }
+
+    // `TxComplete`: the watch row exists from here on, and the two commitments of the open are signed, shown as `ChannelReady`.
+    completeTxCollaboration(first: "CompleteReceivedCommitment" | "SendCommitmentSigned"): void {
+        if (this.watchRow) throw new Error("the funding tx's collaboration already completed");
+        this.watchRow = true;
+        this.channelState = { state_name: "ChannelReady" };
         // R+1 at TxComplete (`channel.rs:9545`), L+1 entering the wait for the external funding (`:4161`).
         this.remote += 1;
         this.local += 1;
@@ -314,7 +466,6 @@ export class InMemoryTenantNode {
             },
         );
         this.drain();
-        return this.channel.channelId;
     }
 
     sendPayment(payment: TenantNodePayment): void {
@@ -345,8 +496,79 @@ export class InMemoryTenantNode {
 
     shutdown(): void {
         if (this.tlcs.length > 0) throw new Error("a channel with TLCs in flight does not shut down");
+        // Both shutdowns exchanged and no TLC left, as fiber asks for the closing signature (`channel.rs:9158-9169`).
+        this.channelState = {
+            state_name: "ShuttingDown",
+            state_flags: "OUR_SHUTDOWN_SENT|THEIR_SHUTDOWN_SENT|AWAITING_PENDING_TLCS|DROPPING_PENDING",
+        };
         this.queue.push({ kind: "request", transition: "SendClosingSigned", state: this.state() });
         this.drain();
+    }
+
+    // The node, or the peer for the remote view, puts the view's commitment on chain; the node's watchtower then spends it.
+    forceClose(view: PolicyView, options: TenantNodeForceClose): void {
+        if (this.channelState.state_name === "Closed") throw new Error("the channel is already closed");
+        const commitment = this.signedCommitments[view].at(-1 - options.commitmentsBack);
+        if (commitment === undefined)
+            throw new Error(`the device signed no commitment ${options.commitmentsBack} before the ${view} view's last`);
+        // The close ends the exchange: the request in flight and those queued behind it are never served.
+        this.pending = null;
+        this.queue.length = 0;
+        const [output] = commitment.transaction.outputs;
+        if (output === undefined) throw new Error("a commitment holds its cell at output 0");
+        // Its on-chain hash covers the funding lock's cell deps fiber adds (`fiber/channel.rs:11567-11581`).
+        const txHash = computeTxHash({ ...commitment.transaction, cellDeps: options.fundingCellDeps });
+        this.forceClosed = {
+            forRemote: commitment.forRemote,
+            settlementCellDeps: options.settlementCellDeps,
+            nodeLock: options.nodeLock,
+            medianTimeMs: BigInt(options.medianTimeMs),
+            preimages: options.preimages.map(hexToBytes),
+            tlcs: commitment.tlcs,
+            live: { outPoint: { txHash, index: 0 }, output, body: commitment.body, first: true },
+        };
+        this.onchainLog.push({ by: view === "local" ? "node" : "peer", what: `${view} commitment`, txHash: bytesToHex(txHash) });
+        // From the broadcast fiber's own commitment is `ShuttingDown(WAITING_COMMITMENT_CONFIRMATION)` (`channel.rs:2723`) and,
+        // confirmed, as it is here at once, `Closed` (`:11665-11673`).
+        const side = view === "local" ? "UNCOOPERATIVE_LOCAL" : "UNCOOPERATIVE_REMOTE";
+        this.channelState = { state_name: "Closed", state_flags: `${side}|WAITING_ONCHAIN_SETTLEMENT` };
+    }
+
+    // The peer's own watchtower spends the cell first, as fiber's would from its side, once what the device signed has landed.
+    peerSpend(): void {
+        const closed = this.requireForceClosed();
+        this.runWatchtower(closed, false);
+        const cell = closed.live;
+        if (cell === null) throw new Error("no commitment lock cell is left to spend");
+        const party: WatchtowerParty = {
+            forRemote: !closed.forRemote,
+            settlementKeyHash: blake160(pubkeyOf(this.peerKeys.tlcBaseKey)),
+            offered: "received",
+            // None, as in the interop vectors: the payee of the device's outbound TLC keeps its preimage.
+            preimages: [],
+        };
+        const pick = pickWatchtowerUnlock(cell, closed.tlcs, party, closed.medianTimeMs);
+        if (pick === null) throw new Error("the peer has nothing to spend");
+        // Its close script stands for its node's lock; its signatures leave the hash unchanged.
+        const lock = this.channel.remoteCloseScript;
+        const context = { cellDeps: closed.settlementCellDeps, sponsorLabel: "peer", payTo: lock, remainderShortfallShannons: 0n };
+        const { transaction, next } = buildWatchtowerSpend(cell, pick, party, context);
+        closed.live = next;
+        this.onchainLog.push({ by: "peer", what: pick.label, txHash: bytesToHex(computeTxHash(transaction)) });
+    }
+
+    passTime(medianTimeMs: string): void {
+        this.requireForceClosed().medianTimeMs = BigInt(medianTimeMs);
+    }
+
+    // The node's watchtower pays the fee of every spend it builds from now on from another of its cells: the spend waiting is
+    // rebuilt under a new request, and fiber keeps the one it supersedes pending (`watchtower/actor.rs:2151-2155`).
+    fundSpendsFrom(sponsorLabel: string): void {
+        this.sponsorLabel = sponsorLabel;
+    }
+
+    tamperSpends(tamper: TenantNodeSpendTamper): void {
+        this.spendTampers.push(tamper);
     }
 
     tamperNext(tamper: TenantNodeTamper): void {
@@ -373,8 +595,8 @@ export class InMemoryTenantNode {
     }
 
     // The next submission lands just before the one after it, and its answer reaches no one.
-    parkNextSubmission(): void {
-        this.parkNext = true;
+    parkNextSubmission(method: SubmitMethod = "submit_channel_signature"): void {
+        this.parkNext = method;
     }
 
     private async beforeThirdSession(): Promise<void> {
@@ -390,13 +612,20 @@ export class InMemoryTenantNode {
 
     private answer(method: string, params: unknown): RpcAnswer {
         switch (method) {
-            case "list_channels":
-                return { result: { channels: this.material === null ? [] : [{ channel_id: this.channel.channelId }] } };
+            case "list_channels": {
+                const listed = { channel_id: this.channel.channelId, state: structuredClone(this.channelState) };
+                return { result: { channels: this.isListed(params) ? [listed] : [] } };
+            }
             case "get_channel_signing_status":
                 return this.signingStatus(params);
             case "submit_channel_signature":
-                for (const parked of this.parked.splice(0)) this.submit(parked);
+                for (const parked of this.parked.submit_channel_signature.splice(0)) this.submit(parked);
                 return this.submit(params);
+            case "get_watchtower_signing_status":
+                return this.watchtowerStatus(params);
+            case "submit_watchtower_signature":
+                for (const parked of this.parked.submit_watchtower_signature.splice(0)) this.watchtowerSubmit(parked);
+                return this.watchtowerSubmit(params);
             default:
                 return { error: { code: METHOD_NOT_FOUND_CODE, message: "Method not found" } };
         }
@@ -447,6 +676,9 @@ export class InMemoryTenantNode {
         if (refusal !== null) return failed(refusal);
         this.lastApplied = { requestId: submission.requestId, receipt, served: pending.served };
         pending.served.answers.push("Applied");
+        // The close lands and confirms at once (`channel.rs:9236`, `:11676`).
+        if (pending.transition === "SendClosingSigned") this.channelState = { state_name: "Closed", state_flags: "COOPERATIVE" };
+        if (pending.commitment !== null) this.signedCommitments[pending.commitment.forRemote ? "remote" : "local"].push(pending.commitment);
         this.pending = null;
         this.advance(pending.transition);
         this.drain();
@@ -587,6 +819,7 @@ export class InMemoryTenantNode {
             message: built.message,
             status,
             served,
+            commitment: built.commitment,
         };
     }
 
@@ -625,7 +858,12 @@ export class InMemoryTenantNode {
         slot: NodeSlot,
         state: CommitmentState,
         tamper: TenantNodeTamper | null,
-    ): { content: SignableContentWire; message: Uint8Array; settlement: SigningSettlementWire | null } {
+    ): {
+        content: SignableContentWire;
+        message: Uint8Array;
+        settlement: SigningSettlementWire | null;
+        commitment: SignedCommitment | null;
+    } {
         switch (transition) {
             // The tx's version is L for the peer's commitment, R for the device's own (`channel.rs:11349`).
             case "SendCommitmentSigned":
@@ -647,7 +885,7 @@ export class InMemoryTenantNode {
         forRemote: boolean,
         version: number,
         tamper: TenantNodeTamper | null,
-    ): { content: SignableContentWire; message: Uint8Array; settlement: SigningSettlementWire } {
+    ): { content: SignableContentWire; message: Uint8Array; settlement: SigningSettlementWire; commitment: SignedCommitment } {
         const { channel } = this;
         const input: CommitmentTxInput = {
             ...this.commitmentTerms(),
@@ -688,6 +926,12 @@ export class InMemoryTenantNode {
             content: { type: "CommitmentTransaction", transaction: encodeTransaction("transaction", transaction) },
             message: computeTxMessage(transaction),
             settlement,
+            commitment: {
+                forRemote,
+                transaction,
+                body: buildCommitmentSettlementWitness(this.deviceKeys, input),
+                tlcs: trackWatchtowerTlcs(this.deviceKeys, input),
+            },
         };
     }
 
@@ -714,7 +958,7 @@ export class InMemoryTenantNode {
     private revocationContent(
         forRemote: boolean,
         revokedCommitmentNumber: number,
-    ): { content: SignableContentWire; message: Uint8Array; settlement: null } {
+    ): { content: SignableContentWire; message: Uint8Array; settlement: null; commitment: null } {
         const input: RevocationInput = {
             ...this.commitmentTerms(),
             forRemote,
@@ -733,6 +977,7 @@ export class InMemoryTenantNode {
             },
             message: computeRevocationContentMessage(output, outputData, commitmentLockArgs),
             settlement: null,
+            commitment: null,
         };
     }
 
@@ -740,7 +985,7 @@ export class InMemoryTenantNode {
     private closingContent(
         state: CommitmentState,
         tamper: TenantNodeTamper | null,
-    ): { content: SignableContentWire; message: Uint8Array; settlement: null } {
+    ): { content: SignableContentWire; message: Uint8Array; settlement: null; commitment: null } {
         const { channel } = this;
         const localCloseScript = tamper?.kind === "closeScript" ? tamper.script : channel.localCloseScript;
         const sizing = {
@@ -769,6 +1014,7 @@ export class InMemoryTenantNode {
             content: { type: "CooperativeCloseTransaction", transaction: encodeTransaction("transaction", transaction) },
             message: computeTxMessage(transaction),
             settlement: null,
+            commitment: null,
         };
     }
 
@@ -833,6 +1079,165 @@ export class InMemoryTenantNode {
         if (point === undefined) throw new Error(`the device published no commitment point ${commitmentNumber}`);
         return point;
     }
+
+    // Fiber's `list_channels` (`rpc/channel.rs:526-534`): a closed channel (`fiber-types/src/channel.rs:297-303`) is listed
+    // only to a call that asks for closed ones.
+    private isListed(params: unknown): boolean {
+        if (this.material === null) return false;
+        if (this.channelState.state_name !== "Closed") return true;
+        return typeof params === "object" && params !== null && "include_closed" in params && params.include_closed === true;
+    }
+
+    // A cooperative close deletes the tenant's watch row (`event_handler.rs:186-191`, wired at `lsp/runtime.rs:214-222`); a force
+    // close emits no `ChannelClosed` (`network.rs:8340-8346`).
+    private isWatched(channelId: string): boolean {
+        return this.isChannel(channelId) && this.watchRow && this.channelState.state_flags !== "COOPERATIVE";
+    }
+
+    // `get_watchtower_signing_status` (`rpc/watchtower.rs:379-400`) once the watchtower has checked the cell on chain.
+    private watchtowerStatus(params: unknown): RpcAnswer {
+        const channelId = readParams<RpcChannelIdParamsWire, string>(params, (at) => requireHexBytes(at("channel_id"), HASH256_LENGTH));
+        if (channelId instanceof WireError) return invalidParams(params, channelId);
+        if (!this.isWatched(channelId)) return failed("watched channel not found");
+        if (this.forceClosed !== null) this.runWatchtower(this.forceClosed, true);
+        // The `first_pending` of a map ordered by request id (`fiber-types/src/watchtower.rs:160-162`).
+        const [requestId] = [...this.watchtowerPending.keys()].sort();
+        const request = this.watchtowerPending.get(requestId ?? "");
+        const status: WatchtowerSigningStatusWire =
+            request === undefined
+                ? { type: "NoSignatureRequired" }
+                : {
+                      type: "SignatureRequired",
+                      request_id: request.served.requestId,
+                      content: {
+                          key_purpose: keyPurposeWire(request.purpose),
+                          transaction: encodeTransaction("transaction", request.transaction),
+                      },
+                  };
+        return { result: { channel_id: channelId, status } };
+    }
+
+    // `submit_watchtower_signature` (`rpc/watchtower.rs:402-472`), its checks in order: a refusal writes nothing, so the request
+    // stays pending. The device's channel always has an external signer.
+    private watchtowerSubmit(params: unknown): RpcAnswer {
+        const submission = readParams<SubmitWatchtowerSignatureParamsWire, WatchtowerSubmission>(params, (at) => ({
+            channelId: requireHexBytes(at("channel_id"), HASH256_LENGTH),
+            requestId: requireHexBytes(at("request_id"), HASH256_LENGTH),
+            // A `Vec<u8>` (`fiber-json-types/src/channel.rs:1014-1017`): any length reads, the handler refuses.
+            signature: decodeAnyHexBytes(at("signature")),
+        }));
+        if (submission instanceof WireError) return invalidParams(params, submission);
+        const { channelId, requestId, signature } = submission;
+        if (signature.length !== RECOVERABLE_ECDSA_SIGNATURE_LENGTH) return failed("watchtower signature must be 65 bytes");
+        if (!this.isWatched(channelId)) return failed("watched channel not found");
+        const signed = this.watchtowerSigned.get(requestId);
+        if (signed !== undefined) {
+            if (signed.served.signature !== bytesToHex(signature)) {
+                return failed("submitted signature does not match the previously applied result");
+            }
+            signed.served.answers.push("AlreadyApplied");
+            return { result: { type: "AlreadyApplied" } };
+        }
+        const request = this.watchtowerPending.get(requestId);
+        if (request === undefined) return failed("signature request id not found in pending requests");
+        const expected = this.expectedOnchainPubkey(request.purpose);
+        if (typeof expected === "string") return failed(expected);
+        const refusal = verifyWatchtowerSignature(expected, computeTxMessage(request.transaction), signature);
+        if (refusal !== null) return failed(refusal);
+        this.watchtowerPending.delete(requestId);
+        this.watchtowerSigned.set(requestId, request);
+        request.served.answers.push("Applied");
+        request.served.signature = bytesToHex(signature);
+        return { result: { type: "Applied" } };
+    }
+
+    // `expected_onchain_pubkey` (`fiber-types/src/watchtower.rs:184-223`) over the local, remote and pending remote snapshots: the
+    // last local commitment and the last two remote ones. Every key at a number derives alike, so its conflict check never fires.
+    private expectedOnchainPubkey(purpose: WatchtowerKeyPurpose): Uint8Array | string {
+        const { tlcBaseKey } = this.openMaterial();
+        if (purpose.kind === "settlement") return tlcBaseKey;
+        const { commitmentNumber } = purpose;
+        const { local, remote } = this.signedCommitments;
+        const snapshots = [local.at(-1), remote.at(-2), remote.at(-1)];
+        if (!snapshots.some((snapshot) => snapshot?.tlcs.some((tlc) => tlc.localKeyCommitmentNumber === commitmentNumber))) {
+            return `TLC signing key not found for derivation index ${commitmentNumber}`;
+        }
+        return derivePublicKey(tlcBaseKey, this.publishedPoint(commitmentNumber));
+    }
+
+    // Fiber's periodic check (`watchtower/actor.rs:558-873`, `:2082-2175`), collapsed: the spend of the cell on chain lands once
+    // signed and the check goes on with its remainder; one unsigned waits as a request, unless the peer's spend lands first.
+    private runWatchtower(closed: ForceClosed, waits: boolean): void {
+        for (let spend = this.nodeSpend(closed); spend !== null; spend = this.nodeSpend(closed)) {
+            if (!this.watchtowerSigned.has(spend.requestId)) {
+                if (waits && !this.watchtowerPending.has(spend.requestId)) this.waitFor(spend);
+                return;
+            }
+            closed.live = spend.next;
+            this.onchainLog.push({ by: "node", what: spend.unlock, txHash: spend.txHash });
+        }
+    }
+
+    private nodeSpend(closed: ForceClosed): NodeSpend | null {
+        const cell = closed.live;
+        if (cell === null) return null;
+        const party: WatchtowerParty = {
+            forRemote: closed.forRemote,
+            settlementKeyHash: blake160(this.openMaterial().tlcBaseKey),
+            offered: "offered",
+            preimages: closed.preimages,
+        };
+        const pick = pickWatchtowerUnlock(cell, closed.tlcs, party, closed.medianTimeMs);
+        if (pick === null) return null;
+        const context: WatchtowerSpendContext = {
+            cellDeps: closed.settlementCellDeps,
+            sponsorLabel: this.sponsorLabel,
+            payTo: closed.nodeLock,
+            remainderShortfallShannons: 0n,
+        };
+        let { purpose } = pick;
+        for (const tamper of this.spendTampers) {
+            if (tamper.kind === "destination") context.payTo = tamper.lock;
+            else if (tamper.kind === "remainder") context.remainderShortfallShannons = BigInt(tamper.shannons);
+            else purpose = tamper.purpose;
+        }
+        const { transaction, next } = buildWatchtowerSpend(cell, pick, party, context);
+        return {
+            requestId: encodeHexBytes("requestId", watchtowerRequestId(transaction), HASH256_LENGTH),
+            purpose,
+            transaction,
+            // Fiber reads it from the lock args, which every remainder keeps (`watchtower/actor.rs:1268-1269`).
+            commitmentNumber: readCommitmentLockVersion(cell.output.lock.args),
+            tlcEntry: pick.record === null ? null : bytesToHex(pick.record),
+            unlock: pick.label,
+            txHash: bytesToHex(computeTxHash(transaction)),
+            next,
+        };
+    }
+
+    private waitFor(spend: NodeSpend): void {
+        const { requestId, purpose, transaction, commitmentNumber, tlcEntry, unlock, txHash, next } = spend;
+        const remainder =
+            next === null ? null : bytesToHex(moleculeCellOutput(next.output.capacityShannons, next.output.lock, next.output.type));
+        const served: TenantNodeWatchtowerServed = {
+            requestId,
+            purpose,
+            commitmentNumber,
+            tlcEntry,
+            unlock,
+            txHash,
+            remainder,
+            answers: [],
+            signature: null,
+        };
+        this.watchtowerLog.push(served);
+        this.watchtowerPending.set(requestId, { purpose, transaction, served });
+    }
+
+    private requireForceClosed(): ForceClosed {
+        if (this.forceClosed === null) throw new Error("the channel was never force closed");
+        return this.forceClosed;
+    }
 }
 
 function tamperApplies(tamper: TenantNodeTamper, transition: NodeTransition): boolean {
@@ -847,6 +1252,11 @@ function tamperApplies(tamper: TenantNodeTamper, transition: NodeTransition): bo
         case "closeScript":
             return transition === "SendClosingSigned";
     }
+}
+
+function keyPurposeWire(purpose: WatchtowerKeyPurpose): OnchainKeyPurposeWire {
+    if (purpose.kind === "settlement") return { type: "Settlement" };
+    return { type: "Tlc", commitment_number: encodeUintHexNumber("commitmentNumber", purpose.commitmentNumber, MAX_COMMITMENT_NUMBER) };
 }
 
 function hashAlgorithmWire(algorithm: TlcHashAlgorithm): TlcHashAlgorithmWire {

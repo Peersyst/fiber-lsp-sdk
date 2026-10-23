@@ -25,6 +25,20 @@ export function refusePolicyRequest(code: SignerErrorCode, message: string): nev
     throw new PolicyRefusalError(code, message);
 }
 
+/**
+ * Runs a step over node-supplied input, turning anything it throws into a wire refusal.
+ * @param code Wire error code the refusal carries.
+ * @param step Step to run.
+ * @returns Whatever the step returned.
+ */
+export function withPolicyRefusal<T>(code: SignerErrorCode, step: () => T): T {
+    try {
+        return step();
+    } catch (error) {
+        refusePolicyRequest(code, String(error));
+    }
+}
+
 export class DebitIntentError extends Error {
     readonly code: DebitIntentErrorCode;
 

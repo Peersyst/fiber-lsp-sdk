@@ -7,3 +7,4 @@ export * from "./sdk.error";
 export * from "./sdk.types";
 export * from "./signing-step";
 export * from "./utils";
+export * from "./watchtower-step";

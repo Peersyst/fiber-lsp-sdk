@@ -14,15 +14,41 @@ export type {
     CommitmentSettlementTerms,
     CommitmentTxInput,
     RevocationInput,
+    SettlementBalance,
+    SettlementBody,
     SettlementTlc,
+    SettlementTlcEntry,
+    SettlementUnlock,
+    SettlementUnlockTarget,
     ShutdownTxInput,
     SigningSettlement,
     SigningSettlementTlc,
 } from "./digest.types";
 export { computeChannelAnnouncementDigest } from "./channel-announcement";
-export { computeCommitmentTxDigest, readCommitmentLockDelay, readCommitmentLockLayout, readCommitmentLockVersion } from "./commitment-tx";
+export {
+    buildCommitmentSettlementWitness,
+    buildCommitmentTx,
+    buildCommitmentTxAndSettlement,
+    computeCommitmentTxDigest,
+    readCommitmentLockDelay,
+    readCommitmentLockLayout,
+    readCommitmentLockSettled,
+    readCommitmentLockSettlementHash,
+    readCommitmentLockVersion,
+} from "./commitment-tx";
 export { calculateCommitmentTxFee, calculateShutdownTxFee } from "./fee";
 export { computeRevocationDigest } from "./revocation";
 export { settlementToCommitmentInput } from "./settlement-input";
+export {
+    buildRemainderLockArgs,
+    deviceSettlementIndex,
+    nextSettlementWitness,
+    readSettlementBody,
+    readSettlementTlcEntry,
+    readSettlementUnlock,
+    settlementTlcEntryLength,
+} from "./settlement-unlock";
 export { computeClosingTxDigest, computeShutdownTxDigest, readClosingTx } from "./shutdown-tx";
 export { computeRevocationContentMessage, computeTxMessage } from "./tx-message";
+export { computeTxHash } from "./tx-hash";
+export { moleculeCellOutput, moleculeOutPoint } from "./utils";

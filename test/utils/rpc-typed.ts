@@ -52,6 +52,7 @@ import {
     encodeSubmitSignedFundingTxParams,
     encodeSubmitWatchtowerSignatureParams,
 } from "../../src/rpc";
+import { encodeTransaction } from "../../src/wire";
 import { toOutPoint, toScript, toScriptOrNull } from "./digest-inputs";
 import { RPC_RESULT_PATH } from "./rpc-answers";
 import type {
@@ -85,6 +86,8 @@ import type {
     TenantRegistryNonceParamsVector,
     TenantRegistryNonceResultVector,
     TransactionVector,
+    WatchtowerSignatureRequiredVector,
+    WatchtowerSigningStatusResultVector,
 } from "./rpc-vectors";
 import { HASH_ALGORITHM_WIRE, wireHex } from "./wire-spellings";
 
@@ -184,9 +187,25 @@ export function toShutdownChannelParams(vector: ShutdownChannelParamsVector): Sh
     return params;
 }
 
+function toWatchtowerSignatureRequiredWire(vector: WatchtowerSignatureRequiredVector): Record<string, unknown> {
+    const purpose = vector.key_purpose;
+    return {
+        type: vector.status,
+        request_id: wireHex(vector.request_id),
+        content: {
+            key_purpose:
+                purpose.commitment_number === null
+                    ? { type: purpose.name }
+                    : { type: purpose.name, commitment_number: `0x${BigInt(purpose.commitment_number).toString(16)}` },
+            transaction: encodeTransaction("transaction", toTransaction(vector.transaction)),
+        },
+    };
+}
+
 // Fiber writes a unit variant as its tag alone, positioned where the decoder leaves it.
-export function toRpcSigningStatusResult(vector: SigningStatusResultVector): RpcSigningStatusResult {
-    return { channelId: wireHex(vector.channel_id), status: { value: { type: vector.status }, path: `${RPC_RESULT_PATH}.status` } };
+export function toRpcSigningStatusResult(vector: SigningStatusResultVector | WatchtowerSigningStatusResultVector): RpcSigningStatusResult {
+    const status = "request_id" in vector ? toWatchtowerSignatureRequiredWire(vector) : { type: vector.status };
+    return { channelId: wireHex(vector.channel_id), status: { value: status, path: `${RPC_RESULT_PATH}.status` } };
 }
 
 export function toSubmitChannelSignatureParams(vector: SubmitChannelSignatureParamsVector): SubmitChannelSignatureParams {

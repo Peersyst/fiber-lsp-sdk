@@ -1,9 +1,10 @@
 # Policy
 
-The gate every signing request passes before the musig2 engine runs. It is the half of the design that makes deterministic
+The gate every musig2 signing request passes before the engine runs. It is the half of the design that makes deterministic
 nonces safe and blind signing impossible: the engine signs whatever it is handed ([signing.md](./signing.md)), the digest
 module rebuilds messages but judges nothing ([digest.md](./digest.md)), and this layer decides. The state it decides over is
-the per-channel record ([persistence.md](./persistence.md)).
+the per-channel record ([persistence.md](./persistence.md)). Not every request passes the gate: a watchtower's spend of a
+force-closed commitment is no musig2 session, and passes the watchtower's own rules instead (below).
 
 ## The six checks, in order
 
@@ -109,7 +110,9 @@ commitment signed in it in `commitmentHashes`: its version, the view's floor, an
 `compute_tx_message` (the raw transaction with its cell deps emptied). That hash is the digest the gate recomputed, which is
 the message of the transaction the node sent once the two match, so it costs nothing to keep. The transaction fiber
 broadcasts adds the funding lock's cell deps, so its on-chain hash is another one: whatever reads this hash compares it
-with the signed transaction rebuilt, not with a chain lookup.
+with the signed transaction rebuilt, not with a chain lookup. Beside it the record keeps the commitment's cell and the
+settlement body its lock args commit, which the watchtower's rules tell a spend's source by, and, for the peer's view,
+the commitment before the last one (below).
 
 ### The peer's view, one version at a time
 
@@ -467,6 +470,139 @@ evidence of a revocation the device never signed is none. The write runs in the 
 lane: a claim only ever asks for evidence to be there, no write of the evidence takes any away, and a claim that lands
 beside it writes the record it read, evidence included.
 
+## The watchtower's spends
+
+A watchtower request names no slot and takes no nonce: its signature is recoverable ECDSA under RFC 6979, which leaks
+nothing however many messages one key signs ([signing.md](./signing.md)). So it passes none of the six checks.
+`PolicyEngine.checkWatchtowerSpend(keys, channelId, request)` runs the watchtower's rules instead, a port of fiber's device
+SDK's `validate` (`fiber-lsp-sdk/src/onchain.rs:61-372`) less what only a chain can tell: which cells are live, the
+capacity of the node's cells that pay the fee, and the median time. The rules read the channel's record alone, so they run
+in its own lane, outside the balance lane, and a refusal writes nothing.
+
+### The approval
+
+`new PolicyEngine(store, { watchtower })` takes what the host approves the spends for: `destination`, the `Script` every
+spend pays, and `maxFeeShannons`, decimal shannons within a u64, how far below what an unlock releases the destination may
+be paid. The spend cannot show its fee, since the node's cells that pay it are not the device's to read, so the fee is
+bounded from the device's side. Each field is checked at construction, a `TypeError` naming it
+(`options.watchtower.destination`), and the approval is copied. Without one, every request is `policy_refusal`, ahead of
+the channel's lookup, and the funds stay where they would be with no watchtower ([signing.md](./signing.md), on the trust
+the destination takes).
+
+### The rules, in order
+
+| #   | Rule                                                                                                                                          | Refused as                     |
+| --- | --------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------ |
+| 1   | An approval                                                                                                                                   | `policy_refusal`               |
+| 2   | A non-empty channel name, resolving to a record                                                                                               | `malformed`, `unknown_channel` |
+| 3   | Structure: a 32-byte request id and a known purpose, every field the tx hash covers, version 0, no header deps, an input, one data per output | `malformed`                    |
+| 4   | Input 0 spends output 0, where every commitment lock cell sits                                                                                | `policy_refusal`               |
+| 5   | Witness 0 reads as one settlement unlock under the layout of the commitment it is read against ([digest.md](./digest.md))                     | `malformed`                    |
+| 6   | The source: the body is a registered commitment's, or descends from one (below)                                                               | `policy_refusal`               |
+| 7   | The key: the unlock is the one the purpose's key signs, settling to that key, and it releases something                                       | `policy_refusal`               |
+| 8   | The unlock's signature is the 65 zero bytes of an unsigned spend                                                                              | `malformed`                    |
+| 9   | Output 0 is the remainder fiber's watchtower leaves, unless no party is left                                                                  | `policy_refusal`               |
+| 10  | The destination: every other output pays it, at least what the unlock releases less the approved fee                                          | `policy_refusal`               |
+| 11  | A request already claimed is the same spend                                                                                                   | `policy_refusal`               |
+
+Through the signer dispatch the channel is resolved first, since the keys the rules take derive from it, so an unknown
+channel answers `unknown_channel` even without an approval ([signing.md](./signing.md)). A rule's message starts with its
+name (`watchtower source:`, `watchtower key:`, `watchtower destination:`) and names the output, the TLC or the amounts at
+fault, never a key; a `malformed` one a reader raises carries the reader's own words.
+
+### Where a spend starts
+
+The record keeps the cell and the settlement body of the three commitments fiber's watchtower settles
+(`fiber/onchain_tlc_reconcile.rs:128-160`): the last local one, the last remote one, and the remote one before it, which
+the peer may still broadcast until it revokes it (`previousRemoteCommitment`, [persistence.md](./persistence.md)). Keeping
+that one past its revocation is harmless: a revoked commitment that lands is punished, and fiber's watchtower takes that
+path, not this one. A commitment signed before the record kept cells registers nothing.
+
+Input 0's tx hash is not read. The peer broadcasts its commitment with cell deps of its choosing, which no signature covers
+(`channel.rs:11567-11581`), so a hash rebuilt over deps the device picked would refuse an honest peer configured otherwise.
+The source is told by its content instead, and by its `since`:
+
+- **A since past zero** spends a commitment's own cell, which the lock holds to the delay: the settlement body in witness
+  0 must be exactly a registered commitment's. Its capacity is the recorded cell's.
+- **A zero since** spends a remainder, which fiber's watchtower spends at once: the body must descend from a registered
+  commitment's, each TLC it lists one that commitment lists, and each balance that commitment's or settled (its key hash
+  and its amount zeroed). The source may be a cell the device never signed: when the peer spends first, its TLC or its
+  balance, the remainder is no spend of the device's, and requiring one would leave the device's funds in it. The lock
+  holds the cell to the body it commits, so a source the body does not describe yields a spend the chain refuses, with
+  the one exception of the caveat below. A descendant's capacity is whatever the chain holds, which the device does not
+  know.
+
+More than one registered commitment can fit: fiber may sign a commitment again with nothing changed but its number (a
+nonce rotation, `channel.rs:2473-2478`), and a descendant of one version can descend from the next too. The source is then
+the one whose first 36 lock args, which carry the commitment number and which a remainder keeps, equal output 0's. A spend
+that leaves no remainder, the final sweep, names none, and is attributed to the first that fits, in the order last remote,
+previous remote, last local.
+
+### The key, and what an unlock releases
+
+- **`Tlc { n }`** signs a TLC's unlock, whose entry carries, on the device's side, the `blake160` of the TLC key at `n`.
+  The unlock carries the preimage exactly when the device received the TLC; one it offered is claimed by its timeout. It
+  releases the TLC's amount.
+- **`Settlement`** signs the device's balance, `0xfe` in a local view and `0xff` in a remote one, where the device's
+  balance sits second, and the balance must settle to the `blake160` of the TLC base key. The body may still hold TLCs the
+  device received, but none it offered, which fiber's watchtower claims first. It releases the balance.
+- **The final party.** Once the peer's balance is settled, the device's unlock takes the whole cell: it releases the
+  balance and every TLC still in the body, and leaves no remainder.
+
+An unlock that releases nothing is refused, and the device never signs with a key the unlock does not need. What the
+clock decides, a delay matured or a TLC expired, is the lock's, which the device cannot read and need not
+([signing.md](./signing.md)).
+
+### The remainder and the destination
+
+Output 0 is the remainder exactly as fiber's watchtower writes it: the source's lock, its args committing the next body (the
+unlocked TLC dropped, or the device's balance zeroed) and flagged as settled ([digest.md](./digest.md)), with no type and no
+data, and, when the source is a commitment's own cell, its capacity less what the unlock releases. Every other output pays
+the approved destination with no type and no data, one or two of them as fiber's device SDK bounds it
+(`MAX_WATCHTOWER_DESTINATION_OUTPUTS`), and together they are paid at least what the unlock releases less
+`maxFeeShannons`.
+
+### The claim
+
+Past every rule, the spend is claimed in the record's `watchtowerSpends` ([persistence.md](./persistence.md)): its request
+id, its purpose, the view and the version of the commitment it descends from, the entry of the TLC it unlocks (`null` for
+the balance), its CKB tx hash, its remainder's cell, and its signature once the signer records it. A spend is keyed by its
+unlock: the view, the version and the entry.
+
+- **A repeat** of a request id is answered `already-signed` with the signature recorded for it, once every rule has passed
+  again against the record and the approval as they stand; one whose tx differs is refused. It writes nothing.
+- **Only an unsigned claim is replaced.** Fiber rebuilds a spend under a new request id when what it holds changes, the
+  node's cells that pay the fee among it, and keeps the old request pending (`watchtower/actor.rs:2151-2155`). A request for
+  an unlock whose claim was never signed replaces that claim. One for an unlock whose spend is signed leaves it in place,
+  and is answered `unclaimed`: signed and handed over, with nothing written. The record names the first spend signed for
+  each unlock, and a lost answer or a lost write cannot let a later request take its place.
+- **`applied`** is set by `markWatchtowerSpendApplied` once fiber answered the submission `Applied` or `AlreadyApplied`. It
+  means accepted by fiber, not landed: fiber also accepts the signature of an old request whose spend can no longer land.
+  It is evidence, which no rule reads.
+- **Two identical TLC entries**, the parts of one payment, share a key, so the second's spend goes unclaimed: it is signed
+  as any spend is, and the evidence of the first alone is kept.
+- **The bound is by construction.** A claim drops the spends of commitments no longer registered, which fiber no longer
+  settles. One spend per TLC and one for the balance, in each of three commitments of at most 255 TLCs, is at most
+  `3 × (255 + 1) = 768` (`MAX_WATCHTOWER_SPENDS`), which the record guard holds; no cap refuses a spend.
+
+### Where it parts from fiber's `validate`
+
+- **The TLC subset is a multiset.** A body may list an entry as often as its commitment does and no more, so equal entries,
+  the parts of one payment among them, stay claimable one by one. Fiber's `validate` checks each entry's membership alone,
+  which lets a body list one more often than the commitment did.
+- **The source is told by content**, not by a hash rebuilt over cell deps, for the reason above.
+- **No chain**: live cells, the fee's sponsors and the median time are the lock's to enforce or the approval's to bound.
+
+UDT channels, the punishment of a revoked commitment and what the lock enforces on chain (the delay's maturity, a TLC's
+expiry, a preimage's hash) are out of scope ([signing.md](./signing.md)).
+
+### The caveat
+
+The source rule rests on the lock, which refuses a body its cell does not commit. That holds a spend to the cell, not to
+its fee: for a descendant the device knows no capacity, so what the cell holds beyond what the unlock releases and the
+remainder keeps is bounded by nothing on the device's side, and a spend over a body that understates the cell can burn
+the difference to the fee. It can never redirect it: every output but the remainder pays the approved destination.
+
 ## What this layer deliberately does not do
 
 - **It does not verify the aggregated nonce or the peer's partial signature.** Both are the signer dispatch's, before it
@@ -495,25 +631,28 @@ beside it writes the record it read, evidence included.
   team (I8).
 - **It cannot tell a fulfilled TLC from a failed one except by the amounts.** The request carries no preimage, so step 2
   charges every TLC that could have been paid, as described above.
-- **It never prunes the record.** A slot per signed commitment, a log entry per reused slot and an evidence entry per
+- **It never prunes the registry.** A slot per signed commitment, a log entry per reused slot and an evidence entry per
   revoked peer commitment stay forever. Pruning the registry is only safe behind the lanes, which refuse a number already
-  served even when its slot is gone, and it would cost the idempotent replay of an old request.
+  served even when its slot is gone, and it would cost the idempotent replay of an old request. The watchtower's spends
+  are the one part that is pruned, by the device's own record rather than by anything the node states: a claim drops
+  those of commitments no longer registered, which no signature's safety rests on (above).
 
 ## Where it lives
 
-| File                                     | Contents                                                                                                                       |
-| ---------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------ |
-| `src/policy/policy-engine.ts`            | The six checks, sign-once and reuse, the claim, channel registration, the host's pins, the evidence, intents and hold invoices |
-| `src/policy/channel-opening.ts`          | What a channel opens with: the funded amount and close script checked, and the registration's pins                             |
-| `src/policy/channel-pins.ts`             | Check 5's pins, pure: what each operation and the host's terms state, in the pins' forms, and the first conflict               |
-| `src/policy/capacity-bounds.ts`          | Check 5's bounds, pure: the commitment fee and what a commitment pays out                                                      |
-| `src/policy/balance-rule.ts`             | Check 6 itself, pure: the opening, the three steps over two snapshots, and the close with its fee bound                        |
-| `src/policy/policy.constants.ts`         | The keyspace prefixes and the balance lane, the pins by who fixes them, the reuse modes and the lanes, the record versions     |
-| `src/policy/policy.error.ts`             | `PolicyRefusalError`, carrying the wire error code; the host's `DebitIntentError`, `HoldInvoiceError` and `ChannelPinError`    |
-| `src/policy/utils/payment-hash.utils.ts` | The bound payment hash a payment record is keyed by, and whether a TLC under that key is the record's                          |
-| `src/policy/utils/slot.utils.ts`         | Operation and counter to slot and lane, where the shared close slot and the fixed announcement live                            |
-| `src/policy/utils/session.utils.ts`      | The session commitment and the shape a signable session must have                                                              |
-| `src/policy/signer-store.ts`             | The persistence underneath ([persistence.md](./persistence.md))                                                                |
+| File                                     | Contents                                                                                                                                                                                                                           |
+| ---------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `src/policy/policy-engine.ts`            | The six checks, sign-once and reuse, the claim, channel registration, the host's pins, the evidence, intents and hold invoices; the watchtower's approval, its claim, the signature recorded and the mark of a spend fiber applied |
+| `src/policy/watchtower-spend.ts`         | The watchtower's rules, pure: the structure, the source, the key, the remainder, the destination, the repeat and the claim                                                                                                         |
+| `src/policy/channel-opening.ts`          | What a channel opens with: the funded amount and close script checked, and the registration's pins                                                                                                                                 |
+| `src/policy/channel-pins.ts`             | Check 5's pins, pure: what each operation and the host's terms state, in the pins' forms, and the first conflict                                                                                                                   |
+| `src/policy/capacity-bounds.ts`          | Check 5's bounds, pure: the commitment fee and what a commitment pays out                                                                                                                                                          |
+| `src/policy/balance-rule.ts`             | Check 6 itself, pure: the opening, the three steps over two snapshots, and the close with its fee bound                                                                                                                            |
+| `src/policy/policy.constants.ts`         | The keyspace prefixes and the balance lane, the pins by who fixes them, the reuse modes and the lanes, the record versions, the watchtower's two bounds                                                                            |
+| `src/policy/policy.error.ts`             | `PolicyRefusalError`, carrying the wire error code, and `withPolicyRefusal`; the host's `DebitIntentError`, `HoldInvoiceError` and `ChannelPinError`                                                                               |
+| `src/policy/utils/payment-hash.utils.ts` | The bound payment hash a payment record is keyed by, and whether a TLC under that key is the record's                                                                                                                              |
+| `src/policy/utils/slot.utils.ts`         | Operation and counter to slot and lane, where the shared close slot and the fixed announcement live                                                                                                                                |
+| `src/policy/utils/session.utils.ts`      | The session commitment and the shape a signable session must have                                                                                                                                                                  |
+| `src/policy/signer-store.ts`             | The persistence underneath ([persistence.md](./persistence.md))                                                                                                                                                                    |
 
 ## What the tests guarantee
 
@@ -871,3 +1010,199 @@ commitment at `n`. The host's pin of the funding cell given the terms' fields as
 more, because the funding cell states none of them. Handing out the pins `readChannelPins` read without copying them, the
 reserve map or the whole object, changes nothing a caller sees: the store parses the stored string afresh on every read, so the
 copy is redundant behind it and only keeps the method's contract if the store ever caches.
+
+`test/tests/policy/watchtower-spend.spec.ts` claims every spend of the vectors' `watchtower` section, the device's own
+commitment and the peer's, through the engine and in the watchtower's order, the peer's spends first included, and
+refuses each of the vectors' variants with the verdict fiber's `validate` gives it. Around that, a refusal per rule and
+per field: each fault of the structure; input 0 on another output; a witness absent or one the unlock reader refuses; a
+body no registered commitment has at a since, and at a zero since a TLC the commitment never listed, one listed fewer
+times than the body does, a balance moved, each fault named against each commitment, and a channel that signed none;
+each key on the other kind of unlock, a TLC key of another number, the preimage on the wrong side, the settlement key on
+the peer's balance, on a balance of zero and beside a TLC the device offered; a signed unlock; the remainder with another
+lock, flag, body, capacity, a type or data, or missing, and one the final party's unlock leaves no room for; and the
+destination by output count, lock, type, data and payment, at the exact edge and a shannon below, summed over two outputs,
+with a fee above the release letting anything through. The sources: a commitment's cell under any tx hash and any since
+past zero, its body at a zero since read as a descendant with no capacity, a descendant at whatever capacity, the remote
+commitment before the last signed and recorded under its own version, two commitments of one body told apart by output
+0's args, and a final sweep recorded under the first that fits. The claim: the purpose recorded alone and the entry of the
+TLC unlocked, the record given left untouched, a repeat served with its signature after every rule ran again and refused
+for another spend, an unsigned claim of the same unlock replaced, a signed one keeping its place while the new request
+goes unclaimed, the other unlocks and the other view's kept in order, and the spends of a commitment no longer registered
+dropped. The engine's spec reads the approval (none, a fee of zero and at u64's maximum, a copy the host's later writes do
+not reach), keeps each commitment's cell and body and moves the previous remote one on, refuses before the channel without
+an approval, an empty name and an unregistered one with nothing written, and records the signature and the mark once each,
+throwing on a request never claimed or replaced, another signature, a mark with no signature and a channel with no record.
+The record guard's spec accepts and refuses each new field one at a time ([persistence.md](./persistence.md)).
+
+The watchtower rules, the engine's `checkWatchtowerSpend`, `recordWatchtowerSignature` and `markWatchtowerSpendApplied`, and
+the record guard's new fields were broken the same way (`test/tests/policy`, still 100% on all four metrics):
+
+| Mutation                                                                                      | Tests that failed |
+| --------------------------------------------------------------------------------------------- | ----------------- |
+| The recorded settlement body drops its last byte                                              | 157               |
+| The commitment is recorded without its settlement body                                        | 150               |
+| The view is read as local always                                                              | 73                |
+| Any purpose kind reads as a TLC's                                                             | 54                |
+| The previous is recorded at the new commitment's version                                      | 53                |
+| A spend with a since is read as a descendant's, and one without as a commitment's             | 51                |
+| A received TLC is read as offered                                                             | 45                |
+| A TLC's spend reads as the last party's, leaving no remainder                                 | 43                |
+| The spends are not checked                                                                    | 38                |
+| The device's balance is placed by the other view                                              | 31                |
+| The claim is recorded applied                                                                 | 19                |
+| The remainder commits the next body of the other view                                         | 19                |
+| A remainder is read as a commitment cell                                                      | 18                |
+| An entry may appear one time fewer than the commitment lists it                               | 17                |
+| The approved fee is ignored                                                                   | 16                |
+| The payment bound is exclusive                                                                | 16                |
+| The structure is refused as a policy refusal                                                  | 14                |
+| A descendant's remainder is held to the commitment cell's capacity                            | 13                |
+| A signed commitment is recorded without its cell                                              | 12                |
+| A spend must carry a signature                                                                | 11                |
+| The previous remote commitment is not checked                                                 | 11                |
+| A descendant may not settle a balance                                                         | 10                |
+| The remainder is recorded with data                                                           | 10                |
+| Every spend is read as a descendant's                                                         | 9                 |
+| A paid output may go elsewhere                                                                | 8                 |
+| The last party is read from the device's own balance                                          | 8                 |
+| The last party still owes a remainder                                                         | 8                 |
+| The new spend replaces every spend recorded                                                   | 8                 |
+| The spend records no version                                                                  | 8                 |
+| A TLC entry of no layout's length is accepted                                                 | 7                 |
+| A descendant's spend records no version                                                       | 7                 |
+| Scripts match whatever their args                                                             | 7                 |
+| A kept balance may change its amount                                                          | 6                 |
+| The last party is owed its TLCs alone                                                         | 6                 |
+| A signed spend of any unlock leaves a request unclaimed                                       | 5                 |
+| The remainder's lock is not checked                                                           | 5                 |
+| The spend key ignores the TLC entry                                                           | 5                 |
+| A TLC entry is not checked to be hex                                                          | 4                 |
+| A TLC's spend records the balance's key                                                       | 4                 |
+| A claim never signed holds its unlock                                                         | 4                 |
+| A new spend keeps the one of its unlock                                                       | 4                 |
+| A recorded cell's flag is not checked                                                         | 4                 |
+| A repeat is decided again as a fresh spend                                                    | 4                 |
+| A request never claimed is updated as nothing                                                 | 4                 |
+| A spend must carry a remainder                                                                | 4                 |
+| Spends of two TLCs share a key                                                                | 4                 |
+| The applied flag is not checked to be a boolean                                               | 4                 |
+| The destination is not checked                                                                | 4                 |
+| The previous's cell is not checked                                                            | 4                 |
+| The purpose is not checked                                                                    | 4                 |
+| The remote commitment before the last is not registered                                       | 4                 |
+| Two destination outputs are refused                                                           | 4                 |
+| A TLC key is not checked against the entry                                                    | 3                 |
+| A TLC purpose may name a number past the chain                                                | 3                 |
+| A commitment cell's remainder is held to no capacity                                          | 3                 |
+| A commitment cell's spend records no version                                                  | 3                 |
+| A descendant's refusal names the first view's fault alone                                     | 3                 |
+| A recorded cell may carry data                                                                | 3                 |
+| A recorded spend's purpose is not checked                                                     | 3                 |
+| A repeat is answered before the rules run                                                     | 3                 |
+| A request left unclaimed reads as fresh                                                       | 3                 |
+| A signed spend is replaced by a later request for its unlock                                  | 3                 |
+| A spend with a since takes the first commitment whatever its body                             | 3                 |
+| A spend's version is not checked                                                              | 3                 |
+| The mark leaves the spend unapplied                                                           | 3                 |
+| The previous is taken from the new commitment                                                 | 3                 |
+| The remainder's capacity is not checked                                                       | 3                 |
+| The request id is not checked                                                                 | 3                 |
+| The spend key ignores the view                                                                | 3                 |
+| A TLC entry of either layout passes a pinned record                                           | 2                 |
+| A TLC purpose may lack its number                                                             | 2                 |
+| A TLC the device received holds a settlement back                                             | 2                 |
+| A TLC's unlock is not held to its preimage flag                                               | 2                 |
+| A body is not checked against the args                                                        | 2                 |
+| A descendant may list a TLC the commitment never did                                          | 2                 |
+| A repeat never carries its recorded signature                                                 | 2                 |
+| A spend leaving no remainder is recorded under the last candidate                             | 2                 |
+| A zero balance is settled                                                                     | 2                 |
+| An entry's copies are counted before it                                                       | 2                 |
+| An updated spend replaces every spend                                                         | 2                 |
+| Equal entries may appear more often than the commitment lists them                            | 2                 |
+| Input 0 may spend any output                                                                  | 2                 |
+| No remainder names a source                                                                   | 2                 |
+| Only a spend fiber confirmed holds its unlock                                                 | 2                 |
+| Outputs and their data may differ in count                                                    | 2                 |
+| Scripts match whatever their code hash                                                        | 2                 |
+| Scripts match whatever their hash type                                                        | 2                 |
+| The approval is not checked to be an object                                                   | 2                 |
+| The body is a set, as in fiber's validate                                                     | 2                 |
+| The fee is not bounded                                                                        | 2                 |
+| The fee is not checked to be a string                                                         | 2                 |
+| The last party is owed its balance alone                                                      | 2                 |
+| The last party may not sweep a TLC the device offered                                         | 2                 |
+| The previous remote commitment is matched before the last                                     | 2                 |
+| The previous remote commitment is never recorded                                              | 2                 |
+| The settlement key may sign the peer's balance                                                | 2                 |
+| The spend key ignores the version                                                             | 2                 |
+| The tx hash is not checked                                                                    | 2                 |
+| 769 spends are accepted                                                                       | 1                 |
+| A TLC entry may go under the settlement key                                                   | 1                 |
+| A TLC key may go without its entry                                                            | 1                 |
+| A TLC key may sign a balance's unlock                                                         | 1                 |
+| A TLC the device offered may carry a preimage                                                 | 1                 |
+| A TLC the device received may go without its preimage                                         | 1                 |
+| A balance with a zeroed amount alone reads as settled                                         | 1                 |
+| A balance with a zeroed key alone reads as settled                                            | 1                 |
+| A body its layout does not read is accepted                                                   | 1                 |
+| A body without its cell is accepted                                                           | 1                 |
+| A cell without its body is accepted                                                           | 1                 |
+| A commitment cell's spend takes the first commitment of its body whatever its remainder names | 1                 |
+| A descendant takes the first candidate whatever its remainder names                           | 1                 |
+| A descendant's balance 1 is not compared                                                      | 1                 |
+| A kept balance may change its key                                                             | 1                 |
+| A last remote commitment without its cell keeps the old previous                              | 1                 |
+| A local commitment drops the previous                                                         | 1                 |
+| A missing witness list is accepted                                                            | 1                 |
+| A null approval reads as none                                                                 | 1                 |
+| A paid output may carry a type                                                                | 1                 |
+| A paid output's data is read at its offset                                                    | 1                 |
+| A purpose of any kind is accepted                                                             | 1                 |
+| A recorded cell may carry a type                                                              | 1                 |
+| A recorded signature is overwritten                                                           | 1                 |
+| A repeat may carry another tx                                                                 | 1                 |
+| A request id of any length is looked up                                                       | 1                 |
+| A settlement may leave a TLC the device offered                                               | 1                 |
+| A signature of any length is accepted                                                         | 1                 |
+| A signature of any length is recorded                                                         | 1                 |
+| A signed unlock is accepted                                                                   | 1                 |
+| A spend is decided with no approval                                                           | 1                 |
+| A spend may name a view with no commitment                                                    | 1                 |
+| A spend may name any view                                                                     | 1                 |
+| A spend paying no destination output is accepted                                              | 1                 |
+| A spend with no signature is marked applied                                                   | 1                 |
+| A spend without an input is accepted                                                          | 1                 |
+| A spend's registration ignores the version                                                    | 1                 |
+| A spend's registration ignores the view                                                       | 1                 |
+| A zero release is read from the balance                                                       | 1                 |
+| An applied spend may lack its signature                                                       | 1                 |
+| An empty channel id is not refused as malformed                                               | 1                 |
+| An unchanged spend is written again                                                           | 1                 |
+| Any version is accepted                                                                       | 1                 |
+| Every party is owed the last party's release                                                  | 1                 |
+| Header deps are accepted                                                                      | 1                 |
+| Other operations drop the previous                                                            | 1                 |
+| Spends of one unlock in two commitments share a key                                           | 1                 |
+| Spends of one unlock in two views share a key                                                 | 1                 |
+| The destination is paid the last output alone                                                 | 1                 |
+| The destination's args are kept by reference                                                  | 1                 |
+| The destination's code hash is kept by reference                                              | 1                 |
+| The mark writes again over an applied spend                                                   | 1                 |
+| The mark's request id is not checked                                                          | 1                 |
+| The previous commitment's fault is named as the last one's                                    | 1                 |
+| The previous may sit at any version below the last                                            | 1                 |
+| The previous needs no remote commitment after it                                              | 1                 |
+| The previous's version is not checked                                                         | 1                 |
+| The recorded purpose keeps whatever the request carried                                       | 1                 |
+| The remainder may carry a type                                                                | 1                 |
+| The remainder may carry data                                                                  | 1                 |
+| The same signature recorded again is a conflict                                               | 1                 |
+| The settlement key is not checked against the balance                                         | 1                 |
+| The settlement key may sign a TLC's unlock                                                    | 1                 |
+| The spend is recorded under the remote view always                                            | 1                 |
+| The spend records the first TLC's entry                                                       | 1                 |
+| The spends of a commitment no longer registered are kept                                      | 1                 |
+| The verdict is fresh whatever the rules decided                                               | 1                 |
+| Two spends may share a commitment's unlock                                                    | 1                 |
+| Two spends may share a request                                                                | 1                 |

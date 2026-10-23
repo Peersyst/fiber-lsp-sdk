@@ -1,6 +1,6 @@
 import type { Script, ScriptTemplate, SignerErrorCode } from "../common";
 import type { NonceContext } from "../derivation";
-import type { PolicyEngine, PolicyView, SignOperation, SignSession, SignSlot, SignSlotRef } from "../policy";
+import type { PolicyEngine, PolicyView, SignOperation, SignSession, SignSlot, SignSlotRef, WatchtowerKeyPurpose } from "../policy";
 import type { ChannelSigningTransition } from "../protocol";
 import type { ChannelOpenSignerMaterial, NextChannelSignerMaterial } from "../rpc";
 import type { SIGNING_KEY_ORDERS } from "./signer.constants";
@@ -66,6 +66,24 @@ export type DispatchOutcome =
           warnings: SigningWarning[];
       }
     | { kind: "refused"; requestId: Uint8Array | null; transition: ChannelSigningTransition | null; error: SignerRefusal }
+    | { kind: "fault"; cause: unknown };
+
+export type WatchtowerDispatchOutcome =
+    | { kind: "idle" }
+    | {
+          kind: "signed";
+          requestId: Uint8Array;
+          purpose: WatchtowerKeyPurpose;
+          /**
+           * Recoverable ECDSA, 65 bytes, the recovery id last.
+           */
+          signature: Uint8Array;
+          /**
+           * False when the record keeps another signed spend of the same unlock, so there is nothing to mark applied.
+           */
+          claimed: boolean;
+      }
+    | { kind: "refused"; requestId: Uint8Array | null; purpose: WatchtowerKeyPurpose | null; error: SignerRefusal }
     | { kind: "fault"; cause: unknown };
 
 export type PendingChannelOpen = {

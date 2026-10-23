@@ -21,6 +21,7 @@ import {
 } from "../../utils/signing-channel";
 import type { SigningCaseVector } from "../../utils/signing-vectors";
 import { loadSigningVectors, signingCaseOf, signingStatusField } from "../../utils/signing-vectors";
+import { abandonAfterHandle, live, pollFailedEvent, summarized, writesOf } from "../../utils/step-run";
 import { withField } from "../../utils/with-field";
 
 const vectors = loadSigningVectors();
@@ -76,24 +77,6 @@ function caseOf(transition: ChannelSigningTransition): SigningCaseVector {
 
 function statusResult(status: unknown, channelId = CHANNEL_ID): unknown {
     return { channel_id: channelId, status: structuredClone(status) };
-}
-
-function errorEvent(message: string, cause: unknown): unknown {
-    return { type: "ERROR", code: "poll_failed", message, cause };
-}
-
-function summarized(events: SdkEvent[]): unknown[] {
-    return events.map((event) =>
-        event.type === "ERROR" ? { type: "ERROR", code: event.error.code, message: event.error.message, cause: event.error.cause } : event,
-    );
-}
-
-function writesOf(channel: SigningChannel): string[] {
-    return channel.storage.ops.filter((op) => op.startsWith("set "));
-}
-
-function live(): { abandoned: boolean } {
-    return { abandoned: false };
 }
 
 describe("buildChannelSigningStep", () => {
@@ -392,7 +375,7 @@ describe("buildChannelSigningStep", () => {
                 signatureSubmissionCall(vectors, kase),
             ]);
             expect(summarized(h.events)).toStrictEqual([
-                errorEvent(`the signing poll of ${OTHER_ID} failed: ${message}`, cause),
+                pollFailedEvent(`the signing poll of ${OTHER_ID} failed: ${message}`, cause),
                 signedEventOf(vectors, kase),
             ]);
         });
@@ -418,7 +401,7 @@ describe("buildChannelSigningStep", () => {
                 signatureSubmissionCall(vectors, kase),
                 signingStatusCall(OTHER_ID),
             ]);
-            expect(summarized(h.events)).toStrictEqual([errorEvent(`the signing poll of ${CHANNEL_ID} failed: ${message}`, cause)]);
+            expect(summarized(h.events)).toStrictEqual([pollFailedEvent(`the signing poll of ${CHANNEL_ID} failed: ${message}`, cause)]);
         });
 
         it("submits the signature again on the tick after a submission that failed", async () => {
@@ -453,7 +436,7 @@ describe("buildChannelSigningStep", () => {
             await h.step(live());
             expect(h.node.calls()).toEqual([LIST_CHANNELS_CALL, signingStatusCall(CHANNEL_ID), signingStatusCall(OTHER_ID)]);
             expect(summarized(h.events)).toStrictEqual([
-                errorEvent(
+                pollFailedEvent(
                     `the signing poll of ${CHANNEL_ID} failed: stored value at ${CHANNEL_RECORD_KEY_PREFIX}${h.channel.channelIndex} is not valid JSON`,
                     expect.any(TypeError),
                 ),
@@ -471,7 +454,7 @@ describe("buildChannelSigningStep", () => {
             await h.step(live());
             expect(h.node.calls()).toEqual([LIST_CHANNELS_CALL, signingStatusCall(CHANNEL_ID), signatureSubmissionCall(vectors, kase)]);
             expect(summarized(h.events)).toStrictEqual([
-                errorEvent(
+                pollFailedEvent(
                     `the signing poll of ${OTHER_ID} failed: stored value at ${CHANNEL_ALIAS_KEY_PREFIX}${OTHER_ID} is not a channel index`,
                     expect.any(TypeError),
                 ),
@@ -522,7 +505,7 @@ describe("buildChannelSigningStep", () => {
             const kase = caseOf("CompleteReceivedRevokeAndAck");
             const h = await harness("CompleteReceivedRevokeAndAck");
             const run = live();
-            abandonAfterHandle(h, run);
+            abandonAfterHandle(h.channel.dispatch, run);
             h.node.result({ channels: [{ channel_id: CHANNEL_ID }] }).result(statusResult(kase.result.status));
             await h.step(run);
             expect(h.node.calls()).toEqual([LIST_CHANNELS_CALL, signingStatusCall(CHANNEL_ID)]);
@@ -574,7 +557,7 @@ describe("buildChannelSigningStep", () => {
             const kase = caseOf("SignChannelAnnouncement");
             const h = await harness("SignChannelAnnouncement");
             const run = live();
-            abandonAfterHandle(h, run);
+            abandonAfterHandle(h.channel.dispatch, run);
             h.node.result({ channels: [{ channel_id: CHANNEL_ID }] }).result(statusResult(kase.result.status));
             await h.step(run);
             expect(h.events).toEqual([]);
@@ -636,12 +619,3 @@ describe("buildChannelSigningStep", () => {
         expect(h.events[0]).toMatchObject({ error: expect.any(SdkError) });
     });
 });
-
-function abandonAfterHandle(h: Harness, run: { abandoned: boolean }): void {
-    const handle = h.channel.dispatch.handle.bind(h.channel.dispatch);
-    jest.spyOn(h.channel.dispatch, "handle").mockImplementationOnce(async (channelId, status) => {
-        const outcome = await handle(channelId, status);
-        run.abandoned = true;
-        return outcome;
-    });
-}

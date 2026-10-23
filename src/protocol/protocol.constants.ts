@@ -1,12 +1,22 @@
 import type { NonceContext } from "../derivation";
 import { MAX_COMMITMENT_NUMBER } from "../derivation";
 import type { NonceCounter } from "../policy";
-import type { ChannelSigningContentKind, ChannelSigningRule, ChannelSigningStatusWire, ChannelSigningTransition } from "./protocol.types";
+import type {
+    ChannelSigningContentKind,
+    ChannelSigningRule,
+    ChannelSigningStatusWire,
+    ChannelSigningTransition,
+    OnchainKeyPurposeWire,
+    WatchtowerSigningStatusWire,
+} from "./protocol.types";
 
-export const CHANNEL_SIGNING_STATUS_TYPES = [
+/**
+ * Shared by fiber's channel and watchtower signing statuses.
+ */
+export const SIGNING_STATUS_TYPES = [
     "NoSignatureRequired",
     "SignatureRequired",
-] as const satisfies readonly ChannelSigningStatusWire["type"][];
+] as const satisfies readonly (ChannelSigningStatusWire["type"] & WatchtowerSigningStatusWire["type"])[];
 
 export const CHANNEL_SIGNING_TRANSITIONS = [
     "SendCommitmentSigned",
@@ -104,3 +114,5 @@ export const CHANNEL_SIGNING_RULES = {
  * One below the derivation's bound: the answer publishes the material of `slot + 1`, which must still be derivable.
  */
 export const MAX_SIGNING_SLOT_NUMBER = MAX_COMMITMENT_NUMBER - 1;
+
+export const ONCHAIN_KEY_PURPOSE_TYPES = ["Settlement", "Tlc"] as const satisfies readonly OnchainKeyPurposeWire["type"][];

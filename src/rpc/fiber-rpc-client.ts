@@ -3,6 +3,7 @@ import { asWireError } from "../wire";
 import {
     decodeAbandonChannelResult,
     decodeListChannelIdsResult,
+    decodeListChannelStatesResult,
     decodeListChannelsResult,
     decodeOpenChannelWithExternalFundingResult,
     decodeSubmitSignedFundingTxResult,
@@ -22,7 +23,12 @@ import { decodeRpcResponse, encodeRpcRequest } from "./json-rpc";
 import { decodeRpcPayment, encodeSendPaymentParams } from "./payments";
 import { RPC_BEARER_PREFIX, RPC_CONTENT_TYPE } from "./rpc.constants";
 import { RpcError, RpcResponseError, RpcTransportError } from "./rpc.error";
-import { decodeRpcSigningStatusResult, decodeRpcSubmissionResult, encodeSubmitChannelSignatureParams } from "./signing";
+import {
+    decodeRpcSigningStatusResult,
+    decodeRpcSubmissionResult,
+    encodeSubmitChannelSignatureParams,
+    encodeSubmitWatchtowerSignatureParams,
+} from "./signing";
 import {
     decodeGetTenantRegistryNonceResult,
     decodeRegisterTenantResult,
@@ -33,6 +39,7 @@ import type {
     AbandonChannelParams,
     RpcChannel,
     RpcChannelIdParams,
+    RpcListedChannelState,
     FiberRpcClientOptions,
     GetTenantRegistryNonceParams,
     GetTenantRegistryNonceResult,
@@ -56,6 +63,7 @@ import type {
     SubmitChannelSignatureParams,
     SubmitSignedFundingTxParams,
     SubmitSignedFundingTxResult,
+    SubmitWatchtowerSignatureParams,
 } from "./rpc.types";
 import { encodeRpcChannelIdParams, encodeRpcPaymentHashParams } from "./utils";
 
@@ -157,6 +165,15 @@ export class FiberRpcClient {
     }
 
     /**
+     * Lists the node's channels' ids and states, taking any state name or flag fiber writes.
+     * @param params The filter, if any.
+     * @returns The channels' ids and states.
+     */
+    async listChannelStates(params: ListChannelsParams = {}): Promise<RpcListedChannelState[]> {
+        return this.call("list_channels", encodeListChannelsParams(params), decodeListChannelStatesResult);
+    }
+
+    /**
      * Creates a hold invoice: the node gets the hash, never the preimage.
      * @param params The invoice to create.
      * @returns The encoded invoice.
@@ -225,6 +242,24 @@ export class FiberRpcClient {
      */
     async submitChannelSignature(params: SubmitChannelSignatureParams): Promise<RpcSubmissionResult> {
         return this.call("submit_channel_signature", encodeSubmitChannelSignatureParams(params), decodeRpcSubmissionResult);
+    }
+
+    /**
+     * Reads a channel's watchtower signing status.
+     * @param params The channel's id.
+     * @returns The channel's id and its status, still undecoded.
+     */
+    async getWatchtowerSigningStatus(params: RpcChannelIdParams): Promise<RpcSigningStatusResult> {
+        return this.call("get_watchtower_signing_status", encodeRpcChannelIdParams(params), decodeRpcSigningStatusResult);
+    }
+
+    /**
+     * Hands the node the device's recoverable signature for a watchtower spend.
+     * @param params The request and its 65-byte signature.
+     * @returns Whether the node applied the signature or had already applied it.
+     */
+    async submitWatchtowerSignature(params: SubmitWatchtowerSignatureParams): Promise<RpcSubmissionResult> {
+        return this.call("submit_watchtower_signature", encodeSubmitWatchtowerSignatureParams(params), decodeRpcSubmissionResult);
     }
 
     /**

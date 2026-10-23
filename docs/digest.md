@@ -4,7 +4,9 @@ The no-blind-signing half of the policy design: before the device signs a 32-byt
 message from the channel state the node attached, so a signature can only ever bind what the device was actually shown. It
 also computes the message of the plaintext the node sent, so the two can be compared. The policy layer compares and refuses
 on mismatch ([policy.md](./policy.md)); this module only reconstructs. For what the signature then does with the digest see
-[signing.md](./signing.md).
+[signing.md](./signing.md). It also reads what a watchtower's spend of a force-closed commitment carries, CKB's tx hash and
+the settlement unlock of a commitment lock's cell, which the policy's watchtower rules judge
+([The settlement unlock](#the-settlement-unlock)).
 
 ## Four messages, not one
 
@@ -134,7 +136,11 @@ device SDK (`fiber-lsp-sdk/src/commitment.rs:623,641-645`) and its watchtower (`
 `readCommitmentLockDelay` (bytes 20 to 28, the little-endian since of a relative epoch delay, returned with its `0xa0` flags
 stripped, any other flags refused) and `readCommitmentLockVersion` (bytes 28 to 36, the big-endian commitment number,
 refused above `MAX_COMMITMENT_NUMBER`). Both take the 57 and 58 bytes of a commitment lock and the 36 bytes a revocation
-signs, which are their prefix, and refuse any other length; the layout is `readCommitmentLockLayout`'s to check.
+signs, which are their prefix, and refuse any other length; the layout is `readCommitmentLockLayout`'s to check. Two more
+take the 57 and 58 bytes alone, since a revocation's 36 do not reach them: `readCommitmentLockSettlementHash` (bytes 36 to
+56, the `blake160` of the settlement body the cell commits, fiber's `COMMITMENT_LOCK_SETTLEMENT_HASH_OFFSET`) and
+`readCommitmentLockSettled` (byte 56, `0x00` in a commitment's own args and `0x01` in the remainder a settlement unlock
+leaves, any other byte refused). Each returns bytes of its own, whatever buffer the args are a view into.
 
 ## The cooperative close, from its tx
 
@@ -170,7 +176,11 @@ over the plaintext a request carries.
   `computeRevocationDigest` wraps the data it rebuilds the same way.
 
 The message is not the transaction's on-chain hash: the transaction fiber broadcasts adds the funding lock's cell deps back
-(`get_latest_commitment_transaction`, `channel.rs:11567-11581`).
+(`get_latest_commitment_transaction`, `channel.rs:11567-11581`). That hash is `computeTxHash(tx)`, CKB's `calc_tx_hash`: the
+same molecule `RawTransaction`, its cell deps written, each one checked first (an out point and `code` or `dep_group`). It
+is the hash a spend's input names the cell it spends by; the watchtower's rules record each spend's, and compare it only
+to tell a repeat of the same spend ([policy.md](./policy.md)). The two share one serializer,
+`serializeRawTransaction`, which reads no cell dep when it writes none.
 
 ## The content before its message
 
@@ -178,6 +188,8 @@ Three constructions are exported beside their digests, so the content a message 
 
 - `buildCommitmentTx(keys, input)`, the tx of fiber's `build_commitment_tx_and_settlement_data`: the funding cell into the
   commitment cell, unsigned and without cell deps. `computeCommitmentTxDigest` is `computeTxMessage` over it.
+  `buildCommitmentTxAndSettlement` returns the tx with the settlement body its lock args commit, built once, which the
+  policy keeps beside the commitment it signs; `buildCommitmentSettlementWitness` builds the body alone.
 - `buildClosingTx(keys, input, udt)`, the cooperative close of `build_shutdown_tx`, with the UDT's type script and each
   side's amount or `null` on a CKB channel. Both close digests are `computeTxMessage` over it.
 - `buildRevocationContent(keys, input)`, fiber's `Musig2SignableContent::Revocation`: the punishment `output`, its
@@ -185,8 +197,43 @@ Three constructions are exported beside their digests, so the content a message 
   `commitmentLockArgs`, fiber's `commitment_lock_script_args` under the name the protocol codecs read them by.
   `computeRevocationDigest` is `computeRevocationContentMessage` over the three.
 
-None of them is in the barrel's list: the SDK only ever needs their messages. The tests' node double, which sends the
-device the content fiber would, imports them by file, as the module's specs do.
+The commitment's three are in the barrel's list, with `moleculeCellOutput` and `moleculeOutPoint`, since the policy
+records a signed commitment's cell and body in molecule form. The close's and the revocation's are not: the SDK only ever
+needs their messages, and the tests' node double, which sends the device the content fiber would, imports them by file, as
+the module's specs do.
+
+## The settlement unlock
+
+After a force close, fiber's watchtower spends a commitment lock's cell one unlock at a time ([signing.md](./signing.md)),
+and witness 0 of each spend is the settlement witness fiber's lock reads. `readSettlementUnlock(witness, layout)` reads it
+under the spent cell's layout:
+
+| Bytes               | What                                                                                  |
+| ------------------- | ------------------------------------------------------------------------------------- |
+| 16                  | Fiber's `XUDT_COMPATIBLE_WITNESS`, an empty molecule `WitnessArgs`                    |
+| 1                   | The unlock count, exactly 1: fiber's watchtower spends one unlock per tx              |
+| `73 + n × (65 + h)` | The settlement body: the TLC count `n`, the `n` entries, then the two balances        |
+| 1                   | The unlock's type: a TLC's index, `0xfe` for the first balance, `0xff` for the second |
+| 1                   | The preimage flag, 0 or 1                                                             |
+| 65                  | The recoverable signature, 65 zero bytes in the spend the watchtower hands over       |
+| 32, with the flag   | The preimage                                                                          |
+
+The body is the one `buildSettlementWitness` writes, which the cell's args commit: each TLC entry is a flag byte (its
+direction bit under the hash algorithm's), its u128 amount, the payment hash at the layout's length `h` (20 or 32 bytes),
+the two key hashes and an 8-byte since, 85 or 97 bytes; each balance is the `blake160` of the TLC base key it settles to
+and its u128 amount, every amount little-endian. `readSettlementBody` splits a body, and `readSettlementTlcEntry(entry, layout,
+forRemote)` reads an entry back into its direction from the device's side, its amount and the device's key hash. Where the
+device sits in each pair the body carries is `deviceSettlementIndex(forRemote)`: first in its own commitment, second in
+the peer's. The readers refuse a prefix, a count or a flag fiber never writes, a body off the length its TLC count says, an
+unlock type naming no TLC and no balance, an unlock whose length its flag contradicts and a balance's unlock with a
+preimage; and each returns bytes of its own.
+
+What the unlock leaves is fiber's too (`SettlementWitness::update`, `watchtower/actor.rs:2448`):
+`nextSettlementWitness(unlock, forRemote)` is the body with the unlocked TLC dropped, or with the device's balance zeroed,
+its key hash and amount; it refuses to settle the peer's balance. `buildRemainderLockArgs(sourceArgs, nextBody)` is the
+remainder's lock args: the source's first 36 bytes, which carry the commitment number, the `blake160` of the next body,
+the flag `0x01`, and the feature byte under `fullPaymentHash`. Judging whether a spend's output 0 is that remainder is the
+policy's.
 
 ## Network pinning
 
@@ -198,7 +245,8 @@ hash could redirect the commitment output and still pass the digest check. Dev c
 ## Molecule, from scratch
 
 The reconstruction needs CKB's molecule serialization (tables, fixed and dynamic vectors, options) for exactly seven
-blockchain types plus the gossip announcement table. The SDK implements that subset rather than adding a dependency: the
+blockchain types, `Script`, `OutPoint`, `CellDep`, `CellInput`, `CellOutput`, `RawTransaction` and `Transaction`, plus the
+gossip announcement table. The SDK implements that subset rather than adding a dependency: the
 runtime dependency set is a hard constraint, and the full molecule machinery is far larger than the fragment needed. The
 writers of the primitives (integers, tables, vectors, `Bytes`, `Script`) live in `common`, since the invoice module writes
 the same ones ([invoice.md](./invoice.md)); the transaction serializers stay in `utils/molecule.utils.ts`. The layout is pinned
@@ -215,7 +263,14 @@ of the fixture channel, which exercises both branches of the sorted orderings ag
 CKB close from what its tx states, and each commitment from the settlement snapshot fiber's `to_rpc_signing_settlement`
 writes for it, through the converter. The builders are pinned to fiber's constructions themselves, not only to their
 digests (`test/tests/digest/interop-vectors.spec.ts`): the tx of each of the nine commitment cases and of the CKB close,
-and the output, data and args of each of the three revocations, come out equal to the ones the vectors carry.
+and the output, data and args of each of the three revocations, come out equal to the ones the vectors carry; and the
+settlement body each commitment case's args commit is rebuilt equal to its witness.
+
+The `watchtower` section of `interop/vectors/signing.json` pins the rest against fiber's watchtower and its device SDK's
+`validate`: per view, the broadcast commitment's on-chain hash, its funding lock's cell deps included, apart from its
+message, and its lock args committing a body its layout reads; then each spend's tx hash and message, the unlock its key
+purpose names under the signer's key, and the remainder whose args commit the next body, or none once nothing is left,
+chained from spend to spend, the peer's own spends included ([interop/README.md](../interop/README.md)).
 
 ## What the tests guarantee
 
@@ -312,3 +367,77 @@ breaking the code on purpose:
 | A header dep is left to the serializer to check                          | 1                 |
 | A header dep is named without the transaction's path                     | 1                 |
 | The commitment's funding out point is left to the message to check       | 1                 |
+
+The watchtower's part has specs of its own: `tx-hash.spec.ts` hashes a hand-built raw transaction under CKB's
+personalization, each dep type as its byte, every dep in order, equal to the message once the deps are emptied, the
+witnesses left out, and refuses each malformed cell dep field by field; `settlement-unlock.spec.ts` reads hand-built
+witnesses (a TLC unlock with and without its preimage, a TLC-less body, `0xfe` as a balance under 255 TLCs and `0xfd` as
+the last index), sizes each entry by its layout, refuses each rule above at its edge, and reads back every body
+`buildSettlementWitness` writes, in both views and layouts, each balance on its side, each TLC as given, and a TLC dropped
+as the witness without it; the lock args readers' and the builders' specs read each layout and refuse each length.
+
+The watchtower's part of the module, `computeTxHash` with the cell deps it serializes, `settlement-unlock.ts`, the two lock
+args readers and `buildCommitmentSettlementWitness`, was broken the same way (`test/tests/digest`, still 100% on all four
+metrics):
+
+| Mutation                                              | Tests that failed |
+| ----------------------------------------------------- | ----------------- |
+| Amounts are read big-endian                           | 51                |
+| The balances are read in reverse                      | 42                |
+| The commitment's args carry the remainder's flag      | 40                |
+| The balances are read one byte early                  | 38                |
+| The device sits first in a remote view                | 37                |
+| An entry is sized by the legacy layout alone          | 29                |
+| A cell dep drops its dep type byte                    | 28                |
+| The commitment's settlement body inverts the view     | 27                |
+| A TLC index is read before the balance types          | 22                |
+| The flag sits a byte later                            | 22                |
+| The tx hash leaves the cell deps out                  | 22                |
+| The commitment's settlement body leaves the TLCs out  | 20                |
+| The dep types' bytes are swapped                      | 20                |
+| The cell deps are written in reverse                  | 17                |
+| The next body counts the TLCs before the unlock       | 17                |
+| The unlocked TLC is kept and the others dropped       | 17                |
+| The remainder keeps the commitment's flag             | 16                |
+| The remainder keeps the source's settlement hash      | 16                |
+| The device's key hash is the peer's                   | 15                |
+| The amount is read from the flag on                   | 14                |
+| The remainder drops the feature byte                  | 13                |
+| The settlement hash is read a byte late               | 13                |
+| 0xfe settles the second balance                       | 12                |
+| 0xff settles the first balance                        | 12                |
+| A settled balance keeps a shannon                     | 11                |
+| The peer's balance is zeroed                          | 11                |
+| A commitment reads as a remainder                     | 8                 |
+| A remainder reads as a commitment                     | 6                 |
+| The flag bound drops the direction bit                | 6                 |
+| The flag is read from any args                        | 5                 |
+| The settlement hash is read from any args             | 5                 |
+| The direction ignores the view                        | 4                 |
+| Any other flag reads as a commitment                  | 3                 |
+| The signature is read a byte early                    | 3                 |
+| The view is not checked to be a boolean               | 3                 |
+| A body may carry trailing bytes                       | 2                 |
+| A body without its count is refused by its length     | 2                 |
+| The next body is not checked against the args' layout | 2                 |
+| The preimage is read a byte late                      | 2                 |
+| The unlock's length is checked against its flag alone | 2                 |
+| A TLC entry of any length is read                     | 1                 |
+| A TLC entry's flag is not bounded                     | 1                 |
+| A TLC index past the body is dropped as nothing       | 1                 |
+| A balance unlock may carry a preimage                 | 1                 |
+| A cell dep is named without the transaction's path    | 1                 |
+| A cell dep is not checked to be an object             | 1                 |
+| A cell dep's out point is not checked                 | 1                 |
+| A cell dep's type is not checked                      | 1                 |
+| An unlock type may name one TLC past the body         | 1                 |
+| Any preimage flag is read                             | 1                 |
+| Any unlock count is read                              | 1                 |
+| The XUDT-compatible prefix is not checked             | 1                 |
+| The body is a view over the witness                   | 1                 |
+| The cell deps are not checked to be a list            | 1                 |
+| The flag is read from the args' buffer                | 1                 |
+| The peer's balance may be settled                     | 1                 |
+| The settlement hash is a view over the args           | 1                 |
+| The settlement hash is read from the args' buffer     | 1                 |
+| The unlock's length may contradict its flag           | 1                 |

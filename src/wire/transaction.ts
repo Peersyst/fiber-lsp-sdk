@@ -47,7 +47,7 @@ export function encodeTransaction(name: string, tx: Transaction): TransactionWir
  * @param field Field to read.
  * @returns The cell dep.
  */
-function decodeCellDep(field: WireField): CellDep {
+export function decodeCellDep(field: WireField): CellDep {
     const at = readObject<CellDepWire>(field);
     return { outPoint: decodeOutPoint(at("out_point")), depType: decodeEnum(at("dep_type"), DEP_TYPES) };
 }

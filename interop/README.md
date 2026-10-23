@@ -6,7 +6,8 @@ is checked against, plus the vectors it produces. The `rpc` module has a contrac
 same harness pins it in `vectors/rpc.json`: params and results serialized by fiber's own JSON types, and the envelopes as the
 jsonrpsee version fiber serves writes them. The `invoice` module reads and writes fiber's invoice string, which the harness
 pins in `vectors/invoice.json` from fiber's own encoder and decoder. And the signer answers fiber's signing requests, which the
-harness pins in `vectors/signing.json`: one request per transition as a node writes it, with what the device must answer.
+harness pins in `vectors/signing.json`: one request per transition as a node writes it, with what the device must answer, and
+the watchtower's spends of a force-closed channel, each with the signature the device owes it.
 
 `test/tests/derivation/interop-vectors.spec.ts` runs against `vectors/vectors.json` on every `pnpm test`, and
 `test/tests/signer/tenant-identity.spec.ts` against its `tenant_registry` section, so the contract is
@@ -26,7 +27,7 @@ For the scheme those vectors pin, see [`docs/derivation.md`](../docs/derivation.
 | `digest`          | Fixture channels through the four digests, with per-case intermediates so a divergence localizes itself. The settlement witness, its hash, the transaction message, the lock layouts (`CommitmentContractFeatures`) and the check that a settlement is the one a commitment's lock args commit are `fiber-types`' own, pinned by git rev; what `fiber-lib` keeps private is ported and cited at its `file:line`: the TLC order and flip of `get_active_tlcs`, the lock args, the fee mocks, and the reserve `reserved_capacity` sizes over a shutdown script with `ckb-types`' own `occupied_capacity` (see [`docs/digest.md`](../docs/digest.md)). Each case carries the plaintext its digest is computed from, as a signing request hands it over, and each commitment case the settlement snapshot fiber's `to_rpc_signing_settlement` states for it |
 | `rpc`             | Nothing ported: fiber's RPC forms for the eighteen methods the client speaks, built from fixed values and serialized by `fiber-json-types` (fiber's serde-only crate, pinned by git rev), plus the request, result and error envelopes as `jsonrpsee-types 0.25.1` writes them; and the other direction, the params the TS client encodes read back by fiber's own deserializers                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
 | `invoice`         | Nothing ported but the coder: invoices built from fixed values and written by `fiber-types`' own `CkbInvoice`, pinned by git rev, with each layer beside the string; the `arcode` coder, ported verbatim because fiber keeps it private, checked against those strings; UTF-8 as Rust reads it; variants of one invoice with fiber's verdict on each; and the other direction, fiber's decoder over the strings the TS encoder writes                                                                                                                                                                                                                                                                                                                                                                                                                   |
-| `signing`         | Fiber's six signing requests on one channel, written by `fiber-json-types` and checked through `fiber-lsp-sdk`'s own JSON codec, fiber's client crate pinned by git rev: the plaintexts built by the `digest` section, the key contexts, nonces and the peer's partial signatures by fiber's `musig2` and `InMemorySigner`; ported, cited, only `to_rpc_signing_settlement`, which `fiber-lib` keeps private. Beside each request, what the device answers; and variants of one request with the verdict of fiber's codec                                                                                                                                                                                                                                                                                                                               |
+| `signing`         | Fiber's six signing requests on one channel, written by `fiber-json-types` and checked through `fiber-lsp-sdk`'s own JSON codec, fiber's client crate pinned by git rev: the plaintexts built by the `digest` section, the key contexts, nonces and the peer's partial signatures by fiber's `musig2` and `InMemorySigner`; ported, cited, only `to_rpc_signing_settlement`, which `fiber-lib` keeps private. Beside each request, what the device answers; and variants of one request with the verdict of fiber's codec. Then the watchtower's spends of both commitments, with the device's signature of each and variants with the verdict of `fiber-lsp-sdk`'s `validate`, ported with the watchtower's own builder because both are private                                                                                                       |
 | `tenant_registry` | Nothing ported: one tenant registration, the RootSigner being the `sdk_scheme` wallet identity key and the LSP's node key and nonce fixed. The payload's canonical bytes, its digest and the tenant id are `fiber-types`' own `TenantRegistryPayload` and `TenantId`, pinned by git rev; the signature is the `sign_ecdsa` of fiber's agent (`crates/fiber-lsp-sdk/src/root_key.rs:53-64`, private there), deterministic, so the vector pins it byte for byte, and it is written only after fiber's `TenantRegistrySignature::from_slice` and `verify_signature` accept it                                                                                                                                                                                                                                                                              |
 
 The master seed half needs BIP32, and the harness implements hardened derivation from the spec (`hmac` + `sha2`) rather than
@@ -100,8 +101,9 @@ is the external-funding open with the signer's opening block (real musig2 public
 absent, the delay and fee rate options present and absent) and a result whose `opening_context` is pinned at ordinary values
 and at `u128::MAX` amounts, `u64::MAX` reserves and fee rate and an epoch with every field set; `shutdown_channel` by channel
 id alone and with the close script, fee rate and `force`, its result `null`; `get_channel_signing_status` and
-`get_watchtower_signing_status` with `NoSignatureRequired` only, a channel's `SignatureRequired` requests being pinned whole
-in `vectors/signing.json` (see "The signing requests") and the watchtower's not yet;
+`get_watchtower_signing_status` with `NoSignatureRequired`, a channel's `SignatureRequired` requests being pinned whole
+in `vectors/signing.json` (see "The signing requests"), and the watchtower's `SignatureRequired` under each key purpose,
+`Tlc` and `Settlement`, its `request_id` the hash fiber gives the transaction it hands over;
 `submit_channel_signature` with and without `next_material` and `submit_watchtower_signature` with a recoverable signature,
 each with both outcomes, `Applied` and `AlreadyApplied`; and `lsp_get_tenant_registry_nonce` and `lsp_register_tenant`, the
 latter's `signature` the bare hex of the 64-byte compact form as fiber's own agent writes it, with a tenant under each runtime
@@ -157,8 +159,10 @@ interop workflow runs it.
    section of `rust/src/main.rs` ports at the `file:line` each comment cites (`get_active_tlcs`, the lock args of
    `build_commitment_transaction_output`, `commitment_tx_size`, `occupied_capacity`). A lock args port that no longer commits
    what the crate's witness says stops `gen-vectors` on the case's name. Re-read, at the `file:line` `rust/src/signing.rs`
-   cites, `to_rpc_signing_settlement` (the one port there), the slot, counter and key order each request builder of
-   `channel.rs` gives its transition, and the peer's nonce derivations.
+   cites, `to_rpc_signing_settlement`, the slot, counter and key order each request builder of `channel.rs` gives its
+   transition, and the peer's nonce derivations; and the watchtower's ports there: fiber-lsp-sdk's `validate`,
+   `epoch_at_least` and the on-chain arm of `sign_content`, and `fiber-lib`'s unlock choice and CKB spend of
+   `build_settlement_tx`, `SettlementWitness::update`, `mul` and the funding witness.
    Re-read the tenant registration's signing at the `file:line` `tenant_registry_vector` in `rust/src/main.rs` cites.
 4. Re-read the refused-token path at the `file:line` the comment on `UNAUTHORIZED_CODE` in `rust/src/rpc.rs` cites: its code and its
    messages are literals there, so a change reaches the vectors only through the harness.
@@ -248,6 +252,43 @@ the `digest` section's builders give it; that the result, read back through `fib
 lock's or the announced one; and that the device's and the peer's partial signatures verify and aggregate into a Schnorr
 signature valid under the aggregated key.
 
+## The watchtower spends
+
+`watchtower` holds, on the same channel, the spends fiber's watchtower builds after a force close, one view each: the peer's
+commitment (`for_remote` true) and the device's own. The channel's TLCs have no known preimage, so both commitments carry
+`watchtower.tlcs` instead, built the same way: an outbound TLC past its expiry and an inbound one whose preimage the
+watchtower holds. Beside them, the funding lock's and the spends' cell deps (the devnet's genesis cells, at fixed out
+points), the `destination` every spend pays (the watchtower's secp256k1 lock), and `max_fee`, the device's bound on what a
+spend may leave unpaid.
+
+Each view's `commitment` is the transaction fiber broadcasts: the signed commitment, its funding witness the two parties'
+aggregated signature, with the funding lock's cell deps added (crates/fiber-lib/src/fiber/channel.rs:11567-11581), so its
+`onchain_tx_hash` is not the hash of the transaction the device signed; `message`, which ignores both, is. `spends` follow,
+in the watchtower's order: each TLC, then the device's settlement, each spending output 0 of the one before, the remainder.
+A spend is the transaction the watchtower hands over, its unlock's signature 65 zero bytes, with fiber's `request_id` (the
+hash of the molecule transaction), its `message` and `tx_hash`, the amount it releases, the key fiber expects for its
+`key_purpose` (`ChannelData::expected_onchain_pubkey`) and the device's `signature`, recoverable ECDSA with the recovery id
+last, as fiber-lsp-sdk's `sign_content` makes it from fiber's `InMemorySigner` keys. The watchtower's unlock choice and its
+CKB spend are ported from `build_settlement_tx` (crates/fiber-lib/src/watchtower/actor.rs:1310-1840), the sponsors at the
+destination fixed and added as it adds them, its fee rate the literal there.
+
+Each view also holds a second history of the same commitment, later on the clock, where the peer's watchtower spends first
+(names `<view>, peer first: ...`). `peer_spends` are the peer's own, built by the same port from the peer's side, so no
+request and no signature of the device's: it times the inbound TLC out of the commitment, and later settles its balance.
+The device's spends of that history follow the watchtower's three in `spends`, which holds the device's spends only: its
+outbound TLC by timeout from the peer's remainder, and its settlement as the last party, from the peer's next remainder,
+taking the whole cell with no remainder of its own. Each spend's first input names the transaction it spends.
+
+A spend is written only after fiber-lsp-sdk's `validate` accepts it, given the device's `RecoveryRecord` of the commitment,
+an authorization of exactly that destination, fee, sponsors and deps, and a `ChainVerifier` the harness serves from the
+transactions it confirms: live cells, the lineage back to the broadcast commitment, the maturity of each `since`, and a
+median time. `validate` is private to the crate and its public callers, `ChannelSigner::prepare_onchain` and `sign_onchain`,
+need a signer whose keys fiber-lsp-sdk derives itself, so the harness ports it verbatim
+(crates/fiber-lsp-sdk/src/onchain.rs:61-395) over the crate's public types. `variants` change one part of a spend each, with
+`validate`'s verdict on the chain that spend met: a foreign destination, an altered remainder, a foreign TLC, the key of
+another TLC's number, a moved balance, a witness the cell does not commit, and the peer's remaining balance paid out.
+Against a live cell the forged witnesses all fail the one check of the committed hash, so three variants share that verdict.
+
 ## Verifying the signing requests
 
 ```bash
@@ -257,13 +298,17 @@ cargo run --release -- verify-signing ../vectors/signing.json /tmp/ts-signing-ou
 ```
 
 `INTEROP_SIGNING_OUT` makes `test/tests/signer/interop-vectors.spec.ts` write
-`{ "cases": [ { "name": "<case>", "public_nonce": "<hex>", "partial_signature": "<hex>" } ] }`, bare hex: the device's half
-of every case of `signing.json` as the SDK computes it, the announcement's included, which the dispatch refuses but the
-engine still signs. Unset, the spec writes nothing. `verify-signing` requires every case once and no other; the public nonce
-to be the device's half of the case's `agg_nonce`; fiber's musig2 crate to verify the partial signature (`verify_partial`);
-and the two halves, the peer's taken from the request or signed by the harness with the peer's nonce, to aggregate into a
-Schnorr signature valid under the case's aggregated key. `cargo test --release` pins each of those outcomes, and the interop
-workflow runs the verifier right after `pnpm test`.
+`{ "cases": [ { "name": "<case>", "public_nonce": "<hex>", "partial_signature": "<hex>" } ], "watchtower": [ { "name": "<spend>", "signature": "<hex>" } ] }`,
+bare hex: the device's half of every case of `signing.json` as the SDK computes it, the announcement's included, which the
+dispatch refuses but the engine still signs, and the device's on-chain signature of every watchtower spend, `signOnchain`
+over the request the protocol decoder reads from the spend. Unset, the spec writes nothing. `verify-signing` requires every
+case once and no other; the public nonce to be the device's half of the case's `agg_nonce`; fiber's musig2 crate to verify
+the partial signature (`verify_partial`); and the two halves, the peer's taken from the request or signed by the harness with
+the peer's nonce, to aggregate into a Schnorr signature valid under the case's aggregated key. Of `watchtower`, it requires
+every spend once and no other, and each signature to recover the spend's expected key over fiber's message of its
+transaction, as fiber's `submit_watchtower_signature` checks it; an output without `watchtower` does not read, since its writer
+is this repo's own spec. `cargo test --release` pins each of those outcomes, and the interop workflow runs the verifier right
+after `pnpm test`.
 
 ## Verifying a partial signature
 

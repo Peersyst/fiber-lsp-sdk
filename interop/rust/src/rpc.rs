@@ -17,8 +17,8 @@ use fiber_json_types::{
     GetWatchtowerSigningStatusParams, GetWatchtowerSigningStatusResult, Hash256, HashAlgorithm, Htlc,
     InboundTlcStatus, InvoiceData, InvoiceParams, InvoiceResult, ListChannelsParams, ListChannelsResult,
     LspTenantRuntimeStatus, LspTenantStatus, NegotiatingFundingFlags, NewInvoiceParams, NextChannelSignerMaterial,
-    OpenChannelWithExternalFundingParams, OpenChannelWithExternalFundingResult, OpenTenantChannelResult,
-    OutboundTlcStatus, PaymentCustomRecords, PaymentStatus, Pubkey, RegisterLspTenantParams,
+    OnchainKeyPurpose, OnchainSigningContent, OpenChannelWithExternalFundingParams, OpenChannelWithExternalFundingResult,
+    OpenTenantChannelResult, OutboundTlcStatus, PaymentCustomRecords, PaymentStatus, Pubkey, RegisterLspTenantParams,
     RegisterLspTenantResult, SendPaymentCommandParams, SettleInvoiceParams, SettleInvoiceResult,
     ShutdownChannelParams, ShuttingDownFlags, SigningCommitmentFlags, SubmitChannelSignatureParams,
     SubmitChannelSignatureResult, SubmitSignedFundingTxParams, SubmitSignedFundingTxResult,
@@ -393,6 +393,21 @@ struct SigningStatusResultValues {
 }
 
 #[derive(Serialize)]
+struct KeyPurposeValues {
+    name: String,
+    commitment_number: Option<String>,
+}
+
+#[derive(Serialize)]
+struct WatchtowerSignatureRequiredValues {
+    channel_id: String,
+    status: String,
+    request_id: String,
+    key_purpose: KeyPurposeValues,
+    transaction: TransactionValues,
+}
+
+#[derive(Serialize)]
 struct NextMaterialValues {
     next_commitment_point: String,
     next_commitment_nonce: String,
@@ -604,6 +619,29 @@ fn channel_submission_results() -> Vec<SubmitChannelSignatureResult> {
     all
 }
 
+fn watchtower_signing_statuses() -> Vec<WatchtowerSigningStatus> {
+    use WatchtowerSigningStatus::*;
+    let content = OnchainSigningContent { key_purpose: OnchainKeyPurpose::Settlement, transaction: Transaction::default() };
+    let all = vec![NoSignatureRequired, SignatureRequired { request_id: hash256(&hash_hex("any request")), content }];
+    for status in &all {
+        match status {
+            NoSignatureRequired | SignatureRequired { .. } => {}
+        }
+    }
+    all
+}
+
+fn onchain_key_purposes() -> Vec<OnchainKeyPurpose> {
+    use OnchainKeyPurpose::*;
+    let all = vec![Settlement, Tlc { commitment_number: 0 }];
+    for purpose in &all {
+        match purpose {
+            Settlement | Tlc { .. } => {}
+        }
+    }
+    all
+}
+
 fn watchtower_submission_results() -> Vec<SubmitWatchtowerSignatureResult> {
     use SubmitWatchtowerSignatureResult::*;
     let all = vec![Applied, AlreadyApplied];
@@ -746,16 +784,26 @@ fn assert_coverage(methods: &MethodVectors) {
         set(watchtower_submission_results().iter().map(tag_of).collect()),
         "watchtower submission results"
     );
-    // The `SignatureRequired` statuses arrive with the signing task; until then every status case is the idle one.
+    // A channel's `SignatureRequired` requests are pinned whole in signing.json; here the status case is the idle one.
     assert_eq!(
         set(values(&[&methods.get_channel_signing_status]).iter().map(|result| text(&result["status"])).collect()),
         set(vec![tag_of(&ChannelSigningStatus::NoSignatureRequired)]),
         "channel signing statuses"
     );
+    let watchtower_statuses = values(&[&methods.get_watchtower_signing_status]);
     assert_eq!(
-        set(values(&[&methods.get_watchtower_signing_status]).iter().map(|result| text(&result["status"])).collect()),
-        set(vec![tag_of(&WatchtowerSigningStatus::NoSignatureRequired)]),
+        set(watchtower_statuses.iter().map(|result| text(&result["status"])).collect()),
+        set(watchtower_signing_statuses().iter().map(tag_of).collect()),
         "watchtower signing statuses"
+    );
+    assert_eq!(
+        set(watchtower_statuses
+            .iter()
+            .filter_map(|result| result.get("key_purpose"))
+            .map(|purpose| text(&purpose["name"]))
+            .collect()),
+        set(onchain_key_purposes().iter().map(tag_of).collect()),
+        "watchtower key purposes"
     );
 }
 
@@ -940,6 +988,105 @@ fn funding_tx(udt: bool, signed: bool) -> TransactionValues {
         ];
         tx.witnesses.push(String::new());
     }
+    tx
+}
+
+/// A watchtower spend as crates/fiber-lib/src/watchtower/actor.rs:1653-1840 builds it: the commitment lock cell, then the
+/// watchtower's sponsor; the remainder, then the watchtower's output; the settlement unlock, its signature zeroed, then the
+/// sponsor's placeholder. `purpose` picks a TLC claimed by timeout from the commitment, or the last party's settlement. The
+/// view is the device's own, so its balance comes first and 0xfe settles it.
+fn watchtower_spend(purpose: &OnchainKeyPurpose) -> TransactionValues {
+    let commitment_lock = |args: &[u8]| ScriptVector {
+        code_hash: hash_hex("commitment lock code hash"),
+        hash_type: "type".to_string(),
+        args: hex::encode(args),
+    };
+    let lock_args = |settlement_body: &[u8], flag: u8| {
+        let since = (0xa000_0000_0000_0000u64 | (1 << 40) | 1).to_le_bytes();
+        [
+            &blake160(b"aggregated commitment pubkey")[..],
+            &since,
+            &7u64.to_be_bytes(),
+            &blake160(settlement_body),
+            &[flag, 0x01],
+        ]
+        .concat()
+    };
+    let device_balance = [blake160(b"device settlement key").as_slice(), &22_549_999_543u128.to_le_bytes()].concat();
+    let peer_balance = [blake160(b"peer settlement key").as_slice(), &72_750_000_000u128.to_le_bytes()].concat();
+    // What the watchtower writes for a balance it settled: the peer's, when the device settles last.
+    let settled_balance = [0u8; 36];
+    let unlock = |unlock_type: u8| [&[unlock_type, 0x00][..], &[0u8; SECP256K1_SIGNATURE_LEN]].concat();
+    let dep = |label: &str, index: u32, dep_type: &str| CellDepValues {
+        out_point: out_point(label, index),
+        dep_type: dep_type.to_string(),
+    };
+    let mut tx = TransactionValues {
+        version: 0,
+        cell_deps: vec![
+            dep("devnet genesis tx", 7, "code"),
+            dep("devnet genesis tx", 5, "code"),
+            dep("devnet genesis dep group tx", 0, "dep_group"),
+        ],
+        header_deps: vec![],
+        inputs: vec![],
+        outputs: vec![],
+        outputs_data: vec![],
+        witnesses: vec![],
+    };
+    let settlement_witness = match purpose {
+        OnchainKeyPurpose::Tlc { .. } => {
+            let tlc = [
+                &[0x00][..],
+                &1_500_000_000u128.to_le_bytes(),
+                &blake2b_256(b"watchtower payment"),
+                &blake160(b"peer tlc key"),
+                &blake160(b"device tlc key"),
+                &(0x4000_0000_0000_0000u64 | 1_760_590_800).to_le_bytes(),
+            ]
+            .concat();
+            tx.inputs = vec![
+                CellInputValues {
+                    since: (0xa000_0000_0000_0000u64 | (3 << 40) | (2 << 24)).to_string(),
+                    previous_output: out_point("commitment tx", 0),
+                },
+                CellInputValues {
+                    since: (0x4000_0000_0000_0000u64 | 1_760_590_800).to_string(),
+                    previous_output: out_point("watchtower sponsor", 1),
+                },
+            ];
+            tx.outputs = vec![
+                CellOutputValues {
+                    capacity: "95299999543".to_string(),
+                    lock: commitment_lock(&lock_args(&[&[0x00][..], &device_balance, &peer_balance].concat(), 0x01)),
+                    type_: None,
+                },
+                CellOutputValues {
+                    capacity: "11499999118".to_string(),
+                    lock: sighash_script("watchtower lock args"),
+                    type_: None,
+                },
+            ];
+            [&[0x01, 0x01][..], &tlc, &device_balance, &peer_balance, &unlock(0)].concat()
+        }
+        OnchainKeyPurpose::Settlement => {
+            tx.inputs = vec![
+                CellInputValues { since: "0".to_string(), previous_output: out_point("settlement tx", 0) },
+                CellInputValues { since: "0".to_string(), previous_output: out_point("watchtower sponsor", 2) },
+            ];
+            tx.outputs = vec![CellOutputValues {
+                capacity: "32549998674".to_string(),
+                lock: sighash_script("watchtower lock args"),
+                type_: None,
+            }];
+            [&[0x01, 0x00][..], &device_balance, &settled_balance, &unlock(0xfe)].concat()
+        }
+    };
+    tx.outputs_data = vec![String::new(); tx.outputs.len()];
+    tx.witnesses = vec![
+        hex::encode([&[16u8, 0, 0, 0, 16, 0, 0, 0, 16, 0, 0, 0, 16, 0, 0, 0][..], &settlement_witness].concat()),
+        witness_args([0; SECP256K1_SIGNATURE_LEN]),
+    ];
     tx
 }
 
@@ -1547,6 +1694,32 @@ fn methods() -> MethodVectors {
         )
     };
     let (channel_status_result, watchtower_status_result) = signing_status("no signature required");
+    let watchtower_signature_required = |name: &str, purpose: OnchainKeyPurpose| {
+        let transaction = watchtower_spend(&purpose);
+        // fiber's request id: the hash of the molecule transaction it hands over (crates/fiber-lib/src/watchtower/signer.rs:95).
+        let packed: ckb_types::packed::Transaction = json_transaction(&transaction).into();
+        let values = WatchtowerSignatureRequiredValues {
+            channel_id: tenant_channel_id.clone(),
+            status: tag_of(&watchtower_signing_statuses()[1]),
+            request_id: hex::encode(blake2b_256(packed.as_slice())),
+            key_purpose: KeyPurposeValues {
+                name: tag_of(&purpose),
+                commitment_number: match purpose {
+                    OnchainKeyPurpose::Settlement => None,
+                    OnchainKeyPurpose::Tlc { commitment_number } => Some(commitment_number.to_string()),
+                },
+            },
+            transaction,
+        };
+        let json = GetWatchtowerSigningStatusResult {
+            channel_id: hash256(&values.channel_id),
+            status: WatchtowerSigningStatus::SignatureRequired {
+                request_id: hash256(&values.request_id),
+                content: OnchainSigningContent { key_purpose: purpose, transaction: json_transaction(&values.transaction) },
+            },
+        };
+        case(name, &values, &json)
+    };
     let status_params = ChannelIdParamsValues { channel_id: tenant_channel_id.clone() };
     let request_id = hash_hex("signing request");
     let submit_signature = |next_material: Option<NextMaterialValues>| SubmitChannelSignatureParamsValues {
@@ -1871,7 +2044,14 @@ fn methods() -> MethodVectors {
                 &status_params,
                 &GetWatchtowerSigningStatusParams { channel_id: hash256(&status_params.channel_id) },
             )],
-            results: vec![watchtower_status_result],
+            results: vec![
+                watchtower_status_result,
+                watchtower_signature_required(
+                    "signature required by a TLC key",
+                    OnchainKeyPurpose::Tlc { commitment_number: 5 },
+                ),
+                watchtower_signature_required("signature required by the settlement key", OnchainKeyPurpose::Settlement),
+            ],
         },
         submit_watchtower_signature: MethodCases {
             params: vec![case(

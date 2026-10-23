@@ -10,8 +10,14 @@ export function resultField(value: unknown): WireField {
 
 export const LIST_CHANNELS_CALL: SentCall = { method: "list_channels", params: {} };
 
+export const LIST_CHANNELS_WITH_CLOSED_CALL: SentCall = { method: "list_channels", params: { include_closed: true } };
+
 export function signingStatusCall(channelId: string): SentCall {
     return { method: "get_channel_signing_status", params: { channel_id: channelId } };
+}
+
+export function watchtowerStatusCall(channelId: string): SentCall {
+    return { method: "get_watchtower_signing_status", params: { channel_id: channelId } };
 }
 
 // Answers only a client's first call, id 1.

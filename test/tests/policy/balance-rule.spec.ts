@@ -1,8 +1,8 @@
 import { hexToBytes } from "@noble/hashes/utils.js";
 import type { TlcHashAlgorithm } from "../../../src/common";
 import type { BalanceRuleContext, PolicyView, PolicyViewSnapshot, PolicyViewTlc } from "../../../src/policy";
-import { PolicyRefusalError } from "../../../src/policy";
 import { judgeClosingTx, judgeCommitment, judgeOpeningCommitment, toPolicyViewTlcs } from "../../../src/policy/balance-rule";
+import { policyRefusal } from "../../utils/refusal";
 
 const HASH_A = "aa".repeat(20);
 const HASH_B = "bb".repeat(20);
@@ -24,16 +24,6 @@ const NO_RECORDS: BalanceRuleContext = { intents: new Map(), invoices: new Map()
 const UNUSED_VIEW: PolicyViewSnapshot = { exposureShannons: "0", tlcs: [], chargedShannons: {}, creditedShannons: {} };
 
 const OPENING: PolicyViewSnapshot = { exposureShannons: "1000", tlcs: [], chargedShannons: {}, creditedShannons: {} };
-
-function refusalOf(judge: () => unknown): PolicyRefusalError {
-    try {
-        judge();
-    } catch (error) {
-        if (error instanceof PolicyRefusalError) return error;
-        throw error;
-    }
-    throw new Error("expected a policy refusal");
-}
 
 describe("toPolicyViewTlcs", () => {
     const OFFERED_A = {
@@ -216,7 +206,7 @@ describe("judgeCommitment", () => {
         });
 
         it("refuses an offered TLC under a hash no intent names", () => {
-            const refusal = refusalOf(() =>
+            const refusal = policyRefusal(() =>
                 judgeCommitment(
                     "remote",
                     { remote: OPENING, local: UNUSED_VIEW },
@@ -241,7 +231,7 @@ describe("judgeCommitment", () => {
         });
 
         it("refuses an offered TLC that grows under a closed intent", () => {
-            const refusal = refusalOf(() =>
+            const refusal = policyRefusal(() =>
                 judgeCommitment(
                     "local",
                     { local: OPENING, remote: UNUSED_VIEW },
@@ -274,7 +264,7 @@ describe("judgeCommitment", () => {
         });
 
         it("refuses an offered TLC above its intent by one shannon", () => {
-            const refusal = refusalOf(() =>
+            const refusal = policyRefusal(() =>
                 judgeCommitment(
                     "remote",
                     { remote: OPENING, local: UNUSED_VIEW },
@@ -329,7 +319,7 @@ describe("judgeCommitment", () => {
                 remote: { exposureShannons: "990", tlcs: [off(HASH_A, "10", "50", "ckb-hash")], chargedShannons: {}, creditedShannons: {} },
                 local: { exposureShannons: "1000", tlcs: [], chargedShannons: {}, creditedShannons: {} },
             };
-            const refusal = refusalOf(() =>
+            const refusal = policyRefusal(() =>
                 judgeCommitment(
                     "local",
                     views,
@@ -423,7 +413,7 @@ describe("judgeCommitment", () => {
                 ),
             ).not.toThrow();
             expect(
-                refusalOf(() =>
+                policyRefusal(() =>
                     judgeCommitment(
                         "remote",
                         { remote: OPENING, local: UNUSED_VIEW },
@@ -471,7 +461,7 @@ describe("judgeCommitment", () => {
                 ],
             };
             expect(
-                refusalOf(() => judgeCommitment("remote", { remote: OPENING, local: UNUSED_VIEW }, next, context("109"))).message,
+                policyRefusal(() => judgeCommitment("remote", { remote: OPENING, local: UNUSED_VIEW }, next, context("109"))).message,
             ).toContain("draws 110 shannons");
             expect(() => judgeCommitment("remote", { remote: OPENING, local: UNUSED_VIEW }, next, context("110"))).not.toThrow();
         });
@@ -482,7 +472,7 @@ describe("judgeCommitment", () => {
                 remote: { exposureShannons: "500", tlcs: [off(HASH_A, "10", "50", "ckb-hash")], chargedShannons: {}, creditedShannons: {} },
                 local: { exposureShannons: "510", tlcs: [], chargedShannons: {}, creditedShannons: {} },
             };
-            const refusal = refusalOf(() =>
+            const refusal = policyRefusal(() =>
                 judgeCommitment(
                     "local",
                     { local: OPENING, remote: UNUSED_VIEW },
@@ -510,7 +500,7 @@ describe("judgeCommitment", () => {
                 chargedShannons: {},
                 creditedShannons: {},
             };
-            const refusal = refusalOf(() =>
+            const refusal = policyRefusal(() =>
                 judgeCommitment(
                     "remote",
                     views,
@@ -534,7 +524,7 @@ describe("judgeCommitment", () => {
                 chargedShannons: { [HASH_A]: "70" },
                 creditedShannons: {},
             };
-            const refusal = refusalOf(() =>
+            const refusal = policyRefusal(() =>
                 judgeCommitment(
                     "remote",
                     { remote: OPENING, local: UNUSED_VIEW },
@@ -570,7 +560,7 @@ describe("judgeCommitment", () => {
                 chargedShannons: { [HASH_A]: "80" },
                 creditedShannons: {},
             };
-            const refusal = refusalOf(() =>
+            const refusal = policyRefusal(() =>
                 judgeCommitment(
                     "remote",
                     { remote: charged, local: UNUSED_VIEW },
@@ -670,10 +660,11 @@ describe("judgeCommitment", () => {
                 otherChannels: [],
             });
             expect(
-                refusalOf(() => judgeCommitment("remote", { remote: previous, local: UNUSED_VIEW }, next, context("199"))).message,
+                policyRefusal(() => judgeCommitment("remote", { remote: previous, local: UNUSED_VIEW }, next, context("199"))).message,
             ).toContain("draws 200 shannons");
             expect(
-                refusalOf(() => judgeCommitment("remote", { remote: previous, local: UNUSED_VIEW }, next, context("200", false))).message,
+                policyRefusal(() => judgeCommitment("remote", { remote: previous, local: UNUSED_VIEW }, next, context("200", false)))
+                    .message,
             ).toContain("whose debit intent is closed");
             expect(judgeCommitment("remote", { remote: previous, local: UNUSED_VIEW }, next, context("200")).chargedShannons).toEqual({
                 [HASH_A]: "100",
@@ -800,7 +791,7 @@ describe("judgeCommitment", () => {
         });
 
         it("refuses a fall with no offered TLC leaving", () => {
-            const refusal = refusalOf(() =>
+            const refusal = policyRefusal(() =>
                 judgeCommitment("local", { local: OPENING, remote: UNUSED_VIEW }, { exposureShannons: 999n, tlcs: [] }, NO_RECORDS),
             );
             expect(refusal.code).toBe("policy_refusal");
@@ -808,14 +799,14 @@ describe("judgeCommitment", () => {
         });
 
         it("refuses a fall larger than every offered TLC that left", () => {
-            const refusal = refusalOf(() =>
+            const refusal = policyRefusal(() =>
                 judgeCommitment("remote", { remote: shown, local: UNUSED_VIEW }, { exposureShannons: 799n, tlcs: [] }, NO_RECORDS),
             );
             expect(refusal.message).toContain("lowers the holdings by 201 shannons, which no offered TLC took");
         });
 
         it("refuses a fall no set of the offered TLCs that left adds up to", () => {
-            const refusal = refusalOf(() =>
+            const refusal = policyRefusal(() =>
                 judgeCommitment("remote", { remote: shown, local: UNUSED_VIEW }, { exposureShannons: 950n, tlcs: [] }, NO_RECORDS),
             );
             expect(refusal.message).toBe(
@@ -900,7 +891,7 @@ describe("judgeCommitment", () => {
             );
             expect(next.chargedShannons).toEqual({ [HASH_A]: "100" });
             expect(
-                refusalOf(() =>
+                policyRefusal(() =>
                     judgeCommitment("remote", { remote: previous, local: UNUSED_VIEW }, { exposureShannons: 931n, tlcs: [] }, NO_RECORDS),
                 ).code,
             ).toBe("policy_refusal");
@@ -924,7 +915,7 @@ describe("judgeCommitment", () => {
                 { ...NO_RECORDS, intents },
             );
             expect(settled.chargedShannons).toEqual({ [HASH_A]: "10" });
-            const refusal = refusalOf(() =>
+            const refusal = policyRefusal(() =>
                 judgeCommitment(
                     "remote",
                     { remote: settled, local: UNUSED_VIEW },
@@ -1069,7 +1060,7 @@ describe("judgeCommitment", () => {
                 creditedShannons: {},
             });
             expect(
-                refusalOf(() =>
+                policyRefusal(() =>
                     judgeCommitment(
                         "remote",
                         { remote: departing(12), local: UNUSED_VIEW },
@@ -1123,7 +1114,7 @@ describe("judgeCommitment", () => {
         });
 
         it("refuses a commitment that drops a released TLC without paying for it", () => {
-            const refusal = refusalOf(() =>
+            const refusal = policyRefusal(() =>
                 judgeCommitment("remote", { remote: holding, local: UNUSED_VIEW }, { exposureShannons: 1000n, tlcs: [] }, released()),
             );
             expect(refusal.message).toBe("the remote commitment lowers the holdings by 100 shannons, which no offered TLC took");
@@ -1197,7 +1188,7 @@ describe("judgeCommitment", () => {
             const next = judgeCommitment("remote", { remote: part, local: UNUSED_VIEW }, { exposureShannons: 1060n, tlcs: [] }, released());
             expect(next.creditedShannons).toEqual({ [HASH_R]: "60" });
             expect(
-                refusalOf(() =>
+                policyRefusal(() =>
                     judgeCommitment("remote", { remote: part, local: UNUSED_VIEW }, { exposureShannons: 1059n, tlcs: [] }, released()),
                 ).code,
             ).toBe("policy_refusal");
@@ -1218,7 +1209,7 @@ describe("judgeCommitment", () => {
             );
             expect(next.creditedShannons).toEqual({ [HASH_R]: "40" });
             expect(
-                refusalOf(() =>
+                policyRefusal(() =>
                     judgeCommitment(
                         "remote",
                         { remote: holding, local: UNUSED_VIEW },
@@ -1235,7 +1226,7 @@ describe("judgeCommitment", () => {
                 remote: { exposureShannons: "0", tlcs: [], chargedShannons: {}, creditedShannons: { [HASH_R]: "100" } },
                 local: { exposureShannons: "0", tlcs: [rec(HASH_R, "100", "50", "ckb-hash")], chargedShannons: {}, creditedShannons: {} },
             };
-            const refusal = refusalOf(() =>
+            const refusal = policyRefusal(() =>
                 judgeCommitment(
                     "remote",
                     { remote: holding, local: UNUSED_VIEW },
@@ -1278,7 +1269,7 @@ describe("judgeCommitment", () => {
             expect(next.chargedShannons).toEqual({ [HASH_A]: "100" });
             expect(next.creditedShannons).toEqual({ [HASH_R]: "100" });
             expect(
-                refusalOf(() =>
+                policyRefusal(() =>
                     judgeCommitment("remote", { remote: previous, local: UNUSED_VIEW }, { exposureShannons: 900n, tlcs: [] }, released()),
                 ).code,
             ).toBe("policy_refusal");
@@ -1304,7 +1295,7 @@ describe("judgeCommitment", () => {
                 ]),
                 otherChannels: [],
             };
-            const refusal = refusalOf(() =>
+            const refusal = policyRefusal(() =>
                 judgeCommitment(
                     "remote",
                     { remote: holding, local: UNUSED_VIEW },
@@ -1317,7 +1308,7 @@ describe("judgeCommitment", () => {
         });
 
         it("refuses it when the released held TLC is listed in the channel's other view", () => {
-            const refusal = refusalOf(() =>
+            const refusal = policyRefusal(() =>
                 judgeCommitment(
                     "local",
                     { local: OPENING, remote: holding },
@@ -1353,7 +1344,7 @@ describe("judgeCommitment", () => {
                 chargedShannons: {},
                 creditedShannons: {},
             };
-            const refusal = refusalOf(() =>
+            const refusal = policyRefusal(() =>
                 judgeCommitment(
                     "remote",
                     { remote: offering, local: UNUSED_VIEW },
@@ -1389,7 +1380,7 @@ describe("judgeCommitment", () => {
                 chargedShannons: {},
                 creditedShannons: {},
             };
-            const refusal = refusalOf(() =>
+            const refusal = policyRefusal(() =>
                 judgeCommitment(
                     "remote",
                     { remote: both, local: UNUSED_VIEW },
@@ -1428,7 +1419,7 @@ describe("judgeCommitment", () => {
                 chargedShannons: {},
                 creditedShannons: {},
             };
-            const refusal = refusalOf(() =>
+            const refusal = policyRefusal(() =>
                 judgeCommitment(
                     "remote",
                     { remote: both, local: UNUSED_VIEW },
@@ -1479,7 +1470,7 @@ describe("judgeCommitment", () => {
         });
 
         it("refuses a TLC of a released invoice under another algorithm", () => {
-            const refusal = refusalOf(() =>
+            const refusal = policyRefusal(() =>
                 judgeCommitment(
                     "remote",
                     { remote: holding, local: UNUSED_VIEW },
@@ -1493,7 +1484,7 @@ describe("judgeCommitment", () => {
         });
 
         it("refuses a released TLC whose algorithm changes between two messages", () => {
-            const refusal = refusalOf(() =>
+            const refusal = policyRefusal(() =>
                 judgeCommitment(
                     "remote",
                     { remote: holding, local: UNUSED_VIEW },
@@ -1628,7 +1619,7 @@ describe("judgeCommitment", () => {
         });
 
         it("refuses an offered TLC under a twin of its intent's hash, naming both", () => {
-            const refusal = refusalOf(() =>
+            const refusal = policyRefusal(() =>
                 judgeCommitment(
                     "remote",
                     { remote: OPENING, local: UNUSED_VIEW },
@@ -1648,14 +1639,14 @@ describe("judgeCommitment", () => {
                 remote: { exposureShannons: "900", tlcs: [offFull(FULL_HASH_A, "100", "50")], chargedShannons: {}, creditedShannons: {} },
                 local: OPENING,
             };
-            const refusal = refusalOf(() =>
+            const refusal = policyRefusal(() =>
                 judgeCommitment("local", views, { exposureShannons: 900n, tlcs: [offFull(TWIN_A, "100", "50")] }, INTENT_A),
             );
             expect(refusal.message).toContain(`offers a TLC under ${TWIN_A}`);
         });
 
         it("leaves an offered twin under no intent to the budget rule", () => {
-            const refusal = refusalOf(() =>
+            const refusal = policyRefusal(() =>
                 judgeCommitment(
                     "remote",
                     { remote: OPENING, local: UNUSED_VIEW },
@@ -1683,7 +1674,7 @@ describe("judgeCommitment", () => {
                 chargedShannons: {},
                 creditedShannons: {},
             };
-            const refusal = refusalOf(() =>
+            const refusal = policyRefusal(() =>
                 judgeCommitment(
                     "remote",
                     { remote: shown, local: UNUSED_VIEW },
@@ -1725,9 +1716,9 @@ describe("judgeCommitment", () => {
                 otherChannels: [{ remote: legacy, local: legacy }],
             });
             const next = { exposureShannons: 950n, tlcs: [offFull(FULL_HASH_A, "50", "50")] };
-            expect(refusalOf(() => judgeCommitment("remote", { remote: OPENING, local: UNUSED_VIEW }, next, context("109"))).message).toBe(
-                `the remote view draws 110 shannons under ${HASH_A}, above its debit intent of 109`,
-            );
+            expect(
+                policyRefusal(() => judgeCommitment("remote", { remote: OPENING, local: UNUSED_VIEW }, next, context("109"))).message,
+            ).toBe(`the remote view draws 110 shannons under ${HASH_A}, above its debit intent of 109`);
             expect(() => judgeCommitment("remote", { remote: OPENING, local: UNUSED_VIEW }, next, context("110"))).not.toThrow();
         });
 
@@ -1739,7 +1730,7 @@ describe("judgeCommitment", () => {
                 creditedShannons: {},
             };
             expect(
-                refusalOf(() =>
+                policyRefusal(() =>
                     judgeCommitment("remote", { remote: holding, local: UNUSED_VIEW }, { exposureShannons: 1000n, tlcs: [] }, RELEASED_R),
                 ).message,
             ).toBe("the remote commitment lowers the holdings by 100 shannons, which no offered TLC took");
@@ -1806,7 +1797,7 @@ describe("judgeCommitment", () => {
                 tlcs: [offFull(FULL_HASH_A, "10", "50"), recFull(FULL_HASH_R, "10", "50", "ckb-hash")],
             };
             expect(
-                refusalOf(() =>
+                policyRefusal(() =>
                     judgeCommitment("remote", { remote: withOwn, local: UNUSED_VIEW }, { exposureShannons: 100n, tlcs: [] }, context),
                 ).message,
             ).toBe("the remote commitment lowers the holdings by 20 shannons, which no offered TLC took");
@@ -1829,7 +1820,7 @@ describe("judgeCommitment", () => {
             expect(next.tlcs).toHaveLength(2);
             const own: PolicyViewSnapshot = { ...holding, tlcs: [recFull(FULL_HASH_R, "100", "50", "ckb-hash")] };
             expect(
-                refusalOf(() =>
+                policyRefusal(() =>
                     judgeCommitment(
                         "remote",
                         { remote: own, local: UNUSED_VIEW },
@@ -1855,7 +1846,7 @@ describe("judgeCommitment", () => {
             );
             expect(next.tlcs).toHaveLength(2);
             expect(
-                refusalOf(() =>
+                policyRefusal(() =>
                     judgeCommitment(
                         "remote",
                         { remote: holding, local: UNUSED_VIEW },
@@ -1874,7 +1865,7 @@ describe("judgeCommitment", () => {
                 creditedShannons: {},
             };
             expect(
-                refusalOf(() =>
+                policyRefusal(() =>
                     judgeCommitment("remote", { remote: holding, local: UNUSED_VIEW }, { exposureShannons: 1000n, tlcs: [] }, RELEASED_R),
                 ).message,
             ).toBe("the remote commitment lowers the holdings by 100 shannons, which no offered TLC took");
@@ -1900,7 +1891,7 @@ describe("judgeCommitment", () => {
             };
             const swapped = [recFull(TWIN_R, "100", "50", "ckb-hash")];
             expect(
-                refusalOf(() =>
+                policyRefusal(() =>
                     judgeCommitment(
                         "remote",
                         { remote: holding, local: UNUSED_VIEW },
@@ -1930,7 +1921,7 @@ describe("judgeOpeningCommitment", () => {
         ["one shannon more", 1001n],
         ["one shannon less", 999n],
     ])("refuses a first commitment paying %s than was funded", (_, exposure) => {
-        const refusal = refusalOf(() => judgeOpeningCommitment("1000", { exposureShannons: exposure, tlcs: [] }));
+        const refusal = policyRefusal(() => judgeOpeningCommitment("1000", { exposureShannons: exposure, tlcs: [] }));
         expect(refusal.code).toBe("policy_refusal");
         expect(refusal.message).toBe(`the channel's first commitment pays the device ${exposure} shannons, not the 1000 it funded`);
     });
@@ -1939,7 +1930,7 @@ describe("judgeOpeningCommitment", () => {
         ["an offered", off(HASH_A, "1", "1700000000", "ckb-hash")],
         ["a received", rec(HASH_R, "1", "1700000000", "ckb-hash")],
     ])("refuses a first commitment that lists %s TLC, whatever it pays", (_, tlc) => {
-        const refusal = refusalOf(() => judgeOpeningCommitment("1000", { exposureShannons: 1000n, tlcs: [tlc] }));
+        const refusal = policyRefusal(() => judgeOpeningCommitment("1000", { exposureShannons: 1000n, tlcs: [tlc] }));
         expect(refusal.message).toBe("the channel's first commitment lists TLCs");
     });
 });
@@ -1968,7 +1959,7 @@ describe("judgeClosingTx", () => {
         ["remote", { remote: settled("1100001001"), local: settled("990") }],
         ["local", { remote: settled("990"), local: settled("1100001001") }],
     ])("refuses a close one shannon further below what the %s view showed", (view, views) => {
-        const refusal = refusalOf(() => judgeClosingTx(views, 1000001000n));
+        const refusal = policyRefusal(() => judgeClosingTx(views, 1000001000n));
         expect(refusal.code).toBe("policy_refusal");
         expect(refusal.message).toBe(
             `the close pays the device 1000001000 shannons, below the 1100001001 of the ${view} commitment by more than the 100000000 its fee may take`,
@@ -1977,7 +1968,7 @@ describe("judgeClosingTx", () => {
 
     it("signs a close of nothing when no view showed more than the fee", () => {
         expect(() => judgeClosingTx({ remote: settled("100000000"), local: settled("0") }, 0n)).not.toThrow();
-        expect(refusalOf(() => judgeClosingTx({ remote: settled("100000001"), local: settled("0") }, 0n)).code).toBe("policy_refusal");
+        expect(policyRefusal(() => judgeClosingTx({ remote: settled("100000001"), local: settled("0") }, 0n)).code).toBe("policy_refusal");
     });
 
     it("judges the two views alone when the record carries an unknown key beside them", () => {
@@ -2003,7 +1994,7 @@ describe("judgeClosingTx", () => {
                 },
             ],
         };
-        expect(refusalOf(() => judgeClosingTx(views, 1000n)).message).toBe(
+        expect(policyRefusal(() => judgeClosingTx(views, 1000n)).message).toBe(
             `a cooperative close while the ${view} commitment still lists TLCs`,
         );
     });

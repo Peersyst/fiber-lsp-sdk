@@ -48,10 +48,11 @@ header fails there and not on every call. No error the client throws carries it.
   id) is always refused by fiber, so there is none.
 - **The params are typed per method** by `RpcParamsWireByMethod`, which names all eighteen, so `call` cannot be handed
   the params of another method. The typed method of each RPC is what a caller uses; `call` is what they share. Of the
-  eight methods of the tenant API, four have their client methods: the two the signing poller calls
-  (`getChannelSigningStatus`, `submitChannelSignature`) and the two registration methods (`getTenantRegistryNonce`,
-  `registerTenant`); the other four have their codecs and no client method yet: each lands with the task that calls it,
-  which is the one that observes what it sends, and until then a caller composes `call` with the codec.
+  eight methods of the tenant API, six have their client methods: the four the poller's two steps call
+  (`getChannelSigningStatus`, `submitChannelSignature`, `getWatchtowerSigningStatus`, `submitWatchtowerSignature`) and the
+  two registration methods (`getTenantRegistryNonce`, `registerTenant`); the other two, `open_tenant_channel` and
+  `shutdown_channel`, have their codecs and no client method yet: each lands with the task that calls it, which is the one
+  that observes what it sends, and until then a caller composes `call` with the codec.
 
 The answer is read strictly, as `response`:
 
@@ -110,6 +111,7 @@ the rest even when they are malformed.
 | `abandon_channel`                    | `abandonChannel`                 | `channel_id`                                                                   | `null`                              |
 | `list_channels`                      | `listChannels`                   | nothing, or one of `include_closed` and `only_pending`                         | per channel, the fields below       |
 | `list_channels`                      | `listChannelIds`                 | the same as `listChannels`                                                     | each channel's `channel_id` alone   |
+| `list_channels`                      | `listChannelStates`              | the same as `listChannels`                                                     | each channel's id and state alone   |
 
 - **The open blocks** until the peer has accepted and the funding transaction is built, and answers with the channel's
   **final** id, not the temporary one. Its answer is the only copy of the unsigned transaction: no other method returns it.
@@ -131,6 +133,11 @@ the rest even when they are malformed.
 - **The listing can be read for its ids alone**: `listChannelIds` reads `channels[].channel_id`, strict in it (an
   array of objects, each id 32 bytes of `0x` lowercase hex) and blind to every other field, so a state or a flag a newer
   fiber adds cannot stop a caller that needs only the ids, which is the signing step ([sdk.md](./sdk.md)).
+- **Or for its ids and states, read tolerantly**: `listChannelStates` reads the id as strictly, and the state as fiber's
+  strings, `{ channelId, stateName, stateFlags }`: `state` an object, `state_name` a string, and `state_flags` a string
+  split on `|`, `""` and an absent member both read as none. A name or a flag the client does not know reads as it is,
+  where `listChannels` refuses it, so the watchtower step, which must keep polling a channel whatever state a newer fiber
+  gives it, is the one that calls it ([sdk.md](./sdk.md)). Every other field is ignored.
 
 A channel is read as:
 
@@ -276,8 +283,9 @@ public signer material at the open, and signs on request afterwards ([Signing re
 Four methods carry the polled signing protocol: the device reads whether the node waits on a signature, and submits one.
 Two getters and two submissions, one pair for the channel and one for the watchtower, with the same forms. The channel
 pair is on the client as `getChannelSigningStatus({ channelId })` and `submitChannelSignature({ channelId, requestId,
-partialSignature, nextMaterial })`, which the facade's signing step calls ([sdk.md](./sdk.md)); the watchtower pair is
-reached through `call` until its step lands.
+partialSignature, nextMaterial })`, which the facade's signing step calls; the watchtower pair as
+`getWatchtowerSigningStatus({ channelId })` and `submitWatchtowerSignature({ channelId, requestId, signature })`, which its
+watchtower step calls ([sdk.md](./sdk.md)).
 
 | Method                          | Sends                                                                   | Reads                  |
 | ------------------------------- | ----------------------------------------------------------------------- | ---------------------- |
@@ -287,7 +295,8 @@ reached through `call` until its step lands.
 | `submit_watchtower_signature`   | `channel_id`, `request_id`, `signature`                                 | `type`                 |
 
 - **The status is the signing protocol's**, a tagged object: `{ "type": "NoSignatureRequired" }` or
-  `{ "type": "SignatureRequired", ... }` with the request's id, the transition and the plaintext to sign. The client reads
+  `{ "type": "SignatureRequired", ... }` with the request's id and what to sign: the transition and its plaintext for a
+  channel, the key purpose and the transaction for the watchtower ([protocol.md](./protocol.md)). The client reads
   the `channel_id` and hands `status` over as the `WireField` it arrived in, positioned at `response.result.status`, so
   the protocol's decoder refuses with the full path; `rpc` never reads inside it, and does not import `protocol`.
 - **A channel signature is a 32-byte musig2 partial signature** for the request it names, with `next_material`: the next
@@ -373,7 +382,7 @@ inputs do, and the host hands it to its CKB signer as it is.
 | File                                  | Contents                                                                                                                                                                                               |
 | ------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | `src/rpc/fiber-rpc-client.ts`         | `FiberRpcClient`: the request, the status, the three errors, the methods                                                                                                                               |
-| `src/rpc/channels.ts`                 | The codecs of the four channel methods and the two tenant channel methods, the channel, its state and the opening context                                                                              |
+| `src/rpc/channels.ts`                 | The codecs of the four channel methods and the two tenant channel methods, the channel, its state, the listing read for its ids or its states, and the opening context                                 |
 | `src/rpc/invoices.ts`                 | The codecs of the four invoice methods                                                                                                                                                                 |
 | `src/rpc/payments.ts`                 | The codecs of the two payment methods                                                                                                                                                                  |
 | `src/rpc/signing.ts`                  | The codecs of the four signing request methods: the status handed over as a field, the two signatures, the two outcomes                                                                                |
@@ -413,7 +422,11 @@ inputs do, and the host hands it to its CKB signer as it is.
 - **The channel methods against fiber**: every params case of the four methods, encoded from its typed input, equal to what
   fiber's serde wrote, and read back unchanged by fiber's own deserializers through `verify-rpc-params`; every result case
   decoded and compared with the vector's input values, not with the JSON it read: both opens, the submit, the abandon's
-  `null`, and the three listings and the empty one, which carry every state and every close flag.
+  `null`, and the three listings and the empty one, which carry every state and every close flag, read by
+  `listChannelStates` too, each state as fiber's strings. That reading has its own refusals and acceptances: a literal
+  listing in the node's order, the flags split and none for a state without them, `""` as none, an entry carrying its id
+  and state alone, a state or a flag no release has yet, and one refusal per field it reads, with its path; the client
+  method lists in the default mode and with the filter's flag, and refuses a filter it cannot write before any fetch.
 - **The flag names per state against fiber**: `RPC_CHANNEL_STATE_FLAGS` equal, state by state, to what fiber's serializer writes
   with every bit set, so a flag a release adds fails the interop spec instead of a listing in production.
 - **One refusal per field read**, with its full path from `response.result` (`response.result.channels[1].state.state_flags`):
@@ -445,10 +458,11 @@ inputs do, and the host hands it to its CKB signer as it is.
 - **The signing request methods against fiber**: every params case of the four (a submit with and without next material,
   the 65-byte watchtower signature) written as fiber's serde wrote it; `NoSignatureRequired` of both getters decoded and
   compared with the vector's values, which pins that fiber writes the unit variant as its tag alone; both outcomes of both
-  submissions; the status handed over untouched, the same value with its path, whatever it holds; a null next material
-  left out and never sent as `null`; the exact body of both channel methods through the client's own methods, `Applied`
-  and `AlreadyApplied` both resolved as results, a result it cannot read named by its path, and a bad param refused
-  before any fetch; the watchtower pair through `call`.
+  submissions; `SignatureRequired` of the watchtower's getter under both key purposes, `Settlement` and `Tlc`, handed
+  over as fiber wrote it; the status handed over untouched, the same value with its path, whatever it holds; a null next
+  material left out and never sent as `null`; the exact body of all four methods through the client's own methods,
+  `Applied` and `AlreadyApplied` both resolved as results, a result it cannot read named by its path, and a bad param
+  refused before any fetch.
 - **The registration methods against fiber**: both params cases written as fiber's serde wrote them, the signature bare;
   both tenants decoded and compared with the vector's values, which carry both runtime statuses, a tenant without a root
   signer or a channel and one with both; a literal cold and a literal active tenant read field by field; the exact body
@@ -591,3 +605,28 @@ Coverage of the module and of `wire` is 100% on all four metrics, and the assert
 
 One mutant changes nothing observable and is left out: dropping the `public: false` the tenant's open writes after the
 spread, since the encoder it spreads already writes it; the member stays for the literal type the wire form states.
+
+The watchtower pair, `getWatchtowerSigningStatus` and `submitWatchtowerSignature`, and the tolerant listing,
+`listChannelStates` over `decodeListChannelStatesResult`, were broken the same way (`test/tests/rpc`, still 100% on all
+four metrics):
+
+| Mutation                                                      | Tests that failed |
+| ------------------------------------------------------------- | ----------------- |
+| Absent flags are refused                                      | 17                |
+| A listed channel id is not checked                            | 14                |
+| The listing is read in reverse                                | 10                |
+| Empty flags read as one empty flag                            | 8                 |
+| The flags are not split                                       | 6                 |
+| The watchtower signature is submitted to the channel's method | 5                 |
+| The watchtower signature is written as a channel signature    | 5                 |
+| The watchtower status is read from the channel's method       | 5                 |
+| The watchtower status is asked with the params unwritten      | 4                 |
+| An absent state reads as an empty one                         | 3                 |
+| The state name is not checked to be a string                  | 3                 |
+| The states are listed under another method                    | 3                 |
+| The watchtower status is not read                             | 3                 |
+| An entry is not checked to be an object                       | 2                 |
+| The states are listed without the filter                      | 2                 |
+| Null flags read as none                                       | 1                 |
+| The states are read by the full reader                        | 1                 |
+| The watchtower submission's result is not read                | 1                 |

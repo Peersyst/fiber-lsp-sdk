@@ -1,5 +1,5 @@
 import { concatBytes } from "@noble/hashes/utils.js";
-import type { OutPoint, Script } from "../../common";
+import type { CellDep, OutPoint, Script } from "../../common";
 import {
     HASH256_LENGTH,
     UINT64_LENGTH,
@@ -16,7 +16,7 @@ import {
     uint32Le,
     uint64Le,
 } from "../../common";
-import { CELL_DEP_LENGTH, CELL_INPUT_LENGTH } from "../digest.constants";
+import { CELL_DEP_LENGTH, CELL_INPUT_LENGTH, DEP_TYPE_BYTES } from "../digest.constants";
 
 /**
  * Serializes a molecule `Uint64`, big-endian, the byte order of the commitment number in lock args.
@@ -38,6 +38,15 @@ export function uint64Be(value: bigint): Uint8Array {
 export function moleculeOutPoint(outPoint: OutPoint): Uint8Array {
     assertOutPoint("outPoint", outPoint);
     return concatBytes(outPoint.txHash, uint32Le(outPoint.index));
+}
+
+/**
+ * Serializes a molecule `CellDep` struct.
+ * @param cellDep Cell dep to serialize.
+ * @returns The 37 bytes.
+ */
+export function moleculeCellDep(cellDep: CellDep): Uint8Array {
+    return concatBytes(moleculeOutPoint(cellDep.outPoint), Uint8Array.of(DEP_TYPE_BYTES[cellDep.depType]));
 }
 
 /**
@@ -64,7 +73,7 @@ export function moleculeCellOutput(capacity: bigint, lock: Script, type: Script 
 export type RawTransactionFields = {
     version: number;
     /**
-     * Serialized 37-byte CellDeps; the digest always passes none, fee sizing passes zeroed mocks.
+     * Serialized 37-byte CellDeps; fiber's message passes none, fee sizing passes zeroed mocks.
      */
     cellDeps: Uint8Array[];
     headerDeps: Uint8Array[];
@@ -83,7 +92,7 @@ export type RawTransactionFields = {
 };
 
 /**
- * Serializes a molecule `RawTransaction` table, the exact bytes fiber's `compute_tx_message` hashes.
+ * Serializes a molecule `RawTransaction` table.
  * @param fields The six schema fields.
  * @returns The RawTransaction bytes.
  */
