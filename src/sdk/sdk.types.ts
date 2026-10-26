@@ -1,6 +1,13 @@
 import type { ITimer, ScriptTemplate } from "../common";
 import type { InvoiceCurrency } from "../invoice";
-import type { IAsyncSignerStorage, ISignerStorage, NonceReuseMode, PolicyEngine } from "../policy";
+import type {
+    IAsyncSignerStorage,
+    ISignerStorage,
+    NonceReuseMode,
+    PolicyEngine,
+    WatchtowerApproval,
+    WatchtowerKeyPurpose,
+} from "../policy";
 import type { ChannelSigningTransition } from "../protocol";
 import type { FiberRpcClient, IFetchLike, RpcChannelStateName, RpcInvoiceStatus, RpcPaymentStatus } from "../rpc";
 import type { SignerDispatch, SignerRefusal } from "../signer";
@@ -30,6 +37,8 @@ export type SdkNetworkConfig = {
 
 export type SdkNetwork = SdkNetworkName | SdkNetworkConfig;
 
+export type SdkWatchtowerOptions = WatchtowerApproval;
+
 export type FiberLspSdkOptions = {
     network: SdkNetwork;
     storage: ISignerStorage | IAsyncSignerStorage;
@@ -56,6 +65,10 @@ export type FiberLspSdkOptions = {
      * Defaults to `refuse`; `allow` serves a second signing session on a slot, as fiber's nonce lifecycle asks, never a third.
      */
     nonceReuse?: NonceReuseMode;
+    /**
+     * Without it, every spend the node's watchtower asks the device to sign is refused.
+     */
+    watchtower?: SdkWatchtowerOptions;
 };
 
 export type SdkEventType = (typeof SDK_EVENT_TYPES)[number];
@@ -74,6 +87,15 @@ type SigningEventPayload = {
     transition: ChannelSigningTransition | null;
 } & ({ outcome: Exclude<SigningEventOutcome, "refused"> } | { outcome: "refused"; error: SignerRefusal });
 
+type WatchtowerSigningEventPayload = {
+    channelId: string;
+    /**
+     * Wire hex; `null`, with the purpose, when the status could not be read or was another channel's.
+     */
+    requestId: string | null;
+    purpose: WatchtowerKeyPurpose | null;
+} & ({ outcome: "signed" } | { outcome: "refused"; error: SignerRefusal });
+
 // Keyed by every event type, so one added to `SDK_EVENT_TYPES` alone fails to compile.
 type SdkEventPayloads = {
     CHANNEL_READY: { channelId: string };
@@ -86,6 +108,7 @@ type SdkEventPayloads = {
     PAYMENT_PENDING: { paymentHashHex: string };
     PAYMENT_RECEIVED: { paymentHashHex: string };
     SIGNING: SigningEventPayload;
+    WATCHTOWER_SIGNING: WatchtowerSigningEventPayload;
     ERROR: { error: SdkError };
 };
 

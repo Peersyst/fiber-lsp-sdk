@@ -2,10 +2,11 @@
 
 The entry of a signing request and the musig2 (BIP-327) engine behind it: what the device checks before it claims a slot,
 the order fiber aggregates the keys in, how the device computes the message itself, why its nonces are deterministic and
-how many sessions one of them can answer, the public material it hands the node, and the tenant identity it registers
-with, the one signature outside musig2. For how the status is read see
-[protocol.md](./protocol.md); for the gate a request passes see [policy.md](./policy.md); for the four constructions the
-messages are rebuilt with see [digest.md](./digest.md); for the keys see [derivation.md](./derivation.md).
+how many sessions one of them can answer, the public material it hands the node, and the two signatures outside musig2:
+the tenant identity the device registers with, and the watchtower's spends of a force-closed commitment. For how the
+statuses are read see [protocol.md](./protocol.md); for the gate a request passes, and the rules a watchtower spend
+passes, see [policy.md](./policy.md); for the four constructions the messages are rebuilt with see
+[digest.md](./digest.md); for the keys see [derivation.md](./derivation.md).
 
 ## The entry: `SignerDispatch.handle`
 
@@ -234,15 +235,95 @@ so the engine never pre-hashes or tags. Wire sizes: 33-byte compressed public ke
 32-byte messages and partial signatures, 64-byte complete signatures. The partial signature's size is checked on the way
 out, since the dependency floats on a caret range and the size is a protocol commitment.
 
+## The watchtower
+
+After a force close, the device's funds sit in the commitment lock's cell, and the node's watchtower takes them out one
+unlock per transaction: each TLC, then the device's balance, every spend but the last leaving the rest of the cell at its
+output 0, the remainder the next spend starts from. Each spend waits on a signature of the device, read through a second
+status, `get_watchtower_signing_status`, and handed back through `submit_watchtower_signature` ([rpc.md](./rpc.md),
+[protocol.md](./protocol.md)). The request carries the unsigned transaction and the key it needs, its `key_purpose`:
+
+| Purpose                     | Key                                                 | What it unlocks                                      |
+| --------------------------- | --------------------------------------------------- | ---------------------------------------------------- |
+| `Settlement`                | the TLC base key, `tlcBaseKey`                      | the device's balance, which settles to its hash      |
+| `Tlc { commitment_number }` | `deriveTlcKey(keys, n)`, the TLC key at that number | a TLC whose entry carries that key's hash as its own |
+
+### The signature
+
+`signOnchain(keys, purpose, tx)` signs as fiber does (`sign_onchain_request`, `watchtower/signer.rs:95-147`, and the
+on-chain arm of its device SDK's `sign_content`, `fiber-lsp-sdk/src/signer.rs:1237-1252`): recoverable ECDSA over
+`computeTxMessage(tx)`, the message of every transaction fiber signs ([digest.md](./digest.md)), which leaves the
+witnesses out, so the 65 zero bytes the unlock holds in their place never reach it. It is RFC 6979 with low S and no
+added entropy over the message as given (`prehash: false`), which is rust-secp256k1's `sign_ecdsa_recoverable`, so it
+matches fiber's own signer to the byte. Noble writes the recovery id first; the device hands over the 65 bytes as fiber
+serializes them, `r ‖ s ‖ recid`. Fiber's `submit_watchtower_signature` checks the length, reads the recovery id, and
+requires the key it recovers over its own message to be the one the purpose names (`verify_onchain_signature`).
+
+Signing again is not the hazard here that it is for musig2: RFC 6979 derives each nonce from the key and the message,
+so two messages never share one, and no number of signatures under one key leaks it. That is why the watchtower keeps no sign-once registry: a spend fiber rebuilds for an unlock already signed is
+signed again, and a spend the chain refuses costs nothing.
+
+### The entry: `SignerDispatch.handleWatchtower`
+
+`handleWatchtower(channelId, status)` takes the `status` member of `get_watchtower_signing_status` and, like `handle`,
+answers it without throwing. Its steps: the decoder ([protocol.md](./protocol.md)); a non-empty channel id; the channel
+resolved to its index and its keys derived; `PolicyEngine.checkWatchtowerSpend`, which runs the watchtower rules and claims
+the spend ([policy.md](./policy.md)); `signOnchain`; and the signature recorded on the claim before it leaves the
+dispatch, so a write that fails leaves a fault that hands nothing over. The outcomes:
+
+- **idle**, for `NoSignatureRequired`, before the channel is looked up;
+- **signed**, with the request id, the purpose, the 65-byte signature and `claimed`. `claimed` is false when the record
+  already holds another signed spend of the same unlock, which leaves this one unclaimed ([policy.md](./policy.md)): it
+  is signed and handed over, nothing is written, and there is no claim to mark applied once fiber takes it;
+- **refused**, with the request id and the purpose once the status decoded, `null` and `null` before, and the code with
+  its message: `malformed` from the decoder, an empty channel id or a spend the policy reads as malformed,
+  `unknown_channel`, and the rules' `policy_refusal`;
+- **fault**, carrying the cause: the storage throwing, a corrupt record, a value whose reading throws for a reason no
+  codec names, a bug. As for `handle`, none of those is the node's.
+
+A request delivered again is answered with the signature recorded for it, signing and writing nothing; every rule still
+runs on it first, against the record and the approval as they stand. A claim whose signature was never recorded, a crash
+between the claim and the record, is signed again, to the same bytes, and recorded then.
+
+### The destination, and the trust it takes
+
+Fiber's watchtower pays every spend to the secp256k1 lock of the node it runs on, and takes the fee from that node's own
+cells (`watchtower/actor.rs:1303-1306`, `:1808-1826`); `create_watch_channel` has no member for another destination.
+Fiber's own device SDK plans the same answer the SDK gives: the wallet approves a destination and a fee bound, and signs
+only spends that pay them (`fiber-lsp-sdk/src/onchain.rs:45-59`). The facade takes them as its `watchtower` option
+([sdk.md](./sdk.md)), and the policy holds every spend to them. Without the option every request is refused as
+`policy_refusal`, and the funds stay in the commitment lock's cell, where they would be with no watchtower at all.
+
+The only destination fiber's watchtower produces today is the LSP node's lock. Approving it is trusting the LSP after a
+force close: the funds the commitment lock releases to the device are paid to the LSP's wallet, and reach the user only if
+the LSP pays them on. A destination the user chooses, which `create_watch_channel` would take, closes that gap; it is a
+proposal to Fiber, and neither side implements it.
+
+### What the chain enforces, and the device does not check
+
+The commitment lock holds a spend to more than the device checks: the commitment cell to its delay through the input's
+`since`, a TLC to its expiry or its preimage, and the settlement body to the hash the cell's args commit, besides the
+remainder, which the device checks too. The device checks none of the clock's part (whether a delay has matured, a TLC
+has expired) and not a preimage's hash: a spend that fails one of them is refused by the chain, and its signature costs
+nothing (above). Nor does
+it check the hash of the transaction input 0 spends: the peer broadcasts its commitment with the cell deps it picks, which
+no signature covers, so the device names the source by its content instead ([policy.md](./policy.md)).
+
+UDT channels, which the device does not open, and the punishment of a revoked commitment, which fiber's watchtower spends
+with the revocation signed in its musig2 round (`watchtower/actor.rs:331-394`), never reach this path.
+
 ## The interop loops
 
-Two loops verify the engine against fiber's exact stack, each with a jest half and a Rust half
+Two loops verify the signer against fiber's exact stack, each with a jest half and a Rust half
 ([`interop/`](../interop/README.md)):
 
 - **The signing requests**: `test/tests/signer/interop-vectors.spec.ts` answers every request of `signing.json`, each on
   a channel at the state before it, through the dispatch, the announcement through the engine, and requires fiber's
-  expected public nonce and partial signature to the byte. Under `INTEROP_SIGNING_OUT` it writes them for
-  `verify-signing`, which verifies each under fiber's `musig2` crate and aggregates it with the peer's half.
+  expected public nonce and partial signature to the byte. It also signs every watchtower spend of the file's
+  `watchtower` section, decoded by the protocol's decoder and signed with `signOnchain` under the purpose fiber names.
+  Under `INTEROP_SIGNING_OUT` it writes both for `verify-signing`, which verifies each partial signature under fiber's
+  `musig2` crate and aggregates it with the peer's half, and requires each on-chain signature to recover the spend's
+  expected key over fiber's message, as `submit_watchtower_signature` checks it.
 - **The canonical slot**: the same spec signs the musig vector at (0, `COMMITMENT`) and, under `INTEROP_TS_OUT`, writes
   it for `verify-ts`.
 
@@ -252,24 +333,29 @@ Those pins, like the vectors, are the idempotent re-delivery contract, not snaps
 
 ## The node double and the flows
 
-`InMemoryTenantNode` (`test/utils/tenant-node.ts`) is the node end of the tenant RPC. It answers the injected `fetch` for
-the three methods the poller calls, `list_channels`, `get_channel_signing_status` and `submit_channel_signature`, in
-fiber's shapes, and holds what fiber holds: the counters L and R (`CommitmentNumbers`, both 0 before the open), the sites
-that issue a request off them, the points and nonces the device published, and the peer's musig2 half. It issues one
-request at a time and queues the movements that arrive while one is pending, as fiber buffers them. A submission first
-meets the conversions of fiber's RPC layer, ahead of the channel lookup (`rpc/channel.rs:840-847`): the partial signature
-as a scalar and the next nonces as musig2 nonces. Then fiber's checks (`channel.rs:2208-2285`): `replay_or_pending`, which answers the exact receipt again `AlreadyApplied`; the
-partial signature, verified against the nonce the device published for the slot; and `next_material`, required on the
-four advancing transitions and installed at the slot's number plus one (`channel.rs:6009-6139`). The content it sends is
-built with digest's own builders ([digest.md](./digest.md)), from device keys the test derives from the seed: a shortcut,
-since a real node holds only the public parts, with the same result. The channel moves through methods of the double
-(open, send, receive, fulfil, shutdown), not through the RPC: the client methods for them come with the facade. Beside
-them, it can tamper with its next request, go past one as if the device had answered it, or keep a submission in the
-network until the next one.
+`InMemoryTenantNode` (`test/utils/tenant-node.ts`) is the node end of the tenant RPC. It answers the injected `fetch`
+for the five methods the poller's two steps call, `list_channels` (with `include_closed` honoured, as fiber's listing
+hides a closed channel without it), `get_channel_signing_status`, `submit_channel_signature`,
+`get_watchtower_signing_status` and `submit_watchtower_signature`, in fiber's shapes, and holds what fiber holds: the
+counters L and R (`CommitmentNumbers`, both 0 before the open), the sites that issue a request off them, the points and
+nonces the device published, and the peer's musig2 half. It issues one request at a time and queues the movements that
+arrive while one is pending, as fiber buffers them. A submission first meets the conversions of fiber's RPC layer, ahead
+of the channel lookup (`rpc/channel.rs:840-847`): the partial signature as a scalar and the next nonces as musig2
+nonces. Then fiber's checks (`channel.rs:2208-2285`): `replay_or_pending`, which answers the exact receipt again
+`AlreadyApplied`; the partial signature, verified against the nonce the device published for the slot; and
+`next_material`, required on the four advancing transitions and installed at the slot's number plus one
+(`channel.rs:6009-6139`). The content it sends is built with digest's own builders ([digest.md](./digest.md)), from
+device keys the test derives from the seed: a shortcut, since a real node holds only the public parts, with the same
+result. The channel moves through methods of the double (open, send, receive, fulfil, shutdown, force close), not
+through the RPC: the client methods for them come with the facade. Beside them, it can tamper with its next request, go
+past one as if the device had answered it, or keep a submission in the network until the next one. Its watchtower half
+is below.
 
 The flows, `test/tests/sdk/signing-step.flow.spec.ts`, run the poller's signing step over the double with the real
-dispatch, policy and rpc client and a mock timer. Under `nonceReuse: "allow"` the sequences run as below, each request
-named by its transition and fiber's nonce slot, and answered `signed`, or `warning` as a second session on its slot:
+dispatch, policy and rpc client and a mock timer, on the harness both flow specs share (`test/utils/tenant-flow.ts`: the
+device wired with one step or both, as the facade wires them, the open, the ticks and the calls the node received).
+Under `nonceReuse: "allow"` the sequences run as below, each request named by its transition and fiber's nonce slot, and
+answered `signed`, or `warning` as a second session on its slot:
 
 - **The open**: `CompleteReceivedCommitment` at `Commitment@1` signed, then `SendCommitmentSigned` at `Commitment@1`
   warning. Fiber may issue them in either order, and the flows run both. Under `refuse` the second is refused as
@@ -348,18 +434,74 @@ channel, no next material on an advancing transition or a member of it missing, 
 nonce that conflicts with the one already published, another signature for a request already applied, and a submission
 while nothing is pending; and jsonrpsee's answers to a method the node does not serve and to params it cannot read.
 
+### The watchtower over the double
+
+`forceClose(view, options)` puts a commitment on chain, the view's last or one before it, with the funding lock's cell deps
+fiber adds when it broadcasts, and the double turns into fiber's watchtower for it. `test/utils/tenant-watchtower.ts` ports
+its `build_settlement_tx` (`watchtower/actor.rs:1308-1840`): the unlock it picks on a cell, by the chain's median time and
+the preimages it holds; the spend it builds, the remainder at output 0 unless no party is left and the node's output paid
+what the unlock releases and its own cell brings, less the fee; the request id, the blake2b of the molecule transaction
+(`watchtower/signer.rs:95`); and `verify_onchain_signature`. The double serves the lowest pending request id, as fiber's
+`first_pending` does, and once it applies a signature the spend lands and the next one is built from its remainder. A
+submission meets fiber's checks: the length, the recovery id, the key recovered over fiber's message, a pending request,
+`AlreadyApplied` for the signature applied and a mismatch for another. Both methods answer "watched channel not found"
+before the watch row exists, which fiber creates at `RemoteTxComplete` (`event_handler.rs:41-67`), and once a cooperative
+close deletes it. Beside them, the peer can spend first, the median time can move on, the node can fund its spends from
+another of its cells, which rebuilds the spend waiting under a new request id and leaves the old one pending, as fiber does
+(`watchtower/actor.rs:2151-2155`), and a spend can be tampered with.
+
+The flows, `test/tests/sdk/watchtower-step.flow.spec.ts`, run both steps as the facade polls them, under `allow` and the
+vectors' approval, over a channel with a TLC each way in flight: an inbound one whose preimage the node holds and an
+outbound one past its expiry. Each spend is named by its purpose, `Tlc@n` being the TLC key at number `n`:
+
+- **The device's own commitment**: `Tlc@3` the outbound TLC by timeout, `Tlc@2` the inbound one by preimage, then
+  `Settlement`, each applied and landed, each next spend built from the remainder.
+- **The peer's commitment**: the inbound TLC, the outbound one, then the settlement; the same when the peer broadcast it
+  with funding lock cell deps of its own, which changes its on-chain hash and nothing the device checks.
+- **The clock and the preimages**: the inbound TLC claimed at once and the outbound one only once the node asks for it
+  past its expiry; without the preimage, the inbound TLC never claimed and the balance settled once it expired.
+- **The peer first**: the peer times the inbound TLC out and settles its own balance, and the device claims its outbound
+  TLC from the peer's remainder, a cell it never signed, then settles as the last party, taking the whole cell with no
+  remainder.
+- **The remote commitment before the last**, which the peer may still broadcast, its spends signed under it; and a
+  commitment with no TLC, settled in one spend.
+- **The watch row**: an open channel fiber does not watch yet read as nothing pending, then its spend signed once
+  watched; a channel closed cooperatively no longer polled.
+- **The host's effects**: with no approval, every spend refused and the node still waiting for the first; after a lost
+  answer, the same bytes again and `AlreadyApplied` taken as success; a spend fiber rebuilds for an unlock already signed,
+  its fee moved to another cell, signed unclaimed, the record keeping the first, which fiber confirms after when the
+  first's submission was lost and which stays unconfirmed when its mark was.
+
+Each pins the calls, the spends the node served with its answers, the transactions that landed, the events and the
+record's spends. The controls each end refused, on two ticks, with nothing signed or written and the node still waiting:
+
+| Control                                                                  | Refused as                        |
+| ------------------------------------------------------------------------ | --------------------------------- |
+| A spend of the device's own commitment before its last, which it revoked | `policy_refusal`: the source      |
+| A spend of the peer's commitment two before its last, which it revoked   | `policy_refusal`: the source      |
+| A spend paying another lock than the approved destination                | `policy_refusal`: the destination |
+| A remainder keeping less than the cell less what the unlock releases     | `policy_refusal`: the remainder   |
+| A purpose naming the TLC key of another commitment number than the TLC's | `policy_refusal`: the key         |
+
+The double reproduces fiber's refusals of a watchtower submission too, with fiber's messages, each leaving the request
+pending: a recovery id above 3, an `r` at or above the curve order or zero, the other recovery id, which recovers another
+key, another request id, another length than 65 bytes, a TLC key no commitment it watches holds, and a submission while
+nothing is pending; and jsonrpsee's answers to params it cannot read. Its listing shows a force-closed channel only to a
+call that asks for closed ones, and a cooperative close as `ShuttingDown` and then as `Closed` to that call alone.
+
 ## Where it lives
 
 | File                                      | Contents                                                                                                                      |
 | ----------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------- |
-| `src/signer/signer-dispatch.ts`           | The twelve steps, the four outcomes, and the opening                                                                          |
+| `src/signer/signer-dispatch.ts`           | The twelve steps, the four outcomes, and the opening; `handleWatchtower` and its four outcomes                                |
 | `src/signer/musig2-engine.ts`             | The public keys, points and nonces, the nonce sum, the partial signature, the peer's half verified, the aggregate             |
 | `src/signer/signer-material.ts`           | The opening block and the next material                                                                                       |
 | `src/signer/tenant-identity.ts`           | The RootSigner: its public key, the tenant id, the registry payload, its digest and the registration signature                |
+| `src/signer/onchain-signature.ts`         | `signOnchain`: the watchtower's recoverable signature under the key its purpose names                                         |
 | `src/signer/signer.constants.ts`          | The key order per transition, fiber's two tenant domains                                                                      |
 | `src/signer/utils/key-order.utils.ts`     | The order of the two funding keys, and the peer's key read out of a request held to it                                        |
 | `src/signer/utils/signing-terms.utils.ts` | The message from the plaintext, and the operation built from the content, the pins and the network                            |
-| `src/signer/signer.types.ts`              | The options, the cosigned session, the prepared operation, the outcome and the pending open                                   |
+| `src/signer/signer.types.ts`              | The options, the cosigned session, the prepared operation, the two outcomes and the pending open                              |
 | `src/common/utils/musig.utils.ts`         | The musig2 shapes `policy` and `protocol` hold a session to as well: the nonce halves, an aggregate's half, two distinct keys |
 
 ## What the tests guarantee
@@ -468,3 +610,59 @@ point, the absent ones), and checks that no property, enumeration or serializati
 
 Reading the pins before the channel resolves fails no test, and cannot: the reader resolves the name itself, with the same
 refusal, so the outcome is the same for every status.
+
+`test/tests/signer/onchain-signature.spec.ts` signs every spend of the vectors' `watchtower` section to fiber's bytes and
+recovers from each the key fiber expects; it signs the settlement under the TLC base key and a TLC under the number its
+purpose names, at 0 and at the derivation's last, pins a literal spend's signature and key, hands each call bytes of its
+own, and refuses a purpose that is no object, a kind it does not know, a number absent, negative, fractional, past the
+derivation or a string, and a transaction it cannot serialize. The
+dispatch's spec drives every spend of the device through `handleWatchtower` to fiber's signature, with the claim written
+before the signature and the signature recorded on it, and every refusal at its step, the store unwritten: each decoder
+refusal without a request to name, ahead of the channel, even an unregistered one; an unregistered channel and an empty
+channel id, naming the request; no approval; each variant of the vectors with the code fiber's verdict calls for; and a
+spend the policy reads as malformed. A repeat is answered with the recorded signature, signing and writing nothing; a
+claim whose signature was lost is signed again to the same bytes and recorded; a spend of an unlock already signed is
+signed unclaimed, writing nothing. A failed record hands nothing over and the next delivery heals it; a status whose
+reading throws for no codec's reason and a corrupt record are faults; and no refusal names a key. The watchtower's flows
+over the node double (above) pin the step end to end.
+
+The watchtower signer, `signOnchain` and `SignerDispatch.handleWatchtower` with the spend it signs unclaimed, was broken the
+same way (`test/tests/signer`, still 100% on all four metrics):
+
+| Mutation                                             | Tests that failed |
+| ---------------------------------------------------- | ----------------- |
+| The recovery id is dropped                           | 41                |
+| The signature is compact, without its recovery id    | 41                |
+| The size check expects 64 bytes                      | 41                |
+| The purpose's kind is read inverted                  | 40                |
+| The message is prehashed                             | 39                |
+| The recovery id stays first, as noble writes it      | 39                |
+| The signature takes added entropy                    | 24                |
+| A TLC signs under the TLC base key                   | 22                |
+| A TLC signs under the next commitment's key          | 22                |
+| The settlement signs under the funding key           | 17                |
+| The keys derive from the next channel index          | 15                |
+| A failed record write still hands the signature over | 13                |
+| The signature is not recorded                        | 13                |
+| The signature may be high-S                          | 13                |
+| The purpose is not checked                           | 12                |
+| A fresh signature reads as unclaimed                 | 11                |
+| A policy refusal is a fault                          | 11                |
+| A refusal names no request                           | 10                |
+| A refusal names no purpose                           | 9                 |
+| Every spend signs under the settlement key           | 7                 |
+| Every refusal is a policy refusal                    | 6                 |
+| The signed outcome names the settlement purpose      | 6                 |
+| A decode refusal is a fault                          | 4                 |
+| A claim without its signature is answered as signed  | 2                 |
+| A signing fault is answered as malformed             | 2                 |
+| A decode fault is answered as malformed              | 1                 |
+| A repeat is signed again                             | 1                 |
+| A repeat's signature reads as unclaimed              | 1                 |
+| A spend signed unclaimed has its signature recorded  | 1                 |
+| A spend signed unclaimed reads as claimed            | 1                 |
+| An empty channel id is a fault                       | 1                 |
+| No request is read as a spend                        | 1                 |
+
+Dropping the size check on the recovered signature fails no test, and cannot: noble's `recovered` format always writes 65
+bytes, so the check only guards a change of the library, whose frozen export no spec can stand in for.

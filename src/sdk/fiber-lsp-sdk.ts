@@ -18,6 +18,7 @@ import { DEFAULT_POLL_INTERVAL_MS, POLL_STEP_TIMEOUT_MS } from "./sdk.constants"
 import { buildChannelSigningStep } from "./signing-step";
 import type { FiberLspSdkOptions, SdkContext, SdkEvent, SdkEventListener } from "./sdk.types";
 import { resolveSdkNetwork, runtimeTimer } from "./utils";
+import { buildWatchtowerSigningStep } from "./watchtower-step";
 
 export class FiberLspSdk {
     private readonly context: SdkContext;
@@ -27,7 +28,7 @@ export class FiberLspSdk {
     /**
      * Wires the device from its seed and the host's effects; nothing connects until `connect()`.
      * @param masterSeed The 32-byte master seed, copied.
-     * @param options The network, the host's effects, the node's endpoint, the LSP's key and the nonce reuse mode.
+     * @param options The network, the host's effects, the node's endpoint, the LSP's key, the nonce reuse mode and the watchtower's approval.
      */
     constructor(masterSeed: Uint8Array, options: FiberLspSdkOptions) {
         assertBytes("masterSeed", masterSeed, MASTER_SEED_LENGTH);
@@ -42,7 +43,7 @@ export class FiberLspSdk {
         const now = options.now ?? Date.now;
         const timer = options.timer ?? runtimeTimer();
         const store = new SignerStore(options.storage);
-        const policy = new PolicyEngine(store, { nonceReuse: options.nonceReuse });
+        const policy = new PolicyEngine(store, { nonceReuse: options.nonceReuse, watchtower: options.watchtower });
         const dispatch = new SignerDispatch({
             masterSeed,
             commitmentLock: network.commitmentLock,
@@ -51,7 +52,10 @@ export class FiberLspSdk {
         });
         const emit = this.listeners.emit.bind(this.listeners);
         const rpc = new FiberRpcClient({ url: options.rpcUrl, token: options.biscuitToken, fetch: options.fetch });
-        const steps = [buildChannelSigningStep({ rpc, store, dispatch, emit })];
+        const steps = [
+            buildChannelSigningStep({ rpc, store, dispatch, emit }),
+            buildWatchtowerSigningStep({ rpc, store, policy, dispatch, emit }),
+        ];
         this.context = {
             network,
             lspPubkey: Uint8Array.from(options.lspPubkey),

@@ -1,10 +1,12 @@
-import type { CellOutput, Transaction } from "../common";
+import type { CellDep, CellOutput, Transaction } from "../common";
 import {
+    DEP_TYPES,
     HASH256_LENGTH,
     UINT32_MAX,
     UINT64_MAX,
     assertAnyBytes,
     assertBytes,
+    assertOneOf,
     assertOutPoint,
     assertScript,
     assertUnsignedBigInt,
@@ -13,7 +15,7 @@ import {
     isPlainObject,
 } from "../common";
 import { MAX_CAPACITY_SHANNONS } from "./digest.constants";
-import { moleculeCellInput, moleculeCellOutput, moleculeRawTransaction } from "./utils";
+import { moleculeCellDep, moleculeCellInput, moleculeCellOutput, moleculeRawTransaction } from "./utils";
 
 /**
  * Port of fiber's `compute_tx_message`: the CKB blake2b of the raw tx with its cell deps emptied.
@@ -21,16 +23,27 @@ import { moleculeCellInput, moleculeCellOutput, moleculeRawTransaction } from ".
  * @returns The 32-byte message.
  */
 export function computeTxMessage(tx: Transaction): Uint8Array {
+    // Emptied on purpose, so a script upgrade that moves the deps never invalidates a signature.
+    return ckbBlake2b(serializeRawTransaction(tx, false));
+}
+
+/**
+ * Serializes a tx's molecule `RawTransaction` after checking it field by field.
+ * @param tx The tx.
+ * @param withCellDeps Whether to write the tx's cell deps or none.
+ * @returns The RawTransaction bytes.
+ */
+export function serializeRawTransaction(tx: Transaction, withCellDeps: boolean): Uint8Array {
     if (!isPlainObject(tx)) throw new TypeError("transaction must be an object");
-    const { version, headerDeps, inputs, outputs, outputsData } = tx;
+    const { version, cellDeps, headerDeps, inputs, outputs, outputsData } = tx;
     assertUnsignedInteger("transaction.version", version, UINT32_MAX);
-    for (const [name, list] of Object.entries({ headerDeps, inputs, outputs, outputsData })) {
+    const lists = { headerDeps, inputs, outputs, outputsData };
+    for (const [name, list] of Object.entries(withCellDeps ? { cellDeps, ...lists } : lists)) {
         if (!Array.isArray(list)) throw new TypeError(`transaction.${name} must be an array`);
     }
-    const raw = moleculeRawTransaction({
+    return moleculeRawTransaction({
         version,
-        // Emptied on purpose, so a script upgrade that moves the deps never invalidates a signature.
-        cellDeps: [],
+        cellDeps: withCellDeps ? cellDeps.map((cellDep, index) => serializeCellDep(`transaction.cellDeps[${index}]`, cellDep)) : [],
         headerDeps: headerDeps.map((headerDep, index) => {
             assertBytes(`transaction.headerDeps[${index}]`, headerDep, HASH256_LENGTH);
             return headerDep;
@@ -48,7 +61,6 @@ export function computeTxMessage(tx: Transaction): Uint8Array {
             return data;
         }),
     });
-    return ckbBlake2b(raw);
 }
 
 /**
@@ -63,6 +75,19 @@ export function computeRevocationContentMessage(output: CellOutput, outputData: 
     assertAnyBytes("outputData", outputData);
     assertAnyBytes("args", args);
     return ckbBlake2b(serializedOutput, outputData, args);
+}
+
+/**
+ * Serializes a cell dep after checking it field by field.
+ * @param name Its path, for the refusal.
+ * @param cellDep The cell dep.
+ * @returns The molecule `CellDep` bytes.
+ */
+function serializeCellDep(name: string, cellDep: CellDep): Uint8Array {
+    if (!isPlainObject(cellDep)) throw new TypeError(`${name} must be an object`);
+    assertOutPoint(`${name}.outPoint`, cellDep.outPoint);
+    assertOneOf(`${name}.depType`, cellDep.depType, DEP_TYPES);
+    return moleculeCellDep(cellDep);
 }
 
 /**

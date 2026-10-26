@@ -1,7 +1,6 @@
 import { malformedWireField } from "./field";
+import { WIRE_FLAG_SEPARATOR } from "./wire.constants";
 import type { WireField } from "./wire.types";
-
-const FLAG_SEPARATOR = "|";
 
 /**
  * Reads a field as fiber's flag set: names joined by `|`, `""` for none.
@@ -13,10 +12,10 @@ export function decodeFlags<Names extends readonly string[]>(field: WireField, n
     if (typeof field.value !== "string") malformedWireField(field, "must be a string of flag names");
     if (field.value === "") return [];
     const accepted: readonly string[] = names;
-    const flags = field.value.split(FLAG_SEPARATOR);
+    const flags = field.value.split(WIRE_FLAG_SEPARATOR);
     // Fiber writes each name once, unpadded.
     if (flags.some((flag) => !accepted.includes(flag)) || new Set(flags).size !== flags.length) {
-        malformedWireField(field, `must be distinct names among ${names.join(", ")}, joined by ${FLAG_SEPARATOR}`);
+        malformedWireField(field, `must be distinct names among ${names.join(", ")}, joined by ${WIRE_FLAG_SEPARATOR}`);
     }
     return flags as Names[number][];
 }

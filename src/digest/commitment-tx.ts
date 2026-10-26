@@ -1,6 +1,7 @@
 import { bytesToHex, concatBytes } from "@noble/hashes/utils.js";
 import type { Script, Transaction } from "../common";
 import {
+    BLAKE160_LENGTH,
     COMPRESSED_POINT_LENGTH,
     MAX_AMOUNT_SHANNONS,
     UINT64_LENGTH,
@@ -18,6 +19,9 @@ import { MAX_COMMITMENT_NUMBER, pubkeyOf } from "../derivation";
 import {
     COMMITMENT_LOCK_ARGS_LENGTHS,
     COMMITMENT_LOCK_LAYOUTS,
+    COMMITMENT_LOCK_SETTLEMENT_FLAGS,
+    COMMITMENT_LOCK_SETTLEMENT_FLAG_OFFSET,
+    COMMITMENT_LOCK_SETTLEMENT_HASH_OFFSET,
     FULL_PAYMENT_HASH_FEATURE_BYTE,
     MAX_CAPACITY_SHANNONS,
     MAX_SINCE_PAYLOAD,
@@ -31,7 +35,7 @@ import { computeTxMessage } from "./tx-message";
 import { aggregateXOnlyPubkey, commitmentCellValue, uint64Be } from "./utils";
 
 // Both fields sit after the 20-byte key hash, at the same offsets in a commitment's args and in a revocation's.
-const LOCK_ARGS_DELAY_OFFSET = 20;
+const LOCK_ARGS_DELAY_OFFSET = BLAKE160_LENGTH;
 const LOCK_ARGS_VERSION_OFFSET = LOCK_ARGS_DELAY_OFFSET + UINT64_LENGTH;
 
 /**
@@ -59,7 +63,7 @@ export function buildCommitmentLockArgs(
         uint64Le(SINCE_RELATIVE_EPOCH_FLAGS | commitmentDelayEpoch),
         uint64Be(BigInt(commitmentNumber)),
         blake160(settlementWitness),
-        Uint8Array.of(0x00),
+        Uint8Array.of(COMMITMENT_LOCK_SETTLEMENT_FLAGS.commitment),
         featureBytes,
     );
 }
@@ -113,6 +117,33 @@ export function readCommitmentLockVersion(args: Uint8Array): number {
 }
 
 /**
+ * Reads the blake160 of the settlement body a commitment lock's args commit.
+ * @param args The 57 or 58 bytes.
+ * @returns The 20-byte hash.
+ */
+export function readCommitmentLockSettlementHash(args: Uint8Array): Uint8Array {
+    // Refuses a revocation's 36 bytes, which carry no hash.
+    readCommitmentLockLayout(args);
+    return args.slice(COMMITMENT_LOCK_SETTLEMENT_HASH_OFFSET, COMMITMENT_LOCK_SETTLEMENT_FLAG_OFFSET);
+}
+
+/**
+ * Reads whether a commitment lock's cell is a settlement unlock's remainder rather than the commitment's output.
+ * @param args The 57 or 58 bytes.
+ * @returns `true` for a remainder, `false` for the commitment.
+ */
+export function readCommitmentLockSettled(args: Uint8Array): boolean {
+    readCommitmentLockLayout(args);
+    const flag = args[COMMITMENT_LOCK_SETTLEMENT_FLAG_OFFSET];
+    if (flag === COMMITMENT_LOCK_SETTLEMENT_FLAGS.remainder) return true;
+    if (flag === COMMITMENT_LOCK_SETTLEMENT_FLAGS.commitment) return false;
+    const offset = COMMITMENT_LOCK_SETTLEMENT_FLAG_OFFSET;
+    throw new TypeError(
+        `commitment lock args must carry the settlement flag 0x00 or 0x01, got 0x${bytesToHex(args.subarray(offset, offset + 1))}`,
+    );
+}
+
+/**
  * Reads one u64 of the 36 bytes a commitment's args and a revocation's share, after checking the length.
  * @param args The args.
  * @param offset Where the u64 starts.
@@ -141,12 +172,44 @@ export function computeCommitmentTxDigest(keys: FiberChannelKeys, input: Commitm
 }
 
 /**
+ * Builds the settlement body a commitment's lock args commit.
+ * @param keys The channel's secrets.
+ * @param input What the tx is a function of.
+ * @returns The body whose blake160 the lock args carry.
+ */
+export function buildCommitmentSettlementWitness(keys: FiberChannelKeys, input: CommitmentTxInput): Uint8Array {
+    const isUdt = input.udtTypeScript !== null;
+    // On CKB channels the settlement amounts absorb each side's reserved CKB; on UDT channels the reserve stays capacity-only.
+    return buildSettlementWitness(keys, {
+        forRemote: input.forRemote,
+        remoteTlcBasePubkey: input.remoteTlcBasePubkey,
+        localAmountShannons: isUdt ? input.settlementLocalShannons : input.settlementLocalShannons + input.localReservedCkbShannons,
+        remoteAmountShannons: isUdt ? input.settlementRemoteShannons : input.settlementRemoteShannons + input.remoteReservedCkbShannons,
+        tlcs: input.tlcs,
+        lockLayout: input.lockLayout,
+    });
+}
+
+/**
  * The tx of fiber's `build_commitment_tx_and_settlement_data`.
  * @param keys The channel's secrets.
  * @param input What the tx is a function of.
  * @returns The unsigned tx, without cell deps.
  */
 export function buildCommitmentTx(keys: FiberChannelKeys, input: CommitmentTxInput): Transaction {
+    return buildCommitmentTxAndSettlement(keys, input).transaction;
+}
+
+/**
+ * Port of fiber's `build_commitment_tx_and_settlement_data`.
+ * @param keys The channel's secrets.
+ * @param input What the tx is a function of.
+ * @returns The unsigned tx, without cell deps, and its settlement body.
+ */
+export function buildCommitmentTxAndSettlement(
+    keys: FiberChannelKeys,
+    input: CommitmentTxInput,
+): { transaction: Transaction; settlementWitness: Uint8Array } {
     assertOutPoint("fundingOutPoint", input.fundingOutPoint);
     assertBytes("remoteFundingPubkey", input.remoteFundingPubkey, COMPRESSED_POINT_LENGTH);
     assertUnsignedBigInt("liquidCapacityShannons", input.liquidCapacityShannons, MAX_AMOUNT_SHANNONS);
@@ -159,16 +222,7 @@ export function buildCommitmentTx(keys: FiberChannelKeys, input: CommitmentTxInp
     const orderedPubkeys: [Uint8Array, Uint8Array] = input.forRemote
         ? [localFundingPubkey, input.remoteFundingPubkey]
         : [input.remoteFundingPubkey, localFundingPubkey];
-    const isUdt = input.udtTypeScript !== null;
-    // On CKB channels the settlement amounts absorb each side's reserved CKB; on UDT channels the reserve stays capacity-only.
-    const witness = buildSettlementWitness(keys, {
-        forRemote: input.forRemote,
-        remoteTlcBasePubkey: input.remoteTlcBasePubkey,
-        localAmountShannons: isUdt ? input.settlementLocalShannons : input.settlementLocalShannons + input.localReservedCkbShannons,
-        remoteAmountShannons: isUdt ? input.settlementRemoteShannons : input.settlementRemoteShannons + input.remoteReservedCkbShannons,
-        tlcs: input.tlcs,
-        lockLayout: input.lockLayout,
-    });
+    const witness = buildCommitmentSettlementWitness(keys, input);
     const lockArgs = buildCommitmentLockArgs(
         aggregateXOnlyPubkey(orderedPubkeys),
         input.commitmentDelayEpoch,
@@ -179,7 +233,7 @@ export function buildCommitmentTx(keys: FiberChannelKeys, input: CommitmentTxInp
     const lock: Script = { ...input.commitmentLock, args: lockArgs };
 
     const { capacityShannons, data } = commitmentCellValue(input, calculateCommitmentTxFee(input));
-    return {
+    const transaction: Transaction = {
         version: 0,
         cellDeps: [],
         headerDeps: [],
@@ -188,4 +242,5 @@ export function buildCommitmentTx(keys: FiberChannelKeys, input: CommitmentTxInp
         outputsData: [data],
         witnesses: [],
     };
+    return { transaction, settlementWitness: witness };
 }

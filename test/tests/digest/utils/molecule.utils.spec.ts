@@ -2,6 +2,7 @@ import { bytesToHex, hexToBytes } from "@noble/hashes/utils.js";
 import type { Script } from "../../../../src/common";
 import { moleculeScript } from "../../../../src/common";
 import {
+    moleculeCellDep,
     moleculeCellInput,
     moleculeCellOutput,
     moleculeOutPoint,
@@ -34,6 +35,15 @@ describe("moleculeOutPoint", () => {
         expect(() => moleculeOutPoint({ ...OUT_POINT, txHash: new Uint8Array(33) })).toThrow(TypeError);
         expect(() => moleculeOutPoint({ ...OUT_POINT, index: -1 })).toThrow(RangeError);
         expect(() => moleculeOutPoint({ ...OUT_POINT, index: 2 ** 32 })).toThrow(RangeError);
+    });
+});
+
+describe("moleculeCellDep", () => {
+    it.each([
+        ["code", "00"],
+        ["dep_group", "01"],
+    ] as const)("puts the %s byte after the out point", (depType, byte) => {
+        expect(bytesToHex(moleculeCellDep({ outPoint: OUT_POINT, depType }))).toBe("aa".repeat(32) + "07000000" + byte);
     });
 });
 

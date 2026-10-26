@@ -1,6 +1,6 @@
 import { hexToBytes } from "@noble/hashes/utils.js";
-import type { ScriptTemplate } from "../common";
-import { PAYMENT_HASH_LENGTH, TRUNCATED_PAYMENT_HASH_LENGTH, UINT64_MAX } from "../common";
+import type { DepType, ScriptTemplate } from "../common";
+import { BLAKE160_LENGTH, PAYMENT_HASH_LENGTH, TRUNCATED_PAYMENT_HASH_LENGTH, UINT64_MAX } from "../common";
 
 /**
  * CKB cell capacities and fees are u64 shannons, unlike the u128 channel amounts.
@@ -31,6 +31,12 @@ export const COMMITMENT_LOCK_ARGS_LENGTHS = { legacy: 57, fullPaymentHash: 58 } 
  * Key hash, delay and version: the revoked cell's args before the settlement hash.
  */
 export const REVOCATION_LOCK_ARGS_LENGTH = 36;
+
+export const COMMITMENT_LOCK_SETTLEMENT_HASH_OFFSET = REVOCATION_LOCK_ARGS_LENGTH;
+
+export const COMMITMENT_LOCK_SETTLEMENT_FLAG_OFFSET = COMMITMENT_LOCK_SETTLEMENT_HASH_OFFSET + BLAKE160_LENGTH;
+
+export const COMMITMENT_LOCK_SETTLEMENT_FLAGS = { commitment: 0x00, remainder: 0x01 } as const;
 
 export const WITNESS_PAYMENT_HASH_LENGTHS = {
     legacy: TRUNCATED_PAYMENT_HASH_LENGTH,
@@ -67,6 +73,8 @@ export const SINCE_ABSOLUTE_TIMESTAMP_FLAG = 0x4000000000000000n;
 export const CELL_DEP_LENGTH = 37;
 
 export const CELL_INPUT_LENGTH = 44;
+
+export const DEP_TYPE_BYTES = { code: 0, dep_group: 1 } as const satisfies Record<DepType, number>;
 
 /**
  * Not derivable from the chain: fiber ships it in its node config, so the device pins it instead of taking the node's.

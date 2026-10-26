@@ -1,4 +1,5 @@
 import { bytesToHex, hexToBytes } from "@noble/hashes/utils.js";
+import { blake160 } from "../../../src/common/utils/ckb-hash.utils";
 import { deriveChannelKeys } from "../../../src/derivation/fiber-scheme";
 import { computeChannelAnnouncementDigest } from "../../../src/digest/channel-announcement";
 import {
@@ -7,6 +8,8 @@ import {
     computeCommitmentTxDigest,
     readCommitmentLockDelay,
     readCommitmentLockLayout,
+    readCommitmentLockSettled,
+    readCommitmentLockSettlementHash,
     readCommitmentLockVersion,
 } from "../../../src/digest/commitment-tx";
 import { COMMITMENT_LOCK_TESTNET } from "../../../src/digest/digest.constants";
@@ -15,6 +18,15 @@ import { buildRevocationContent, computeRevocationDigest } from "../../../src/di
 import { settlementToCommitmentInput } from "../../../src/digest/settlement-input";
 import { buildSettlementWitness } from "../../../src/digest/settlement-witness";
 import { buildClosingTx, computeClosingTxDigest, computeShutdownTxDigest, readClosingTx } from "../../../src/digest/shutdown-tx";
+import {
+    buildRemainderLockArgs,
+    deviceSettlementIndex,
+    nextSettlementWitness,
+    readSettlementBody,
+    readSettlementTlcEntry,
+    readSettlementUnlock,
+} from "../../../src/digest/settlement-unlock";
+import { computeTxHash } from "../../../src/digest/tx-hash";
 import { computeRevocationContentMessage, computeTxMessage } from "../../../src/digest/tx-message";
 import { moleculeCellOutput } from "../../../src/digest/utils/molecule.utils";
 import { aggregateXOnlyPubkey } from "../../../src/digest/utils/digest.utils";
@@ -34,6 +46,8 @@ import {
     toTransaction,
 } from "../../utils/digest-inputs";
 import { caseOf, loadInteropVectors, toVectorSettlement } from "../../utils/interop-vectors";
+import type { CkbTransactionJson, SigningWatchtowerViewVector } from "../../utils/signing-vectors";
+import { loadSigningVectors, toCkbCellDep } from "../../utils/signing-vectors";
 
 const vectors = loadInteropVectors();
 const digest = vectors.digest;
@@ -295,5 +309,181 @@ describe("digest cross-implementation vectors", () => {
                 expect(bytesToHex(recomputed)).toBe(kase.digest);
             });
         }
+    });
+});
+
+describe("watchtower cross-implementation vectors", () => {
+    const watchtower = loadSigningVectors().watchtower;
+
+    // Pinned by name, so a regeneration that breaks a chain cannot stay green.
+    const LINEAGE: [spend: string, source: string][] = [
+        ["peer's commitment: inbound TLC by preimage", "commitment"],
+        ["peer's commitment: outbound TLC by timeout", "peer's commitment: inbound TLC by preimage"],
+        ["peer's commitment: settlement", "peer's commitment: outbound TLC by timeout"],
+        ["peer's commitment, peer first: peer's outbound TLC by timeout", "commitment"],
+        ["peer's commitment, peer first: outbound TLC by timeout", "peer's commitment, peer first: peer's outbound TLC by timeout"],
+        ["peer's commitment, peer first: peer's settlement", "peer's commitment, peer first: outbound TLC by timeout"],
+        ["peer's commitment, peer first: settlement as the last party", "peer's commitment, peer first: peer's settlement"],
+        ["own commitment: outbound TLC by timeout", "commitment"],
+        ["own commitment: inbound TLC by preimage", "own commitment: outbound TLC by timeout"],
+        ["own commitment: settlement", "own commitment: inbound TLC by preimage"],
+        ["own commitment, peer first: peer's outbound TLC by timeout", "commitment"],
+        ["own commitment, peer first: outbound TLC by timeout", "own commitment, peer first: peer's outbound TLC by timeout"],
+        ["own commitment, peer first: peer's settlement", "own commitment, peer first: outbound TLC by timeout"],
+        ["own commitment, peer first: settlement as the last party", "own commitment, peer first: peer's settlement"],
+    ];
+
+    const LAST_PARTY_SETTLEMENTS = [
+        "peer's commitment, peer first: settlement as the last party",
+        "own commitment, peer first: settlement as the last party",
+    ];
+
+    const EMPTY_BODY = "00" + "00".repeat(72);
+
+    // The peer settles from the other side of the same body.
+    type ChainSpend = { name: string; transaction: CkbTransactionJson; tx_hash: string; byPeer: boolean };
+
+    function ckbHex(bytes: Uint8Array): string {
+        return `0x${bytesToHex(bytes)}`;
+    }
+
+    function chainOf(view: SigningWatchtowerViewVector): ChainSpend[] {
+        return [
+            ...view.spends.map((spend) => ({ name: spend.name, transaction: spend.transaction, tx_hash: spend.tx_hash, byPeer: false })),
+            ...view.peer_spends.map((spend) => ({ ...spend, byPeer: true })),
+        ];
+    }
+
+    function commitmentOf(view: SigningWatchtowerViewVector) {
+        const tx = toTransaction(view.commitment.transaction);
+        const lock = tx.outputs[0]!.lock;
+        return { tx, lock, layout: readCommitmentLockLayout(lock.args) };
+    }
+
+    function spendOf(view: SigningWatchtowerViewVector, spend: ChainSpend) {
+        const tx = toTransaction(spend.transaction);
+        const unlock = readSettlementUnlock(tx.witnesses[0]!, commitmentOf(view).layout);
+        return { tx, unlock, next: nextSettlementWitness(unlock, spend.byPeer ? !view.for_remote : view.for_remote) };
+    }
+
+    function sourceOf(view: SigningWatchtowerViewVector, spend: ChainSpend) {
+        const { previousOutput } = toTransaction(spend.transaction).inputs[0]!;
+        const txHash = ckbHex(previousOutput.txHash);
+        if (previousOutput.index !== 0) return null;
+        if (txHash === view.commitment.onchain_tx_hash) {
+            return { name: "commitment", lockArgs: commitmentOf(view).lock.args, body: view.commitment.settlement_witness };
+        }
+        const parent = chainOf(view).find((candidate) => candidate.tx_hash === txHash);
+        if (parent === undefined) return null;
+        const { tx, next } = spendOf(view, parent);
+        return { name: parent.name, lockArgs: tx.outputs[0]!.lock.args, body: ckbHex(next) };
+    }
+
+    function expectRemainder(view: SigningWatchtowerViewVector, spend: ChainSpend): void {
+        const { tx, next } = spendOf(view, spend);
+        const { lock } = commitmentOf(view);
+        const remainders = tx.outputs.filter((output) => bytesToHex(output.lock.codeHash) === bytesToHex(lock.codeHash));
+        if (bytesToHex(next) === EMPTY_BODY) {
+            expect(remainders).toEqual([]);
+        } else {
+            expect(remainders).toEqual([tx.outputs[0]]);
+            expect(tx.outputs[0]!.lock).toEqual({ ...lock, args: buildRemainderLockArgs(lock.args, next) });
+        }
+    }
+
+    function chainSpendOf(name: string): [SigningWatchtowerViewVector, ChainSpend] {
+        for (const view of watchtower.views) {
+            const spend = chainOf(view).find((candidate) => candidate.name === name);
+            if (spend !== undefined) return [view, spend];
+        }
+        throw new Error(`the vectors carry no watchtower spend named ${name}`);
+    }
+
+    describe.each(watchtower.views.map((view) => [view.for_remote, view] as const))("the view with forRemote %p", (_, view) => {
+        it("hashes the broadcast commitment, the funding lock's deps included, apart from its message", () => {
+            const { tx } = commitmentOf(view);
+            expect(tx.cellDeps).toEqual(watchtower.funding_cell_deps.map(toCkbCellDep));
+            expect(ckbHex(computeTxHash(tx))).toBe(view.commitment.onchain_tx_hash);
+            expect(ckbHex(computeTxMessage(tx))).toBe(view.commitment.message);
+            expect(view.commitment.onchain_tx_hash).not.toBe(view.commitment.message);
+        });
+
+        it("commits the settlement witness in the commitment's lock args, a body its layout reads", () => {
+            const { lock, layout } = commitmentOf(view);
+            const witness = hexToBytes(view.commitment.settlement_witness.slice(2));
+            expect(readCommitmentLockSettlementHash(lock.args)).toEqual(blake160(witness));
+            expect(readCommitmentLockSettled(lock.args)).toBe(false);
+            expect(() => readSettlementBody(witness, layout)).not.toThrow();
+        });
+
+        it("chains each spend whose source the vectors carry onto the body that source commits", () => {
+            const chained = chainOf(view).flatMap((spend) => {
+                const source = sourceOf(view, spend);
+                if (source === null) return [];
+                const { unlock } = spendOf(view, spend);
+                expect(ckbHex(unlock.body)).toBe(source.body);
+                expect(readCommitmentLockSettlementHash(source.lockArgs)).toEqual(blake160(unlock.body));
+                expect(readCommitmentLockSettled(source.lockArgs)).toBe(source.name !== "commitment");
+                return [[spend.name, source.name]];
+            });
+            const pinned = LINEAGE.filter(([spend]) => chainOf(view).some((candidate) => candidate.name === spend));
+            expect(pinned).not.toEqual([]);
+            expect(chained).toEqual(expect.arrayContaining(pinned));
+        });
+
+        describe.each(view.peer_spends.map((spend) => [spend.name, spend] as const))("%s", (_name, spend) => {
+            it("hashes to its tx hash", () => {
+                expect(ckbHex(computeTxHash(toTransaction(spend.transaction)))).toBe(spend.tx_hash);
+            });
+
+            it("leaves the remainder whose lock args commit the next body, read from the peer's side", () => {
+                expectRemainder(view, { ...spend, byPeer: true });
+            });
+        });
+
+        describe.each(view.spends.map((spend) => [spend.name, spend] as const))("%s", (_name, spend) => {
+            const chainSpend: ChainSpend = { name: spend.name, transaction: spend.transaction, tx_hash: spend.tx_hash, byPeer: false };
+
+            it("hashes to its tx hash, and to its message without the cell deps", () => {
+                const tx = toTransaction(spend.transaction);
+                expect(ckbHex(computeTxHash(tx))).toBe(spend.tx_hash);
+                expect(ckbHex(computeTxMessage(tx))).toBe(spend.message);
+            });
+
+            it("unlocks what its key purpose names, under the signer's key", () => {
+                const { unlock } = spendOf(view, chainSpend);
+                const signerKeyHash = blake160(hexToBytes(spend.signer_pubkey.slice(2)));
+                if (spend.key_purpose.type === "Settlement") {
+                    const index = deviceSettlementIndex(view.for_remote);
+                    expect(unlock.target).toEqual({ kind: "balance", index });
+                    expect(unlock.balances[index].pubkeyHash).toEqual(signerKeyHash);
+                } else {
+                    if (unlock.target.kind !== "tlc") throw new Error(`${spend.name} unlocks no TLC`);
+                    const entry = readSettlementTlcEntry(
+                        unlock.tlcEntries[unlock.target.index]!,
+                        commitmentOf(view).layout,
+                        view.for_remote,
+                    );
+                    expect(entry.localKeyHash).toEqual(signerKeyHash);
+                    expect(entry.amountShannons).toBe(BigInt(spend.released_shannons));
+                }
+            });
+
+            it("leaves the remainder whose lock args commit the next body, or none once nothing is left", () => {
+                expectRemainder(view, chainSpend);
+            });
+        });
+    });
+
+    it.each(LINEAGE)("carries the pinned spend %s", (name) => {
+        expect(() => chainSpendOf(name)).not.toThrow();
+    });
+
+    it.each(LAST_PARTY_SETTLEMENTS)("leaves nothing to commit after %s, and no commitment-lock output", (name) => {
+        const [view, spend] = chainSpendOf(name);
+        const { tx, next } = spendOf(view, spend);
+        expect(bytesToHex(next)).toBe(EMPTY_BODY);
+        const { lock } = commitmentOf(view);
+        expect(tx.outputs.filter((output) => bytesToHex(output.lock.codeHash) === bytesToHex(lock.codeHash))).toEqual([]);
     });
 });

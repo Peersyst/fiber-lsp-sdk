@@ -11,7 +11,7 @@ import { flush } from "../../utils/flush";
 import { TimerMock } from "../../mocks/common";
 import { loadInteropVectors } from "../../utils/interop-vectors";
 import { rejection } from "../../utils/rejection";
-import { LIST_CHANNELS_CALL, signingStatusCall } from "../../utils/rpc-answers";
+import { LIST_CHANNELS_CALL, LIST_CHANNELS_WITH_CLOSED_CALL, signingStatusCall, watchtowerStatusCall } from "../../utils/rpc-answers";
 import type { SigningChannel } from "../../utils/signing-channel";
 import {
     openSigningChannel,
@@ -22,7 +22,14 @@ import {
     signingRequestIdOf,
     stageSecondSession,
 } from "../../utils/signing-channel";
-import { loadSigningVectors, signingCaseOf, signingStatusField } from "../../utils/signing-vectors";
+import {
+    loadSigningVectors,
+    signingCaseOf,
+    signingStatusField,
+    watchtowerApprovalOf,
+    watchtowerSpendOf,
+    watchtowerStatusField,
+} from "../../utils/signing-vectors";
 import { withRuntime } from "../../utils/with-runtime";
 
 const vectors = loadInteropVectors();
@@ -41,6 +48,9 @@ const DEV_NETWORK = {
     invoiceCurrency: "Fibd",
     fundingLockCellDepsCount: 3,
 } as const;
+const APPROVAL = watchtowerApprovalOf(signing);
+const IDLE = { type: "NoSignatureRequired" };
+const READY = { state_name: "ChannelReady" };
 
 function harness(overrides: Partial<FiberLspSdkOptions> = {}, seed: Uint8Array = MASTER_SEED) {
     const timer = new TimerMock();
@@ -100,11 +110,12 @@ async function signingHarness(
     return { sdk, node, events };
 }
 
-async function tickOver(h: SigningHarness, status: unknown): Promise<void> {
+async function tickOver(h: SigningHarness, status: unknown, submits: boolean, watchtowerStatus: unknown = IDLE): Promise<void> {
+    h.node.result({ channels: [{ channel_id: SIGNING_CHANNEL_ID }] }).result({ channel_id: SIGNING_CHANNEL_ID, status });
+    if (submits) h.node.result({ type: "Applied" });
     h.node
-        .result({ channels: [{ channel_id: SIGNING_CHANNEL_ID }] })
-        .result({ channel_id: SIGNING_CHANNEL_ID, status })
-        .result({ type: "Applied" });
+        .result({ channels: [{ channel_id: SIGNING_CHANNEL_ID, state: READY }] })
+        .result({ channel_id: SIGNING_CHANNEL_ID, status: watchtowerStatus });
     h.sdk.connect();
     await flush();
     h.sdk.disconnect();
@@ -241,6 +252,12 @@ describe("FiberLspSdk", () => {
                 new TypeError("options.nonceReuse must be one of refuse, allow"),
             ],
             [
+                "a watchtower approval that is not an object",
+                { watchtower: "approve" as never },
+                MASTER_SEED,
+                new TypeError("options.watchtower must be an object"),
+            ],
+            [
                 "a token with a space",
                 { biscuitToken: "not a token" },
                 MASTER_SEED,
@@ -270,6 +287,8 @@ describe("FiberLspSdk", () => {
             ["no nonce reuse mode", { nonceReuse: undefined }],
             ["nonce reuse refused", { nonceReuse: "refuse" as const }],
             ["nonce reuse allowed", { nonceReuse: "allow" as const }],
+            ["no watchtower approval", { watchtower: undefined }],
+            ["the vectors' watchtower approval", { watchtower: APPROVAL }],
         ])("accepts %s", (_, overrides) => {
             expect(() => harness(overrides)).not.toThrow();
         });
@@ -360,6 +379,15 @@ describe("FiberLspSdk", () => {
             expect(contextOf(h.sdk).lspPubkey).toEqual(LSP_PUBKEY);
         });
 
+        it("hands the policy engine a copy of the watchtower approval, and none without one", () => {
+            const watchtowerOf = (sdk: FiberLspSdk): unknown => (contextOf(sdk).policy as unknown as { watchtower: unknown }).watchtower;
+            const approval = structuredClone(APPROVAL);
+            const h = harness({ watchtower: approval });
+            approval.destination.args.fill(0);
+            expect(watchtowerOf(h.sdk)).toEqual(APPROVAL);
+            expect(watchtowerOf(harness().sdk)).toBeNull();
+        });
+
         it("reads the clock from the options, and from Date.now without one", () => {
             const now = (): number => NOW_MS;
             expect(contextOf(harness({ now }).sdk).now).toBe(now);
@@ -396,7 +424,7 @@ describe("FiberLspSdk", () => {
             };
             withRuntime(later, () => h.sdk.connect());
             await flush();
-            expect(delays).toEqual([POLL_STEP_TIMEOUT_MS, POLL_INTERVAL_MS]);
+            expect(delays).toEqual([POLL_STEP_TIMEOUT_MS, POLL_STEP_TIMEOUT_MS, POLL_INTERVAL_MS]);
             withRuntime(later, () => h.sdk.disconnect());
         });
     });
@@ -407,16 +435,17 @@ describe("FiberLspSdk", () => {
             h.sdk.connect();
             expect(h.timer.delays).toEqual([POLL_STEP_TIMEOUT_MS]);
             await flush();
+            // Each step lists the node's channels.
             expect(h.polls()).toBe(1);
-            expect(h.fetch.requests).toHaveLength(1);
-            h.timer.advance(POLL_INTERVAL_MS);
-            await flush();
-            expect(h.polls()).toBe(2);
             expect(h.fetch.requests).toHaveLength(2);
             h.timer.advance(POLL_INTERVAL_MS);
             await flush();
+            expect(h.polls()).toBe(2);
+            expect(h.fetch.requests).toHaveLength(4);
+            h.timer.advance(POLL_INTERVAL_MS);
+            await flush();
             expect(h.polls()).toBe(3);
-            expect(h.fetch.requests).toHaveLength(3);
+            expect(h.fetch.requests).toHaveLength(6);
         });
 
         it("starts nothing twice when called while polling", async () => {
@@ -492,18 +521,20 @@ describe("FiberLspSdk", () => {
             expect(vectorsChain.commitmentLock).toEqual(COMMITMENT_LOCK_TESTNET);
             expect(vectorsChain.fundingLockCellDepsCount).toBe(2);
             const h = await signingHarness({ network: "testnet" });
-            await tickOver(h, sent.result.status);
+            await tickOver(h, sent.result.status, true);
             expect(h.node.calls()).toEqual([
                 LIST_CHANNELS_CALL,
                 signingStatusCall(SIGNING_CHANNEL_ID),
                 signatureSubmissionCall(signing, sent),
+                LIST_CHANNELS_WITH_CLOSED_CALL,
+                watchtowerStatusCall(SIGNING_CHANNEL_ID),
             ]);
             expect(h.events).toStrictEqual([signedEventOf(signing, sent)]);
         });
 
         it("signs on a development chain with the vectors' network", async () => {
             const h = await signingHarness({ network: vectorsChain });
-            await tickOver(h, sent.result.status);
+            await tickOver(h, sent.result.status, true);
             expect(h.events).toStrictEqual([signedEventOf(signing, sent)]);
         });
 
@@ -511,14 +542,19 @@ describe("FiberLspSdk", () => {
             const codeHash = Uint8Array.from(vectorsChain.commitmentLock.codeHash);
             const h = await signingHarness({ network: { ...vectorsChain, commitmentLock: { ...vectorsChain.commitmentLock, codeHash } } });
             codeHash.fill(0);
-            await tickOver(h, sent.result.status);
+            await tickOver(h, sent.result.status, true);
             expect(h.events).toStrictEqual([signedEventOf(signing, sent)]);
         });
 
         it("refuses a commitment under another network's commitment lock, submitting nothing", async () => {
             const h = await signingHarness({ network: "mainnet" });
-            await tickOver(h, sent.result.status);
-            expect(h.node.calls()).toEqual([LIST_CHANNELS_CALL, signingStatusCall(SIGNING_CHANNEL_ID)]);
+            await tickOver(h, sent.result.status, false);
+            expect(h.node.calls()).toEqual([
+                LIST_CHANNELS_CALL,
+                signingStatusCall(SIGNING_CHANNEL_ID),
+                LIST_CHANNELS_WITH_CLOSED_CALL,
+                watchtowerStatusCall(SIGNING_CHANNEL_ID),
+            ]);
             expect(h.events).toStrictEqual([
                 refusedEvent("SendCommitmentSigned", {
                     code: "malformed",
@@ -531,8 +567,13 @@ describe("FiberLspSdk", () => {
             const h = await signingHarness({
                 network: { ...vectorsChain, fundingLockCellDepsCount: vectorsChain.fundingLockCellDepsCount + 1 },
             });
-            await tickOver(h, sent.result.status);
-            expect(h.node.calls()).toEqual([LIST_CHANNELS_CALL, signingStatusCall(SIGNING_CHANNEL_ID)]);
+            await tickOver(h, sent.result.status, false);
+            expect(h.node.calls()).toEqual([
+                LIST_CHANNELS_CALL,
+                signingStatusCall(SIGNING_CHANNEL_ID),
+                LIST_CHANNELS_WITH_CLOSED_CALL,
+                watchtowerStatusCall(SIGNING_CHANNEL_ID),
+            ]);
             expect(h.events).toStrictEqual([
                 refusedEvent("SendCommitmentSigned", {
                     code: "malformed",
@@ -553,11 +594,13 @@ describe("FiberLspSdk", () => {
         it("serves a second session on a served slot under nonceReuse allow, as a warning", async () => {
             const h = await servedSlot({ nonceReuse: "allow" });
             const second = secondSessionStatus(signing);
-            await tickOver(h, second.value);
+            await tickOver(h, second.value, true);
             expect(h.node.calls().map((call) => call.method)).toEqual([
                 "list_channels",
                 "get_channel_signing_status",
                 "submit_channel_signature",
+                "list_channels",
+                "get_watchtower_signing_status",
             ]);
             expect(h.events).toStrictEqual([signedEventOf(signing, signingCaseOf(signing, "CompleteReceivedCommitment"), "warning")]);
         });
@@ -567,13 +610,96 @@ describe("FiberLspSdk", () => {
             ["under nonceReuse refuse", { nonceReuse: "refuse" as const }],
         ])("refuses a second session on a served slot %s", async (_, overrides) => {
             const h = await servedSlot(overrides);
-            await tickOver(h, secondSessionStatus(signing).value);
-            expect(h.node.calls()).toEqual([LIST_CHANNELS_CALL, signingStatusCall(SIGNING_CHANNEL_ID)]);
+            await tickOver(h, secondSessionStatus(signing).value, false);
+            expect(h.node.calls()).toEqual([
+                LIST_CHANNELS_CALL,
+                signingStatusCall(SIGNING_CHANNEL_ID),
+                LIST_CHANNELS_WITH_CLOSED_CALL,
+                watchtowerStatusCall(SIGNING_CHANNEL_ID),
+            ]);
             expect(h.events).toStrictEqual([
                 refusedEvent("CompleteReceivedCommitment", {
                     code: "policy_refusal",
                     message: "slot COMMITMENT:4 has already served a different signing session",
                 }),
+            ]);
+        });
+    });
+
+    describe("watchtower signing", () => {
+        const sent = signingCaseOf(signing, "SendCommitmentSigned");
+        const spend = watchtowerSpendOf(signing, "own commitment: settlement");
+        const spendStatus = watchtowerStatusField(spend).value;
+        const purpose = { kind: "settlement" } as const;
+
+        it("runs after the channel signing step, in the same tick, over the channels the node lists", async () => {
+            const h = await signingHarness({ watchtower: APPROVAL });
+            await tickOver(h, IDLE, false);
+            expect(h.node.calls()).toEqual([
+                LIST_CHANNELS_CALL,
+                signingStatusCall(SIGNING_CHANNEL_ID),
+                LIST_CHANNELS_WITH_CLOSED_CALL,
+                watchtowerStatusCall(SIGNING_CHANNEL_ID),
+            ]);
+            expect(h.events).toEqual([]);
+        });
+
+        it("runs after a channel signing step that signed, emitting each step's event in the order of the steps", async () => {
+            const h = await signingHarness({});
+            await tickOver(h, sent.result.status, true, spendStatus);
+            expect(h.events.map((event) => event.type)).toEqual(["SIGNING", "WATCHTOWER_SIGNING"]);
+        });
+
+        it("runs even when the channel signing step fails", async () => {
+            const h = await signingHarness({});
+            h.node
+                .error(-32000, "node is syncing")
+                .result({ channels: [{ channel_id: SIGNING_CHANNEL_ID, state: READY }] })
+                .result({ channel_id: SIGNING_CHANNEL_ID, status: IDLE });
+            h.sdk.connect();
+            await flush();
+            h.sdk.disconnect();
+            expect(h.node.calls()).toEqual([LIST_CHANNELS_CALL, LIST_CHANNELS_WITH_CLOSED_CALL, watchtowerStatusCall(SIGNING_CHANNEL_ID)]);
+            expect(h.events.map((event) => event.type)).toEqual(["ERROR"]);
+        });
+
+        it("refuses every spend without the host's approval, submitting nothing", async () => {
+            const h = await signingHarness({});
+            await tickOver(h, IDLE, false, spendStatus);
+            expect(h.node.calls().at(-1)).toEqual(watchtowerStatusCall(SIGNING_CHANNEL_ID));
+            expect(h.events).toStrictEqual([
+                {
+                    type: "WATCHTOWER_SIGNING",
+                    channelId: SIGNING_CHANNEL_ID,
+                    requestId: spend.request_id,
+                    purpose,
+                    outcome: "refused",
+                    error: {
+                        code: "policy_refusal",
+                        message: "watchtower option: the host approved no destination, so the device signs no watchtower spend",
+                    },
+                },
+            ]);
+        });
+
+        it("judges a spend by the host's approval when given one", async () => {
+            const h = await signingHarness({ watchtower: APPROVAL });
+            await tickOver(h, IDLE, false, spendStatus);
+            expect(h.node.calls().at(-1)).toEqual(watchtowerStatusCall(SIGNING_CHANNEL_ID));
+            expect(h.events).toStrictEqual([
+                {
+                    type: "WATCHTOWER_SIGNING",
+                    channelId: SIGNING_CHANNEL_ID,
+                    requestId: spend.request_id,
+                    purpose,
+                    outcome: "refused",
+                    error: {
+                        code: "policy_refusal",
+                        message:
+                            "watchtower source: input 0, spent with a zero since, is no cell descending from a signed commitment: no " +
+                            "commitment has been signed",
+                    },
+                },
             ]);
         });
     });

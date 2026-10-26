@@ -3364,6 +3364,319 @@
               "type": "NoSignatureRequired"
             }
           }
+        },
+        {
+          "name": "signature required by a TLC key",
+          "values": {
+            "channel_id": "41958bba3ff2755c67fb5d290a10f5b655a836c59124908a3bc5e7561e1f98bb",
+            "status": "SignatureRequired",
+            "request_id": "7df7d1ba7f8c6f93d1cf84cbf9f27eec67f68499e655f9156a354f213a78ded9",
+            "key_purpose": {
+              "name": "Tlc",
+              "commitment_number": "5"
+            },
+            "transaction": {
+              "version": 0,
+              "cell_deps": [
+                {
+                  "out_point": {
+                    "tx_hash": "202d47719dbcca8c60da1b133bbe23b5b4a1b350d985b0ff611a48a3b5de193c",
+                    "index": 7
+                  },
+                  "dep_type": "code"
+                },
+                {
+                  "out_point": {
+                    "tx_hash": "202d47719dbcca8c60da1b133bbe23b5b4a1b350d985b0ff611a48a3b5de193c",
+                    "index": 5
+                  },
+                  "dep_type": "code"
+                },
+                {
+                  "out_point": {
+                    "tx_hash": "367bfdc9bb0a028e33aaa22d58e96c860ba2fca4aab551900c262d40da4a8e56",
+                    "index": 0
+                  },
+                  "dep_type": "dep_group"
+                }
+              ],
+              "header_deps": [],
+              "inputs": [
+                {
+                  "since": "11529218344636907520",
+                  "previous_output": {
+                    "tx_hash": "8e93e28781e4ad5110a394c39f952ade4a133ddb02c20d94cad27fc549131214",
+                    "index": 0
+                  }
+                },
+                {
+                  "since": "4611686020187978704",
+                  "previous_output": {
+                    "tx_hash": "b2310cf602dc069f3d61b45ce9e39339f7b99ad43d920d299bfbeff46322322c",
+                    "index": 1
+                  }
+                }
+              ],
+              "outputs": [
+                {
+                  "capacity": "95299999543",
+                  "lock": {
+                    "code_hash": "a3f36d0e166a380166112425e0d1ec7695773c5577b0f6be139ac4a739f937b8",
+                    "hash_type": "type",
+                    "args": "04299aa171be9f3eddf8f645db2bf1197721467801000000000100a00000000000000007838375abcabc3e3402081b4ca6afb711e3ecd3960101"
+                  },
+                  "type": null
+                },
+                {
+                  "capacity": "11499999118",
+                  "lock": {
+                    "code_hash": "9bd7e06f3ecf4be0f2fcd2188b23f1b9fcc88e5d4b65a8637b17723bbda3cce8",
+                    "hash_type": "type",
+                    "args": "d6d4943aec78b87c0e721d75014d7097a426153b"
+                  },
+                  "type": null
+                }
+              ],
+              "outputs_data": [
+                "",
+                ""
+              ],
+              "witnesses": [
+                "10000000100000001000000010000000010100002f68590000000000000000000000002270bd28148408ed9912cd7dfbef2f548d49e0085a379f53bdb1cde9f575433086f000c822e7891814b4d3f1b98d2f91e26ff7eb05d8eb3b81c71dc23d88befd966ff87b031dde26d07bf0680000004056f7c5b53a0b237f9ae917c414f82ba7bcbd0954b7af1540050000000000000000000000ad27b27271a86dcdc9712ab20828cce197201ea480e73cf010000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
+                "55000000100000005500000055000000410000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
+              ]
+            }
+          },
+          "json": {
+            "channel_id": "0x41958bba3ff2755c67fb5d290a10f5b655a836c59124908a3bc5e7561e1f98bb",
+            "status": {
+              "type": "SignatureRequired",
+              "request_id": "0x7df7d1ba7f8c6f93d1cf84cbf9f27eec67f68499e655f9156a354f213a78ded9",
+              "content": {
+                "key_purpose": {
+                  "type": "Tlc",
+                  "commitment_number": "0x5"
+                },
+                "transaction": {
+                  "version": "0x0",
+                  "cell_deps": [
+                    {
+                      "out_point": {
+                        "tx_hash": "0x202d47719dbcca8c60da1b133bbe23b5b4a1b350d985b0ff611a48a3b5de193c",
+                        "index": "0x7"
+                      },
+                      "dep_type": "code"
+                    },
+                    {
+                      "out_point": {
+                        "tx_hash": "0x202d47719dbcca8c60da1b133bbe23b5b4a1b350d985b0ff611a48a3b5de193c",
+                        "index": "0x5"
+                      },
+                      "dep_type": "code"
+                    },
+                    {
+                      "out_point": {
+                        "tx_hash": "0x367bfdc9bb0a028e33aaa22d58e96c860ba2fca4aab551900c262d40da4a8e56",
+                        "index": "0x0"
+                      },
+                      "dep_type": "dep_group"
+                    }
+                  ],
+                  "header_deps": [],
+                  "inputs": [
+                    {
+                      "since": "0xa000030002000000",
+                      "previous_output": {
+                        "tx_hash": "0x8e93e28781e4ad5110a394c39f952ade4a133ddb02c20d94cad27fc549131214",
+                        "index": "0x0"
+                      }
+                    },
+                    {
+                      "since": "0x4000000068f07bd0",
+                      "previous_output": {
+                        "tx_hash": "0xb2310cf602dc069f3d61b45ce9e39339f7b99ad43d920d299bfbeff46322322c",
+                        "index": "0x1"
+                      }
+                    }
+                  ],
+                  "outputs": [
+                    {
+                      "capacity": "0x1630529737",
+                      "lock": {
+                        "code_hash": "0xa3f36d0e166a380166112425e0d1ec7695773c5577b0f6be139ac4a739f937b8",
+                        "hash_type": "type",
+                        "args": "0x04299aa171be9f3eddf8f645db2bf1197721467801000000000100a00000000000000007838375abcabc3e3402081b4ca6afb711e3ecd3960101"
+                      },
+                      "type": null
+                    },
+                    {
+                      "capacity": "0x2ad740f8e",
+                      "lock": {
+                        "code_hash": "0x9bd7e06f3ecf4be0f2fcd2188b23f1b9fcc88e5d4b65a8637b17723bbda3cce8",
+                        "hash_type": "type",
+                        "args": "0xd6d4943aec78b87c0e721d75014d7097a426153b"
+                      },
+                      "type": null
+                    }
+                  ],
+                  "outputs_data": [
+                    "0x",
+                    "0x"
+                  ],
+                  "witnesses": [
+                    "0x10000000100000001000000010000000010100002f68590000000000000000000000002270bd28148408ed9912cd7dfbef2f548d49e0085a379f53bdb1cde9f575433086f000c822e7891814b4d3f1b98d2f91e26ff7eb05d8eb3b81c71dc23d88befd966ff87b031dde26d07bf0680000004056f7c5b53a0b237f9ae917c414f82ba7bcbd0954b7af1540050000000000000000000000ad27b27271a86dcdc9712ab20828cce197201ea480e73cf010000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
+                    "0x55000000100000005500000055000000410000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
+                  ]
+                }
+              }
+            }
+          }
+        },
+        {
+          "name": "signature required by the settlement key",
+          "values": {
+            "channel_id": "41958bba3ff2755c67fb5d290a10f5b655a836c59124908a3bc5e7561e1f98bb",
+            "status": "SignatureRequired",
+            "request_id": "828e599ec53ed051a5ace38fd24a003ffb9019474df1b804efbabc980fb397bf",
+            "key_purpose": {
+              "name": "Settlement",
+              "commitment_number": null
+            },
+            "transaction": {
+              "version": 0,
+              "cell_deps": [
+                {
+                  "out_point": {
+                    "tx_hash": "202d47719dbcca8c60da1b133bbe23b5b4a1b350d985b0ff611a48a3b5de193c",
+                    "index": 7
+                  },
+                  "dep_type": "code"
+                },
+                {
+                  "out_point": {
+                    "tx_hash": "202d47719dbcca8c60da1b133bbe23b5b4a1b350d985b0ff611a48a3b5de193c",
+                    "index": 5
+                  },
+                  "dep_type": "code"
+                },
+                {
+                  "out_point": {
+                    "tx_hash": "367bfdc9bb0a028e33aaa22d58e96c860ba2fca4aab551900c262d40da4a8e56",
+                    "index": 0
+                  },
+                  "dep_type": "dep_group"
+                }
+              ],
+              "header_deps": [],
+              "inputs": [
+                {
+                  "since": "0",
+                  "previous_output": {
+                    "tx_hash": "5b211bfdd5a7e6e7639e9e114cd6b0229517bdc4b59015db949c3528de311299",
+                    "index": 0
+                  }
+                },
+                {
+                  "since": "0",
+                  "previous_output": {
+                    "tx_hash": "b2310cf602dc069f3d61b45ce9e39339f7b99ad43d920d299bfbeff46322322c",
+                    "index": 2
+                  }
+                }
+              ],
+              "outputs": [
+                {
+                  "capacity": "32549998674",
+                  "lock": {
+                    "code_hash": "9bd7e06f3ecf4be0f2fcd2188b23f1b9fcc88e5d4b65a8637b17723bbda3cce8",
+                    "hash_type": "type",
+                    "args": "d6d4943aec78b87c0e721d75014d7097a426153b"
+                  },
+                  "type": null
+                }
+              ],
+              "outputs_data": [
+                ""
+              ],
+              "witnesses": [
+                "10000000100000001000000010000000010056f7c5b53a0b237f9ae917c414f82ba7bcbd0954b7af1540050000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000fe000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
+                "55000000100000005500000055000000410000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
+              ]
+            }
+          },
+          "json": {
+            "channel_id": "0x41958bba3ff2755c67fb5d290a10f5b655a836c59124908a3bc5e7561e1f98bb",
+            "status": {
+              "type": "SignatureRequired",
+              "request_id": "0x828e599ec53ed051a5ace38fd24a003ffb9019474df1b804efbabc980fb397bf",
+              "content": {
+                "key_purpose": {
+                  "type": "Settlement"
+                },
+                "transaction": {
+                  "version": "0x0",
+                  "cell_deps": [
+                    {
+                      "out_point": {
+                        "tx_hash": "0x202d47719dbcca8c60da1b133bbe23b5b4a1b350d985b0ff611a48a3b5de193c",
+                        "index": "0x7"
+                      },
+                      "dep_type": "code"
+                    },
+                    {
+                      "out_point": {
+                        "tx_hash": "0x202d47719dbcca8c60da1b133bbe23b5b4a1b350d985b0ff611a48a3b5de193c",
+                        "index": "0x5"
+                      },
+                      "dep_type": "code"
+                    },
+                    {
+                      "out_point": {
+                        "tx_hash": "0x367bfdc9bb0a028e33aaa22d58e96c860ba2fca4aab551900c262d40da4a8e56",
+                        "index": "0x0"
+                      },
+                      "dep_type": "dep_group"
+                    }
+                  ],
+                  "header_deps": [],
+                  "inputs": [
+                    {
+                      "since": "0x0",
+                      "previous_output": {
+                        "tx_hash": "0x5b211bfdd5a7e6e7639e9e114cd6b0229517bdc4b59015db949c3528de311299",
+                        "index": "0x0"
+                      }
+                    },
+                    {
+                      "since": "0x0",
+                      "previous_output": {
+                        "tx_hash": "0xb2310cf602dc069f3d61b45ce9e39339f7b99ad43d920d299bfbeff46322322c",
+                        "index": "0x2"
+                      }
+                    }
+                  ],
+                  "outputs": [
+                    {
+                      "capacity": "0x794219052",
+                      "lock": {
+                        "code_hash": "0x9bd7e06f3ecf4be0f2fcd2188b23f1b9fcc88e5d4b65a8637b17723bbda3cce8",
+                        "hash_type": "type",
+                        "args": "0xd6d4943aec78b87c0e721d75014d7097a426153b"
+                      },
+                      "type": null
+                    }
+                  ],
+                  "outputs_data": [
+                    "0x"
+                  ],
+                  "witnesses": [
+                    "0x10000000100000001000000010000000010056f7c5b53a0b237f9ae917c414f82ba7bcbd0954b7af1540050000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000fe000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
+                    "0x55000000100000005500000055000000410000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
+                  ]
+                }
+              }
+            }
+          }
         }
       ]
     },

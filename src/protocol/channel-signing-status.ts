@@ -41,7 +41,7 @@ import {
 import { decodeKeyAggContext } from "./key-agg-context";
 import {
     CHANNEL_SIGNING_RULES,
-    CHANNEL_SIGNING_STATUS_TYPES,
+    SIGNING_STATUS_TYPES,
     CHANNEL_SIGNING_TRANSITIONS,
     COMMITMENT_COUNTERS,
     MAX_SIGNING_SLOT_NUMBER,
@@ -91,7 +91,7 @@ export function decodeChannelSigningStatus(field: WireField): ChannelSigningStat
  * @returns The status.
  */
 function readChannelSigningStatus(field: WireField): ChannelSigningStatus {
-    const status = readTagged<ChannelSigningStatusWire>(field, CHANNEL_SIGNING_STATUS_TYPES);
+    const status = readTagged<ChannelSigningStatusWire>(field, SIGNING_STATUS_TYPES);
     if (status.tag === "NoSignatureRequired") return { kind: "none" };
     const { at } = status;
     const requestId = decodeHexBytes(at("request_id"), HASH256_LENGTH);

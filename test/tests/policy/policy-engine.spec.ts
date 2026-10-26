@@ -1,13 +1,16 @@
 import { bytesToHex, hexToBytes } from "@noble/hashes/utils.js";
-import type { OutPoint } from "../../../src/common";
+import type { CellDep, CellOutput, OutPoint } from "../../../src/common";
 import type { FiberChannelKeys } from "../../../src/derivation";
 import { deriveChannelKeys, pubkeyOf } from "../../../src/derivation";
 import {
+    buildRemainderLockArgs,
     computeChannelAnnouncementDigest,
     computeClosingTxDigest,
     computeCommitmentTxDigest,
     computeRevocationDigest,
+    computeTxHash,
     computeTxMessage,
+    moleculeCellOutput,
     readClosingTx,
 } from "../../../src/digest";
 import type {
@@ -22,6 +25,9 @@ import type {
     PolicyView,
     SignOperation,
     SignSession,
+    WatchtowerApproval,
+    WatchtowerSpendRecord,
+    WatchtowerSpendRequest,
 } from "../../../src/policy";
 import { ChannelPinError, DebitIntentError, HoldInvoiceError, PolicyEngine, PolicyRefusalError, SignerStore } from "../../../src/policy";
 import { buildSessionCommitment } from "../../../src/policy/utils";
@@ -299,11 +305,26 @@ async function peerRevokes(engine: PolicyEngine, slot: number, channel: Channel 
 // Never read by the revocation rule, which holds the replacement's version; the hash only records what was signed.
 const REPLACEMENT_TX_HASH = "5e".repeat(32);
 
+// The cells and settlement bodies of two vector commitments, molecule hex written by hand from fiber's txs and witnesses.
+const NO_TLC_REMOTE_OUTPUT =
+    "8600000010000000180000008600000038e5c483160000006e000000100000003000000031000000740dee83f87c6f309824d8fd3fbdd3c8380ee6fc9acc" +
+    "90b1a748438afcdf81d801390000007ff980b4d180ee128bbfc295ef936f8d73a5dea501000000000100a00000000000000000d192bbc331c35aebda34ea" +
+    "9953c40f79a54bab8900";
+const NO_TLC_REMOTE_WITNESS =
+    "00e5b099614920970b0ec3c35f979f4d1a070336d600f831c60500000000000000000000006b5e8d9ad1828550472e07fe80b39585cc0837d600ef92bd10" +
+    "0000000000000000000000";
+const THREE_TLC_LOCAL_OUTPUT =
+    "8600000010000000180000008600000038e5c483160000006e000000100000003000000031000000740dee83f87c6f309824d8fd3fbdd3c8380ee6fc9acc" +
+    "90b1a748438afcdf81d801390000004483f0fbfe1784b42de8fd2c7900febe16cf8c7907000003000c00a0000000000000000ce291deb0de8d8f0ea152d9" +
+    "bc6a7d42a55b0dcc1100";
+
 async function holdLastCommitment(store: SignerStore, view: PolicyView, commitmentNumber: number): Promise<void> {
     await store.updateChannelRecord(CHANNEL_INDEX, (current) => {
         if (current === null) throw new Error("the channel holds no record");
         const last = { commitmentNumber, txHash: REPLACEMENT_TX_HASH };
-        return { ...current, commitmentHashes: { ...current.commitmentHashes, [view]: last } };
+        // The record guard holds a previous remote commitment to one below the last remote one, which this one replaces.
+        const previous = view === "remote" ? { previousRemoteCommitment: undefined } : {};
+        return { ...current, commitmentHashes: { ...current.commitmentHashes, [view]: last }, ...previous };
     });
 }
 
@@ -1363,7 +1384,14 @@ describe("checkAndClaim", () => {
                 lastSignedCommitmentNumbers: { "COMMITMENT:local": 0 },
                 signedSessions: { "COMMITMENT:0": buildSessionCommitment(request.session) },
                 nonceReuse: {},
-                commitmentHashes: { remote: { commitmentNumber: 0, txHash: kase.digest } },
+                commitmentHashes: {
+                    remote: {
+                        commitmentNumber: 0,
+                        txHash: kase.digest,
+                        source: { output: NO_TLC_REMOTE_OUTPUT, outputData: "" },
+                        settlementWitness: NO_TLC_REMOTE_WITNESS,
+                    },
+                },
                 revocations: [],
                 pins: OPENED_PINS,
                 views: { remote: OPENING_VIEW, local: OPENING_VIEW },
@@ -1378,6 +1406,27 @@ describe("checkAndClaim", () => {
                 expect(bytesToHex(computeTxMessage(toTransaction(kase.transaction)))).toBe(kase.digest);
             },
         );
+
+        it("keeps the cell and the settlement body of the device's own commitment in its view", async () => {
+            const { engine, store } = await registered();
+            const kase = caseOf(digest.commitment_cases, "ckb, three tlcs, for local");
+            // Opened at the case's delay, which the "ckb" cases do not share.
+            const delay = { commitmentDelayEpoch: BigInt(kase.delay_epoch) };
+            await engine.checkAndClaim(
+                KEYS,
+                signedRequest({ kind: "commitment_tx", input: { ...ckbCommitment(), ...delay, commitmentNumber: 10 } }, 10),
+            );
+            await recordThreeTlcIntents(engine);
+            const request = commitmentRequest("ckb, three tlcs, for local", { slot: { commitmentNumber: 11, counter: "local" } });
+
+            await expect(engine.checkAndClaim(KEYS, request)).resolves.toMatchObject({ status: "fresh", commitmentNumber: 11 });
+            expect((await store.getChannelRecord(CHANNEL_INDEX))?.commitmentHashes.local).toEqual({
+                commitmentNumber: 12,
+                txHash: kase.digest,
+                source: { output: THREE_TLC_LOCAL_OUTPUT, outputData: "" },
+                settlementWitness: kase.settlement_witness,
+            });
+        });
 
         it("claims the commitment slot for a cooperative close, and keeps no commitment hash", async () => {
             const { engine, store } = await registered();
@@ -1946,7 +1995,7 @@ describe("checkAndClaim", () => {
             );
             await expect(engine.checkAndClaim(KEYS, local(3, 13))).resolves.toMatchObject({ status: "fresh" });
             const record = await store.getChannelRecord(CHANNEL_INDEX);
-            expect(record?.commitmentHashes).toEqual({
+            expect(record?.commitmentHashes).toMatchObject({
                 remote: {
                     commitmentNumber: 11,
                     txHash: bytesToHex(
@@ -1980,7 +2029,7 @@ describe("checkAndClaim", () => {
                     context: "COMMITMENT",
                     commitmentNumber: 7,
                 });
-                expect((await store.getChannelRecord(CHANNEL_INDEX))?.commitmentHashes).toEqual({
+                expect((await store.getChannelRecord(CHANNEL_INDEX))?.commitmentHashes).toMatchObject({
                     remote: { commitmentNumber: 7, txHash: bytesToHex(remote(7).session.message) },
                 });
             });
@@ -2047,10 +2096,57 @@ describe("checkAndClaim", () => {
                 await engine.checkAndClaim(KEYS, receivedRevocation(11));
                 await engine.recordRevocation(CHANNEL_ID, { version: 10, signature: SIGNATURE });
                 await expect(engine.checkAndClaim(KEYS, remote(12))).resolves.toMatchObject({ status: "fresh", commitmentNumber: 12 });
-                expect((await store.getChannelRecord(CHANNEL_INDEX))?.commitmentHashes.remote).toEqual({
+                expect((await store.getChannelRecord(CHANNEL_INDEX))?.commitmentHashes.remote).toMatchObject({
                     commitmentNumber: 12,
                     txHash: bytesToHex(remote(12).session.message),
                 });
+            });
+
+            it("keeps the cell and the settlement body of the last one as the previous one, signing the next", async () => {
+                const { engine, store } = await opened();
+                const opening = (await store.getChannelRecord(CHANNEL_INDEX))?.commitmentHashes.remote;
+                expect((await store.getChannelRecord(CHANNEL_INDEX))?.previousRemoteCommitment).toBeUndefined();
+                await engine.checkAndClaim(KEYS, remote(11));
+                expect((await store.getChannelRecord(CHANNEL_INDEX))?.previousRemoteCommitment).toEqual({
+                    commitmentNumber: 10,
+                    source: opening?.source,
+                    settlementWitness: opening?.settlementWitness,
+                });
+            });
+
+            it("moves the previous one on with each remote commitment, and keeps it over a local one and a revocation", async () => {
+                const { engine, store } = await opened();
+                await engine.checkAndClaim(KEYS, remote(11));
+                await peerRevokes(engine, 11);
+                const eleventh = (await store.getChannelRecord(CHANNEL_INDEX))?.commitmentHashes.remote;
+                await engine.checkAndClaim(KEYS, remote(12));
+                const previous = { commitmentNumber: 11, source: eleventh?.source, settlementWitness: eleventh?.settlementWitness };
+                expect((await store.getChannelRecord(CHANNEL_INDEX))?.previousRemoteCommitment).toEqual(previous);
+                await engine.checkAndClaim(
+                    KEYS,
+                    customCommitmentRequest({
+                        forRemote: false,
+                        commitmentNumber: 13,
+                        settlementLocalShannons: OPENING_SETTLEMENT,
+                        tlcIds: [],
+                    }),
+                );
+                expect((await store.getChannelRecord(CHANNEL_INDEX))?.previousRemoteCommitment).toEqual(previous);
+                await peerRevokes(engine, 12);
+                expect((await store.getChannelRecord(CHANNEL_INDEX))?.previousRemoteCommitment).toEqual(previous);
+            });
+
+            it("keeps no previous one after a last one signed before the record kept cells", async () => {
+                const { engine, store } = await opened();
+                await engine.checkAndClaim(KEYS, remote(11));
+                await store.updateChannelRecord(CHANNEL_INDEX, (current) => {
+                    if (current === null) throw new Error("the channel holds no record");
+                    const cellless = { commitmentNumber: 11, txHash: REPLACEMENT_TX_HASH };
+                    return { ...current, commitmentHashes: { ...current.commitmentHashes, remote: cellless } };
+                });
+                await peerRevokes(engine, 11);
+                await engine.checkAndClaim(KEYS, remote(12));
+                expect((await store.getChannelRecord(CHANNEL_INDEX))?.previousRemoteCommitment).toBeUndefined();
             });
 
             it("refuses the next one as stale while the last revocation signed is the one before, writing nothing", async () => {
@@ -2191,7 +2287,7 @@ describe("checkAndClaim", () => {
                     tlcIds: [],
                 });
                 await expect(engine.checkAndClaim(KEYS, skipping)).resolves.toMatchObject({ status: "fresh", commitmentNumber: 14 });
-                expect((await store.getChannelRecord(CHANNEL_INDEX))?.commitmentHashes.local).toEqual({
+                expect((await store.getChannelRecord(CHANNEL_INDEX))?.commitmentHashes.local).toMatchObject({
                     commitmentNumber: 14,
                     txHash: bytesToHex(skipping.session.message),
                 });
@@ -2243,8 +2339,8 @@ describe("checkAndClaim", () => {
                     },
                 },
                 commitmentHashes: {
-                    remote: { commitmentNumber: 0, txHash: bytesToHex(first.session.message) },
-                    local: { commitmentNumber: 0, txHash: bytesToHex(second.session.message) },
+                    remote: expect.objectContaining({ commitmentNumber: 0, txHash: bytesToHex(first.session.message) }),
+                    local: expect.objectContaining({ commitmentNumber: 0, txHash: bytesToHex(second.session.message) }),
                 },
                 revocations: [],
                 pins: OPENED_PINS,
@@ -3947,5 +4043,393 @@ describe("checkAndClaim", () => {
         );
         expect(refusal.message).not.toContain(vectors.sdk_scheme.channel.channel_keys.funding_key);
         expect(refusal.message).not.toContain(vectors.sdk_scheme.channel.seed);
+    });
+});
+
+const WATCHTOWER_APPROVAL: WatchtowerApproval = {
+    destination: {
+        codeHash: hexToBytes("9bd7e06f3ecf4be0f2fcd2188b23f1b9fcc88e5d4b65a8637b17723bbda3cce8"),
+        hashType: "type",
+        args: hexToBytes("b502c4a25f89b69ac44329eed55950843ab24495"),
+    },
+    maxFeeShannons: "100000",
+};
+// The funding lock's, which the commitment the peer broadcasts carries and no signature covers.
+const BROADCAST_CELL_DEPS: CellDep[] = [
+    { outPoint: { txHash: hexToBytes("202d47719dbcca8c60da1b133bbe23b5b4a1b350d985b0ff611a48a3b5de193c"), index: 6 }, depType: "code" },
+    { outPoint: { txHash: hexToBytes("202d47719dbcca8c60da1b133bbe23b5b4a1b350d985b0ff611a48a3b5de193c"), index: 5 }, depType: "code" },
+];
+
+describe("the watchtower option", () => {
+    const { destination } = WATCHTOWER_APPROVAL;
+
+    it("takes an approval, and none", () => {
+        expect(() => newEngine(undefined, { watchtower: WATCHTOWER_APPROVAL })).not.toThrow();
+        expect(() => newEngine(undefined, { watchtower: undefined })).not.toThrow();
+    });
+
+    it("takes a fee of zero", () => {
+        expect(() => newEngine(undefined, { watchtower: { ...WATCHTOWER_APPROVAL, maxFeeShannons: "0" } })).not.toThrow();
+    });
+
+    it("takes a fee at u64's maximum", () => {
+        expect(() =>
+            newEngine(undefined, { watchtower: { ...WATCHTOWER_APPROVAL, maxFeeShannons: "18446744073709551615" } }),
+        ).not.toThrow();
+    });
+
+    it.each<[string, unknown, Error]>([
+        ["a null approval", null, new TypeError("options.watchtower must be an object")],
+        ["an approval that is an array", [], new TypeError("options.watchtower must be an object")],
+        [
+            "no destination",
+            { ...WATCHTOWER_APPROVAL, destination: undefined },
+            new TypeError("options.watchtower.destination must be an object"),
+        ],
+        [
+            "a destination with a short code hash",
+            { ...WATCHTOWER_APPROVAL, destination: { ...destination, codeHash: new Uint8Array(31) } },
+            new TypeError("options.watchtower.destination.codeHash must be 32 bytes, got 31"),
+        ],
+        [
+            "a destination of an unknown hash type",
+            { ...WATCHTOWER_APPROVAL, destination: { ...destination, hashType: "data3" } },
+            new TypeError("options.watchtower.destination.hashType must be one of data, type, data1, data2"),
+        ],
+        [
+            "a destination without args",
+            { ...WATCHTOWER_APPROVAL, destination: { ...destination, args: undefined } },
+            new TypeError("options.watchtower.destination.args must be a Uint8Array"),
+        ],
+        [
+            "no fee",
+            { ...WATCHTOWER_APPROVAL, maxFeeShannons: undefined },
+            new TypeError("options.watchtower.maxFeeShannons must be a string"),
+        ],
+        [
+            "a numeric fee",
+            { ...WATCHTOWER_APPROVAL, maxFeeShannons: 100000 },
+            new TypeError("options.watchtower.maxFeeShannons must be a string"),
+        ],
+        [
+            "a fee in hex",
+            { ...WATCHTOWER_APPROVAL, maxFeeShannons: "0x1" },
+            new TypeError("options.watchtower.maxFeeShannons must be an amount in decimal shannons"),
+        ],
+        [
+            "a fee above u64",
+            { ...WATCHTOWER_APPROVAL, maxFeeShannons: "18446744073709551616" },
+            new RangeError("options.watchtower.maxFeeShannons must be at most 18446744073709551615, the most a CKB cell's capacity holds"),
+        ],
+    ])("refuses %s", (_, watchtower, error) => {
+        expect(() => newEngine(undefined, { watchtower: watchtower as never })).toThrow(error);
+    });
+
+    it("keeps a copy, so the host changing its object later changes nothing", async () => {
+        const watchtower = structuredClone(WATCHTOWER_APPROVAL);
+        const { engine } = await registeredEngine(undefined, { watchtower });
+        await engine.checkAndClaim(KEYS, commitmentRequest("ckb, no tlcs, for remote"));
+        watchtower.destination.args.fill(0);
+        watchtower.destination.codeHash.fill(0);
+        await expect(engine.checkWatchtowerSpend(KEYS, CHANNEL_ID, ownSettlementSpend())).resolves.toEqual({ status: "fresh" });
+    });
+});
+
+const SPEND_REQUEST_ID = hexToBytes("cc".repeat(32));
+const WATCHTOWER_SIGNATURE = Uint8Array.from({ length: 65 }, (_, index) => index);
+
+// The device's balance in "ckb, no tlcs, for remote", settled from the cell the peer broadcast.
+function ownSettlementSpend(): WatchtowerSpendRequest {
+    const kase = caseOf(digest.commitment_cases, "ckb, no tlcs, for remote");
+    const commitment = toTransaction(kase.transaction);
+    const onchainHash = computeTxHash({ ...commitment, cellDeps: BROADCAST_CELL_DEPS });
+    const [cell] = commitment.outputs;
+    if (cell === undefined) throw new Error("the commitment has no output");
+    const nextBody = hexToBytes(NO_TLC_REMOTE_WITNESS.slice(0, -72) + "00".repeat(36));
+    return {
+        requestId: SPEND_REQUEST_ID,
+        purpose: { kind: "settlement" },
+        transaction: {
+            version: 0,
+            cellDeps: [],
+            headerDeps: [],
+            inputs: [{ since: 0xa000010000000001n, previousOutput: { txHash: onchainHash, index: 0 } }],
+            outputs: [
+                {
+                    capacityShannons: 24799999544n,
+                    lock: { ...cell.lock, args: buildRemainderLockArgs(cell.lock.args, nextBody) },
+                    type: null,
+                },
+                { capacityShannons: 71899900000n, lock: WATCHTOWER_APPROVAL.destination, type: null },
+            ],
+            outputsData: [new Uint8Array(0), new Uint8Array(0)],
+            witnesses: [hexToBytes(`1000000010000000100000001000000001${NO_TLC_REMOTE_WITNESS}ff00${"00".repeat(65)}`)],
+        },
+    };
+}
+
+async function watchtowerEngine(options: PolicyEngineOptions = { watchtower: WATCHTOWER_APPROVAL }) {
+    const context = await registeredEngine(undefined, options);
+    await context.engine.checkAndClaim(KEYS, commitmentRequest("ckb, no tlcs, for remote"));
+    return context;
+}
+
+describe("checkWatchtowerSpend", () => {
+    it("claims the spend of the commitment cell the device signed, before anything is signed", async () => {
+        const { engine, store } = await watchtowerEngine();
+        const request = ownSettlementSpend();
+        await expect(engine.checkWatchtowerSpend(KEYS, CHANNEL_ID, request)).resolves.toEqual({ status: "fresh" });
+        const [remainder] = request.transaction.outputs as [CellOutput];
+        expect((await store.getChannelRecord(CHANNEL_INDEX))?.watchtowerSpends).toEqual([
+            {
+                requestId: "cc".repeat(32),
+                purpose: { kind: "settlement" },
+                view: "remote",
+                commitmentNumber: 0,
+                tlcEntry: null,
+                txHash: bytesToHex(computeTxHash(request.transaction)),
+                remainder: {
+                    output: bytesToHex(moleculeCellOutput(remainder.capacityShannons, remainder.lock, remainder.type)),
+                    outputData: "",
+                },
+                signature: null,
+                applied: false,
+            },
+        ]);
+    });
+
+    it("serves a repeat, with no signature until the signer records one, and with it after", async () => {
+        const { engine } = await watchtowerEngine();
+        await engine.checkWatchtowerSpend(KEYS, CHANNEL_ID, ownSettlementSpend());
+        await expect(engine.checkWatchtowerSpend(KEYS, CHANNEL_ID, ownSettlementSpend())).resolves.toEqual({
+            status: "already-signed",
+            signature: null,
+        });
+        await engine.recordWatchtowerSignature(CHANNEL_ID, SPEND_REQUEST_ID, WATCHTOWER_SIGNATURE);
+        await expect(engine.checkWatchtowerSpend(KEYS, CHANNEL_ID, ownSettlementSpend())).resolves.toEqual({
+            status: "already-signed",
+            signature: WATCHTOWER_SIGNATURE,
+        });
+    });
+
+    it("refuses every spend when the host approved none, before reading the channel", async () => {
+        const { engine } = newEngine();
+        const refusal = await refusalOf(engine.checkWatchtowerSpend(KEYS, CHANNEL_ID, ownSettlementSpend()));
+        expect(refusal.code).toBe("policy_refusal");
+        expect(refusal.message).toBe("watchtower option: the host approved no destination, so the device signs no watchtower spend");
+    });
+
+    it("refuses an empty channel id as malformed", async () => {
+        const { engine } = await watchtowerEngine();
+        const refusal = await refusalOf(engine.checkWatchtowerSpend(KEYS, "", ownSettlementSpend()));
+        expect(refusal.code).toBe("malformed");
+        expect(refusal.message).toBe("TypeError: channelId must be a non-empty string");
+    });
+
+    it("refuses a channel this device never registered", async () => {
+        const { engine } = newEngine(undefined, { watchtower: WATCHTOWER_APPROVAL });
+        expect((await refusalOf(engine.checkWatchtowerSpend(KEYS, CHANNEL_ID, ownSettlementSpend()))).code).toBe("unknown_channel");
+    });
+
+    it("writes nothing on a refusal", async () => {
+        const { engine, storage } = await watchtowerEngine();
+        const stored = new Map(storage.map);
+        const request = ownSettlementSpend();
+        const paid = {
+            ...request,
+            transaction: { ...request.transaction, outputs: request.transaction.outputs.slice(0, 1), outputsData: [new Uint8Array(0)] },
+        };
+        expect((await refusalOf(engine.checkWatchtowerSpend(KEYS, CHANNEL_ID, paid))).code).toBe("policy_refusal");
+        expect(storage.map).toEqual(stored);
+    });
+
+    it("throws when the name resolves to an index that holds no record", async () => {
+        const { engine, storage } = await watchtowerEngine();
+        storage.map.delete(`fiber-lsp-sdk:channel:${CHANNEL_INDEX}`);
+        await expect(engine.checkWatchtowerSpend(KEYS, CHANNEL_ID, ownSettlementSpend())).rejects.toThrow(
+            new TypeError(`channel ${CHANNEL_ID} resolves to channel index ${CHANNEL_INDEX}, which holds no record`),
+        );
+    });
+});
+
+describe("recordWatchtowerSignature", () => {
+    it("records the signature on the claimed spend, once", async () => {
+        const { engine, store, storage } = await watchtowerEngine();
+        await engine.checkWatchtowerSpend(KEYS, CHANNEL_ID, ownSettlementSpend());
+        await engine.recordWatchtowerSignature(CHANNEL_ID, SPEND_REQUEST_ID, WATCHTOWER_SIGNATURE);
+        expect((await store.getChannelRecord(CHANNEL_INDEX))?.watchtowerSpends?.[0]?.signature).toBe(bytesToHex(WATCHTOWER_SIGNATURE));
+
+        const stored = new Map(storage.map);
+        await engine.recordWatchtowerSignature(CHANNEL_ID, SPEND_REQUEST_ID, WATCHTOWER_SIGNATURE);
+        expect(storage.map).toEqual(stored);
+    });
+
+    it("keeps the other spends as they are", async () => {
+        const { engine, store } = await watchtowerEngine();
+        // A TLC's spend of the same commitment.
+        const tlcSpend: WatchtowerSpendRecord = {
+            requestId: "dd".repeat(32),
+            purpose: { kind: "tlc", commitmentNumber: 6 },
+            view: "remote",
+            commitmentNumber: 0,
+            tlcEntry: "ab".repeat(85),
+            txHash: "5f".repeat(32),
+            remainder: null,
+            signature: null,
+            applied: false,
+        };
+        await store.updateChannelRecord(CHANNEL_INDEX, (current) => {
+            if (current === null) throw new Error("the channel holds no record");
+            return { ...current, watchtowerSpends: [tlcSpend] };
+        });
+        await engine.checkWatchtowerSpend(KEYS, CHANNEL_ID, ownSettlementSpend());
+        await engine.recordWatchtowerSignature(CHANNEL_ID, SPEND_REQUEST_ID, WATCHTOWER_SIGNATURE);
+        expect((await store.getChannelRecord(CHANNEL_INDEX))?.watchtowerSpends?.map((spend) => spend.signature)).toEqual([
+            null,
+            bytesToHex(WATCHTOWER_SIGNATURE),
+        ]);
+    });
+
+    // Fiber asks again under a new request each time the spend it rebuilds changes.
+    it("throws on a request another one replaced, for the same commitment and unlock", async () => {
+        const { engine } = await watchtowerEngine();
+        await engine.checkWatchtowerSpend(KEYS, CHANNEL_ID, ownSettlementSpend());
+        await engine.checkWatchtowerSpend(KEYS, CHANNEL_ID, { ...ownSettlementSpend(), requestId: hexToBytes("dd".repeat(32)) });
+        await expect(engine.recordWatchtowerSignature(CHANNEL_ID, SPEND_REQUEST_ID, WATCHTOWER_SIGNATURE)).rejects.toThrow(
+            new TypeError(`channel ${CHANNEL_ID} never claimed the watchtower request ${"cc".repeat(32)}`),
+        );
+    });
+
+    it("throws on another signature for the same spend: the signature is deterministic", async () => {
+        const { engine } = await watchtowerEngine();
+        await engine.checkWatchtowerSpend(KEYS, CHANNEL_ID, ownSettlementSpend());
+        await engine.recordWatchtowerSignature(CHANNEL_ID, SPEND_REQUEST_ID, WATCHTOWER_SIGNATURE);
+        await expect(engine.recordWatchtowerSignature(CHANNEL_ID, SPEND_REQUEST_ID, new Uint8Array(65))).rejects.toThrow(
+            new TypeError(`channel ${CHANNEL_ID} already records another signature for the watchtower request ${"cc".repeat(32)}`),
+        );
+    });
+
+    it("throws on a request the channel never claimed, with no spend or another one", async () => {
+        const { engine } = await watchtowerEngine();
+        const error = new TypeError(`channel ${CHANNEL_ID} never claimed the watchtower request ${"cc".repeat(32)}`);
+        await expect(engine.recordWatchtowerSignature(CHANNEL_ID, SPEND_REQUEST_ID, WATCHTOWER_SIGNATURE)).rejects.toThrow(error);
+        await engine.checkWatchtowerSpend(KEYS, CHANNEL_ID, { ...ownSettlementSpend(), requestId: hexToBytes("dd".repeat(32)) });
+        await expect(engine.recordWatchtowerSignature(CHANNEL_ID, SPEND_REQUEST_ID, WATCHTOWER_SIGNATURE)).rejects.toThrow(error);
+    });
+
+    it.each<[string, Uint8Array, Uint8Array, Error]>([
+        ["a request id of 31 bytes", new Uint8Array(31), WATCHTOWER_SIGNATURE, new TypeError("requestId must be 32 bytes, got 31")],
+        ["a compact signature", SPEND_REQUEST_ID, new Uint8Array(64), new TypeError("signature must be 65 bytes, got 64")],
+    ])("throws on %s", async (_, requestId, signature, error) => {
+        const { engine } = await watchtowerEngine();
+        await expect(engine.recordWatchtowerSignature(CHANNEL_ID, requestId, signature)).rejects.toThrow(error);
+    });
+
+    it("throws when the name resolves to an index that holds no record", async () => {
+        const { engine, storage } = await watchtowerEngine();
+        storage.map.delete(`fiber-lsp-sdk:channel:${CHANNEL_INDEX}`);
+        await expect(engine.recordWatchtowerSignature(CHANNEL_ID, SPEND_REQUEST_ID, WATCHTOWER_SIGNATURE)).rejects.toThrow(
+            new TypeError(`channel ${CHANNEL_ID} resolves to channel index ${CHANNEL_INDEX}, which holds no record`),
+        );
+    });
+
+    it("throws on a channel this device never registered", async () => {
+        const { engine } = newEngine();
+        await expect(engine.recordWatchtowerSignature(CHANNEL_ID, SPEND_REQUEST_ID, WATCHTOWER_SIGNATURE)).rejects.toThrow(
+            new TypeError(`channel ${CHANNEL_ID} is not registered on this device`),
+        );
+    });
+});
+
+describe("markWatchtowerSpendApplied", () => {
+    async function signedSpend() {
+        const harness = await watchtowerEngine();
+        await harness.engine.checkWatchtowerSpend(KEYS, CHANNEL_ID, ownSettlementSpend());
+        await harness.engine.recordWatchtowerSignature(CHANNEL_ID, SPEND_REQUEST_ID, WATCHTOWER_SIGNATURE);
+        return harness;
+    }
+
+    it("marks the signed spend applied, once", async () => {
+        const { engine, store, storage } = await signedSpend();
+        await engine.markWatchtowerSpendApplied(CHANNEL_ID, SPEND_REQUEST_ID);
+        const [spend] = (await store.getChannelRecord(CHANNEL_INDEX))?.watchtowerSpends ?? [];
+        expect([spend?.applied, spend?.signature]).toEqual([true, bytesToHex(WATCHTOWER_SIGNATURE)]);
+
+        const stored = new Map(storage.map);
+        storage.ops.length = 0;
+        await engine.markWatchtowerSpendApplied(CHANNEL_ID, SPEND_REQUEST_ID);
+        expect(storage.map).toEqual(stored);
+        expect(storage.ops.filter((op) => op.startsWith("set "))).toEqual([]);
+    });
+
+    it("keeps the other spends as they are", async () => {
+        const { engine, store } = await signedSpend();
+        const tlcSpend: WatchtowerSpendRecord = {
+            requestId: "dd".repeat(32),
+            purpose: { kind: "tlc", commitmentNumber: 6 },
+            view: "remote",
+            commitmentNumber: 0,
+            tlcEntry: "ab".repeat(85),
+            txHash: "5f".repeat(32),
+            remainder: null,
+            signature: "b4".repeat(65),
+            applied: false,
+        };
+        await store.updateChannelRecord(CHANNEL_INDEX, (current) => {
+            if (current === null) throw new Error("the channel holds no record");
+            return { ...current, watchtowerSpends: [tlcSpend, ...(current.watchtowerSpends ?? [])] };
+        });
+        await engine.markWatchtowerSpendApplied(CHANNEL_ID, SPEND_REQUEST_ID);
+        expect((await store.getChannelRecord(CHANNEL_INDEX))?.watchtowerSpends?.map((spend) => spend.applied)).toEqual([false, true]);
+    });
+
+    it("throws on a spend whose signature was never recorded", async () => {
+        const { engine, storage } = await watchtowerEngine();
+        await engine.checkWatchtowerSpend(KEYS, CHANNEL_ID, ownSettlementSpend());
+        const stored = new Map(storage.map);
+        await expect(engine.markWatchtowerSpendApplied(CHANNEL_ID, SPEND_REQUEST_ID)).rejects.toThrow(
+            new TypeError(`channel ${CHANNEL_ID} records no signature for the watchtower request ${"cc".repeat(32)}`),
+        );
+        expect(storage.map).toEqual(stored);
+    });
+
+    it("throws on a request the channel never claimed, with no spend or another one", async () => {
+        const { engine } = await watchtowerEngine();
+        const error = new TypeError(`channel ${CHANNEL_ID} never claimed the watchtower request ${"cc".repeat(32)}`);
+        await expect(engine.markWatchtowerSpendApplied(CHANNEL_ID, SPEND_REQUEST_ID)).rejects.toThrow(error);
+        await engine.checkWatchtowerSpend(KEYS, CHANNEL_ID, { ...ownSettlementSpend(), requestId: hexToBytes("dd".repeat(32)) });
+        await expect(engine.markWatchtowerSpendApplied(CHANNEL_ID, SPEND_REQUEST_ID)).rejects.toThrow(error);
+    });
+
+    // The signed spend stays the record's: a later request for its unlock goes unclaimed.
+    it("throws on a request served after the spend of its unlock was signed", async () => {
+        const { engine } = await signedSpend();
+        const later = { ...ownSettlementSpend(), requestId: hexToBytes("dd".repeat(32)) };
+        await expect(engine.checkWatchtowerSpend(KEYS, CHANNEL_ID, later)).resolves.toEqual({ status: "unclaimed" });
+        await expect(engine.markWatchtowerSpendApplied(CHANNEL_ID, later.requestId)).rejects.toThrow(
+            new TypeError(`channel ${CHANNEL_ID} never claimed the watchtower request ${"dd".repeat(32)}`),
+        );
+    });
+
+    it("throws on a request id of 31 bytes", async () => {
+        const { engine } = await signedSpend();
+        await expect(engine.markWatchtowerSpendApplied(CHANNEL_ID, new Uint8Array(31))).rejects.toThrow(
+            new TypeError("requestId must be 32 bytes, got 31"),
+        );
+    });
+
+    it("throws when the name resolves to an index that holds no record", async () => {
+        const { engine, storage } = await signedSpend();
+        storage.map.delete(`fiber-lsp-sdk:channel:${CHANNEL_INDEX}`);
+        await expect(engine.markWatchtowerSpendApplied(CHANNEL_ID, SPEND_REQUEST_ID)).rejects.toThrow(
+            new TypeError(`channel ${CHANNEL_ID} resolves to channel index ${CHANNEL_INDEX}, which holds no record`),
+        );
+    });
+
+    it("throws on a channel this device never registered", async () => {
+        const { engine } = newEngine();
+        await expect(engine.markWatchtowerSpendApplied(CHANNEL_ID, SPEND_REQUEST_ID)).rejects.toThrow(
+            new TypeError(`channel ${CHANNEL_ID} is not registered on this device`),
+        );
     });
 });

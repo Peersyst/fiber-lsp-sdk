@@ -3,16 +3,24 @@ import { deriveChannelSeed } from "../../../src/derivation/device-scheme";
 import { deriveChannelKeys, pubkeyOf } from "../../../src/derivation/fiber-scheme";
 import {
     buildCommitmentLockArgs,
+    buildCommitmentSettlementWitness,
     buildCommitmentTx,
+    buildCommitmentTxAndSettlement,
     computeCommitmentTxDigest,
     readCommitmentLockDelay,
     readCommitmentLockLayout,
+    readCommitmentLockSettled,
+    readCommitmentLockSettlementHash,
     readCommitmentLockVersion,
 } from "../../../src/digest/commitment-tx";
 import { blake160 } from "../../../src/common/utils/ckb-hash.utils";
 import { COMMITMENT_LOCK_LAYOUTS, COMMITMENT_LOCK_TESTNET } from "../../../src/digest/digest.constants";
 import type { CommitmentTxInput, SettlementTlc } from "../../../src/digest/digest.types";
+import { readSettlementBody } from "../../../src/digest/settlement-unlock";
 import { aggregateXOnlyPubkey } from "../../../src/digest/utils/digest.utils";
+import { ckbHash } from "../../utils/ckb-hash";
+import { toCommitmentTxInput } from "../../utils/digest-inputs";
+import { loadInteropVectors } from "../../utils/interop-vectors";
 
 const MASTER_SEED = new Uint8Array(32).fill(0x24);
 const channelKeys = deriveChannelKeys(deriveChannelSeed(MASTER_SEED, 0));
@@ -232,6 +240,88 @@ describe("readCommitmentLockVersion", () => {
     });
 });
 
+// Key hash, delay since, version, settlement hash, then the settlement flag; the feature byte follows under fullPaymentHash.
+const SETTLEMENT_ARGS = "a0".repeat(20) + "b0".repeat(8) + "c0".repeat(8) + "d0".repeat(20);
+
+describe("readCommitmentLockSettlementHash", () => {
+    it.each(COMMITMENT_LOCK_LAYOUTS)("reads back the witness hash the %s args were built with", (layout) => {
+        const args = buildCommitmentLockArgs(XONLY, DELAY, VERSION, WITNESS, layout);
+        expect(readCommitmentLockSettlementHash(args)).toEqual(blake160(WITNESS));
+    });
+
+    it.each(["00", "01", "0001", "0101"])("reads bytes 36 to 56 of the args ending in %s", (tail) => {
+        expect(bytesToHex(readCommitmentLockSettlementHash(hexToBytes(SETTLEMENT_ARGS + tail)))).toBe("d0".repeat(20));
+    });
+
+    it("returns its own bytes, which a later change to the args never reaches", () => {
+        const args = hexToBytes(SETTLEMENT_ARGS + "00");
+        const hash = readCommitmentLockSettlementHash(args);
+        args.fill(0x77);
+        expect(bytesToHex(hash)).toBe("d0".repeat(20));
+    });
+
+    it("reads at the args' own offset when they are a view into a larger buffer", () => {
+        const buffer = new Uint8Array(64);
+        buffer.set(hexToBytes(SETTLEMENT_ARGS + "01"), 5);
+        expect(bytesToHex(readCommitmentLockSettlementHash(buffer.subarray(5, 62)))).toBe("d0".repeat(20));
+    });
+
+    it.each([0, 36, 56, 59])("refuses %i bytes, a revocation's 36 included", (length) => {
+        expect(() => readCommitmentLockSettlementHash(new Uint8Array(length))).toThrow(
+            new TypeError(`commitment lock args must be 57 or 58 bytes, got ${length}`),
+        );
+    });
+
+    it("refuses 58 bytes without the feature byte, and what is not bytes", () => {
+        expect(() => readCommitmentLockSettlementHash(hexToBytes(SETTLEMENT_ARGS + "0000"))).toThrow(
+            new TypeError("commitment lock args of 58 bytes must end in the feature byte 0x01, got 0x00"),
+        );
+        expect(() => readCommitmentLockSettlementHash(SETTLEMENT_ARGS as never)).toThrow(
+            new TypeError("commitment lock args must be a Uint8Array"),
+        );
+    });
+});
+
+describe("readCommitmentLockSettled", () => {
+    it.each(COMMITMENT_LOCK_LAYOUTS)("reads the %s args of a commitment as not settled", (layout) => {
+        expect(readCommitmentLockSettled(buildCommitmentLockArgs(XONLY, DELAY, VERSION, WITNESS, layout))).toBe(false);
+    });
+
+    it.each([
+        ["00", false],
+        ["01", true],
+        ["0001", false],
+        ["0101", true],
+    ])("reads the args ending in %s as settled: %p", (tail, settled) => {
+        expect(readCommitmentLockSettled(hexToBytes(SETTLEMENT_ARGS + tail))).toBe(settled);
+    });
+
+    it("reads at the args' own offset when they are a view into a larger buffer", () => {
+        const buffer = new Uint8Array(64);
+        buffer.set(hexToBytes(SETTLEMENT_ARGS + "01"), 3);
+        expect(readCommitmentLockSettled(buffer.subarray(3, 60))).toBe(true);
+    });
+
+    it.each(["02", "ff", "0201"])("refuses the args ending in %s, a flag fiber never writes", (tail) => {
+        expect(() => readCommitmentLockSettled(hexToBytes(SETTLEMENT_ARGS + tail))).toThrow(
+            new TypeError(`commitment lock args must carry the settlement flag 0x00 or 0x01, got 0x${tail.slice(0, 2)}`),
+        );
+    });
+
+    it.each([0, 36, 56, 59])("refuses %i bytes, a revocation's 36 included", (length) => {
+        expect(() => readCommitmentLockSettled(new Uint8Array(length))).toThrow(
+            new TypeError(`commitment lock args must be 57 or 58 bytes, got ${length}`),
+        );
+    });
+
+    it("refuses 58 bytes without the feature byte, and what is not bytes", () => {
+        expect(() => readCommitmentLockSettled(hexToBytes(SETTLEMENT_ARGS + "0100"))).toThrow(
+            new TypeError("commitment lock args of 58 bytes must end in the feature byte 0x01, got 0x00"),
+        );
+        expect(() => readCommitmentLockSettled(undefined as never)).toThrow(new TypeError("commitment lock args must be a Uint8Array"));
+    });
+});
+
 describe("computeCommitmentTxDigest", () => {
     it("returns a deterministic 32-byte digest", () => {
         expect(computeCommitmentTxDigest(channelKeys, BASE_INPUT)).toHaveLength(32);
@@ -383,5 +473,76 @@ describe("buildCommitmentTx", () => {
         expect(() => entry({ lockLayout: "full_payment_hash" as never })).toThrow(
             new TypeError("lockLayout must be one of legacy, fullPaymentHash"),
         );
+    });
+});
+
+describe("buildCommitmentTxAndSettlement", () => {
+    it("builds the tx and the body the commitment builders build apart, the body the one its lock args commit", () => {
+        const { transaction, settlementWitness } = buildCommitmentTxAndSettlement(channelKeys, BASE_INPUT);
+        expect(transaction).toEqual(buildCommitmentTx(channelKeys, BASE_INPUT));
+        expect(settlementWitness).toEqual(buildCommitmentSettlementWitness(channelKeys, BASE_INPUT));
+        expect(readCommitmentLockSettlementHash(transaction.outputs[0]?.lock.args ?? new Uint8Array(0))).toEqual(
+            blake160(settlementWitness),
+        );
+    });
+});
+
+describe("buildCommitmentSettlementWitness", () => {
+    const DEVICE_KEY_HASH = ckbHash(pubkeyOf(channelKeys.tlcBaseKey)).slice(0, 20);
+    const PEER_KEY_HASH = ckbHash(remoteTlcBasePubkey).slice(0, 20);
+
+    function bodyOf(input: CommitmentTxInput) {
+        return readSettlementBody(buildCommitmentSettlementWitness(channelKeys, input), input.lockLayout);
+    }
+
+    // The peer's commitment puts the peer's balance first; the device's own puts the device's.
+    it.each<[string, boolean, [Uint8Array, bigint][]]>([
+        [
+            "the peer's",
+            true,
+            [
+                [PEER_KEY_HASH, 24_800_000_000n],
+                [DEVICE_KEY_HASH, 66_200_000_000n],
+            ],
+        ],
+        [
+            "the device's",
+            false,
+            [
+                [DEVICE_KEY_HASH, 66_200_000_000n],
+                [PEER_KEY_HASH, 24_800_000_000n],
+            ],
+        ],
+    ])("settles each side's balance with its reserve on %s CKB commitment", (_, forRemote, balances) => {
+        const body = bodyOf({ ...BASE_INPUT, forRemote });
+        expect(body.tlcEntries).toEqual([]);
+        expect(body.balances).toEqual(balances.map(([pubkeyHash, amountShannons]) => ({ pubkeyHash, amountShannons })));
+    });
+
+    it("leaves the reserves, capacity only, out of a UDT commitment's balances", () => {
+        expect(bodyOf(UDT_INPUT).balances).toEqual([
+            { pubkeyHash: PEER_KEY_HASH, amountShannons: 300_000_000_000_000_000_000n },
+            { pubkeyHash: DEVICE_KEY_HASH, amountShannons: 500_000_000_000_000_000_000n },
+        ]);
+    });
+
+    it("carries the commitment's TLCs", () => {
+        expect(bodyOf({ ...BASE_INPUT, tlcs: [TLC] }).tlcEntries).toHaveLength(1);
+    });
+
+    it.each(COMMITMENT_LOCK_LAYOUTS)("is the body the %s commitment's lock args commit", (lockLayout) => {
+        const input: CommitmentTxInput = { ...BASE_INPUT, tlcs: [TLC], lockLayout };
+        const args = buildCommitmentTx(channelKeys, input).outputs[0]?.lock.args ?? new Uint8Array(0);
+        expect(readCommitmentLockSettlementHash(args)).toEqual(blake160(buildCommitmentSettlementWitness(channelKeys, input)));
+    });
+
+    describe("fiber's commitments", () => {
+        const vectors = loadInteropVectors();
+        const keys = deriveChannelKeys(hexToBytes(vectors.sdk_scheme.channel.seed));
+
+        it.each(vectors.digest.commitment_cases.map((kase) => [kase.name, kase] as const))("rebuilds the witness of %s", (_, kase) => {
+            const witness = buildCommitmentSettlementWitness(keys, toCommitmentTxInput(kase, vectors.digest.remote));
+            expect(bytesToHex(witness)).toBe(kase.settlement_witness);
+        });
     });
 });

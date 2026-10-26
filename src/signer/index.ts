@@ -1,4 +1,5 @@
 export * from "./musig2-engine";
+export * from "./onchain-signature";
 export * from "./signer-dispatch";
 export * from "./signer-material";
 export * from "./signer.constants";

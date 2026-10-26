@@ -1,10 +1,8 @@
 import { blake2b } from "@noble/hashes/blake2.js";
 import { concatBytes, utf8ToBytes } from "@noble/hashes/utils.js";
-import { HASH256_LENGTH } from "../common.constants";
+import { BLAKE160_LENGTH, HASH256_LENGTH } from "../common.constants";
 
 const CKB_PERSONALIZATION = utf8ToBytes("ckb-default-hash");
-
-const BLAKE160_LENGTH = 20;
 
 /**
  * CKB-style blake2b-256: the personalization is what makes digests match CKB and fiber.

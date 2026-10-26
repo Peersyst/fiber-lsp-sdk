@@ -14,7 +14,7 @@ import { toLockLayout, toScript } from "./digest-inputs";
 import { asBoolean, asRecord, asString } from "./json-shape";
 import { resignPeerHalf } from "./peer-musig";
 import type { SigningCaseVector, SigningVectors } from "./signing-vectors";
-import { signingCaseOf, signingStatusField } from "./signing-vectors";
+import { signingCaseOf, signingStatusField, watchtowerSignedCommitmentOf } from "./signing-vectors";
 import { withField } from "./with-field";
 
 // The view a revocation's replacement belongs to: the device's own commitment when it sends one, the peer's when it receives.
@@ -122,6 +122,18 @@ export function signatureSubmissionCall(vectors: SigningVectors, kase: SigningCa
               }),
     };
     return { method: "submit_channel_signature", params };
+}
+
+// The vectors' channel with both views' commitments signed.
+export async function openWatchtowerChannel(
+    vectors: SigningVectors,
+    options: PolicyEngineOptions,
+    storage: InMemorySignerStorage = new InMemorySignerStorage(),
+): Promise<SigningChannel> {
+    const channel = await openSigningChannel(vectors, signingCaseOf(vectors, "SendClosingSigned"), options, storage);
+    const commitmentHashes = { remote: watchtowerSignedCommitmentOf(vectors, true), local: watchtowerSignedCommitmentOf(vectors, false) };
+    await channel.store.updateChannelRecord(channel.channelIndex, (current) => ({ ...required(current), commitmentHashes }));
+    return channel;
 }
 
 // Fiber's open lands both commitment transitions on one slot: the received commitment, moved onto the sent one's slot.

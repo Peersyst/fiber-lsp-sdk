@@ -17,6 +17,8 @@ export const SHANNONS_PER_CKB = 100_000_000n;
 
 export const HASH256_LENGTH = 32;
 
+export const BLAKE160_LENGTH = 20;
+
 /**
  * secp256k1 compressed encoding, which every point crossing the wire uses: public keys and commitment points alike.
  */

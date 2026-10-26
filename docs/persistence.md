@@ -55,21 +55,38 @@ index and its name at another.
 One record per channel, holding what the policy checks need. Everything else about a channel lives on the node, which stays
 the durable store for channel state.
 
-| Field                         | What it holds                                                                                                       |
-| ----------------------------- | ------------------------------------------------------------------------------------------------------------------- |
-| `version`                     | Format version of the record itself                                                                                 |
-| `channelId`                   | The channel's current name, which the open handshake may still change                                               |
-| `lastSignedCommitmentNumbers` | Last number claimed per lane, fresh or reused (`COMMITMENT:local`, `REVOKE:remote`, `REVOKE:local`, `ANNOUNCEMENT`) |
-| `signedSessions`              | Sign-once registry: the first session served in each `<context>:<number>` slot                                      |
-| `nonceReuse`                  | Under `allow` only: per slot, the second session it served, its session commitment and its message (hex)            |
-| `commitmentHashes`            | Per view, the last commitment signed in it: its version, the view's floor, and its `compute_tx_message` hash (hex)  |
-| `revocations`                 | The complete revocation signature of each revoked peer commitment, `{ version, forRemote: true, signature }`        |
-| `pins`                        | The channel's constant values, each held to one value for the channel's life                                        |
-| `views`                       | One snapshot per commitment the device signs, `remote` (the peer's) and `local` (its own)                           |
+| Field                         | What it holds                                                                                                               |
+| ----------------------------- | --------------------------------------------------------------------------------------------------------------------------- |
+| `version`                     | Format version of the record itself                                                                                         |
+| `channelId`                   | The channel's current name, which the open handshake may still change                                                       |
+| `lastSignedCommitmentNumbers` | Last number claimed per lane, fresh or reused (`COMMITMENT:local`, `REVOKE:remote`, `REVOKE:local`, `ANNOUNCEMENT`)         |
+| `signedSessions`              | Sign-once registry: the first session served in each `<context>:<number>` slot                                              |
+| `nonceReuse`                  | Under `allow` only: per slot, the second session it served, its session commitment and its message (hex)                    |
+| `commitmentHashes`            | Per view, the last commitment signed: version (the view's floor), `compute_tx_message` hash, cell and settlement body (hex) |
+| `previousRemoteCommitment`    | The remote commitment signed before the last one, its version, cell and settlement body, which fiber still settles          |
+| `revocations`                 | The complete revocation signature of each revoked peer commitment, `{ version, forRemote: true, signature }`                |
+| `pins`                        | The channel's constant values, each held to one value for the channel's life                                                |
+| `views`                       | One snapshot per commitment the device signs, `remote` (the peer's) and `local` (its own)                                   |
+| `watchtowerSpends`            | Watchtower spends claimed, one per request and per commitment and unlock: a later request replaces one while it is unsigned |
 
 `commitmentHashes` is read by more than the views' order: a revocation is signed only while the last commitment of the
 revoked one's view is its replacement, at the slot's number ([policy.md](./policy.md)). Its hash is the message the
 device signed, not the on-chain hash: the transaction fiber broadcasts adds the funding lock's cell deps.
+
+Each signed commitment also keeps what a watchtower spend of it starts from ([policy.md](./policy.md)): `source`, the
+commitment's cell as `{ output, outputData }` (the molecule `CellOutput` and its data, hex, the data empty on a CKB channel),
+and `settlementWitness`, the settlement body whose `blake160` the cell's lock args carry. Both are absent from a commitment
+signed before the record kept them, from which no spend starts. `previousRemoteCommitment` holds the same three values,
+`commitmentNumber`, `source` and `settlementWitness`, for the remote commitment signed before the last one, which the peer
+may still broadcast; each remote commitment signed moves it on, and one signed after a commitment without its cell clears
+it.
+
+A spend in `watchtowerSpends` holds `requestId` (fiber's, 32 bytes hex), `purpose` (`{ kind: "settlement" }` or
+`{ kind: "tlc", commitmentNumber }`), the `view` and the `commitmentNumber` of the commitment it descends from, `tlcEntry`
+(the settlement body's entry of the TLC it unlocks, hex, `null` for the balance), `txHash` (its CKB tx hash, which a spend
+of its remainder names it by), `remainder` (the cell it leaves at output 0, as a `source` is written, or `null` once no party
+is left), `signature` (the 65 bytes, hex, `null` until the signer records them) and `applied` (fiber answered the
+submission `Applied` or `AlreadyApplied`). The list is in the order claimed, and the field is absent until the first.
 
 `pins` holds four values from the registration, `fundedShannons` (base 10), `localReservedCkbShannons` (a map from each
 lock layout, `legacy` and `fullPaymentHash`, to the reserve computed under it in base 10, exactly those two keys),
@@ -83,7 +100,20 @@ never as unknown.
 
 The record is read strictly, field by field: a counter under an unknown lane, a log entry on a slot the registry
 never served or repeating its first session, a commitment hash under an unknown view, and revocation evidence out of
-ascending version order, repeated, or of the device's own commitment all read as corruption.
+ascending version order, repeated, or of the device's own commitment all read as corruption. So do, of the watchtower's
+fields:
+
+- a commitment with `source` and no `settlementWitness`, or the reverse; a `source` that is no commitment lock's cell (a
+  canonical `CellOutput` whose args a commitment lock carries, flagged as a commitment, with no type and no data); and a
+  body its args' layout does not read or whose `blake160` is not the one the args carry;
+- a `previousRemoteCommitment` without a last remote commitment exactly one version above it, or without its cell and
+  body, which it always has;
+- in `watchtowerSpends`: more than 768 entries (`MAX_WATCHTOWER_SPENDS`, [policy.md](./policy.md)); two sharing a request
+  id, or a view, version and entry; a purpose fiber does not write or a number past the chain; a view in which no
+  commitment was signed; a `tlcEntry` on the settlement purpose, none on a TLC's, or one of another length than an entry
+  of the pinned layout (either layout's before the pin); a remainder that is no commitment lock's cell flagged as settled,
+  with no type and no data; a signature of another length; and `applied` on a spend with no signature, since fiber applies
+  only a signature the device recorded before submitting it.
 
 A view's snapshot holds:
 
@@ -140,18 +170,25 @@ The registry inside the record is the half that grows without a bound, at about 
 re-serialized on every claim. The revocation evidence grows beside it, one entry of about 170 bytes per update of the
 channel (every received revocation adds one), and under `allow` the reuse log adds about 170 bytes per slot that served a
 second session. A channel a thousand updates deep therefore rewrites a record of about 300 KB on each signature, and that
-write amplification, not the alias map, is the cost to watch on a device. The commitment hashes stay two entries, one
-per view, whatever the channel's depth.
+write amplification, not the alias map, is the cost to watch on a device. The commitments stay three, the last of each
+view and the remote one before it, whatever the channel's depth; each costs about 600 bytes with no TLC and about 200 more
+per TLC its settlement body lists, so three at fiber's 255 TLCs are about 150 KB.
+
+The watchtower's spends are bounded rather than kept: a spend is about 1 KB, and a claim drops those of commitments no
+longer registered, so the list holds at most one spend per TLC and one per balance of three commitments, 768 at the most
+and a handful in practice, since a channel is force-closed once.
 
 The views grow the same way, more slowly: each keeps one entry of about 60 bytes per payment hash it has ever charged or
 credited, so the record also carries every payment that ever crossed the channel. A payment record is about 200 bytes and
 one exists per payment and per invoice the device ever made, so ten thousand of them is about 2 MB, read only when a
 commitment names their hash.
 
-None of it is pruned, and the reason is the same for all of it: the device never learns from a source it trusts that a
-channel is finished, since closure is node-supplied state, and deleting on it would hand the node a way to clear the names
-and slots that refuse it. Pruning the registry is additionally bounded by what would still be safe without it, the lanes,
-and it would cost the idempotent replay of an old request ([policy.md](./policy.md)).
+None of the rest is pruned, and the reason is the same for all of it: the device never learns from a source it trusts
+that a channel is finished, since closure is node-supplied state, and deleting on it would hand the node a way to clear
+the names and slots that refuse it. Pruning the registry is additionally bounded by what would still be safe without it,
+the lanes, and it would cost the idempotent replay of an old request ([policy.md](./policy.md)). The watchtower's spends
+are pruned on the device's own record, the commitments it signed, never on what the node states, and no signature's
+safety rests on them.
 
 ## The facade's records
 
@@ -194,7 +231,8 @@ host must give the SDK a single instance, or keep its storage private to one.
 
 From the mnemonic alone the host re-derives the master seed, and the SDK re-derives every channel key (see
 [derivation.md](./derivation.md)). What does not come back is the record: counters, the sign-once registry, the evidence and
-the view snapshots all start empty, and so do the intents and the invoices. Losing the storage is therefore not losing
+the view snapshots all start empty, and so do the intents and the invoices. So do the commitments a watchtower spend starts
+from: a device whose storage is gone signs none ([policy.md](./policy.md)). Losing the storage is therefore not losing
 funds, with one exception: hold-invoice preimages exist only on the device, so unclaimed held payments need the storage
 intact. They are refundable to the payer otherwise.
 

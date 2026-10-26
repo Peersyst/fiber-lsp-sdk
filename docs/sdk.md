@@ -38,6 +38,7 @@ of them, since it is the first thing that lets a host construct any of the modul
 | `lspPubkey`      | The LSP node's key, the peer every channel opens to, as a compressed point on the curve; copied                      |
 | `pollIntervalMs` | How often the node is asked about what is watched; five seconds by default, at least one millisecond                 |
 | `nonceReuse`     | `"refuse"` by default, or `"allow"`: whether a slot already served may serve a second session, never a third         |
+| `watchtower`     | `{ destination, maxFeeShannons }`, what the watchtower's spends may pay; omitted, every spend is refused             |
 
 A network preset is the commitment lock fiber ships in its node config for that chain ([digest.md](./digest.md)), the
 currency its invoices carry there, `Fibb` on mainnet and `Fibt` on testnet, and the number of cell deps of the funding
@@ -59,12 +60,21 @@ it sent or at a payment received after one it fulfilled ([policy.md](./policy.md
 that is a bare function (`fetch`, the clock, the runtime's timer functions) is called without a receiver, the storage
 and the timer as methods of the host's own object, so none sees an SDK object as `this`. Nothing schedules or reads the storage until `connect()`.
 
+The `watchtower` option, `SdkWatchtowerOptions`, is what the host approves a watchtower's spends for after a force close:
+`destination`, the `Script` every spend must pay, and `maxFeeShannons`, decimal shannons within a u64, how far below what
+an unlock releases the destination may be paid ([policy.md](./policy.md)). It is the policy engine's, which checks it,
+naming each field `options.watchtower.destination` and `options.watchtower.maxFeeShannons`, and copies it. Without it every
+spend the node's watchtower asks for is refused, and the funds stay in the commitment lock's cell; the only destination
+fiber's watchtower pays today is the LSP node's own lock, and approving it is trusting the LSP after a force close
+([signing.md](./signing.md)).
+
 ## What gets wired
 
-Construction builds, in order, the typed store over the storage, the policy engine over the store, the signer dispatch
-over the seed, the network's commitment lock and funding lock cell deps count, and the engine ([signing.md](./signing.md)),
-the rpc client over the url, the token and `fetch`, and the three pieces this document describes: the allocator and the
-activity tracker over the store, and the poller over the timer. The dispatch copies the seed; the facade itself keeps
+Construction builds, in order, the typed store over the storage, the policy engine over the store, the nonce reuse mode
+and the watchtower's approval, the signer dispatch over the seed, the network's commitment lock and funding lock cell deps
+count, and the engine ([signing.md](./signing.md)), the rpc client over the url, the token and `fetch`, and the three
+pieces this document describes: the allocator and the activity tracker over the store, and the poller over the timer and
+its two steps. The dispatch copies the seed; the facade itself keeps
 nothing of it.
 
 Everything built is held in one context the facade's operations will share: the network, the LSP's key, the clock, the
@@ -75,25 +85,26 @@ are thin entry points over that context, which is what keeps each flow a functio
 
 `connect()` is the host's foreground and `disconnect()` its background. `connect()` starts the poller and returns: there
 is no link to establish, so it cannot fail, and calling it while polling changes nothing. The device reaches the node
-only through the RPC, and what the node asks of the device is read by the poller's signing step, below.
+only through the RPC, and what the node asks of the device is read by the poller's two steps, below.
 
 `disconnect()` never throws: it stops the poller, abandoning the step in flight so nothing of it is acted on and no tick
 follows. The instance stays usable: the next `connect()` starts polling again.
 
 ## Events
 
-`onEvent(listener)` subscribes to every event and returns the function that unsubscribes. Eight events exist:
+`onEvent(listener)` subscribes to every event and returns the function that unsubscribes. Nine events exist:
 
-| Event              | Payload                    | When                                                                                 |
-| ------------------ | -------------------------- | ------------------------------------------------------------------------------------ |
-| `CHANNEL_READY`    | `channelId`                | A channel the device opened is ready; read by the poller (not built yet)             |
-| `CHANNEL_CLOSED`   | `channelId`                | A channel the device watched is closed, by any of fiber's three ways (not built yet) |
-| `PAYMENT_SENT`     | `paymentHashHex`           | A payment the device started succeeded (not built yet)                               |
-| `PAYMENT_FAILED`   | `paymentHashHex`, `reason` | A payment the device started failed, with fiber's text (not built yet)               |
-| `PAYMENT_PENDING`  | `paymentHashHex`           | An invoice of the device has a payment held on it (not built yet)                    |
-| `PAYMENT_RECEIVED` | `paymentHashHex`           | An invoice of the device was paid (not built yet)                                    |
-| `SIGNING`          | see below                  | A signing request was answered or refused by the poller's signing step               |
-| `ERROR`            | `error`                    | A failed poll step, or one channel's failure inside the signing step                 |
+| Event                | Payload                    | When                                                                                 |
+| -------------------- | -------------------------- | ------------------------------------------------------------------------------------ |
+| `CHANNEL_READY`      | `channelId`                | A channel the device opened is ready; read by the poller (not built yet)             |
+| `CHANNEL_CLOSED`     | `channelId`                | A channel the device watched is closed, by any of fiber's three ways (not built yet) |
+| `PAYMENT_SENT`       | `paymentHashHex`           | A payment the device started succeeded (not built yet)                               |
+| `PAYMENT_FAILED`     | `paymentHashHex`, `reason` | A payment the device started failed, with fiber's text (not built yet)               |
+| `PAYMENT_PENDING`    | `paymentHashHex`           | An invoice of the device has a payment held on it (not built yet)                    |
+| `PAYMENT_RECEIVED`   | `paymentHashHex`           | An invoice of the device was paid (not built yet)                                    |
+| `SIGNING`            | see below                  | A signing request was answered or refused by the poller's signing step               |
+| `WATCHTOWER_SIGNING` | see below                  | A watchtower spend was signed or refused by the poller's watchtower step             |
+| `ERROR`              | `error`                    | A failed poll step, or one channel's failure inside a step                           |
 
 The six activity events are **at least once**: the poller emits the event and then records, in the activity list below,
 the status it was emitted for, so a crash between the two repeats it on the next tick. A host deduplicates on the
@@ -108,6 +119,13 @@ deduplicated: a refused request stays pending on the node and is refused again, 
 the node drops it. The same holds for a signed one: while fiber keeps offering a request it already took, or after a
 submission whose answer was lost, it is signed again with the same bytes, resubmitted and announced again, so a host
 that shows one notification per signature deduplicates on `requestId`.
+
+`WATCHTOWER_SIGNING` carries `channelId`, `requestId` (in the same form, `null` in the same case), `purpose` (the key the
+spend needs, `{ kind: "settlement" }` or `{ kind: "tlc", commitmentNumber }`, `null` in the same case) and `outcome`:
+`"signed"` once the node took the signature, or `"refused"`, which alone carries `error` ([policy.md](./policy.md) lists
+the watchtower's refusals). It follows `SIGNING`'s rules: neither recorded nor deduplicated, a refused spend reported on
+every tick while it waits, and a signed one announced again when its submission is sent again, or when fiber rebuilds a
+spend of an unlock already signed under a new request id, so a host deduplicates on `requestId`.
 
 `ERROR` exists because a poll tick that fails, a node that cannot be reached or an answer that cannot be read, has no
 caller to reach. It is reported as a `poll_failed` and retried at the next tick, since the alternative is a node outage
@@ -125,7 +143,7 @@ underneath as its `cause`; a host's programming error, such as an option out of 
 
 | Code                 | When                                                              | Cause       |
 | -------------------- | ----------------------------------------------------------------- | ----------- |
-| `poll_failed`        | A step of a poll tick, or one channel of the signing step, failed | What failed |
+| `poll_failed`        | A step of a poll tick, or one channel of a step, failed           | What failed |
 | `clock_before_floor` | An index was asked of a clock reading before the allocation floor | None        |
 
 A message says what failed and then the cause's own words. The codes grow
@@ -183,9 +201,10 @@ tick can be asked for at once, which the operations do after a `send_payment` or
 the interval; asked during a tick, it queues exactly one more, and a host cancel that throws does not stop it. A timer
 whose cancel does nothing cannot fire a stale tick, since the slot that holds the armed tick ignores a callback armed
 before the last clear. A host timer that throws when arming is reported as a `poll_failed` too, and ends the loop until
-the next `start()`, rather than rejecting a promise nobody awaits. Today a tick runs one step, the signing step below;
-the event steps, one `list_channels` for the channels, one `get_payment` per payment and one `get_invoice` per invoice,
-land with the operations.
+the next `start()`, rather than rejecting a promise nobody awaits. Today a tick runs two steps, the signing step and then
+the watchtower step, below, each with its own listing and its own thirty seconds, so a slow channel read in one cannot
+spend the other's; the event steps, one `list_channels` for the channels, one `get_payment` per payment and one
+`get_invoice` per invoice, land with the operations.
 
 ## The signing step
 
@@ -221,11 +240,43 @@ bytes (`already-signed`), and submits them. The same holds for a submission whos
 taken as success. Under `allow`, a slot's second session resent after a cut is still a reuse to the policy, so it is
 announced as a `warning` again.
 
+## The watchtower step
+
+After a force close the node's watchtower spends the commitment cell one unlock at a time, each spend waiting on the
+device's signature ([signing.md](./signing.md)). The step runs after the signing step, in the same tick, and lists the
+channels itself with `include_closed`: a force-closed channel is the one the watchtower spends from, and fiber's default
+listing hides it once closed. The listing is `listChannelStates`, read for the ids and the states alone, any state name or
+flag accepted ([rpc.md](./rpc.md)). It skips only a `Closed` channel flagged `COOPERATIVE`, `ABANDONED` or
+`FUNDING_ABORTED` (`WATCHTOWER_UNWATCHED_CLOSE_FLAGS`): fiber deletes the watch row on a cooperative close and on a failed
+opening, which may hold one since its collaboration. A state or a flag the SDK does not know is polled, since polling
+costs a read and skipping might leave a spend unsigned. For each channel the policy has registered, in the order listed,
+one at a time:
+
+1. `get_watchtower_signing_status`. Before `RemoteTxComplete` fiber holds no watch row for the channel, and answers
+   `-32000` with "watched channel not found" (`WATCHTOWER_UNWATCHED_ERROR`, `rpc/watchtower.rs:386-391`); on a channel
+   that is not `Closed` that answer is read as nothing pending, rather than a `poll_failed` on every tick of an opening.
+   On a closed one it is a failure. An answer for another channel than the one asked is refused as `malformed`, with
+   neither request id nor purpose, and never reaches the dispatch.
+2. The dispatch's `handleWatchtower`, which decodes the status, runs the watchtower's rules and the claim, and signs or
+   refuses ([signing.md](./signing.md)). Nothing pending is nothing done.
+3. A signature goes back through `submit_watchtower_signature`; `Applied` and `AlreadyApplied` are both success. Then
+   the spend is marked applied, `PolicyEngine.markWatchtowerSpendApplied`, unless the dispatch signed it unclaimed, and
+   `WATCHTOWER_SIGNING` is emitted. A refusal is emitted at once and nothing is submitted: the spend stays pending, and
+   the funds where they are.
+
+A channel whose registration, status read, submission or mark fails, or whose dispatch faults, is reported as a
+`poll_failed` naming it, and the step goes on to the next channel; only a listing that fails, or that the client cannot
+read, fails the step. The run's `abandoned` is read before the dispatch, before the submission and before every event, as
+in the signing step, with one exception: the mark after a submission is written even once the run is abandoned, because
+fiber never serves an applied request again, so a mark skipped there would never come. A signature abandoned before its
+submission is not lost: the claim was written, and the next tick answers the same request with the signature recorded.
+
 ## What is published
 
 `src/index.ts` exports the facade, `FiberLspSdk`, with its options, network and event types, `SdkError` with its codes,
-the event type list, the network names and the default poll interval, the nonce reuse mode, and what `SIGNING` names
-(`SigningEventOutcome`, `ChannelSigningTransition`, `SignerRefusal`); the injection interfaces of the modules behind it,
+the event type list, the network names and the default poll interval, the nonce reuse mode, the watchtower option
+(`SdkWatchtowerOptions`), and what `SIGNING` and `WATCHTOWER_SIGNING` name (`SigningEventOutcome`,
+`ChannelSigningTransition`, `WatchtowerKeyPurpose`, `SignerRefusal`); the injection interfaces of the modules behind it,
 `ISignerStorage`, `IAsyncSignerStorage`, `ITimer`, `IFetchLike` and their event and response types; the rpc client's
 three with the `RpcMethod` they name, which a wallet meets as causes; `decodeInvoice` with the invoice types and
 `InvoiceError`, since a wallet has to show what it is about to pay; and the `Script` types the options and the
@@ -244,25 +295,28 @@ the facade alone.
 
 ## Where it lives
 
-| File                                     | Contents                                                                                                  |
-| ---------------------------------------- | --------------------------------------------------------------------------------------------------------- |
-| `src/sdk/fiber-lsp-sdk.ts`               | `FiberLspSdk`: the options checked, the wiring, `connect`, `disconnect`, the events                       |
-| `src/sdk/sdk.types.ts`                   | The options, the network, the events, the error codes, the activity record, the shared context            |
-| `src/sdk/sdk.constants.ts`               | The network presets, the poll interval, the allocation floor, the storage keys, the event and error lists |
-| `src/sdk/sdk.error.ts`                   | `SdkError`                                                                                                |
-| `src/sdk/allocator.ts`                   | `IndexAllocator`: the channel and invoice indexes from the clock, the last one persisted                  |
-| `src/sdk/activity.ts`                    | `ActivityTracker`: the persisted list of what is watched, and the status each event was emitted for       |
-| `src/sdk/poller.ts`                      | `ActivityPoller`: the tick, its steps and their runs and deadline, the interval, `start`, `stop`          |
-| `src/sdk/signing-step.ts`                | `buildChannelSigningStep`: the channels polled, the status read, the dispatch, the submission, `SIGNING`  |
-| `src/sdk/utils/runtime-timer.utils.ts`   | The timer over the runtime's `setTimeout` and `clearTimeout`                                              |
-| `src/sdk/utils/network.utils.ts`         | The network option resolved to its three constants                                                        |
-| `src/sdk/utils/activity-record.utils.ts` | The activity record's guard, ids and statuses per kind                                                    |
-| `src/sdk/utils/failure.utils.ts`         | An `SdkError`'s message from what failed and its cause; the guarded emit and the `poll_failed` report     |
-| `src/policy/signer-store.ts`             | `getRecord` and `updateRecord`, the store's records of another module's format, used by the two above     |
-| `src/common/utils/assert.utils.ts`       | `assertTimerDelayMs`, `assertScriptTemplate`, `assertCompressedPoint` and `assertFunction`                |
-| `src/common/utils/validate.utils.ts`     | `isCompressedPoint`, shared with the invoice codec                                                        |
-| `src/common/timer-slot.ts`               | `TimerSlot`: the one armed callback the poller holds                                                      |
-| `src/common/listener-set.ts`             | `ListenerSet`: the events' fan-out                                                                        |
+| File                                     | Contents                                                                                                                                                            |
+| ---------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `src/sdk/fiber-lsp-sdk.ts`               | `FiberLspSdk`: the options checked, the wiring, `connect`, `disconnect`, the events                                                                                 |
+| `src/sdk/sdk.types.ts`                   | The options, the network, the events, the error codes, the activity record, the shared context                                                                      |
+| `src/sdk/sdk.constants.ts`               | The network presets, the poll interval, the allocation floor, the storage keys, the event and error lists, the watchtower step's skipped flags and unwatched answer |
+| `src/sdk/sdk.error.ts`                   | `SdkError`                                                                                                                                                          |
+| `src/sdk/allocator.ts`                   | `IndexAllocator`: the channel and invoice indexes from the clock, the last one persisted                                                                            |
+| `src/sdk/activity.ts`                    | `ActivityTracker`: the persisted list of what is watched, and the status each event was emitted for                                                                 |
+| `src/sdk/poller.ts`                      | `ActivityPoller`: the tick, its steps and their runs and deadline, the interval, `start`, `stop`                                                                    |
+| `src/sdk/signing-step.ts`                | `buildChannelSigningStep`: the channels polled, the status read, the dispatch, the submission, `SIGNING`                                                            |
+| `src/sdk/watchtower-step.ts`             | `buildWatchtowerSigningStep`: the channels it may still watch, the unwatched answer, the dispatch, the submission, the mark, `WATCHTOWER_SIGNING`                   |
+| `src/sdk/utils/poll-step.utils.ts`       | What both steps share under their run: each channel in turn, the guarded event, the `poll_failed` report, the refusal of another channel's status                   |
+| `src/sdk/utils/request-id.utils.ts`      | `encodeSdkRequestId`, a request id as both signing events carry it                                                                                                  |
+| `src/sdk/utils/runtime-timer.utils.ts`   | The timer over the runtime's `setTimeout` and `clearTimeout`                                                                                                        |
+| `src/sdk/utils/network.utils.ts`         | The network option resolved to its three constants                                                                                                                  |
+| `src/sdk/utils/activity-record.utils.ts` | The activity record's guard, ids and statuses per kind                                                                                                              |
+| `src/sdk/utils/failure.utils.ts`         | An `SdkError`'s message from what failed and its cause; the guarded emit and the `poll_failed` report                                                               |
+| `src/policy/signer-store.ts`             | `getRecord` and `updateRecord`, the store's records of another module's format, used by the two above                                                               |
+| `src/common/utils/assert.utils.ts`       | `assertTimerDelayMs`, `assertScriptTemplate`, `assertCompressedPoint` and `assertFunction`                                                                          |
+| `src/common/utils/validate.utils.ts`     | `isCompressedPoint`, shared with the invoice codec                                                                                                                  |
+| `src/common/timer-slot.ts`               | `TimerSlot`: the one armed callback the poller holds                                                                                                                |
+| `src/common/listener-set.ts`             | `ListenerSet`: the events' fan-out                                                                                                                                  |
 
 ## What the tests guarantee
 
@@ -286,6 +340,10 @@ in-memory storage and a `fetch` double. Beyond a happy path per feature:
   construction; mainnet and a cell deps count of 3 are refused as `malformed` with nothing submitted; a slot's second
   session is a `warning` under `allow` and refused by default and under `refuse`; `"ALLOW"`, `null` and `1` refused as
   the nonce reuse mode.
+- **The watchtower through the facade**: the approval refused when it is not an object, and handed to the policy engine
+  as a copy, or none; the watchtower step run after the signing step in the same tick, after one that signed with each
+  step's event in the steps' order, and after one that failed; every spend refused without an approval, nothing
+  submitted, and judged by the approval when there is one.
 
 `signing-step.spec.ts` pins the step with the real dispatch over the signing vectors and a scripted node
 (`test/mocks/rpc/scripted-node.mock.ts`): each of the five signable transitions submitted with the vectors' request id,
@@ -302,6 +360,26 @@ the step; the run abandoned during the status read, the signature, the submissio
 failing read, acting on nothing and polling no further channel, with the next tick submitting the same bytes; and an
 emitter that throws leaving the step running. `utils/failure.utils.spec.ts` pins the guarded emit and the `poll_failed`
 report with its cause.
+
+`watchtower-step.spec.ts` pins the watchtower step the same way, with the real dispatch and policy over the vectors'
+spends and the scripted node: each spend of the device submitted with the vectors' signature, marked applied before its
+event and announced as `signed`; a spend of an unlock already signed submitted unclaimed, marking nothing; a repeat
+resubmitted with the same bytes, writing nothing, `AlreadyApplied` as success; the channels in listing order, listed with
+`include_closed`, and an unregistered one skipped without a status read. Each of the three skipped flags is skipped, and
+every other state is polled and signed: closed by either commitment, waiting for the settlement, shutting down with the
+commitment broadcast, closed with no flag, with a flag or in a state no release has yet, a skipped flag's name under
+another state, and `Stale`. The unwatched answer is nothing pending on a channel still opening and on a ready one, and a
+`poll_failed` under another message, another code or on a closed channel. A refusal without an approval, by a rule and of
+an unreadable status (with neither request id nor purpose), another channel's status refused as `malformed` without
+reaching the dispatch, a refusal repeated on every tick; a status read that fails, a submission refused or unreadable, a
+mark that fails with the signature already out, a dispatch fault and a registration it cannot read, each a `poll_failed`
+naming the channel with the next channel answered, and a failed submission sent again on the next tick with the same
+signature, marked on either answer; a listing that fails or that it cannot read failing the step; and the
+run abandoned during the status read, the signature and the submission, acting on nothing but the mark after a
+submission, emitting no refusal, failure or fault, polling no further channel, and answering the same request on the next
+tick. `utils/poll-step.utils.spec.ts` pins what the two steps share, each helper silent once its run is abandoned, and
+`utils/request-id.utils.spec.ts` the request id as the events write it. The flows over the tenant node double run both
+steps together ([signing.md](./signing.md)).
 
 `allocator.spec.ts` pins the floor to 2026-10-01T00:00:00Z and the key prefix, the first index as the clock in seconds
 and in milliseconds, one past the last index while the clock stands still, goes back, or stands at the floor, the clock
@@ -351,14 +429,12 @@ Coverage of the module is 100% on all four metrics, and the assertions were chec
 | The last index is handed out again when the clock stands still              | 9                 |
 | The last index is ignored                                                   | 9                 |
 | A failing step ends the tick                                                | 8                 |
-| A failing channel fails the whole step                                      | 8                 |
 | A step's deadline outlives the step                                         | 7                 |
 | A refusal's request id is dropped                                           | 7                 |
 | A refusal's transition is dropped                                           | 7                 |
 | A stop() leaves the interval armed                                          | 6                 |
 | A fractional clock is accepted                                              | 6                 |
 | connect() does not start the poller                                         | 6                 |
-| A failing channel ends the step                                             | 6                 |
 | The interval is armed after a stop()                                        | 5                 |
 | A start() after a stop() waits on the stopped tick                          | 5                 |
 | The host's timer is ignored for the runtime's                               | 5                 |
@@ -384,7 +460,6 @@ Coverage of the module is 100% on all four metrics, and the assertions were chec
 | The presets state one cell dep                                              | 3                 |
 | The dispatch gets another cell deps count than the network's                | 3                 |
 | A channel the policy never registered is polled too                         | 3                 |
-| An abandoned run still emits                                                | 3                 |
 | A stop() mid-tick lets the remaining steps run                              | 2                 |
 | A pollNow() during a tick is forgotten                                      | 2                 |
 | A second start() ticks again                                                | 2                 |
@@ -423,9 +498,7 @@ Coverage of the module is 100% on all four metrics, and the assertions were chec
 | A dispatch fault is reported to nobody                                      | 1                 |
 | A status for another channel is not checked                                 | 1                 |
 | A status for another channel is refused and still signed                    | 1                 |
-| An abandoned run polls the next channel                                     | 1                 |
 | An abandoned run still reaches the dispatch                                 | 1                 |
-| An abandoned run still reports a channel's failure                          | 1                 |
 | An abandoned run still submits                                              | 1                 |
 
 The `TimerSlot` the poller holds lives in `common` (`src/common/timer-slot.ts`), at 100% on all four metrics, and was swept
@@ -456,3 +529,61 @@ send and sign.
 The rows of the facade, the network, the runtime timer, the listener set and the poller were measured again once the
 signer session and its socket left the facade, with the rows only the session exercised gone; the allocator's and the
 activity's, whose code and specs that change did not touch, keep their counts.
+
+The watchtower step, `buildWatchtowerSigningStep` with `WATCHTOWER_UNWATCHED_CLOSE_FLAGS` and the mark of the spend fiber
+applied, its wiring and the `watchtower` option in the facade, `encodeSdkRequestId`, and the run-guarded helpers both steps
+share (`utils/poll-step.utils.ts`), were broken the same way (`test/tests/sdk`, its flow spec included, still 100% on all
+four metrics). A helper's row counts the failures of both steps' specs and its own, and stands for the signing step's copy
+it replaced:
+
+| Mutation                                                             | Tests that failed |
+| -------------------------------------------------------------------- | ----------------- |
+| The request id is written without its prefix                         | 91                |
+| The listing leaves the closed channels out                           | 70                |
+| The signed event is a channel SIGNING event                          | 36                |
+| The signed event carries no purpose                                  | 35                |
+| The spend is not marked applied                                      | 27                |
+| A channel's failure fails the step                                   | 21                |
+| Every closed channel is skipped                                      | 21                |
+| A channel's failure names neither the poll nor the channel           | 15                |
+| A channel's failure ends the step                                    | 14                |
+| A refusal is not announced                                           | 13                |
+| The watchtower step is not wired                                     | 13                |
+| The watchtower step runs first                                       | 13                |
+| A refusal's event names no purpose                                   | 10                |
+| A channel's failure names the signing poll whichever step failed     | 9                 |
+| A listed channel's failure names its listing, not its id             | 9                 |
+| The watchtower step's failures name the signing poll                 | 8                 |
+| A step's event is emitted after abandonment                          | 7                 |
+| The signing step's failures name the watchtower poll                 | 7                 |
+| The spend is marked before the submission                            | 7                 |
+| A channel's failure is reported after abandonment                    | 6                 |
+| Any failed read of an open channel is nothing pending                | 5                 |
+| A refusal's event names no request                                   | 4                 |
+| An unwatched channel is polled                                       | 4                 |
+| The channels are answered on after abandonment                       | 4                 |
+| A failed submission is still announced as signed                     | 3                 |
+| A misanswered status is refused as a policy refusal                  | 3                 |
+| A misanswered status names neither channel                           | 3                 |
+| A signature signed unclaimed is marked too                           | 3                 |
+| An unregistered channel's status is read                             | 3                 |
+| An unwatched channel's status is read on                             | 3                 |
+| Fiber's unwatched answer is a poll failure                           | 3                 |
+| Fiber's unwatched code is nothing pending under any message          | 3                 |
+| The event is emitted before the mark                                 | 3                 |
+| The watchtower approval is not handed to the policy                  | 3                 |
+| A cooperative close is polled                                        | 2                 |
+| A failed mark is swallowed                                           | 2                 |
+| The request id's length is not checked                               | 2                 |
+| A channel is skipped only when all its flags are                     | 1                 |
+| A fault is not reported                                              | 1                 |
+| A refusal's event carries another code                               | 1                 |
+| A signature is submitted after abandonment                           | 1                 |
+| A skipped flag skips a channel in any state                          | 1                 |
+| A status read after abandonment is still signed                      | 1                 |
+| An abandoned channel is polled                                       | 1                 |
+| An aborted funding is polled                                         | 1                 |
+| Another channel's status is handed to the dispatch                   | 1                 |
+| Fiber's unwatched answer is nothing pending for a closed channel too | 1                 |
+| Fiber's unwatched message is nothing pending under any code          | 1                 |
+| The mark is skipped once the run is abandoned                        | 1                 |

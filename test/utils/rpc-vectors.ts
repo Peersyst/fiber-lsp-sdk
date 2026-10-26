@@ -157,6 +157,18 @@ export type ShutdownChannelParamsVector = {
 
 export type SigningStatusResultVector = { channel_id: string; status: string };
 
+export type WatchtowerKeyPurposeVector = { name: "Settlement"; commitment_number: null } | { name: "Tlc"; commitment_number: string };
+
+export type WatchtowerSignatureRequiredVector = {
+    channel_id: string;
+    status: "SignatureRequired";
+    request_id: string;
+    key_purpose: WatchtowerKeyPurposeVector;
+    transaction: TransactionVector;
+};
+
+export type WatchtowerSigningStatusResultVector = { channel_id: string; status: "NoSignatureRequired" } | WatchtowerSignatureRequiredVector;
+
 export type NextChannelSignerMaterialVector = {
     next_commitment_point: string;
     next_commitment_nonce: string;
@@ -207,7 +219,7 @@ export type RpcVectorShapes = {
     shutdown_channel: { params: ShutdownChannelParamsVector; result: null };
     get_channel_signing_status: { params: ChannelIdParamsVector; result: SigningStatusResultVector };
     submit_channel_signature: { params: SubmitChannelSignatureParamsVector; result: SubmissionResultVector };
-    get_watchtower_signing_status: { params: ChannelIdParamsVector; result: SigningStatusResultVector };
+    get_watchtower_signing_status: { params: ChannelIdParamsVector; result: WatchtowerSigningStatusResultVector };
     submit_watchtower_signature: { params: SubmitWatchtowerSignatureParamsVector; result: SubmissionResultVector };
     lsp_get_tenant_registry_nonce: { params: TenantRegistryNonceParamsVector; result: TenantRegistryNonceResultVector };
     lsp_register_tenant: { params: RegisterTenantParamsVector; result: RegisterTenantResultVector };
@@ -404,6 +416,29 @@ function asSigningStatusResult(value: unknown, path: string): SigningStatusResul
     return asStringFields(value, path, ["channel_id", "status"] as const);
 }
 
+function asWatchtowerKeyPurpose(value: unknown, path: string): WatchtowerKeyPurposeVector {
+    const record = asRecord(value, path);
+    const name = asString(record.name, `${path}.name`);
+    if (name === "Settlement") return { name, commitment_number: asNull(record.commitment_number, `${path}.commitment_number`) };
+    if (name === "Tlc") return { name, commitment_number: asString(record.commitment_number, `${path}.commitment_number`) };
+    throw new Error(`${path}.name is not a key purpose: ${name}`);
+}
+
+function asWatchtowerSigningStatusResult(value: unknown, path: string): WatchtowerSigningStatusResultVector {
+    const record = asRecord(value, path);
+    const channel_id = asString(record.channel_id, `${path}.channel_id`);
+    const status = asString(record.status, `${path}.status`);
+    if (status === "NoSignatureRequired") return { channel_id, status };
+    if (status !== "SignatureRequired") throw new Error(`${path}.status is not a watchtower signing status: ${status}`);
+    return {
+        channel_id,
+        status,
+        request_id: asString(record.request_id, `${path}.request_id`),
+        key_purpose: asWatchtowerKeyPurpose(record.key_purpose, `${path}.key_purpose`),
+        transaction: asTransaction(record.transaction, `${path}.transaction`),
+    };
+}
+
 function asSubmissionResult(value: unknown, path: string): SubmissionResultVector {
     return asStringFields(value, path, ["outcome"] as const);
 }
@@ -533,7 +568,7 @@ const METHOD_PARSERS: {
         },
         result: asSubmissionResult,
     },
-    get_watchtower_signing_status: { params: asChannelIdParams, result: asSigningStatusResult },
+    get_watchtower_signing_status: { params: asChannelIdParams, result: asWatchtowerSigningStatusResult },
     submit_watchtower_signature: {
         params: (value, path) => asStringFields(value, path, ["channel_id", "request_id", "signature"] as const),
         result: asSubmissionResult,
