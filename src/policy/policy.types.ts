@@ -370,12 +370,21 @@ export type WatchtowerSpendVerdict =
     { status: "fresh" } | { status: "already-signed"; signature: Uint8Array | null } | { status: "unclaimed" };
 
 /**
- * The terms no signing request states, pinned by the host from the node's `opening_context`.
+ * What the host pins from the node's `opening_context`: the terms no signing request vouches for, and three first-sight values.
  */
 export type PolicyChannelTerms = {
     commitmentFeeRate: bigint;
     remoteReservedCkbShannons: string;
     liquidCapacityShannons: string;
+    remoteFundingPubkey: Uint8Array;
+    /**
+     * Fiber's `remote_settlement_key`.
+     */
+    remoteTlcBasePubkey: Uint8Array;
+    /**
+     * The full `EpochNumberWithFraction` value.
+     */
+    commitmentDelayEpoch: bigint;
 };
 
 export type RevokedCommitmentSignature = {

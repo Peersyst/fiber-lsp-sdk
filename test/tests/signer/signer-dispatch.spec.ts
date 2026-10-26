@@ -91,7 +91,7 @@ function revocationOutputWire(capacityShannons: bigint, lock: Script, type: Scri
 }
 
 // The capacity both vector revocations pay: the funding cell less the commitment fee.
-const REVOCATION_CAPACITY = 0x1689bac637n;
+const REVOCATION_CAPACITY = 0x1766444b37n;
 
 function signedOf(outcome: DispatchOutcome): Extract<DispatchOutcome, { kind: "signed" }> {
     if (outcome.kind !== "signed") throw new Error(`expected a signature, got ${JSON.stringify(outcome)}`);
@@ -1065,15 +1065,32 @@ describe("the signing deadline", () => {
         await updateRecord(channel, (record) => ({ ...record, pins: { ...record.pins, commitmentDelayEpoch } }));
     }
 
+    // A record from before the host pinned the delay, which no commitment has pinned at first sight yet.
+    async function unpinDelay(channel: SigningChannel): Promise<void> {
+        await updateRecord(channel, (record) => ({ ...record, pins: { ...record.pins, commitmentDelayEpoch: undefined } }));
+    }
+
     // Refused at the gate, after every pin is read: the snapshot no longer rebuilds the tx.
     function unrebuilt(): WireField {
         return mutated(statusOf("SendCommitmentSigned"), "settlement.local_amount", "0x103d6c8981");
     }
 
     it.each(["SendCommitmentSigned", "CompleteReceivedCommitment"] as const)(
+        "reports on %s fiber's deadline, under the delay the host pinned at the opening",
+        async (transition) => {
+            const channel = await openSigningChannel(vectors, caseOf(transition));
+            expect((await recordOf(channel)).pins.commitmentDelayEpoch).toBe(DELAY_EPOCH);
+            const signed = signedOf(await channel.dispatch.handle(channel.channelId, statusOf(transition)));
+            expect(signed.deadlineMs).toBe(DEADLINE_MS);
+        },
+    );
+
+    // The pins are read after the claim, so the delay a commitment pins at first sight dates its own signature.
+    it.each(["SendCommitmentSigned", "CompleteReceivedCommitment"] as const)(
         "reports on %s fiber's deadline, under the delay its own claim pinned",
         async (transition) => {
             const channel = await openSigningChannel(vectors, caseOf(transition));
+            await unpinDelay(channel);
             expect((await recordOf(channel)).pins.commitmentDelayEpoch).toBeUndefined();
             const signed = signedOf(await channel.dispatch.handle(channel.channelId, statusOf(transition)));
             expect(signed.deadlineMs).toBe(DEADLINE_MS);
@@ -1137,6 +1154,7 @@ describe("the signing deadline", () => {
 
     it("reports no deadline on a refused commitment while the channel has pinned no delay", async () => {
         const channel = await openSigningChannel(vectors, caseOf("SendCommitmentSigned"));
+        await unpinDelay(channel);
         expect(refusedOf(await channel.dispatch.handle(channel.channelId, unrebuilt())).deadlineMs).toBeNull();
     });
 

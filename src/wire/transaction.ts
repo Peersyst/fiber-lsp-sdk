@@ -82,7 +82,7 @@ function decodeCellOutput(field: WireField): CellOutput {
  * @param dep Cell dep to write.
  * @returns The wire cell dep.
  */
-function encodeCellDep(name: string, dep: CellDep): CellDepWire {
+export function encodeCellDep(name: string, dep: CellDep): CellDepWire {
     assertOneOf(`${name}.depType`, dep.depType, DEP_TYPES);
     return { out_point: encodeOutPoint(`${name}.outPoint`, dep.outPoint), dep_type: dep.depType };
 }

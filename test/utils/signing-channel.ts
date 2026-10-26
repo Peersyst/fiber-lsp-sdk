@@ -94,6 +94,9 @@ export async function openSigningChannel(
         commitmentFeeRate: BigInt(channel.commitment_fee_rate),
         remoteReservedCkbShannons: channel.remote_reserved,
         liquidCapacityShannons: (BigInt(channel.to_local) + BigInt(channel.to_remote)).toString(),
+        remoteFundingPubkey: hexToBytes(vectors.peer.funding_pubkey),
+        remoteTlcBasePubkey: hexToBytes(vectors.peer.tlc_base_pubkey),
+        commitmentDelayEpoch: BigInt(channel.delay_epoch),
     });
     // Every value from the vectors. Before a commitment: its lane one below the slot, its view already at the case's balance
     // and TLCs, so the balance rule judges no change. Before a revocation: its replacement as its view's last commitment.

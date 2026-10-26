@@ -6,9 +6,11 @@ import type { CellDep, OutPoint, Script, ScriptTemplate, TlcDirection, TlcHashAl
 import {
     COMPRESSED_POINT_LENGTH,
     HASH256_LENGTH,
+    MILLISECONDS_PER_SECOND,
     PARTIAL_SIGNATURE_LENGTH,
     PUBLIC_NONCE_LENGTH,
     RECOVERABLE_ECDSA_SIGNATURE_LENGTH,
+    SHANNONS_PER_CKB,
     UINT128_MAX,
     UINT64_MAX,
     blake160,
@@ -19,6 +21,7 @@ import type { FiberChannelKeys } from "../../src/derivation";
 import { MAX_COMMITMENT_NUMBER, derivePublicKey, getCommitmentPoint, pubkeyOf } from "../../src/derivation";
 import type { CommitmentLockLayout, CommitmentTxInput, RevocationInput } from "../../src/digest";
 import {
+    FUNDING_LOCK_TESTNET,
     REVOCATION_LOCK_ARGS_LENGTH,
     buildCommitmentSettlementWitness,
     buildCommitmentTx,
@@ -26,12 +29,15 @@ import {
     computeRevocationContentMessage,
     computeTxHash,
     computeTxMessage,
+    fundingLockArgs,
     moleculeCellOutput,
     readCommitmentLockVersion,
+    tenantChannelId,
 } from "../../src/digest";
 import { buildRevocationContent } from "../../src/digest/revocation";
 import { buildClosingTx } from "../../src/digest/shutdown-tx";
 import type { PolicyView, SignSlot, WatchtowerKeyPurpose } from "../../src/policy";
+import { reservedCkbShannons } from "../../src/policy";
 import type { ChannelSigningTransition } from "../../src/protocol";
 import type {
     ChannelSigningStatusWire,
@@ -43,15 +49,22 @@ import type {
 } from "../../src/protocol/protocol.types";
 import type {
     ChannelOpenSignerMaterial,
+    ChannelOpenSignerMaterialWire,
     FetchInit,
     FetchResponseLike,
     IFetchLike,
+    ListChannelsParamsWire,
     NextChannelSignerMaterialWire,
+    OpenTenantChannelParamsWire,
+    OpenTenantChannelResultWire,
     RpcChannelIdParamsWire,
     RpcChannelStateWire,
+    RpcChannelWire,
     RpcSubmissionResult,
     SubmitChannelSignatureParamsWire,
+    SubmitSignedFundingTxParamsWire,
     SubmitWatchtowerSignatureParamsWire,
+    TenantChannelOpeningContextWire,
 } from "../../src/rpc";
 import { RPC_CALL_FAILED_CODE } from "../../src/rpc";
 import type { TlcHashAlgorithmWire, WireField } from "../../src/wire";
@@ -59,13 +72,20 @@ import {
     WireError,
     decodeAnyHexBytes,
     decodeBareHexBytes,
+    decodeBoolean,
+    decodeCellDep,
     decodeHexBytes,
+    decodeScript,
+    decodeTransaction,
+    decodeUintHex,
     encodeAnyHexBytes,
     encodeBareHexBytes,
     encodeHexBytes,
+    encodeScript,
     encodeTransaction,
     encodeUintHex,
     encodeUintHexNumber,
+    readArray,
     readObject,
     requireHexBytes,
 } from "../../src/wire";
@@ -76,6 +96,7 @@ import { signingCommitmentLock } from "./signing-channel";
 import type { SigningVectors } from "./signing-vectors";
 import type { WatchtowerCell, WatchtowerParty, WatchtowerSpendContext, WatchtowerTlc } from "./tenant-watchtower";
 import {
+    SECP_PLACEHOLDER_WITNESS,
     buildWatchtowerSpend,
     pickWatchtowerUnlock,
     trackWatchtowerTlcs,
@@ -96,6 +117,23 @@ const CURVE_ORDER = secp256k1.Point.Fn.ORDER;
 // `ProcessingChannelError::Musig2VerifyError` around musig2's `VerifyError::BadSignature`, as `channel.rs:2271` wraps it.
 const INVALID_SIGNATURE = "Invalid parameter: signature is invalid: Musig2 VerifyError: failed to verify signature: signature is invalid";
 
+// The cells the funding tx spends, which nothing resolves here: the user's, collected under the open's `funding_lock_script`, and
+// the LSP's.
+const USER_CELL: OutPoint = { txHash: ckbBlake2b(utf8ToBytes("tenant node user cell")), index: 0 };
+
+const LSP_CELL: OutPoint = { txHash: ckbBlake2b(utf8ToBytes("tenant node lsp cell")), index: 0 };
+
+// What each side's cells hold past its share and the fee.
+const USER_CHANGE_SHANNONS = 120n * SHANNONS_PER_CKB;
+
+const LSP_CHANGE_SHANNONS = 85n * SHANNONS_PER_CKB;
+
+// CKB testnet's secp256k1_blake160 dep group, which both funding inputs' locks run from.
+const SECP256K1_DEP_GROUP: CellDep = {
+    outPoint: { txHash: hexToBytes("f8de3bb47d055cdf460d93a2a6e1b05f7432f9777c8c474abf4eec1d4aee5d37"), index: 0 },
+    depType: "dep_group",
+};
+
 // Fiber's `requires_next_signer_material` (`fiber-types/src/channel_signer.rs:380-388`).
 const ADVANCING_TRANSITIONS: readonly NodeTransition[] = [
     "SendCommitmentSigned",
@@ -111,6 +149,8 @@ const ROUNDS = {
 } as const satisfies Record<string, readonly NodeTransition[]>;
 
 type NodeTransition = Exclude<ChannelSigningTransition, "SignChannelAnnouncement">;
+
+type OpeningTransition = "CompleteReceivedCommitment" | "SendCommitmentSigned";
 
 type NoncePurpose = "Commitment" | "Revocation";
 
@@ -143,6 +183,16 @@ type PendingRequest = {
     status: ChannelSigningStatusWire;
     served: TenantNodeServed;
     commitment: SignedCommitment | null;
+    closingTxHash: Uint8Array | null;
+};
+
+type BuiltContent = {
+    content: SignableContentWire;
+    message: Uint8Array;
+    settlement: SigningSettlementWire | null;
+    commitment: SignedCommitment | null;
+    // The cooperative close's, which fiber names the channel's shutdown tx once it lands.
+    closingTxHash: Uint8Array | null;
 };
 
 type NextMaterial = { point: Uint8Array | null; commitmentNonce: Uint8Array | null; revocationNonce: Uint8Array | null };
@@ -182,10 +232,42 @@ type WatchtowerRequest = { purpose: WatchtowerKeyPurpose; transaction: Transacti
 
 type WatchtowerSubmission = { channelId: string; requestId: string; signature: Uint8Array };
 
+// The params of `open_tenant_channel` the double reads (`fiber-json-types/src/channel.rs:182-260`), an absent option `null`.
+type OpenRequest = {
+    pubkey: Uint8Array;
+    fundingShannons: bigint;
+    public: boolean | null;
+    shutdownScript: Script;
+    fundingLockScript: Script;
+    // Empty when absent, as fiber defaults them.
+    fundingLockScriptCellDeps: CellDep[];
+    commitmentDelayEpoch: bigint | null;
+    commitmentFeeRate: bigint | null;
+    material: ChannelOpenSignerMaterial | null;
+};
+
+// Fiber's `TenantChannelOpening` (`fiber/channel.rs:11921`): the command as serde writes it, its channel and the result it froze.
+type TenantOpening = { command: string; channelId: string; result: OpenTenantChannelResultWire; terminated: boolean };
+
+// Fiber's `ChannelOpenRecord` (`fiber-types/src/channel.rs:1376`), which outlives an aborted channel's state.
+type OpenRecord = {
+    channelId: string;
+    // The open's, reserve included.
+    fundingShannons: bigint;
+    createdAtMs: bigint;
+    status: "opening" | "ready" | "failed";
+    failureDetail: string | null;
+};
+
+// The funding of a channel `open_tenant_channel` opened: the tx it froze, and whether the peer's commitment came before it was
+// signed.
+type ExternalFunding = { unsigned: Transaction; signedSubmitted: boolean; early: boolean };
+
 export type TenantNodeChannel = {
     channelId: string;
     fundingOutPoint: OutPoint;
     commitmentLock: ScriptTemplate;
+    fundingLock: ScriptTemplate;
     fundingLockCellDepsCount: number;
     commitmentDelayEpoch: bigint;
     commitmentFeeRate: bigint;
@@ -199,6 +281,7 @@ export type TenantNodeChannel = {
     localShutdownFeeRate: bigint;
     remoteShutdownFeeRate: bigint;
     lockLayout: CommitmentLockLayout;
+    createdAtMs: bigint;
 };
 
 export type TenantNodePayment = { paymentHash: string; amountShannons: string; hashAlgorithm: TlcHashAlgorithm; expiryMs: string };
@@ -214,6 +297,14 @@ export type TenantNodeTamper =
     | { kind: "delayEpoch"; commitmentDelayEpoch: string }
     // Pays the device's side to another script; the close only.
     | { kind: "closeScript"; script: Script };
+
+// What the next opening's answer states otherwise than the node froze; the device refuses it before it signs anything.
+export type TenantNodeOpeningTamper =
+    | { kind: "delayEpoch"; commitmentDelayEpoch: string }
+    | { kind: "reserve"; side: "local" | "remote"; shannons: string }
+    | { kind: "channelId"; channelId: string }
+    // Locks output 0 of the funding tx with another script.
+    | { kind: "fundingLock"; lock: Script };
 
 export type TenantNodeServed = {
     requestId: string;
@@ -273,8 +364,10 @@ export type TenantNodeOnchainTx = { by: "node" | "peer"; what: string; txHash: s
 
 export type TenantNodeOptions = {
     channel: TenantNodeChannel;
-    // A test shortcut: the node holds only the public parts, but the SDK's builders take the secrets.
-    deviceKeys: FiberChannelKeys;
+    lspPubkey: Uint8Array;
+    // A test shortcut: the node holds only the public parts, but the SDK's builders take the secrets. A channel is built with
+    // the keys whose funding key its open's material carries.
+    deviceKeys: FiberChannelKeys[];
     peerKeys: FiberChannelKeys;
 };
 
@@ -284,6 +377,8 @@ export function tenantNodeChannelOf(vectors: SigningVectors): TenantNodeChannel 
         channelId: channel.channel_id,
         fundingOutPoint: toOutPoint(channel.funding_out_point),
         commitmentLock: signingCommitmentLock(vectors),
+        // The vectors' commitment lock is testnet's.
+        fundingLock: FUNDING_LOCK_TESTNET,
         fundingLockCellDepsCount: channel.funding_lock_cell_deps_count,
         commitmentDelayEpoch: BigInt(channel.delay_epoch),
         commitmentFeeRate: BigInt(channel.commitment_fee_rate),
@@ -296,15 +391,23 @@ export function tenantNodeChannelOf(vectors: SigningVectors): TenantNodeChannel 
         localShutdownFeeRate: BigInt(channel.local_shutdown_fee_rate),
         remoteShutdownFeeRate: BigInt(channel.remote_shutdown_fee_rate),
         lockLayout: toLockLayout(channel.lock_layout),
+        // The second the device allocated the channel's index, its clock's reading.
+        createdAtMs: BigInt(vectors.device.channel_index) * MILLISECONDS_PER_SECOND,
     };
 }
 
 export class InMemoryTenantNode {
     readonly fetch: IFetchLike;
 
-    private readonly channel: TenantNodeChannel;
+    // The node's side of every channel it opens; an open by RPC takes the rest from the request.
+    private readonly terms: TenantNodeChannel;
 
-    private readonly deviceKeys: FiberChannelKeys;
+    // The channel opened last.
+    private channel: TenantNodeChannel;
+
+    private readonly lspPubkey: Uint8Array;
+
+    private readonly knownDeviceKeys: readonly FiberChannelKeys[];
 
     private readonly peerKeys: FiberChannelKeys;
 
@@ -347,6 +450,8 @@ export class InMemoryTenantNode {
 
     private parkNext: SubmitMethod | null = null;
 
+    private dropNext: string | null = null;
+
     private readonly parked: Record<SubmitMethod, unknown[]> = { submit_channel_signature: [], submit_watchtower_signature: [] };
 
     // Each view's commitments the device signed, in order: fiber's node broadcasts the latest.
@@ -355,10 +460,25 @@ export class InMemoryTenantNode {
     private forceClosed: ForceClosed | null = null;
 
     // Fiber's `ChannelState` as `list_channels` writes it (`fiber-json-types/src/channel.rs:430-462`), each name whose bits
-    // overlap joined by `|` (`serde_utils.rs:475-506`). The handshake's states but the funding tx's collaboration are not modeled.
+    // overlap joined by `|` (`serde_utils.rs:475-506`). The handshake's states but the funding tx's collaboration and the wait for
+    // its signature are not modeled.
     private channelState: RpcChannelStateWire = { state_name: "ChannelReady" };
 
     private watchRow = false;
+
+    // The tenant's single opening slot (`fiber/network.rs:3679-3790`).
+    private opening: TenantOpening | null = null;
+
+    // By channel id, as fiber's store keys them.
+    private readonly records = new Map<string, OpenRecord>();
+
+    private external: ExternalFunding | null = null;
+
+    private readonly openingTampers: TenantNodeOpeningTamper[] = [];
+
+    private commitsEarly = false;
+
+    private shutdownTxHash: Uint8Array | null = null;
 
     private readonly spendTampers: TenantNodeSpendTamper[] = [];
 
@@ -376,8 +496,10 @@ export class InMemoryTenantNode {
     private readonly onchainLog: TenantNodeOnchainTx[] = [];
 
     constructor(options: TenantNodeOptions) {
+        this.terms = options.channel;
         this.channel = options.channel;
-        this.deviceKeys = options.deviceKeys;
+        this.lspPubkey = options.lspPubkey;
+        this.knownDeviceKeys = options.deviceKeys;
         this.peerKeys = options.peerKeys;
         this.localShannons = options.channel.localShannons;
         this.remoteShannons = options.channel.remoteShannons;
@@ -394,6 +516,10 @@ export class InMemoryTenantNode {
             }
             if (request.method === "get_channel_signing_status") await this.beforeThirdSession();
             const body = JSON.stringify({ jsonrpc: "2.0", id: request.id, ...this.answer(request.method, params) });
+            if (request.method === this.dropNext) {
+                this.dropNext = null;
+                throw new TypeError("fetch failed: the connection dropped before the answer");
+            }
             return { status: 200, text: () => Promise.resolve(body) };
         };
     }
@@ -422,7 +548,7 @@ export class InMemoryTenantNode {
         return structuredClone(this.onchainLog);
     }
 
-    openTenantChannel(material: ChannelOpenSignerMaterial, first: "CompleteReceivedCommitment" | "SendCommitmentSigned"): string {
+    openTenantChannel(material: ChannelOpenSignerMaterial, first: OpeningTransition): string {
         const channelId = this.negotiateTenantChannel(material);
         this.completeTxCollaboration(first);
         return channelId;
@@ -431,41 +557,49 @@ export class InMemoryTenantNode {
     // The open up to the funding tx's collaboration: listed already, but fiber creates the tenant's watch row only at
     // `RemoteTxComplete` (`event_handler.rs:41-67`, fired at `fiber/channel.rs:9520-9530`).
     negotiateTenantChannel(material: ChannelOpenSignerMaterial): string {
-        if (this.material !== null) throw new Error("the node already opened its channel");
-        this.material = material;
-        // Installed as fiber's `apply_open_signer_material` does (`channel.rs:5958-6005`); a tenant channel has no announcement.
-        this.points.set(1, material.firstCommitmentPoint);
-        this.points.set(2, material.secondCommitmentPoint);
-        this.nonces.set(slotKey({ purpose: "Commitment", commitmentNumber: 0 }), material.commitmentNonce);
-        this.nonces.set(slotKey({ purpose: "Commitment", commitmentNumber: 1 }), material.nextCommitmentNonce);
-        this.nonces.set(slotKey({ purpose: "Revocation", commitmentNumber: 2 }), material.revocationNonce);
+        this.install(material, this.terms);
         this.channelState = { state_name: "CollaboratingFundingTx", state_flags: "AWAITING_REMOTE_TX_COLLABORATION_MSG" };
         return this.channel.channelId;
     }
 
-    // `TxComplete`: the watch row exists from here on, and the two commitments of the open are signed, shown as `ChannelReady`.
-    completeTxCollaboration(first: "CompleteReceivedCommitment" | "SendCommitmentSigned"): void {
-        if (this.watchRow) throw new Error("the funding tx's collaboration already completed");
-        this.watchRow = true;
-        this.channelState = { state_name: "ChannelReady" };
-        // R+1 at TxComplete (`channel.rs:9545`), L+1 entering the wait for the external funding (`:4161`).
-        this.remote += 1;
-        this.local += 1;
-        const state = this.state();
-        const second = first === "SendCommitmentSigned" ? "CompleteReceivedCommitment" : "SendCommitmentSigned";
-        this.queue.push(
-            { kind: "request", transition: first, state },
-            { kind: "request", transition: second, state },
-            {
-                kind: "event",
-                // ChannelReady moves both (`channel.rs:9905`).
-                run: () => {
-                    this.local += 1;
-                    this.remote += 1;
-                },
-            },
-        );
+    // The two commitments of the open are signed with the channel shown `ChannelReady` already.
+    completeTxCollaboration(first: OpeningTransition): void {
+        this.collaborate();
+        this.markReady();
+        this.queueOpening([first, first === "SendCommitmentSigned" ? "CompleteReceivedCommitment" : "SendCommitmentSigned"]);
+        this.queueChannelReady(false);
         this.drain();
+    }
+
+    // The next opening's answer states the tampered value; the double's channel keeps the one it froze.
+    tamperOpening(tamper: TenantNodeOpeningTamper): void {
+        this.openingTampers.push(tamper);
+    }
+
+    // The next opening's peer sends its commitment_signed before the funding tx is signed, as fiber allows
+    // (`fiber/channel.rs:4086-4095`): the device's own commitment is asked for while the opening waits.
+    receiveCommitmentEarly(): void {
+        this.commitsEarly = true;
+    }
+
+    // Fiber's external funding timeout, 300 s by default (`fiber/config.rs:97`), fired (`fiber/channel.rs:4374-4395`): the channel
+    // stops `Closed(FUNDING_ABORTED)`, the tenant's opening terminated (`fiber/network.rs:2574-2586`), its open record failed with
+    // the detail (`:2588-2620`) and its state deleted (`:8387-8398`) with its watch row (`event_handler.rs:186-191`).
+    expireOpening(): void {
+        if (this.material === null || this.external === null || this.external.signedSubmitted) {
+            throw new Error("no opening waits for its signed funding tx");
+        }
+        const { channelId } = this.channel;
+        const record = this.recordOf(channelId);
+        record.status = "failed";
+        // The id in its display form, the state in its debug form (`fiber/channel.rs:4385-4390`), bitflags naming the flags held whole.
+        const state =
+            this.channelState.state_name === "SigningCommitment"
+                ? "SigningCommitment(SigningCommitmentFlags(THEIR_COMMITMENT_SIGNED_SENT))"
+                : "NegotiatingFunding(NegotiatingFundingFlags(AWAITING_EXTERNAL_FUNDING))";
+        record.failureDetail = `[Channel Hash256(${channelId})] External funding transaction submission timed out in state ${state}`;
+        if (this.opening?.channelId === channelId) this.opening.terminated = true;
+        this.forgetChannel();
     }
 
     sendPayment(payment: TenantNodePayment): void {
@@ -528,6 +662,8 @@ export class InMemoryTenantNode {
             live: { outPoint: { txHash, index: 0 }, output, body: commitment.body, first: true },
         };
         this.onchainLog.push({ by: view === "local" ? "node" : "peer", what: `${view} commitment`, txHash: bytesToHex(txHash) });
+        // Named once confirmed, either close (`channel.rs:11679`).
+        this.shutdownTxHash = txHash;
         // From the broadcast fiber's own commitment is `ShuttingDown(WAITING_COMMITMENT_CONFIRMATION)` (`channel.rs:2723`) and,
         // confirmed, as it is here at once, `Closed` (`:11665-11673`).
         const side = view === "local" ? "UNCOOPERATIVE_LOCAL" : "UNCOOPERATIVE_REMOTE";
@@ -599,6 +735,11 @@ export class InMemoryTenantNode {
         this.parkNext = method;
     }
 
+    // The node handles the method's next call, and the connection drops before its answer.
+    dropNextAnswer(method: string): void {
+        this.dropNext = method;
+    }
+
     private async beforeThirdSession(): Promise<void> {
         const pending = this.pending;
         if (this.forgetSecondSession === null || pending === null) return;
@@ -612,10 +753,12 @@ export class InMemoryTenantNode {
 
     private answer(method: string, params: unknown): RpcAnswer {
         switch (method) {
-            case "list_channels": {
-                const listed = { channel_id: this.channel.channelId, state: structuredClone(this.channelState) };
-                return { result: { channels: this.isListed(params) ? [listed] : [] } };
-            }
+            case "list_channels":
+                return this.listChannels(params);
+            case "open_tenant_channel":
+                return this.openChannelByRpc(params);
+            case "submit_signed_funding_tx":
+                return this.submitSignedFundingTx(params);
             case "get_channel_signing_status":
                 return this.signingStatus(params);
             case "submit_channel_signature":
@@ -676,8 +819,15 @@ export class InMemoryTenantNode {
         if (refusal !== null) return failed(refusal);
         this.lastApplied = { requestId: submission.requestId, receipt, served: pending.served };
         pending.served.answers.push("Applied");
+        // `finish_received_commitment_signed` (`fiber/channel.rs:2525-2550`): the peer's commitment taken while the funding waits.
+        if (pending.transition === "CompleteReceivedCommitment" && this.channelState.state_flags === "AWAITING_EXTERNAL_FUNDING") {
+            this.channelState = { state_name: "SigningCommitment", state_flags: "THEIR_COMMITMENT_SIGNED_SENT|COMMITMENT_SIGNED_SENT" };
+        }
         // The close lands and confirms at once (`channel.rs:9236`, `:11676`).
-        if (pending.transition === "SendClosingSigned") this.channelState = { state_name: "Closed", state_flags: "COOPERATIVE" };
+        if (pending.transition === "SendClosingSigned") {
+            this.channelState = { state_name: "Closed", state_flags: "COOPERATIVE" };
+            this.shutdownTxHash = pending.closingTxHash;
+        }
         if (pending.commitment !== null) this.signedCommitments[pending.commitment.forRemote ? "remote" : "local"].push(pending.commitment);
         this.pending = null;
         this.advance(pending.transition);
@@ -820,6 +970,7 @@ export class InMemoryTenantNode {
             status,
             served,
             commitment: built.commitment,
+            closingTxHash: built.closingTxHash,
         };
     }
 
@@ -853,17 +1004,7 @@ export class InMemoryTenantNode {
         return compareBytes(device, peer) <= 0 ? [device, peer] : [peer, device];
     }
 
-    private contentOf(
-        transition: NodeTransition,
-        slot: NodeSlot,
-        state: CommitmentState,
-        tamper: TenantNodeTamper | null,
-    ): {
-        content: SignableContentWire;
-        message: Uint8Array;
-        settlement: SigningSettlementWire | null;
-        commitment: SignedCommitment | null;
-    } {
+    private contentOf(transition: NodeTransition, slot: NodeSlot, state: CommitmentState, tamper: TenantNodeTamper | null): BuiltContent {
         switch (transition) {
             // The tx's version is L for the peer's commitment, R for the device's own (`channel.rs:11349`).
             case "SendCommitmentSigned":
@@ -885,7 +1026,7 @@ export class InMemoryTenantNode {
         forRemote: boolean,
         version: number,
         tamper: TenantNodeTamper | null,
-    ): { content: SignableContentWire; message: Uint8Array; settlement: SigningSettlementWire; commitment: SignedCommitment } {
+    ): BuiltContent & { settlement: SigningSettlementWire; commitment: SignedCommitment } {
         const { channel } = this;
         const input: CommitmentTxInput = {
             ...this.commitmentTerms(),
@@ -907,7 +1048,8 @@ export class InMemoryTenantNode {
                 remoteTlcPubkey: this.peerTlcPubkey(tlc),
             })),
         };
-        const transaction = buildCommitmentTx(this.deviceKeys, input);
+        const keys = this.deviceKeys();
+        const transaction = buildCommitmentTx(keys, input);
         const localAmount =
             tamper?.kind === "settlement" ? BigInt(tamper.localAmountShannons) : state.localShannons + channel.localReservedCkbShannons;
         const settlement: SigningSettlementWire = {
@@ -929,9 +1071,10 @@ export class InMemoryTenantNode {
             commitment: {
                 forRemote,
                 transaction,
-                body: buildCommitmentSettlementWitness(this.deviceKeys, input),
-                tlcs: trackWatchtowerTlcs(this.deviceKeys, input),
+                body: buildCommitmentSettlementWitness(keys, input),
+                tlcs: trackWatchtowerTlcs(keys, input),
             },
+            closingTxHash: null,
         };
     }
 
@@ -955,10 +1098,7 @@ export class InMemoryTenantNode {
         return derivePublicKey(pubkeyOf(this.peerKeys.tlcBaseKey), getCommitmentPoint(this.peerKeys.commitmentSeed, tlc.createdAt.local));
     }
 
-    private revocationContent(
-        forRemote: boolean,
-        revokedCommitmentNumber: number,
-    ): { content: SignableContentWire; message: Uint8Array; settlement: null; commitment: null } {
+    private revocationContent(forRemote: boolean, revokedCommitmentNumber: number): BuiltContent {
         const input: RevocationInput = {
             ...this.commitmentTerms(),
             forRemote,
@@ -967,7 +1107,7 @@ export class InMemoryTenantNode {
             payoutScript: forRemote ? this.channel.localCloseScript : this.channel.remoteCloseScript,
             commitmentDelayEpoch: this.channel.commitmentDelayEpoch,
         };
-        const { output, outputData, commitmentLockArgs } = buildRevocationContent(this.deviceKeys, input);
+        const { output, outputData, commitmentLockArgs } = buildRevocationContent(this.deviceKeys(), input);
         return {
             content: {
                 type: "Revocation",
@@ -978,14 +1118,12 @@ export class InMemoryTenantNode {
             message: computeRevocationContentMessage(output, outputData, commitmentLockArgs),
             settlement: null,
             commitment: null,
+            closingTxHash: null,
         };
     }
 
     // Fiber's `build_shutdown_tx`: each side's total less its own fee.
-    private closingContent(
-        state: CommitmentState,
-        tamper: TenantNodeTamper | null,
-    ): { content: SignableContentWire; message: Uint8Array; settlement: null; commitment: null } {
+    private closingContent(state: CommitmentState, tamper: TenantNodeTamper | null): BuiltContent {
         const { channel } = this;
         const localCloseScript = tamper?.kind === "closeScript" ? tamper.script : channel.localCloseScript;
         const sizing = {
@@ -995,7 +1133,7 @@ export class InMemoryTenantNode {
             remoteCloseScript: channel.remoteCloseScript,
         };
         const transaction = buildClosingTx(
-            this.deviceKeys,
+            this.deviceKeys(),
             {
                 fundingOutPoint: channel.fundingOutPoint,
                 remoteFundingPubkey: pubkeyOf(this.peerKeys.fundingKey),
@@ -1015,6 +1153,7 @@ export class InMemoryTenantNode {
             message: computeTxMessage(transaction),
             settlement: null,
             commitment: null,
+            closingTxHash: computeTxHash(transaction),
         };
     }
 
@@ -1080,12 +1219,309 @@ export class InMemoryTenantNode {
         return point;
     }
 
-    // Fiber's `list_channels` (`rpc/channel.rs:526-534`): a closed channel (`fiber-types/src/channel.rs:297-303`) is listed
-    // only to a call that asks for closed ones.
-    private isListed(params: unknown): boolean {
-        if (this.material === null) return false;
-        if (this.channelState.state_name !== "Closed") return true;
-        return typeof params === "object" && params !== null && "include_closed" in params && params.include_closed === true;
+    // Fiber's `list_channels` (`rpc/channel.rs:506-680`): the channel while its state is stored, closed (`fiber-types/src/
+    // channel.rs:297-303`) only to a call that asks for closed ones; to one that asks for pending ones, the channel while it opens
+    // (`fiber-json-types/src/convert.rs:143-158`) and each failed opening whose state is gone, as fiber makes it up.
+    private listChannels(params: unknown): RpcAnswer {
+        const filter = readParams<ListChannelsParamsWire, { includeClosed: boolean; onlyPending: boolean }>(params, (at) => ({
+            includeClosed: readOption(at("include_closed"), decodeBoolean) ?? false,
+            onlyPending: readOption(at("only_pending"), decodeBoolean) ?? false,
+        }));
+        if (filter instanceof WireError) return invalidParams(params, filter);
+        const { includeClosed, onlyPending } = filter;
+        if (includeClosed && onlyPending) return failed("only_pending and include_closed are mutually exclusive");
+        const channels: RpcChannelWire[] = [];
+        if (this.material !== null) {
+            const name = this.channelState.state_name;
+            // A closed channel is pending only as an aborted opening, whose state fiber deletes.
+            const pending = name !== "ChannelReady" && name !== "ShuttingDown" && name !== "Closed";
+            if (onlyPending ? pending : includeClosed || name !== "Closed") channels.push(this.listedChannel());
+        }
+        if (onlyPending) {
+            // A record still opening keeps its state here.
+            const failedRecords = [...this.records.values()].filter((record) => record.status === "failed");
+            channels.push(...failedRecords.map((record) => this.abortedChannel(record)));
+        }
+        return { result: { channels } };
+    }
+
+    // Fiber's `to_local_amount` keeps an offered TLC until it is fulfilled (`fiber/channel.rs:8195-8225`), where the double's
+    // balance moves it at once.
+    private listedChannel(): RpcChannelWire {
+        const { channel, shutdownTxHash } = this;
+        const inFlight = (direction: TlcDirection): bigint =>
+            this.tlcs.filter((tlc) => tlc.direction === direction).reduce((sum, tlc) => sum + tlc.amountShannons, 0n);
+        const offered = inFlight("offered");
+        const received = inFlight("received");
+        return {
+            channel_id: channel.channelId,
+            pubkey: encodeBareHexBytes("pubkey", this.lspPubkey, COMPRESSED_POINT_LENGTH),
+            funding_udt_type_script: null,
+            state: structuredClone(this.channelState),
+            local_balance: encodeUintHex("localBalance", this.localShannons + offered, UINT128_MAX),
+            offered_tlc_balance: encodeUintHex("offeredTlcBalance", offered, UINT128_MAX),
+            remote_balance: encodeUintHex("remoteBalance", this.remoteShannons + received, UINT128_MAX),
+            received_tlc_balance: encodeUintHex("receivedTlcBalance", received, UINT128_MAX),
+            created_at: encodeUintHex("createdAt", channel.createdAtMs, UINT64_MAX),
+            shutdown_transaction_hash:
+                shutdownTxHash === null ? null : encodeHexBytes("shutdownTransactionHash", shutdownTxHash, HASH256_LENGTH),
+            failure_detail: this.recordOf(channel.channelId).failureDetail,
+        };
+    }
+
+    // The entry fiber makes up for a failed opening (`rpc/channel.rs:601-680`): the open's amount on the tenant's side.
+    private abortedChannel(record: OpenRecord): RpcChannelWire {
+        return {
+            channel_id: record.channelId,
+            pubkey: encodeBareHexBytes("pubkey", this.lspPubkey, COMPRESSED_POINT_LENGTH),
+            funding_udt_type_script: null,
+            state: { state_name: "Closed", state_flags: "FUNDING_ABORTED" },
+            local_balance: encodeUintHex("localBalance", record.fundingShannons, UINT128_MAX),
+            offered_tlc_balance: encodeUintHex("offeredTlcBalance", 0n, UINT128_MAX),
+            remote_balance: encodeUintHex("remoteBalance", 0n, UINT128_MAX),
+            received_tlc_balance: encodeUintHex("receivedTlcBalance", 0n, UINT128_MAX),
+            created_at: encodeUintHex("createdAt", record.createdAtMs, UINT64_MAX),
+            shutdown_transaction_hash: null,
+            failure_detail: record.failureDetail,
+        };
+    }
+
+    // `open_tenant_channel` (`rpc/channel.rs:345-370`): the params checked (`:1110-1124`), then the network actor's single opening
+    // per tenant (`fiber/network.rs:3679-3790`). Never parked: the double freezes the funding tx within the call.
+    private openChannelByRpc(params: unknown): RpcAnswer {
+        const request = readParams<OpenTenantChannelParamsWire, OpenRequest>(params, readOpenRequest);
+        if (request instanceof WireError) return invalidParams(params, request);
+        if (!equalBytes(request.pubkey, this.lspPubkey)) return failed("tenant channel peer must be the LSP public node");
+        if (request.public !== false) return failed("tenant channel requires public: false");
+        const { material } = request;
+        if (material === null) return failed("tenant channel requires external_channel_signer");
+        // Fiber compares the commands it converts the params to, the material's nonces included.
+        const command = canonicalJson(openCommandOf(params));
+        const { opening } = this;
+        if (opening !== null && !opening.terminated) {
+            if (opening.command !== command) return failed("tenant already has a different channel opening");
+            if (this.recordOf(opening.channelId).status === "ready") return failed("tenant channel is already open");
+            return { result: structuredClone(opening.result) };
+        }
+        // A terminated opening is cleared; only a failed record lets another open.
+        this.opening = null;
+        if ([...this.records.values()].some((record) => record.status !== "failed")) return failed("tenant already has a channel");
+        const result = this.openExternallyFunded(request, material);
+        this.opening = { command, channelId: this.channel.channelId, result, terminated: false };
+        return { result: structuredClone(result) };
+    }
+
+    // The channel fiber's actor opens (`fiber/channel.rs:4913-4960`), through `TxComplete` into the wait for the host's signature
+    // (`:4155-4167`), and its frozen terms (`:5911-5944`). The tenant's reserve covers the open's shutdown script
+    // (`get_funding_and_reserved_amount`, `:4946-4951`, `:5811-5851`); the LSP's is the vectors', over its own.
+    private openExternallyFunded(request: OpenRequest, material: ChannelOpenSignerMaterial): OpenTenantChannelResultWire {
+        const { terms } = this;
+        const localReserved = reservedCkbShannons(request.shutdownScript, terms.lockLayout);
+        const remoteReserved = terms.remoteReservedCkbShannons;
+        if (request.fundingShannons < localReserved) throw new Error("the double opens no channel its funding cannot reserve");
+        const peerFundingPubkey = pubkeyOf(this.peerKeys.fundingKey);
+        const peerTlcBasePubkey = pubkeyOf(this.peerKeys.tlcBaseKey);
+        const localAmount = request.fundingShannons;
+        const remoteAmount = terms.remoteShannons + remoteReserved;
+        const commitmentDelayEpoch = request.commitmentDelayEpoch ?? terms.commitmentDelayEpoch;
+        const commitmentFeeRate = request.commitmentFeeRate ?? terms.commitmentFeeRate;
+        const channelId = tenantChannelId(material.tlcBaseKey, peerTlcBasePubkey);
+        const fundingLock: Script = { ...terms.fundingLock, args: fundingLockArgs(material.fundingPubkey, peerFundingPubkey) };
+        const stated = { channelId, commitmentDelayEpoch, localReserved, remoteReserved, fundingLock };
+        for (const tamper of this.openingTampers.splice(0)) {
+            switch (tamper.kind) {
+                case "delayEpoch":
+                    stated.commitmentDelayEpoch = BigInt(tamper.commitmentDelayEpoch);
+                    break;
+                case "reserve":
+                    stated[tamper.side === "local" ? "localReserved" : "remoteReserved"] = BigInt(tamper.shannons);
+                    break;
+                case "channelId":
+                    stated.channelId = tamper.channelId;
+                    break;
+                case "fundingLock":
+                    stated.fundingLock = tamper.lock;
+            }
+        }
+        const unsigned = this.fundingTx(stated.fundingLock, localAmount + remoteAmount, request);
+        this.install(material, {
+            ...terms,
+            channelId,
+            fundingOutPoint: { txHash: computeTxHash(unsigned), index: 0 },
+            commitmentDelayEpoch,
+            commitmentFeeRate,
+            localShannons: localAmount - localReserved,
+            localReservedCkbShannons: localReserved,
+            remoteReservedCkbShannons: remoteReserved,
+            localCloseScript: request.shutdownScript,
+        });
+        this.collaborate();
+        this.channelState = { state_name: "NegotiatingFunding", state_flags: "AWAITING_EXTERNAL_FUNDING" };
+        this.external = { unsigned, signedSubmitted: false, early: this.commitsEarly };
+        if (this.commitsEarly) {
+            this.queueOpening(["CompleteReceivedCommitment"]);
+            this.drain();
+        }
+        this.commitsEarly = false;
+        return {
+            channel_id: stated.channelId,
+            unsigned_funding_tx: encodeTransaction("unsignedFundingTx", unsigned),
+            opening_context: {
+                remote_funding_key: encodeBareHexBytes("remoteFundingKey", peerFundingPubkey, COMPRESSED_POINT_LENGTH),
+                remote_settlement_key: encodeBareHexBytes("remoteSettlementKey", peerTlcBasePubkey, COMPRESSED_POINT_LENGTH),
+                remote_shutdown_script: encodeScript("remoteShutdownScript", terms.remoteCloseScript),
+                commitment_delay_epoch: encodeUintHex("commitmentDelayEpoch", stated.commitmentDelayEpoch, UINT64_MAX),
+                commitment_fee_rate: encodeUintHex("commitmentFeeRate", commitmentFeeRate, UINT64_MAX),
+                local_amount: encodeUintHex("localAmount", localAmount, UINT128_MAX),
+                remote_amount: encodeUintHex("remoteAmount", remoteAmount, UINT128_MAX),
+                local_reserved_ckb_amount: encodeUintHex("localReservedCkbAmount", stated.localReserved, UINT64_MAX),
+                remote_reserved_ckb_amount: encodeUintHex("remoteReservedCkbAmount", stated.remoteReserved, UINT64_MAX),
+            } satisfies TenantChannelOpeningContextWire,
+        };
+    }
+
+    // Output 0 the funding cell, then the opener's change and the LSP's, as `assemble_base_tx` appends a builder's outputs after
+    // the ones it received (`ckb/funding/funding_tx.rs:552-600`), with a placeholder for each input's lock. The open's extra deps
+    // of the user's lock follow the tx's own, each once (`:714-726`).
+    private fundingTx(fundingLock: Script, capacityShannons: bigint, request: OpenRequest): Transaction {
+        const cellDeps = [SECP256K1_DEP_GROUP];
+        for (const dep of request.fundingLockScriptCellDeps) if (!cellDeps.some((held) => sameCellDep(held, dep))) cellDeps.push(dep);
+        return {
+            version: 0,
+            cellDeps,
+            headerDeps: [],
+            inputs: [USER_CELL, LSP_CELL].map((previousOutput) => ({ since: 0n, previousOutput })),
+            outputs: [
+                { capacityShannons, lock: fundingLock, type: null },
+                { capacityShannons: USER_CHANGE_SHANNONS, lock: request.fundingLockScript, type: null },
+                // The LSP's close script stands for its wallet's lock.
+                { capacityShannons: LSP_CHANGE_SHANNONS, lock: this.terms.remoteCloseScript, type: null },
+            ],
+            outputsData: [new Uint8Array(0), new Uint8Array(0), new Uint8Array(0)],
+            witnesses: [SECP_PLACEHOLDER_WITNESS, SECP_PLACEHOLDER_WITNESS],
+        };
+    }
+
+    // `submit_signed_funding_tx` (`rpc/channel.rs:799-816`): the network actor's lookup (`fiber/network.rs:3832-3842`), then
+    // `handle_submit_external_funding_tx` (`fiber/channel.rs:4075-4125`), whose commitment signing resumes the open.
+    private submitSignedFundingTx(params: unknown): RpcAnswer {
+        const submission = readParams<SubmitSignedFundingTxParamsWire, { channelId: string; signed: Transaction }>(params, (at) => ({
+            channelId: requireHexBytes(at("channel_id"), HASH256_LENGTH),
+            signed: decodeTransaction(at("signed_funding_tx")),
+        }));
+        if (submission instanceof WireError) return invalidParams(params, submission);
+        // The id in `Hash256`'s debug form.
+        if (!this.isChannel(submission.channelId)) return failed(`Channel not found error: Hash256(${submission.channelId})`);
+        const funding = this.external;
+        if (funding === null) throw new Error("the double serves submit_signed_funding_tx only to a channel open_tenant_channel opened");
+        if (funding.signedSubmitted) return failed("Repeated processing message: Signed funding tx has already been submitted");
+        // The hash covers the raw transaction, the witnesses aside.
+        const txHash = computeTxHash(submission.signed);
+        if (!equalBytes(txHash, computeTxHash(funding.unsigned))) {
+            return failed(
+                "Invalid parameter: Signed funding transaction raw data mismatch; only witnesses may change for external funding",
+            );
+        }
+        funding.signedSubmitted = true;
+        // `install_external_funding_signed_tx`, called keeping a signing state (`fiber/channel.rs:4007-4022`, `:4109`).
+        if (this.channelState.state_name !== "SigningCommitment") {
+            this.channelState = {
+                state_name: "CollaboratingFundingTx",
+                state_flags: "OUR_TX_COMPLETE_SENT|THEIR_TX_COMPLETE_SENT|COLLABORATION_COMPLETED",
+            };
+        }
+        this.queueOpening(funding.early ? ["SendCommitmentSigned"] : ["SendCommitmentSigned", "CompleteReceivedCommitment"]);
+        this.queueChannelReady(true);
+        this.drain();
+        return { result: { channel_id: submission.channelId, funding_tx_hash: encodeHexBytes("fundingTxHash", txHash, HASH256_LENGTH) } };
+    }
+
+    // Installed as fiber's `apply_open_signer_material` does (`channel.rs:5958-6005`); a tenant channel has no announcement. The
+    // open record is written at the open (`fiber/network.rs:7549-7555`), over any of the same id.
+    private install(material: ChannelOpenSignerMaterial, channel: TenantNodeChannel): void {
+        if (this.material !== null) throw new Error("the node already opened its channel");
+        this.material = material;
+        this.channel = channel;
+        this.localShannons = channel.localShannons;
+        this.remoteShannons = channel.remoteShannons;
+        this.points.set(1, material.firstCommitmentPoint);
+        this.points.set(2, material.secondCommitmentPoint);
+        this.nonces.set(slotKey({ purpose: "Commitment", commitmentNumber: 0 }), material.commitmentNonce);
+        this.nonces.set(slotKey({ purpose: "Commitment", commitmentNumber: 1 }), material.nextCommitmentNonce);
+        this.nonces.set(slotKey({ purpose: "Revocation", commitmentNumber: 2 }), material.revocationNonce);
+        this.records.set(channel.channelId, {
+            channelId: channel.channelId,
+            fundingShannons: channel.localShannons + channel.localReservedCkbShannons,
+            createdAtMs: channel.createdAtMs,
+            status: "opening",
+            failureDetail: null,
+        });
+    }
+
+    // `TxComplete`: the watch row exists from here on (`event_handler.rs:41-67`, fired at `fiber/channel.rs:9520-9530`); R+1 at
+    // TxComplete (`channel.rs:9545`), L+1 entering the wait for the external funding (`:4161`).
+    private collaborate(): void {
+        if (this.watchRow) throw new Error("the funding tx's collaboration already completed");
+        this.watchRow = true;
+        this.remote += 1;
+        this.local += 1;
+    }
+
+    private queueOpening(transitions: readonly OpeningTransition[]): void {
+        const state = this.state();
+        this.queue.push(...transitions.map((transition): Step => ({ kind: "request", transition, state })));
+    }
+
+    // ChannelReady moves both counters (`channel.rs:9905`); an open by RPC is shown ready only then.
+    private queueChannelReady(shown: boolean): void {
+        this.queue.push({
+            kind: "event",
+            run: () => {
+                this.local += 1;
+                this.remote += 1;
+                if (shown) this.markReady();
+            },
+        });
+    }
+
+    private markReady(): void {
+        this.channelState = { state_name: "ChannelReady" };
+        this.recordOf(this.channel.channelId).status = "ready";
+    }
+
+    // The channel's state is gone; its open record and the logs stay.
+    private forgetChannel(): void {
+        this.material = null;
+        this.local = 0;
+        this.remote = 0;
+        this.points.clear();
+        this.nonces.clear();
+        this.tlcs = [];
+        this.nextTlcIds = { offered: 0, received: 0 };
+        this.queue.length = 0;
+        this.pending = null;
+        this.lastApplied = null;
+        this.signedCommitments.local.length = 0;
+        this.signedCommitments.remote.length = 0;
+        this.forceClosed = null;
+        this.watchRow = false;
+        this.external = null;
+        this.shutdownTxHash = null;
+        this.watchtowerPending.clear();
+        this.watchtowerSigned.clear();
+    }
+
+    private recordOf(channelId: string): OpenRecord {
+        const record = this.records.get(channelId);
+        if (record === undefined) throw new Error(`the node holds no open record of ${channelId}`);
+        return record;
+    }
+
+    private deviceKeys(): FiberChannelKeys {
+        const { fundingPubkey } = this.openMaterial();
+        const keys = this.knownDeviceKeys.find((candidate) => equalBytes(pubkeyOf(candidate.fundingKey), fundingPubkey));
+        if (keys === undefined) throw new Error(`the node holds no device keys under the funding key ${bytesToHex(fundingPubkey)}`);
+        return keys;
     }
 
     // A cooperative close deletes the tenant's watch row (`event_handler.rs:186-191`, wired at `lsp/runtime.rs:214-222`); a force
@@ -1303,28 +1739,83 @@ function invalidParams(params: unknown, error: WireError): RpcAnswer {
 }
 
 function readSubmission(at: (name: keyof SubmitChannelSignatureParamsWire & string) => WireField): Submission {
-    const material = at("next_material");
     return {
         channelId: requireHexBytes(at("channel_id"), HASH256_LENGTH),
         requestId: requireHexBytes(at("request_id"), HASH256_LENGTH),
         partialSignature: decodeHexBytes(at("partial_signature"), PARTIAL_SIGNATURE_LENGTH),
-        nextMaterial: material.value === undefined || material.value === null ? null : readNextMaterial(material),
+        nextMaterial: readOption(at("next_material"), readNextMaterial),
     };
 }
 
 // Each member optional, as fiber's own type has them, so a missing one gets fiber's refusal rather than a parse error.
 function readNextMaterial(field: WireField): NextMaterial {
     const at = readObject<NextChannelSignerMaterialWire>(field);
-    const optional = (name: keyof NextChannelSignerMaterialWire, read: (member: WireField) => Uint8Array): Uint8Array | null => {
-        const member = at(name);
-        return member.value === undefined || member.value === null ? null : read(member);
-    };
     return {
-        point: optional("next_commitment_point", (member) => decodeBareHexBytes(member, COMPRESSED_POINT_LENGTH)),
+        point: readOption(at("next_commitment_point"), (member) => decodeBareHexBytes(member, COMPRESSED_POINT_LENGTH)),
         // `Option<SliceHex>` over a `Vec<u8>` (`fiber-json-types/src/channel.rs:912-919`): any length reads, the submit refuses.
-        commitmentNonce: optional("next_commitment_nonce", decodeAnyHexBytes),
-        revocationNonce: optional("next_revocation_nonce", decodeAnyHexBytes),
+        commitmentNonce: readOption(at("next_commitment_nonce"), decodeAnyHexBytes),
+        revocationNonce: readOption(at("next_revocation_nonce"), decodeAnyHexBytes),
     };
+}
+
+function readOpenRequest(at: (name: keyof OpenTenantChannelParamsWire & string) => WireField): OpenRequest {
+    const readUint64 = (field: WireField): bigint => decodeUintHex(field, UINT64_MAX);
+    return {
+        pubkey: decodeBareHexBytes(at("pubkey"), COMPRESSED_POINT_LENGTH),
+        fundingShannons: decodeUintHex(at("funding_amount"), UINT128_MAX),
+        public: readOption(at("public"), decodeBoolean),
+        shutdownScript: decodeScript(at("shutdown_script")),
+        fundingLockScript: decodeScript(at("funding_lock_script")),
+        fundingLockScriptCellDeps: readOption(at("funding_lock_script_cell_deps"), (field) => readArray(field).map(decodeCellDep)) ?? [],
+        commitmentDelayEpoch: readOption(at("commitment_delay_epoch"), readUint64),
+        commitmentFeeRate: readOption(at("commitment_fee_rate"), readUint64),
+        material: readOption(at("external_channel_signer"), readOpenMaterial),
+    };
+}
+
+function readOpenMaterial(field: WireField): ChannelOpenSignerMaterial {
+    const at = readObject<ChannelOpenSignerMaterialWire>(field);
+    const keys = readObject<ChannelOpenSignerMaterialWire["base_public_keys"]>(at("base_public_keys"));
+    const readPoint = (member: WireField): Uint8Array => decodeBareHexBytes(member, COMPRESSED_POINT_LENGTH);
+    const readNonce = (member: WireField): Uint8Array => decodeHexBytes(member, PUBLIC_NONCE_LENGTH);
+    return {
+        fundingPubkey: readPoint(keys("funding_pubkey")),
+        tlcBaseKey: readPoint(keys("tlc_base_key")),
+        firstCommitmentPoint: readPoint(at("first_commitment_point")),
+        secondCommitmentPoint: readPoint(at("second_commitment_point")),
+        commitmentNonce: readNonce(at("commitment_nonce")),
+        nextCommitmentNonce: readNonce(at("next_commitment_nonce")),
+        revocationNonce: readNonce(at("revocation_nonce")),
+        channelAnnouncementNonce: readOption(at("channel_announcement_nonce"), readNonce),
+    };
+}
+
+function sameCellDep(a: CellDep, b: CellDep): boolean {
+    return equalBytes(a.outPoint.txHash, b.outPoint.txHash) && a.outPoint.index === b.outPoint.index && a.depType === b.depType;
+}
+
+// Serde's `Option`: absent or `null` is `None`.
+function readOption<Value>(field: WireField, read: (field: WireField) => Value): Value | null {
+    return field.value === undefined || field.value === null ? null : read(field);
+}
+
+// Serde writes a struct's members in declaration order, so two requests compare alike whatever order their JSON members came in.
+// Fiber's conversion reads absent, null and empty `funding_lock_script_cell_deps` as one empty list (`rpc/channel.rs:1130-1136`).
+function openCommandOf(params: unknown): unknown {
+    if (typeof params !== "object" || params === null) return params;
+    return Object.fromEntries(
+        Object.entries(params).filter(
+            ([name, value]) => name !== "funding_lock_script_cell_deps" || (Array.isArray(value) && value.length > 0),
+        ),
+    );
+}
+
+function canonicalJson(value: unknown): string {
+    return JSON.stringify(value, (_key: string, member: unknown): unknown =>
+        typeof member === "object" && member !== null && !Array.isArray(member)
+            ? Object.fromEntries(Object.entries(member).sort(([a], [b]) => (a < b ? -1 : 1)))
+            : member,
+    );
 }
 
 // Fiber compares receipts whole: the request id, the partial signature and the material.

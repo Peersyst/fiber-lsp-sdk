@@ -258,6 +258,7 @@ struct OpenChannelParamsValues {
     public: bool,
     shutdown_script: ScriptVector,
     funding_lock_script: ScriptVector,
+    funding_lock_script_cell_deps: Option<Vec<CellDepValues>>,
 }
 
 #[derive(Serialize)]
@@ -353,6 +354,7 @@ struct OpenTenantChannelParamsValues {
     funding_amount: String,
     shutdown_script: ScriptVector,
     funding_lock_script: ScriptVector,
+    funding_lock_script_cell_deps: Option<Vec<CellDepValues>>,
     commitment_delay_epoch: Option<String>,
     commitment_fee_rate: Option<String>,
     external_channel_signer: SignerMaterialValues,
@@ -512,21 +514,25 @@ fn json_out_point(out_point: &OutPointVector) -> OutPoint {
     packed_out_point(out_point).into()
 }
 
+fn json_cell_dep(dep: &CellDepValues) -> CellDep {
+    CellDep {
+        out_point: json_out_point(&dep.out_point),
+        dep_type: match dep.dep_type.as_str() {
+            "code" => DepType::Code,
+            "dep_group" => DepType::DepGroup,
+            other => panic!("unknown dep_type {other}"),
+        },
+    }
+}
+
+fn json_cell_deps(deps: &Option<Vec<CellDepValues>>) -> Option<Vec<CellDep>> {
+    deps.as_ref().map(|deps| deps.iter().map(json_cell_dep).collect())
+}
+
 fn json_transaction(tx: &TransactionValues) -> Transaction {
     Transaction {
         version: Uint32::from(tx.version),
-        cell_deps: tx
-            .cell_deps
-            .iter()
-            .map(|dep| CellDep {
-                out_point: json_out_point(&dep.out_point),
-                dep_type: match dep.dep_type.as_str() {
-                    "code" => DepType::Code,
-                    "dep_group" => DepType::DepGroup,
-                    other => panic!("unknown dep_type {other}"),
-                },
-            })
-            .collect(),
+        cell_deps: tx.cell_deps.iter().map(json_cell_dep).collect(),
         header_deps: tx.header_deps.iter().map(|hash| h256(hash)).collect(),
         inputs: tx
             .inputs
@@ -1485,7 +1491,7 @@ fn methods() -> MethodVectors {
             funding_udt_type_script: None,
             shutdown_script: json_script(&values.shutdown_script),
             funding_lock_script: json_script(&values.funding_lock_script),
-            funding_lock_script_cell_deps: None,
+            funding_lock_script_cell_deps: json_cell_deps(&values.funding_lock_script_cell_deps),
             commitment_delay_epoch: None,
             commitment_fee_rate: None,
             funding_fee_rate: None,
@@ -1599,7 +1605,7 @@ fn methods() -> MethodVectors {
             funding_udt_type_script: None,
             shutdown_script: json_script(&values.shutdown_script),
             funding_lock_script: json_script(&values.funding_lock_script),
-            funding_lock_script_cell_deps: None,
+            funding_lock_script_cell_deps: json_cell_deps(&values.funding_lock_script_cell_deps),
             commitment_delay_epoch: values.commitment_delay_epoch.as_deref().map(|epoch| Uint64::from(u64_of(epoch))),
             commitment_fee_rate: values.commitment_fee_rate.as_deref().map(u64_of),
             funding_fee_rate: None,
@@ -1650,6 +1656,16 @@ fn methods() -> MethodVectors {
         case(name, &values, &json)
     };
 
+    // A lock outside the genesis defaults, with the code cell and the dep group a wallet would resolve it from.
+    let wallet_lock = ScriptVector {
+        code_hash: hash_hex("custom wallet lock code hash"),
+        hash_type: "type".to_string(),
+        args: hex::encode(blake160(b"custom wallet lock args")),
+    };
+    let wallet_lock_cell_deps = vec![
+        CellDepValues { out_point: out_point("custom wallet lock code cell", 0), dep_type: "code".to_string() },
+        CellDepValues { out_point: out_point("custom wallet lock dep group", 3), dep_type: "dep_group".to_string() },
+    ];
     let tenant_channel_id = hash_hex("channel tenant");
     let tenant_shutdown = sighash_script("tenant shutdown args");
     let tenant_lock = sighash_script("tenant lock args");
@@ -1658,6 +1674,7 @@ fn methods() -> MethodVectors {
         funding_amount: "80500000000".to_string(),
         shutdown_script: tenant_shutdown.clone(),
         funding_lock_script: tenant_lock.clone(),
+        funding_lock_script_cell_deps: None,
         commitment_delay_epoch: delay.map(str::to_string),
         commitment_fee_rate: fee_rate.map(str::to_string),
         external_channel_signer: signer_material("tenant", announced),
@@ -1772,6 +1789,7 @@ fn methods() -> MethodVectors {
                         public: true,
                         shutdown_script: sighash_script("shutdown args"),
                         funding_lock_script: sighash_script("user lock args"),
+                        funding_lock_script_cell_deps: None,
                     },
                 ),
                 open_channel(
@@ -1790,6 +1808,18 @@ fn methods() -> MethodVectors {
                             hash_type: "data".to_string(),
                             args: hash_hex("wallet lock args"),
                         },
+                        funding_lock_script_cell_deps: None,
+                    },
+                ),
+                open_channel(
+                    "with the funding lock's cell deps",
+                    OpenChannelParamsValues {
+                        pubkey: peer.clone(),
+                        funding_amount: "16000000000".to_string(),
+                        public: true,
+                        shutdown_script: sighash_script("shutdown args"),
+                        funding_lock_script: wallet_lock.clone(),
+                        funding_lock_script_cell_deps: Some(wallet_lock_cell_deps.clone()),
                     },
                 ),
             ],
@@ -1970,6 +2000,14 @@ fn methods() -> MethodVectors {
                     tenant_open(Some(&((12u64 << 40) | (3 << 24) | 7).to_string()), Some("2500"), false),
                 ),
                 open_tenant_channel("with the announcement nonce", tenant_open(None, None, true)),
+                open_tenant_channel(
+                    "with the funding lock's cell deps",
+                    OpenTenantChannelParamsValues {
+                        funding_lock_script: wallet_lock.clone(),
+                        funding_lock_script_cell_deps: Some(wallet_lock_cell_deps.clone()),
+                        ..tenant_open(None, None, false)
+                    },
+                ),
             ],
             results: vec![
                 open_tenant_result(
@@ -2329,7 +2367,7 @@ fn check_rpc_params(methods: &MethodVectors, written: &BTreeMap<String, Vec<TsPa
 mod tests {
     use super::*;
 
-    const CASES: usize = 29;
+    const CASES: usize = 31;
 
     /// What a correct TS writer emits.
     fn identity() -> Value {
@@ -2425,6 +2463,22 @@ mod tests {
     #[test]
     fn refuses_a_hex_amount_with_a_leading_zero() {
         assert_refused(with("/new_invoice/0/params/amount", json!("0x0ee6b280")), "fiber refuses the params");
+    }
+
+    #[test]
+    fn refuses_a_misspelt_funding_lock_cell_deps_field_fiber_drops_in_silence() {
+        assert_refused(
+            renamed("/open_tenant_channel/3/params", "funding_lock_script_cell_deps", "funding_lock_cell_deps"),
+            "do not come back unchanged",
+        );
+    }
+
+    #[test]
+    fn refuses_a_funding_lock_cell_dep_in_another_spelling() {
+        assert_refused(
+            with("/open_tenant_channel/3/params/funding_lock_script_cell_deps/1/dep_type", json!("depGroup")),
+            "fiber refuses the params",
+        );
     }
 
     #[test]

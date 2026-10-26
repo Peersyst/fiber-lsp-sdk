@@ -9,6 +9,8 @@ import { answering, refusing, sent } from "../../utils/rpc-answers";
 import {
     toGetTenantRegistryNonceParams,
     toGetTenantRegistryNonceResult,
+    toOpenTenantChannelParams,
+    toOpenTenantChannelResult,
     toRegisterTenantParams,
     toRegisterTenantResult,
     toRpcChannelIdParams,
@@ -29,6 +31,7 @@ const {
     submit_watchtower_signature: submitWatchtower,
     lsp_get_tenant_registry_nonce: getNonce,
     lsp_register_tenant: register,
+    open_tenant_channel: openTenant,
 } = vectors.methods;
 
 const URL = "http://fiber.example:8227";
@@ -595,6 +598,47 @@ describe("FiberRpcClient", () => {
             const error = await rejection(run(clientOf(refusing(-32000, "tenant already registered"))));
             expect(error).toBeInstanceOf(RpcError);
             expect(error).toMatchObject({ method, code: -32000, message: "tenant already registered" });
+        });
+    });
+
+    describe("the tenant channel opening", () => {
+        it.each(openTenant.params.map((entry) => [entry.name, entry] as const))(
+            "sends open_tenant_channel with the vector's %s params",
+            async (_, params) => {
+                const mock = answering(caseOf(openTenant.results, "opening context").json);
+                await clientOf(mock).openTenantChannel(toOpenTenantChannelParams(params.values));
+                expect(sent(mock)).toEqual({ jsonrpc: "2.0", id: 1, method: "open_tenant_channel", params: [withoutNulls(params.json)] });
+            },
+        );
+
+        it.each(openTenant.results.map((entry) => [entry.name, entry] as const))("reads the %s result", async (_, entry) => {
+            const params = caseOf(openTenant.params, "private, no options");
+            const mock = answering(entry.json);
+            await expect(clientOf(mock).openTenantChannel(toOpenTenantChannelParams(params.values))).resolves.toEqual(
+                toOpenTenantChannelResult(entry.values),
+            );
+        });
+
+        it("refuses params it cannot write before sending anything", async () => {
+            const mock = new FetchMock();
+            const params = toOpenTenantChannelParams(caseOf(openTenant.params, "private, no options").values);
+            await expect(clientOf(mock).openTenantChannel({ ...params, fundingAmountShannons: "-1" })).rejects.toThrow(TypeError);
+            expect(mock.requests).toHaveLength(0);
+        });
+
+        it("surfaces the node's refusal as an RpcError", async () => {
+            const params = toOpenTenantChannelParams(caseOf(openTenant.params, "private, no options").values);
+            const error = await rejection(clientOf(refusing(-32000, "different channel opening")).openTenantChannel(params));
+            expect(error).toBeInstanceOf(RpcError);
+            expect(error).toMatchObject({ method: "open_tenant_channel", code: -32000, message: "different channel opening" });
+        });
+
+        it("names the field of a result without an opening context", async () => {
+            const params = toOpenTenantChannelParams(caseOf(openTenant.params, "private, no options").values);
+            const json = { ...(caseOf(openTenant.results, "opening context").json as object), opening_context: undefined };
+            const error = await rejection(clientOf(answering(json)).openTenantChannel(params));
+            expect(error).toBeInstanceOf(RpcResponseError);
+            expect(error).toMatchObject({ method: "open_tenant_channel", path: "response.result.opening_context" });
         });
     });
 });

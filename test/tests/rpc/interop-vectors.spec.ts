@@ -194,6 +194,17 @@ describe("rpc interop vectors", () => {
         const openParams = vectors.methods.open_tenant_channel.params.map((entry) => entry.values);
         const shutdownParams = vectors.methods.shutdown_channel.params.map((entry) => entry.values);
 
+        it("cover both opens with the funding lock's cell deps, of both dep types, and without them", () => {
+            const groups = [
+                vectors.methods.open_channel_with_external_funding.params.map((entry) => entry.values.funding_lock_script_cell_deps),
+                openParams.map((entry) => entry.funding_lock_script_cell_deps),
+            ];
+            for (const deps of groups) {
+                expect(deps.some((entry) => entry === null)).toBe(true);
+                expect(deps.some((entry) => entry !== null && new Set(entry.map((dep) => dep.dep_type)).size === 2)).toBe(true);
+            }
+        });
+
         it("cover the open without options, with the delay and the fee rate, and with the announcement nonce", () => {
             expect(openParams.some((entry) => entry.commitment_delay_epoch === null && entry.commitment_fee_rate === null)).toBe(true);
             expect(openParams.some((entry) => entry.commitment_delay_epoch !== null && entry.commitment_fee_rate !== null)).toBe(true);

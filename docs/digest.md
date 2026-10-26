@@ -6,7 +6,8 @@ also computes the message of the plaintext the node sent, so the two can be comp
 on mismatch ([policy.md](./policy.md)); this module only reconstructs. For what the signature then does with the digest see
 [signing.md](./signing.md). It also reads what a watchtower's spend of a force-closed commitment carries, CKB's tx hash and
 the settlement unlock of a commitment lock's cell, which the policy's watchtower rules judge
-([The settlement unlock](#the-settlement-unlock)).
+([The settlement unlock](#the-settlement-unlock)), and computes what identifies a tenant channel's opening, its funding lock
+and its id, which the facade holds the node's answer to ([The funding lock and the channel id](#the-funding-lock-and-the-channel-id)).
 
 ## Four messages, not one
 
@@ -84,13 +85,17 @@ The settlement witness hashes two keys per TLC (fiber's `get_tlc_keys`, `channel
 
 Fiber aggregates the two funding pubkeys in two different orders, and both appear here:
 
-- **Sorted** (lexicographic byte compare): the cooperative close's output order and the announcement's `ckb_key`. The node
-  ids of the announcement are also sorted, so the caller's order never matters.
+- **Sorted** (lexicographic byte compare): the cooperative close's output order, the announcement's `ckb_key` and the
+  funding lock's args. The node ids of the announcement and the two TLC base keys of the channel id are also sorted, so the
+  caller's order never matters.
 - **Role order** (`forRemote ? [local, remote] : [remote, local]`): the x-only key hashed into commitment and revocation
   lock args, which must equal the key baked into the cell being spent or punished.
 
-The signing engine itself never orders keys (see [signing.md](./signing.md)); these orderings exist only inside the
-reconstructed bytes.
+The two parties' keys are sorted by one helper, `sortDistinctPubkeys` (`utils/digest.utils.ts`), which the announcement, the
+funding lock and the channel id share. It refuses, by the name the caller gives each key, one that is not a compressed point
+on secp256k1 and two equal keys: no channel has the same key on both sides, and the device's own key stated as the peer's
+is the node's mistake, never a slot to sign. The signing engine itself never orders keys (see [signing.md](./signing.md));
+these orderings exist only inside the reconstructed bytes.
 
 ## Fees are part of the digest
 
@@ -235,12 +240,32 @@ remainder's lock args: the source's first 36 bytes, which carry the commitment n
 the flag `0x01`, and the feature byte under `fullPaymentHash`. Judging whether a spend's output 0 is that remainder is the
 policy's.
 
+## The funding lock and the channel id
+
+Opening a tenant channel, the node answers with the channel's id and the funding tx its cell sits in
+([sdk.md](./sdk.md)). Both are deterministic in the two parties' keys, so the device recomputes them rather than taking
+them as stated:
+
+- `fundingLockArgs(fundingPubkeyA, fundingPubkeyB)` is the args of fiber's `get_funding_lock_script`
+  (`channel.rs:8426-8455`): the `blake160` of the x-only musig2 aggregate of the two funding keys, sorted, aggregated by the
+  same `aggregateXOnlyPubkey` the announcement uses. Either party's key may come first. The funding cell's lock is the
+  network's funding lock template with these args.
+- `tenantChannelId(localTlcBasePubkey, remoteSettlementKey)` is fiber-lib's `derive_channel_id_from_tlc_keys`
+  (`channel.rs:5796-5804`): CKB's blake2b-256 (`ckbBlake2b`, fiber-lib's `blake2b_256`) of the two TLC base keys, sorted and
+  concatenated. The peer's is the opening context's `remote_settlement_key`. The id comes back as fiber's JSON writes it,
+  `0x` and lowercase hex, written here rather than through `wire`, which `digest` does not depend on.
+
+Both refuse what `sortDistinctPubkeys` refuses ([Two key orderings](#two-key-orderings)), with a `TypeError`.
+
 ## Network pinning
 
-The commitment lock's code hash decides which script guards the funds after a force close, and on mainnet and testnet it
-comes from fiber's shipped node config, not from the chain. The SDK therefore pins both as constants
-(`COMMITMENT_LOCK_MAINNET`, `COMMITMENT_LOCK_TESTNET`) and never accepts them from the node: a node able to choose the code
-hash could redirect the commitment output and still pass the digest check. Dev chains pass an explicit template instead.
+The commitment lock's code hash decides which script guards the funds after a force close, and the funding lock's which one
+guards them while the channel is open; on mainnet and testnet both come from fiber's shipped node config
+(`config/<network>/config.yml`), not from the chain. The SDK therefore pins
+them as constants (`COMMITMENT_LOCK_MAINNET`, `COMMITMENT_LOCK_TESTNET`, `FUNDING_LOCK_MAINNET`, `FUNDING_LOCK_TESTNET`) and
+never accepts them from the node: a node able to choose a code hash could redirect the commitment output, or fund the
+channel into a cell it alone unlocks, and still pass every check. Dev chains pass explicit templates instead
+([sdk.md](./sdk.md)).
 
 ## Molecule, from scratch
 
@@ -271,6 +296,12 @@ The `watchtower` section of `interop/vectors/signing.json` pins the rest against
 message, and its lock args committing a body its layout reads; then each spend's tx hash and message, the unlock its key
 purpose names under the signer's key, and the remainder whose args commit the next body, or none once nothing is left,
 chained from spend to spend, the peer's own spends included ([interop/README.md](../interop/README.md)).
+
+The `funding_lock` section of `vectors.json` pins the opening's identity for the channel the `signing` vectors run: the two
+parties are the same, the device's keys derive from its master seed and channel index, and the section's channel id is the
+one `signing.json`'s channel carries. The lock is the harness's port of `get_funding_lock_script` over the testnet preset's
+code hash, aggregated by fiber's `musig2` crate; `fundingLockArgs` recomputes its args with either party's key first, and
+`tenantChannelId` the id.
 
 ## What the tests guarantee
 
@@ -441,3 +472,27 @@ metrics):
 | The settlement hash is a view over the args           | 1                 |
 | The settlement hash is read from the args' buffer     | 1                 |
 | The unlock's length may contradict its flag           | 1                 |
+
+The funding lock, `funding-lock.ts` with the key sort it shares with the announcement and the funding lock presets, was
+broken the same way (`test/tests/digest`, still 100% on all four metrics):
+
+| Mutation                                                           | Tests that failed |
+| ------------------------------------------------------------------ | ----------------- |
+| The second key is checked under the first's name                   | 16                |
+| The second key is not checked                                      | 16                |
+| The first key is not checked                                       | 15                |
+| The keys are sorted descending                                     | 15                |
+| The channel id names its keys in the order of the funding lock     | 13                |
+| The equal keys' error names them in reverse                        | 4                 |
+| The funding lock args hash the two keys instead of their aggregate | 4                 |
+| The funding lock args keep 19 bytes                                | 4                 |
+| Two equal keys are sorted as distinct                              | 4                 |
+| The channel id is hashed with a one-byte salt                      | 3                 |
+| The channel id loses its 0x prefix                                 | 3                 |
+| The channel id hashes the keys in the order given                  | 2                 |
+| The funding lock args aggregate the keys in the order given        | 2                 |
+| The announcement names the device's funding key as the peer's      | 1                 |
+| The testnet funding lock's code hash is another                    | 1                 |
+| The testnet funding lock's hash type is data1                      | 1                 |
+
+The mainnet preset is pinned where the network presets are, by the `sdk` specs.

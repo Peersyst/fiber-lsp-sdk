@@ -165,7 +165,8 @@ The checks of this step, each `malformed`:
 - **No output carries a type script**: every channel of the device is a CKB channel.
 - **The snapshot's device keys are the device's**: the converter refuses a local settlement key or a per-TLC key the
   device does not derive at the stated number ([digest.md](./digest.md)). The peer's settlement key, its TLC base key, is
-  taken as stated and held by the gate's first-sight pin.
+  taken as stated and held by the gate's pin, which the facade's opening sets from the opening context it checked
+  ([policy.md](./policy.md)).
 
 ## Deterministic nonces
 
@@ -226,7 +227,7 @@ since all of it derives from the seed and the node checks each value against the
   `Commitment@1` and `Revocation@2`, the slots fiber installs them at (`channel.rs:5975-6005`), with the announcement nonce
   always `null`, which fiber requires of a private channel. Beside it, what the channel is registered with once the node
   names it: the index, the funded amount and a copy of the close script, both checked first against what fiber opens with
-  ([policy.md](./policy.md)).
+  ([policy.md](./policy.md)). The facade's opening sends the material as `external_channel_signer` ([sdk.md](./sdk.md)).
 - **With every signature** on the four commitment and revocation transitions, `buildNextMaterial(keys, slot + 1)`: the
   commitment point and the commitment and revocation nonces of the number after the slot, fiber's `next_material`
   (`fiber-lsp-sdk/src/signer.rs:363-385`). The decoder bounds the slot one below the derivation's top, so `slot + 1` is
@@ -367,9 +368,9 @@ Those pins, like the vectors, are the idempotent re-delivery contract, not snaps
 ## The node double and the flows
 
 `InMemoryTenantNode` (`test/utils/tenant-node.ts`) is the node end of the tenant RPC. It answers the injected `fetch`
-for the five methods the poller's two steps call, `list_channels` (with `include_closed` honoured, as fiber's listing
-hides a closed channel without it), `get_channel_signing_status`, `submit_channel_signature`,
-`get_watchtower_signing_status` and `submit_watchtower_signature`, in fiber's shapes, and holds what fiber holds: the
+for the seven methods the facade calls, `open_tenant_channel` and `submit_signed_funding_tx` (below), `list_channels`,
+`get_channel_signing_status`, `submit_channel_signature`, `get_watchtower_signing_status` and
+`submit_watchtower_signature`, in fiber's shapes, and holds what fiber holds: the
 counters L and R (`CommitmentNumbers`, both 0 before the open), the sites that issue a request off them, the points and
 nonces the device published, and the peer's musig2 half. It issues one request at a time and queues the movements that
 arrive while one is pending, as fiber buffers them. A submission first meets the conversions of fiber's RPC layer, ahead
@@ -379,10 +380,12 @@ nonces. Then fiber's checks (`channel.rs:2208-2285`): `replay_or_pending`, which
 `next_material`, required on the four advancing transitions and installed at the slot's number plus one
 (`channel.rs:6009-6139`). The content it sends is built with digest's own builders ([digest.md](./digest.md)), from
 device keys the test derives from the seed: a shortcut, since a real node holds only the public parts, with the same
-result. The channel moves through methods of the double (open, send, receive, fulfil, shutdown, force close), not
-through the RPC: the client methods for them come with the facade. Beside them, it can tamper with its next request, go
-past one as if the device had answered it, or keep a submission in the network until the next one. Its watchtower half
-is below.
+result. The double takes the keys of each channel index a test may open under, and a channel is built with the ones
+whose funding key its open's material carries. The channel opens through the RPC or through a method of the double, and
+moves through methods of the double (send, receive, fulfil, shutdown, force close): the client methods for those come
+with the facade. Beside them, it can tamper with its next request, go past one as if the device had answered it, keep a
+submission in the network until the next one, or drop the answer to a method's next call after handling it. Its
+opening and its watchtower halves are below.
 
 The flows, `test/tests/sdk/signing-step.flow.spec.ts`, run the poller's signing step over the double with the real
 dispatch, policy and rpc client and a mock timer, on the harness both flow specs share (`test/utils/tenant-flow.ts`: the
@@ -521,6 +524,29 @@ pending: a recovery id above 3, an `r` at or above the curve order or zero, the 
 key, another request id, another length than 65 bytes, a TLC key no commitment it watches holds, and a submission while
 nothing is pending; and jsonrpsee's answers to params it cannot read. Its listing shows a force-closed channel only to a
 call that asks for closed ones, and a cooperative close as `ShuttingDown` and then as `Closed` to that call alone.
+
+### The opening over the double
+
+`open_tenant_channel` meets fiber's checks of the params (`rpc/channel.rs:1110-1124`): the LSP's own key as the peer,
+`public: false` and the signer material present. Then the tenant's single opening slot (`network.rs:3679-3790`): the
+identical command, nonces included, answers the result it froze; another answers "tenant already has a different channel
+opening", and the identical one once the channel is ready "tenant channel is already open". Absent, `null` and empty
+`funding_lock_script_cell_deps` compare alike, as fiber's conversion reads them (`rpc/channel.rs:1130-1136`). The open
+never parks: within the call the double freezes the funding tx, output 0 the funding cell under the testnet funding lock
+over the two funding keys, then the tenant's change and the LSP's (`funding_tx.rs:552-600`), each input's witness the
+65-zero-byte placeholder, and the user lock's cell deps after the tx's own, each once (`:714-726`); and the opening
+context, the tenant's reserve sized over the open's shutdown script, the LSP's being the vectors'.
+
+`submit_signed_funding_tx` answers a second submission "Repeated processing message: Signed funding tx has already been
+submitted" and a tx whose raw part differs from the frozen one fiber's mismatch, the witnesses alone being free, then
+resumes the open's commitments and shows the channel `ChannelReady` once both are signed. The listing is fiber's whole:
+the four balances, the closed channels to a call that asks for them, and to an `only_pending` call the opening while it
+opens and each failed one, made up as fiber makes it (`rpc/channel.rs:601-680`). Beside them, the next opening's answer
+can be tampered with (the delay, either reserve, the channel id, output 0's lock), the peer can send its commitment
+before the funding tx is signed, which leaves the channel `SigningCommitment` with `THEIR_COMMITMENT_SIGNED_SENT` as
+fiber's does (`channel.rs:2525-2550`), and the opening can expire as fiber's external funding timeout fires
+(`channel.rs:4374-4395`): `Closed` with `FUNDING_ABORTED`, its state deleted and listed among the pending ones alone. The
+flows that run the facade's opening over it are [sdk.md](./sdk.md)'s.
 
 ## Where it lives
 

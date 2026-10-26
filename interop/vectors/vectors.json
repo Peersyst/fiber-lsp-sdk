@@ -1629,5 +1629,29 @@
         }
       }
     ]
+  },
+  "funding_lock": {
+    "device": {
+      "master_seed": "2424242424242424242424242424242424242424242424242424242424242424",
+      "channel_index": 1760572800,
+      "funding_pubkey": "02e42662b93a36b0817ec942512688ce880d300f3d48309ac79953cfd402c10ff5",
+      "tlc_base_pubkey": "035de18a9013ba6eb918a415764d99945683f18d3f9fa4c881ed92423124de0849"
+    },
+    "peer": {
+      "seed": "7777777777777777777777777777777777777777777777777777777777777777",
+      "funding_pubkey": "026372d1f1bf5f44d3bf185fe8f69502f36c9a01760029db0a15f6c7dedb4f5638",
+      "tlc_base_pubkey": "032559e1b167552782cab5be4294260d51edfc36aef4ca7cc165b3b21b15e98e21"
+    },
+    "key_order": [
+      "peer",
+      "device"
+    ],
+    "aggregated_pubkey": "2e1e62fc327b5be20d8ee21232a25ca7de1016464895df90b2166305e248a7be",
+    "lock": {
+      "code_hash": "6c67887fe201ee0c7853f1682c0b77c0e6214044c156c7558269390a8afa6d7c",
+      "hash_type": "type",
+      "args": "d28355e59077c4ac7d755f5f63c5a3e4d154e9dd"
+    },
+    "channel_id": "0xba90612b1c7b672e5dea40d64e0b352ec7dc8b7f652c9a84d4b82f7ec1488c2a"
   }
 }

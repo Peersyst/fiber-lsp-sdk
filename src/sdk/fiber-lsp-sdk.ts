@@ -8,6 +8,7 @@ import {
     assertNonEmptyString,
     assertTimerDelayMs,
 } from "../common";
+import type { CellDep, Script, Transaction } from "../common";
 import { MASTER_SEED_LENGTH } from "../derivation";
 import { PolicyEngine, SignerStore } from "../policy";
 import { FiberRpcClient } from "../rpc";
@@ -15,15 +16,22 @@ import { SignerDispatch, TenantIdentity } from "../signer";
 import { ActivityTracker } from "./activity";
 import { IndexAllocator } from "./allocator";
 import { readSdkChannelEvidence } from "./channel-evidence";
+import { listSdkChannels } from "./channel-listing";
+import { openSdkChannel, prepareSdkChannelOpen, submitSdkFundingTx } from "./channel-opening";
+import { buildChannelStep } from "./channel-step";
+import { PendingOpeningStore } from "./pending-opening";
 import { ActivityPoller } from "./poller";
 import { DEFAULT_POLL_INTERVAL_MS, POLL_STEP_TIMEOUT_MS } from "./sdk.constants";
 import { buildChannelSigningStep } from "./signing-step";
 import type {
     FiberLspSdkOptions,
     SdkChannelEvidence,
+    SdkChannelInfo,
+    SdkChannelOpening,
     SdkContext,
     SdkEvent,
     SdkEventListener,
+    SdkSignFundingInputs,
     SdkTenantChallenge,
     SdkTenantRegistration,
 } from "./sdk.types";
@@ -63,7 +71,10 @@ export class FiberLspSdk {
         });
         const emit = this.listeners.emit.bind(this.listeners);
         const rpc = new FiberRpcClient({ url: options.rpcUrl, token: options.biscuitToken, fetch: options.fetch });
+        const activity = new ActivityTracker(store);
+        const openings = new PendingOpeningStore(store);
         const steps = [
+            buildChannelStep({ rpc, activity, openings, emit }),
             buildChannelSigningStep({ rpc, store, dispatch, emit }),
             buildWatchtowerSigningStep({ rpc, store, policy, dispatch, emit }),
         ];
@@ -77,7 +88,8 @@ export class FiberLspSdk {
             policy,
             dispatch,
             allocator: new IndexAllocator(store, now),
-            activity: new ActivityTracker(store),
+            activity,
+            openings,
             poller: new ActivityPoller({ timer, intervalMs: pollIntervalMs, stepTimeoutMs: POLL_STEP_TIMEOUT_MS, steps, emit }),
             emit,
         };
@@ -129,6 +141,52 @@ export class FiberLspSdk {
      */
     channelEvidence(channelId: string): Promise<SdkChannelEvidence> {
         return readSdkChannelEvidence(this.context.store, channelId);
+    }
+
+    /**
+     * Opens a channel to the LSP up to the funding tx the host signs: the node's answer is checked and pinned first.
+     * @param amountShannons What the user pays in, reserve included, in decimal shannons.
+     * @param userLock The lock that funds the channel and that the device's side of a close pays to.
+     * @param userLockCellDeps The cell deps the node needs to spend the user's lock, when the chain's defaults lack them.
+     * @returns The channel id, the unsigned funding tx and the terms the node froze, copies.
+     */
+    prepareChannelOpen(amountShannons: string, userLock: Script, userLockCellDeps?: CellDep[]): Promise<SdkChannelOpening> {
+        return prepareSdkChannelOpen(this.context, amountShannons, userLock, userLockCellDeps);
+    }
+
+    /**
+     * Hands the node the funding tx the host signed, refusing one that is not the tx the opening froze.
+     * @param channelId The channel, as the opening named it.
+     * @param signedTx The funding tx, its inputs signed.
+     * @returns Settles once the node took the tx; `CHANNEL_READY` tells when the channel is ready.
+     */
+    submitFundingTx(channelId: string, signedTx: Transaction): Promise<void> {
+        return submitSdkFundingTx(this.context, channelId, signedTx);
+    }
+
+    /**
+     * Opens a channel to the LSP in one call, the host's signer signing the funding inputs in between.
+     * @param amountShannons What the user pays in, reserve included, in decimal shannons.
+     * @param userLock The lock that funds the channel and that the device's side of a close pays to.
+     * @param signFundingInputs The host's signer, which checks what the inputs pay before signing them.
+     * @param userLockCellDeps The cell deps the node needs to spend the user's lock, when the chain's defaults lack them.
+     * @returns The channel id, once the node took the signed tx.
+     */
+    openChannel(
+        amountShannons: string,
+        userLock: Script,
+        signFundingInputs: SdkSignFundingInputs,
+        userLockCellDeps?: CellDep[],
+    ): Promise<string> {
+        return openSdkChannel(this.context, amountShannons, userLock, signFundingInputs, userLockCellDeps);
+    }
+
+    /**
+     * Lists the node's channels, closed ones included, as a wallet shows them.
+     * @returns The channels, each telling whether this device registered it.
+     */
+    listChannels(): Promise<SdkChannelInfo[]> {
+        return listSdkChannels(this.context.rpc, this.context.store);
     }
 
     /**

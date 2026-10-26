@@ -115,12 +115,12 @@ const EXPECTED: Record<ChannelSigningTransition, ChannelSigningRequest> = {
                 ],
                 outputs: [
                     {
-                        capacityShannons: 96799999543n,
+                        capacityShannons: 100499999543n,
                         lock: {
                             codeHash: bytes("0x740dee83f87c6f309824d8fd3fbdd3c8380ee6fc9acc90b1a748438afcdf81d8"),
                             hashType: "type",
                             args: bytes(
-                                "0x5c5dfaf84654cd9ca715c1e585b951d5d0d62c9601000000000100a00000000000000004072dc1e95ec2be0bbcd1f9a5ab1af169a340f1050001",
+                                "0x5c5dfaf84654cd9ca715c1e585b951d5d0d62c9601000000000100a000000000000000044ddb3e0e50341d441e61a7dee6ed72675b7442180001",
                             ),
                         },
                         type: null,
@@ -138,7 +138,7 @@ const EXPECTED: Record<ChannelSigningTransition, ChannelSigningRequest> = {
         },
         settlement: {
             localAmountShannons: 69750000000n,
-            remoteAmountShannons: 22550000000n,
+            remoteAmountShannons: 26250000000n,
             localSettlementPubkey: bytes("0x035de18a9013ba6eb918a415764d99945683f18d3f9fa4c881ed92423124de0849"),
             remoteSettlementPubkey: bytes("0x032559e1b167552782cab5be4294260d51edfc36aef4ca7cc165b3b21b15e98e21"),
             forRemote: true,
@@ -172,12 +172,12 @@ const EXPECTED: Record<ChannelSigningTransition, ChannelSigningRequest> = {
                 ],
                 outputs: [
                     {
-                        capacityShannons: 96799999543n,
+                        capacityShannons: 100499999543n,
                         lock: {
                             codeHash: bytes("0x740dee83f87c6f309824d8fd3fbdd3c8380ee6fc9acc90b1a748438afcdf81d8"),
                             hashType: "type",
                             args: bytes(
-                                "0xd28355e59077c4ac7d755f5f63c5a3e4d154e9dd01000000000100a000000000000000023325e8325d21fb755da6ce46b88abd1a4f6944840001",
+                                "0xd28355e59077c4ac7d755f5f63c5a3e4d154e9dd01000000000100a00000000000000002e6a77fd06db575d69fff9ed5cdeec662a02eea420001",
                             ),
                         },
                         type: null,
@@ -191,11 +191,11 @@ const EXPECTED: Record<ChannelSigningTransition, ChannelSigningRequest> = {
             peerPublicNonce: bytes(
                 "0x02a3ef2f64714c9e3d9edcc7bb7f4ec6095c70316f2d6427301a4cbd84e3ab8525024df3a407346881969dfa56951c16cd6083dea3acd5ffaaa11ccf18edec4790f6",
             ),
-            peerPartialSignature: bytes("0xddfc723cdd2dc66da0d3c725f41bfb458b515fec5f5607373405dbd41d730df3"),
+            peerPartialSignature: bytes("0xb9285a6d96bb072190338c019c52e8e19a361f195ee4af00d7d5734e8ec33c3c"),
         },
         settlement: {
             localAmountShannons: 69750000000n,
-            remoteAmountShannons: 22550000000n,
+            remoteAmountShannons: 26250000000n,
             localSettlementPubkey: bytes("0x035de18a9013ba6eb918a415764d99945683f18d3f9fa4c881ed92423124de0849"),
             remoteSettlementPubkey: bytes("0x032559e1b167552782cab5be4294260d51edfc36aef4ca7cc165b3b21b15e98e21"),
             forRemote: false,
@@ -218,7 +218,7 @@ const EXPECTED: Record<ChannelSigningTransition, ChannelSigningRequest> = {
         content: {
             kind: "revocation",
             output: {
-                capacityShannons: 0x1689bac637n,
+                capacityShannons: 0x1766444b37n,
                 lock: {
                     codeHash: bytes("0x4d62a160ec2d470f499fb511b77777e0af54af776d9d31ee9ecdc71d7378c2ba"),
                     hashType: "type",
@@ -253,7 +253,7 @@ const EXPECTED: Record<ChannelSigningTransition, ChannelSigningRequest> = {
         content: {
             kind: "revocation",
             output: {
-                capacityShannons: 0x1689bac637n,
+                capacityShannons: 0x1766444b37n,
                 lock: {
                     codeHash: bytes("0x537320e708e05f80a3d3a873b32eda052298e274ad93e7b9d5c2fc0ca201d769"),
                     hashType: "type",
@@ -268,7 +268,7 @@ const EXPECTED: Record<ChannelSigningTransition, ChannelSigningRequest> = {
             peerPublicNonce: bytes(
                 "0x037f940f7f26d97ab832872207f1c6b817e1b6ca7f9317ae2b231f532096ac0f600352c0e3da18619f2ea41c4472b0a5db1db431596b33bc5f9d428875f664fafe3b",
             ),
-            peerPartialSignature: bytes("0xb718a2195a47ba2097762206999df1a3ec16a1f7e4410c42ffe5c7d26a608e5d"),
+            peerPartialSignature: bytes("0xc035f0b664390520e9dd8e4ad1374e21b2831b7566b659bbed7fb372d4f61560"),
         },
         settlement: null,
     },
@@ -299,7 +299,7 @@ const EXPECTED: Record<ChannelSigningTransition, ChannelSigningRequest> = {
                 ],
                 outputs: [
                     {
-                        capacityShannons: 24799999367n,
+                        capacityShannons: 28499999367n,
                         lock: {
                             codeHash: bytes("0x4d62a160ec2d470f499fb511b77777e0af54af776d9d31ee9ecdc71d7378c2ba"),
                             hashType: "type",
@@ -345,7 +345,7 @@ const EXPECTED: Record<ChannelSigningTransition, ChannelSigningRequest> = {
         content: {
             kind: "announcement",
             unsignedAnnouncement: bytes(
-                "0xae0100003000000070000000b0000000f0000000f8000000180100003c0100005d0100007e0100009e010000ae01000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000007dd6a90d41a8137fd3a212a69b8c14c554ca590e431d77bc836e5c5d05a545af341b96611104178e30e46e7b2a9039a76b9a76422328ee39a2d4cb09aa8711af0000000002106fa580a1c56411d6ee7deabcc98aae6f6479858f924487cf58c4c2ca3023040388b3f6725f602c2264516a7cb3e769ee809ef696eef87fa3f7f33b34e1f922c22e1e62fc327b5be20d8ee21232a25ca7de1016464895df90b2166305e248a7be00c8ba89160000000000000000000000",
+                "0xae0100003000000070000000b0000000f0000000f8000000180100003c0100005d0100007e0100009e010000ae01000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000007dd6a90d41a8137fd3a212a69b8c14c554ca590e431d77bc836e5c5d05a545af341b96611104178e30e46e7b2a9039a76b9a76422328ee39a2d4cb09aa8711af0000000002106fa580a1c56411d6ee7deabcc98aae6f6479858f924487cf58c4c2ca3023040388b3f6725f602c2264516a7cb3e769ee809ef696eef87fa3f7f33b34e1f922c22e1e62fc327b5be20d8ee21232a25ca7de1016464895df90b2166305e248a7be004d4466170000000000000000000000",
             ),
         },
         evidence: {

@@ -3,6 +3,8 @@ import {
     assertAnyBytes,
     assertBoolean,
     assertBytes,
+    assertCellDep,
+    assertCellDeps,
     assertCompressedPoint,
     assertDecimalShannons,
     assertFunction,
@@ -326,5 +328,58 @@ describe("assertOutPoint", () => {
         ],
     ])("rejects %s, naming the field", (_, value, error) => {
         expect(() => assertOutPoint("funding", value)).toThrow(error);
+    });
+});
+
+describe("assertCellDep", () => {
+    const CELL_DEP = { outPoint: { txHash: new Uint8Array(32), index: 0 }, depType: "dep_group" };
+
+    it.each(["code", "dep_group"])("accepts a cell dep of dep type %s", (depType) => {
+        expect(() => assertCellDep("dep", { ...CELL_DEP, depType })).not.toThrow();
+    });
+
+    it.each([
+        ["null", null, new TypeError("dep must be an object")],
+        ["an array", [CELL_DEP], new TypeError("dep must be an object")],
+        ["no out point", { depType: "code" }, new TypeError("dep.outPoint must be an object")],
+        [
+            "an out point with a tx hash of 31 bytes",
+            { ...CELL_DEP, outPoint: { txHash: new Uint8Array(31), index: 0 } },
+            new TypeError("dep.outPoint.txHash must be 32 bytes, got 31"),
+        ],
+        [
+            "an out point with an index above u32",
+            { ...CELL_DEP, outPoint: { txHash: new Uint8Array(32), index: 2 ** 32 } },
+            new RangeError("dep.outPoint.index must be an integer between 0 and 4294967295, got 4294967296"),
+        ],
+        ["no dep type", { outPoint: CELL_DEP.outPoint }, new TypeError("dep.depType must be one of code, dep_group")],
+        ["a dep type in camel case", { ...CELL_DEP, depType: "depGroup" }, new TypeError("dep.depType must be one of code, dep_group")],
+    ])("rejects %s, naming the field", (_, value, error) => {
+        expect(() => assertCellDep("dep", value)).toThrow(error);
+    });
+});
+
+describe("assertCellDeps", () => {
+    const CELL_DEP = { outPoint: { txHash: new Uint8Array(32), index: 0 }, depType: "code" };
+
+    it.each([
+        ["none", []],
+        ["one", [CELL_DEP]],
+        ["two", [CELL_DEP, { ...CELL_DEP, depType: "dep_group" }]],
+    ])("accepts a list of %s", (_, value) => {
+        expect(() => assertCellDeps("deps", value)).not.toThrow();
+    });
+
+    it.each([
+        ["a single cell dep", CELL_DEP, new TypeError("deps must be an array")],
+        ["null", null, new TypeError("deps must be an array")],
+        ["a second entry that is not an object", [CELL_DEP, "dep"], new TypeError("deps[1] must be an object")],
+        [
+            "a second entry of an unknown dep type",
+            [CELL_DEP, { ...CELL_DEP, depType: "data" }],
+            new TypeError("deps[1].depType must be one of code, dep_group"),
+        ],
+    ])("rejects %s, naming the entry", (_, value, error) => {
+        expect(() => assertCellDeps("deps", value)).toThrow(error);
     });
 });

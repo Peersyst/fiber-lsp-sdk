@@ -1,6 +1,6 @@
 import { equalBytes } from "@noble/curves/utils.js";
 import type { Script } from "../common";
-import { assertBytes, assertNonEmptyString, assertPositiveInteger, assertScriptTemplate } from "../common";
+import { assertBytes, assertNonEmptyString, assertPositiveInteger, assertScriptTemplate, copyScript } from "../common";
 import type { FiberChannelKeys } from "../derivation";
 import { MASTER_SEED_LENGTH, deriveChannelKeys, deriveChannelSeed, pubkeyOf } from "../derivation";
 import { MAX_CELL_DEPS_COUNT } from "../digest";
@@ -115,11 +115,7 @@ export class SignerDispatch {
             channelIndex,
             fundedShannons,
             // Copied: the caller's bytes may change before the node names the channel.
-            localCloseScript: {
-                ...localCloseScript,
-                codeHash: Uint8Array.from(localCloseScript.codeHash),
-                args: Uint8Array.from(localCloseScript.args),
-            },
+            localCloseScript: copyScript(localCloseScript),
             material: buildChannelOpenMaterial(keys),
         };
     }

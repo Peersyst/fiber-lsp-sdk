@@ -52,8 +52,19 @@ describe("computeChannelAnnouncementDigest", () => {
         expect(() => digestOf({ chainHash: new Uint8Array(31) })).toThrow(TypeError);
         expect(() => digestOf({ nodeIds: [new Uint8Array(32), NODE_TWO] })).toThrow(TypeError);
         expect(() => digestOf({ nodeIds: [NODE_ONE, new Uint8Array(34)] })).toThrow(TypeError);
-        expect(() => digestOf({ remoteFundingPubkey: new Uint8Array(32) })).toThrow(TypeError);
+        expect(() => digestOf({ remoteFundingPubkey: new Uint8Array(32) })).toThrow(
+            new TypeError("remoteFundingPubkey must be 33 bytes, got 32"),
+        );
+        expect(() => digestOf({ remoteFundingPubkey: Uint8Array.of(0x02, ...new Uint8Array(32)) })).toThrow(
+            new TypeError("remoteFundingPubkey must be a compressed point on secp256k1"),
+        );
         expect(() => digestOf({ capacityShannons: 1n << 128n })).toThrow(RangeError);
         expect(() => digestOf({ fundingOutPoint: { txHash: new Uint8Array(32), index: 2 ** 32 } })).toThrow(RangeError);
+    });
+
+    it("refuses the device's own funding key as the peer's", () => {
+        expect(() => digestOf({ remoteFundingPubkey: pubkeyOf(channelKeys.fundingKey) })).toThrow(
+            new TypeError("localFundingPubkey and remoteFundingPubkey must be two distinct public keys"),
+        );
     });
 });

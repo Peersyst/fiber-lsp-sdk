@@ -1,5 +1,5 @@
 import { hexToBytes } from "@noble/hashes/utils.js";
-import type { DepType, TlcHashAlgorithm, Transaction } from "../../src/common";
+import type { CellDep, DepType, TlcHashAlgorithm, Transaction } from "../../src/common";
 import type { InvoiceCurrency } from "../../src/invoice";
 import type {
     GetTenantRegistryNonceParams,
@@ -56,6 +56,7 @@ import { encodeTransaction } from "../../src/wire";
 import { toOutPoint, toScript, toScriptOrNull } from "./digest-inputs";
 import { RPC_RESULT_PATH } from "./rpc-answers";
 import type {
+    CellDepVector,
     ChannelIdParamsVector,
     ChannelStateVector,
     ChannelVector,
@@ -96,10 +97,14 @@ const HASH_ALGORITHMS = Object.fromEntries(Object.entries(HASH_ALGORITHM_WIRE).m
     TlcHashAlgorithm
 >;
 
+function toCellDep(vector: CellDepVector): CellDep {
+    return { outPoint: toOutPoint(vector.out_point), depType: vector.dep_type as DepType };
+}
+
 export function toTransaction(vector: TransactionVector): Transaction {
     return {
         version: vector.version,
-        cellDeps: vector.cell_deps.map((dep) => ({ outPoint: toOutPoint(dep.out_point), depType: dep.dep_type as DepType })),
+        cellDeps: vector.cell_deps.map(toCellDep),
         headerDeps: vector.header_deps.map((dep) => hexToBytes(dep)),
         inputs: vector.inputs.map((input) => ({ since: BigInt(input.since), previousOutput: toOutPoint(input.previous_output) })),
         outputs: vector.outputs.map((output) => ({
@@ -113,13 +118,16 @@ export function toTransaction(vector: TransactionVector): Transaction {
 }
 
 export function toOpenChannelWithExternalFundingParams(vector: OpenChannelParamsVector): OpenChannelWithExternalFundingParams {
-    return {
+    const params: OpenChannelWithExternalFundingParams = {
         peerPubkey: hexToBytes(vector.pubkey),
         fundingAmountShannons: vector.funding_amount,
         public: vector.public,
         shutdownScript: toScript(vector.shutdown_script),
         fundingLockScript: toScript(vector.funding_lock_script),
     };
+    if (vector.funding_lock_script_cell_deps !== null)
+        params.fundingLockScriptCellDeps = vector.funding_lock_script_cell_deps.map(toCellDep);
+    return params;
 }
 
 export function toOpenChannelWithExternalFundingResult(vector: OpenChannelResultVector): OpenChannelWithExternalFundingResult {
@@ -156,6 +164,8 @@ export function toOpenTenantChannelParams(vector: OpenTenantChannelParamsVector)
             channelAnnouncementNonce: material.channel_announcement_nonce === null ? null : hexToBytes(material.channel_announcement_nonce),
         },
     };
+    if (vector.funding_lock_script_cell_deps !== null)
+        params.fundingLockScriptCellDeps = vector.funding_lock_script_cell_deps.map(toCellDep);
     if (vector.commitment_delay_epoch !== null) params.commitmentDelayEpoch = BigInt(vector.commitment_delay_epoch);
     if (vector.commitment_fee_rate !== null) params.commitmentFeeRate = BigInt(vector.commitment_fee_rate);
     return params;

@@ -1,6 +1,7 @@
 import { bytesToHex, hexToBytes } from "@noble/hashes/utils.js";
 import { blake160 } from "../../../src/common/utils/ckb-hash.utils";
-import { deriveChannelKeys } from "../../../src/derivation/fiber-scheme";
+import { deriveChannelSeed } from "../../../src/derivation/device-scheme";
+import { deriveChannelKeys, pubkeyOf } from "../../../src/derivation/fiber-scheme";
 import { computeChannelAnnouncementDigest } from "../../../src/digest/channel-announcement";
 import {
     buildCommitmentLockArgs,
@@ -12,8 +13,9 @@ import {
     readCommitmentLockSettlementHash,
     readCommitmentLockVersion,
 } from "../../../src/digest/commitment-tx";
-import { COMMITMENT_LOCK_TESTNET } from "../../../src/digest/digest.constants";
+import { COMMITMENT_LOCK_TESTNET, FUNDING_LOCK_TESTNET } from "../../../src/digest/digest.constants";
 import { calculateTxFee, commitmentTxSize, shutdownTxSize } from "../../../src/digest/fee";
+import { fundingLockArgs, tenantChannelId } from "../../../src/digest/funding-lock";
 import { buildRevocationContent, computeRevocationDigest } from "../../../src/digest/revocation";
 import { settlementToCommitmentInput } from "../../../src/digest/settlement-input";
 import { buildSettlementWitness } from "../../../src/digest/settlement-witness";
@@ -309,6 +311,50 @@ describe("digest cross-implementation vectors", () => {
                 expect(bytesToHex(recomputed)).toBe(kase.digest);
             });
         }
+    });
+});
+
+describe("funding lock cross-implementation vectors", () => {
+    const fundingLock = vectors.funding_lock;
+    const parties = {
+        device: { funding: hexToBytes(fundingLock.device.funding_pubkey), tlcBase: hexToBytes(fundingLock.device.tlc_base_pubkey) },
+        peer: { funding: hexToBytes(fundingLock.peer.funding_pubkey), tlcBase: hexToBytes(fundingLock.peer.tlc_base_pubkey) },
+    };
+
+    it("takes the two parties of the signing vectors' channel, and gives that channel its id", () => {
+        const signing = loadSigningVectors();
+        expect(fundingLock.device).toEqual(signing.device);
+        expect(fundingLock.peer).toEqual(signing.peer);
+        expect(signing.channel.channel_id).toBe(fundingLock.channel_id);
+    });
+
+    it("holds the device's keys as the SDK derives them from its master seed and channel index", () => {
+        const deviceKeys = deriveChannelKeys(
+            deriveChannelSeed(hexToBytes(fundingLock.device.master_seed), fundingLock.device.channel_index),
+        );
+        expect(bytesToHex(pubkeyOf(deviceKeys.fundingKey))).toBe(fundingLock.device.funding_pubkey);
+        expect(bytesToHex(pubkeyOf(deviceKeys.tlcBaseKey))).toBe(fundingLock.device.tlc_base_pubkey);
+    });
+
+    it("uses the SDK's testnet funding lock preset", () => {
+        expect(bytesToHex(FUNDING_LOCK_TESTNET.codeHash)).toBe(fundingLock.lock.code_hash);
+        expect(FUNDING_LOCK_TESTNET.hashType).toBe(fundingLock.lock.hash_type);
+    });
+
+    it("aggregates the funding keys in fiber's order", () => {
+        const [first, second] = fundingLock.key_order;
+        expect(bytesToHex(aggregateXOnlyPubkey([parties[first].funding, parties[second].funding]))).toBe(fundingLock.aggregated_pubkey);
+    });
+
+    it.each([
+        ["device", "peer"],
+        ["peer", "device"],
+    ] as const)("recomputes the lock args with the %s's funding key passed first", (first, second) => {
+        expect(bytesToHex(fundingLockArgs(parties[first].funding, parties[second].funding))).toBe(fundingLock.lock.args);
+    });
+
+    it("recomputes the channel id from the device's TLC base key and the peer's", () => {
+        expect(tenantChannelId(parties.device.tlcBase, parties.peer.tlcBase)).toBe(fundingLock.channel_id);
     });
 });
 

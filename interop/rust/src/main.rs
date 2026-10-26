@@ -2,6 +2,8 @@ mod invoice;
 mod rpc;
 mod signing;
 
+use signing::{DEVICE, PEER};
+
 use musig2::{
     aggregate_partial_signatures, sign_partial, verify_partial, AggNonce, CompactSignature,
     KeyAggContext, PartialSignature, PubNonce, SecNonce, SecNonceBuilder,
@@ -465,6 +467,7 @@ struct Vectors {
     tenant_registry: TenantRegistryVector,
     musig: MusigVector,
     digest: DigestVectors,
+    funding_lock: FundingLockVector,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -680,6 +683,21 @@ struct MusigVector {
     message: String,
 }
 
+/// The funding lock and the id of the signing channel, from the two parties `signing.json` holds.
+#[derive(Serialize, Deserialize)]
+struct FundingLockVector {
+    device: signing::DeviceVector,
+    peer: signing::PeerVector,
+    /// Whose funding key `get_deterministic_musig2_agg_context` aggregates first.
+    key_order: [String; 2],
+    /// The x-only aggregate of the two funding keys in that order.
+    aggregated_pubkey: String,
+    /// The testnet funding lock with the channel's args: fiber's `get_script_by_contract(Contract::FundingLock, args)`.
+    lock: ScriptVector,
+    /// As fiber's JSON writes it.
+    channel_id: String,
+}
+
 #[derive(Deserialize)]
 struct TsOutput {
     local_pubnonce: String,
@@ -734,6 +752,10 @@ const REMOTE_SIGNER_SEED: [u8; 32] = [0x77; 32];
 
 /// The SDK's testnet commitment lock preset; keeping it in the vectors pins the TS constant too.
 const COMMITMENT_LOCK_TESTNET_CODE_HASH: &str = "740dee83f87c6f309824d8fd3fbdd3c8380ee6fc9acc90b1a748438afcdf81d8";
+
+/// The SDK's testnet funding lock preset, `FundingLock` in fiber's config/testnet/config.yml at the pin; keeping it in the
+/// vectors pins the TS constant too.
+const FUNDING_LOCK_TESTNET_CODE_HASH: &str = "6c67887fe201ee0c7853f1682c0b77c0e6214044c156c7558269390a8afa6d7c";
 
 /// Default commitment delay: EpochNumberWithFraction(number 1, index 0, length 1) as a full value.
 const DEFAULT_DELAY_EPOCH: u64 = (1 << 40) | 1;
@@ -1073,6 +1095,103 @@ fn tenant_registry_vector() -> TenantRegistryVector {
     }
 }
 
+fn pubkey_bytes(hex: &str) -> [u8; 33] {
+    hex::decode(hex).unwrap().try_into().unwrap()
+}
+
+/// The x-only aggregate of the keys in the order given, as fiber's `get_funding_lock_script_xonly` writes it.
+fn funding_keys_xonly(keys: &[[u8; 33]; 2]) -> [u8; 32] {
+    let ctx = KeyAggContext::new(keys.iter().map(|key| musig2::secp256k1::PublicKey::from_slice(key).unwrap())).unwrap();
+    ctx.aggregated_pubkey::<musig2::secp::Point>().serialize_xonly()
+}
+
+/// The id fiber's channel actor gives a channel, `derive_channel_id_from_tlc_keys` (crates/fiber-lib/src/fiber/channel.rs:5796-5804,
+/// private there and ported), as fiber's JSON writes it.
+pub(crate) fn derived_channel_id(mut tlc_base_keys: [[u8; 33]; 2]) -> String {
+    tlc_base_keys.sort();
+    let channel_id = fiber_json_types::Hash256(ckb_hash::blake2b_256(tlc_base_keys.concat()));
+    serde_json::to_value(channel_id).unwrap().as_str().unwrap().to_string()
+}
+
+/// The funding lock and the id of the signing channel as fiber's channel actor derives them, ported because it derives both
+/// from its own state: the args from the funding keys in the order of `get_deterministic_musig2_agg_context`
+/// (crates/fiber-lib/src/fiber/channel.rs:8426-8455, 11029-11042), the id by `derived_channel_id`.
+fn funding_lock_vector() -> FundingLockVector {
+    let (device, peer) = signing::channel_parties();
+    let device_funding = fiber_types::Pubkey(pubkey_bytes(&device.funding_pubkey));
+    let peer_funding = fiber_types::Pubkey(pubkey_bytes(&peer.funding_pubkey));
+    // `should_local_go_first_in_musig2`, from either end of the channel: the key that is not above the other goes first.
+    let (key_order, keys) = if device_funding <= peer_funding {
+        ([DEVICE, PEER], [device_funding.0, peer_funding.0])
+    } else {
+        ([PEER, DEVICE], [peer_funding.0, device_funding.0])
+    };
+    let aggregated_pubkey = funding_keys_xonly(&keys);
+    let channel_id = derived_channel_id([pubkey_bytes(&device.tlc_base_pubkey), pubkey_bytes(&peer.tlc_base_pubkey)]);
+    let case = FundingLockVector {
+        device,
+        peer,
+        key_order: key_order.map(String::from),
+        aggregated_pubkey: hex::encode(aggregated_pubkey),
+        lock: ScriptVector {
+            code_hash: FUNDING_LOCK_TESTNET_CODE_HASH.to_string(),
+            hash_type: "type".to_string(),
+            args: hex::encode(&ckb_hash::blake2b_256(aggregated_pubkey)[0..20]),
+        },
+        channel_id,
+    };
+    if let Err(failures) = check_funding_lock(&case) {
+        panic!("fiber-lsp-sdk reads another funding lock: {failures:#?}");
+    }
+    case
+}
+
+/// The case as fiber-lsp-sdk reads it, its two checks ported because both are private there: the args
+/// `musig2_matches_approved_lock` requires of the sorted keys' context (crates/fiber-lsp-sdk/src/signer.rs:1454-1467), and
+/// the id `validate_opening` requires (crates/fiber-lsp-sdk/src/opening.rs:174-193).
+fn check_funding_lock(case: &FundingLockVector) -> Result<(), Vec<String>> {
+    let mut failures = Vec::new();
+    let device_funding = pubkey_bytes(&case.device.funding_pubkey);
+    let mut funding_keys = [device_funding, pubkey_bytes(&case.peer.funding_pubkey)];
+    funding_keys.sort();
+    let key_order = funding_keys.map(|funding_key| if funding_key == device_funding { DEVICE } else { PEER });
+    if case.key_order != key_order {
+        failures.push(format!("key order: {:?}, the sorted keys are {key_order:?}", case.key_order));
+    }
+    let ctx = KeyAggContext::new(funding_keys.iter().map(|key| musig2::secp256k1::PublicKey::from_slice(key).unwrap())).unwrap();
+    let point: musig2::secp::Point = ctx.aggregated_pubkey();
+    if case.aggregated_pubkey != hex::encode(point.serialize_xonly()) {
+        failures.push(format!("aggregated pubkey: {} is not the sorted keys' aggregate", case.aggregated_pubkey));
+    }
+    let args = &fiber_types::blake2b_hash_with_salt(&point.serialize_xonly(), &[])[..20];
+    if case.lock.args != hex::encode(args) {
+        failures.push(format!("lock args: {}, the sorted keys' are {}", case.lock.args, hex::encode(args)));
+    }
+    if case.lock.code_hash != FUNDING_LOCK_TESTNET_CODE_HASH || case.lock.hash_type != "type" {
+        failures.push(format!("lock script: {} {} is not the testnet funding lock", case.lock.code_hash, case.lock.hash_type));
+    }
+    let mut tlc_base_keys = [pubkey_bytes(&case.device.tlc_base_pubkey), pubkey_bytes(&case.peer.tlc_base_pubkey)];
+    tlc_base_keys.sort();
+    let expected_id = fiber_types::blake2b_hash_with_salt(&tlc_base_keys.concat(), &[]);
+    match serde_json::from_value::<fiber_json_types::Hash256>(serde_json::Value::String(case.channel_id.clone())) {
+        Ok(channel_id) if channel_id.0 != expected_id => {
+            failures.push(format!("channel id: {}, the settlement keys give 0x{}", case.channel_id, hex::encode(expected_id)))
+        }
+        Ok(channel_id) => {
+            let written = serde_json::to_value(channel_id).unwrap();
+            if written != serde_json::Value::String(case.channel_id.clone()) {
+                failures.push(format!("channel id: {}, fiber's JSON writes it {written}", case.channel_id));
+            }
+        }
+        Err(error) => failures.push(format!("channel id: fiber's JSON does not read {}: {error}", case.channel_id)),
+    }
+    if failures.is_empty() {
+        Ok(())
+    } else {
+        Err(failures)
+    }
+}
+
 fn gen_vectors(out_path: &str) {
     let signer = FiberSigner::generate_from_seed(&CHANNEL_SEED_PARAMS);
 
@@ -1158,6 +1277,7 @@ fn gen_vectors(out_path: &str) {
             message: hex::encode(message),
         },
         digest,
+        funding_lock: funding_lock_vector(),
     };
 
     let json = serde_json::to_string_pretty(&vectors).unwrap();
@@ -1582,5 +1702,89 @@ fn main() {
             );
             std::process::exit(1);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn assert_refused(case: FundingLockVector, reason: &str) {
+        let failures = check_funding_lock(&case).unwrap_err();
+        assert_eq!(failures.len(), 1, "{failures:#?}");
+        assert!(failures[0].contains(reason), "expected {reason:?} in {failures:#?}");
+    }
+
+    fn keys_of(case: &FundingLockVector) -> ([u8; 33], [u8; 33], [u8; 33], [u8; 33]) {
+        (
+            pubkey_bytes(&case.device.funding_pubkey),
+            pubkey_bytes(&case.peer.funding_pubkey),
+            pubkey_bytes(&case.device.tlc_base_pubkey),
+            pubkey_bytes(&case.peer.tlc_base_pubkey),
+        )
+    }
+
+    #[test]
+    fn accepts_the_funding_lock_as_the_vectors_write_it() {
+        assert_eq!(check_funding_lock(&funding_lock_vector()), Ok(()));
+    }
+
+    // With these keys the peer's funding key sorts first, so an unsorted port, device first, is the one that diverges.
+    #[test]
+    fn sorts_the_peers_funding_key_first() {
+        assert_eq!(funding_lock_vector().key_order, [PEER, DEVICE]);
+    }
+
+    #[test]
+    fn refuses_another_key_order() {
+        let mut case = funding_lock_vector();
+        case.key_order.reverse();
+        assert_refused(case, "key order");
+    }
+
+    #[test]
+    fn refuses_the_aggregate_of_the_keys_unsorted() {
+        let mut case = funding_lock_vector();
+        let (device_funding, peer_funding, _, _) = keys_of(&case);
+        case.aggregated_pubkey = hex::encode(funding_keys_xonly(&[device_funding, peer_funding]));
+        assert_refused(case, "aggregated pubkey");
+    }
+
+    #[test]
+    fn refuses_the_args_of_the_keys_unsorted() {
+        let mut case = funding_lock_vector();
+        let (device_funding, peer_funding, _, _) = keys_of(&case);
+        case.lock.args = hex::encode(&blake2b_256(&funding_keys_xonly(&[device_funding, peer_funding]))[0..20]);
+        assert_refused(case, "lock args");
+    }
+
+    #[test]
+    fn refuses_another_lock_script() {
+        let mut case = funding_lock_vector();
+        case.lock.code_hash = COMMITMENT_LOCK_TESTNET_CODE_HASH.to_string();
+        assert_refused(case, "lock script");
+    }
+
+    #[test]
+    fn refuses_the_id_of_the_keys_unsorted() {
+        let mut case = funding_lock_vector();
+        let (_, _, device_tlc_base, peer_tlc_base) = keys_of(&case);
+        case.channel_id = format!("0x{}", hex::encode(blake2b_256(&[device_tlc_base, peer_tlc_base].concat())));
+        assert_refused(case, "the settlement keys give");
+    }
+
+    #[test]
+    fn refuses_an_id_fibers_json_does_not_read() {
+        let mut case = funding_lock_vector();
+        case.channel_id.truncate(case.channel_id.len() - 2);
+        assert_refused(case, "fiber's JSON does not read");
+    }
+
+    // fiber's reader takes the id without its `0x` as well; the case holds the form its writer gives.
+    #[test]
+    fn refuses_an_id_in_another_form_than_fibers_json_writes() {
+        let mut case = funding_lock_vector();
+        case.channel_id = case.channel_id.trim_start_matches("0x").to_string();
+        assert_refused(case, "fiber's JSON writes it");
     }
 }

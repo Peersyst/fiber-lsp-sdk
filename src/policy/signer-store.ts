@@ -20,6 +20,7 @@ import {
     HOLD_INVOICE_RECORD_KEY_PREFIX,
     STORAGE_KEY_NAMESPACE,
 } from "./policy.constants";
+import { ChannelRegistrationError } from "./policy.error";
 import type { ChannelPolicyRecord, DebitIntentRecord, HoldInvoicePolicyRecord, SignerRecordFormat } from "./policy.types";
 import {
     assertChannelPolicyRecord,
@@ -109,7 +110,11 @@ export class SignerStore {
             const current = await this.readChannelIndex(key);
             if (current === channelIndex) return;
             if (current !== null) {
-                throw new TypeError(`the name at ${key} already resolves to channel index ${current}`);
+                throw new ChannelRegistrationError(
+                    channelId,
+                    channelIndex,
+                    `the name at ${key} already resolves to channel index ${current}`,
+                );
             }
             await this.storage.set(key, String(channelIndex));
         });

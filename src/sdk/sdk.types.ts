@@ -1,9 +1,10 @@
-import type { ITimer, ScriptTemplate } from "../common";
+import type { DepType, ITimer, Script, ScriptTemplate, Transaction } from "../common";
 import type { InvoiceCurrency } from "../invoice";
 import type {
     IAsyncSignerStorage,
     ISignerStorage,
     NonceReuseMode,
+    PolicyChannelTerms,
     PolicyEngine,
     SignerStore,
     WatchtowerApproval,
@@ -18,15 +19,19 @@ import type {
     RpcChannelStateName,
     RpcInvoiceStatus,
     RpcPaymentStatus,
+    TenantChannelOpeningContext,
 } from "../rpc";
 import type { SignerDispatch, SignerRefusal, TenantIdentity } from "../signer";
 import type { ActivityTracker } from "./activity";
 import type { IndexAllocator } from "./allocator";
+import type { PendingOpeningStore } from "./pending-opening";
 import type { ActivityPoller } from "./poller";
 import type {
     ACTIVITY_KINDS,
     ACTIVITY_RECORD_VERSION,
     ALLOCATION_KINDS,
+    PENDING_OPENING_RECORD_VERSION,
+    SDK_CHANNEL_STATES,
     SDK_ERROR_CODES,
     SDK_EVENT_TYPES,
     SDK_NETWORK_NAMES,
@@ -37,6 +42,10 @@ export type SdkNetworkName = (typeof SDK_NETWORK_NAMES)[number];
 
 export type SdkNetworkConfig = {
     commitmentLock: ScriptTemplate;
+    /**
+     * Its args are the channel's own, computed from the two funding keys.
+     */
+    fundingLock: ScriptTemplate;
     invoiceCurrency: InvoiceCurrency;
     /**
      * Fiber counts these into the commitment fee although the commitment tx carries none.
@@ -161,6 +170,86 @@ export type ActivityRecord = {
     invoices: Record<string, ActivityEntry<"invoice">>;
 };
 
+export type PendingOpening = {
+    channelIndex: number;
+    /**
+     * Reserve included.
+     */
+    fundedShannons: string;
+    /**
+     * Molecule hex, so a retry compares it by equality.
+     */
+    userLock: string;
+    userLockCellDeps?: PendingOpeningCellDep[];
+    /**
+     * `null` until the node's answer passes the check.
+     */
+    channelId: string | null;
+};
+
+/**
+ * The tx hash in lowercase hex without the prefix, as the store keeps bytes.
+ */
+export type PendingOpeningCellDep = { txHash: string; index: number; depType: DepType };
+
+/**
+ * The storage has no delete, so a cleared opening is `null` rather than an absent key.
+ */
+export type PendingOpeningRecord = {
+    version: typeof PENDING_OPENING_RECORD_VERSION;
+    opening: PendingOpening | null;
+};
+
+export type SdkChannelState = (typeof SDK_CHANNEL_STATES)[number];
+
+export type SdkChannelInfo = {
+    channelId: string;
+    state: SdkChannelState;
+    localBalanceShannons: string;
+    remoteBalanceShannons: string;
+    offeredTlcBalanceShannons: string;
+    receivedTlcBalanceShannons: string;
+    /**
+     * Whether this device registered the channel.
+     */
+    hasRecord: boolean;
+};
+
+/**
+ * Copies: nothing the device keeps changes with them.
+ */
+export type SdkChannelOpening = {
+    channelId: string;
+    unsignedFundingTx: Transaction;
+    openingContext: TenantChannelOpeningContext;
+};
+
+/**
+ * The host's signer, which resolves the inputs and so is the one to check what they pay before signing.
+ */
+export type SdkSignFundingInputs = (unsignedFundingTx: Transaction) => Promise<Transaction>;
+
+export type SdkOpeningRequest = {
+    /**
+     * Reserve included.
+     */
+    fundedShannons: string;
+    userLock: Script;
+    commitmentDelayEpoch: bigint;
+    commitmentFeeRate: bigint;
+    /**
+     * The device's own.
+     */
+    fundingPubkey: Uint8Array;
+    tlcBasePubkey: Uint8Array;
+    fundingLock: ScriptTemplate;
+};
+
+export type SdkOpeningPins = {
+    terms: PolicyChannelTerms;
+    fundingCapacityShannons: string;
+};
+
 export type SdkTenantChallenge = GetTenantRegistryNonceResult;
 
 export type SdkTenantRegistration = RegisterTenantParams & { tenantId: string };
@@ -196,6 +285,7 @@ export type SdkContext = {
     dispatch: SignerDispatch;
     allocator: IndexAllocator;
     activity: ActivityTracker;
+    openings: PendingOpeningStore;
     poller: ActivityPoller;
     emit: (event: SdkEvent) => void;
 };

@@ -1,4 +1,5 @@
 import { hexToBytes } from "@noble/hashes/utils.js";
+import { deriveChannelKeys, deriveChannelSeed } from "../../src/derivation";
 import type { ChannelPolicyRecord, PolicyChannelTerms, PolicyEngineOptions } from "../../src/policy";
 import { PolicyEngine, SignerStore } from "../../src/policy";
 import type { FetchInit } from "../../src/rpc";
@@ -9,7 +10,7 @@ import { SignerDispatch } from "../../src/signer";
 import { TimerMock } from "../mocks/common";
 import type { InMemorySignerStorage } from "../mocks/policy";
 import { flush } from "./flush";
-import { SIGNING_MILLISECONDS_PER_EPOCH, signingDeviceKeys, signingPeerKeys } from "./signing-channel";
+import { SIGNING_MILLISECONDS_PER_EPOCH, signingPeerKeys } from "./signing-channel";
 import { loadSigningVectors } from "./signing-vectors";
 import { InMemoryTenantNode, tenantNodeChannelOf } from "./tenant-node";
 
@@ -29,6 +30,8 @@ export const CHANNEL_INDEX = vectors.device.channel_index;
 
 export const OTHER_CHANNEL_ID = `0x${"2e".repeat(32)}`;
 
+export const LSP_PUBKEY = hexToBytes("02c91d295563aa25d500374244b0428ed9d7978740d8dae8e466b8a16c15945b37");
+
 // What the user pays in, reserve included.
 export const FUNDED = (CHANNEL.localShannons + CHANNEL.localReservedCkbShannons).toString();
 
@@ -36,6 +39,9 @@ export const TERMS: PolicyChannelTerms = {
     commitmentFeeRate: CHANNEL.commitmentFeeRate,
     remoteReservedCkbShannons: CHANNEL.remoteReservedCkbShannons.toString(),
     liquidCapacityShannons: (CHANNEL.localShannons + CHANNEL.remoteShannons).toString(),
+    remoteFundingPubkey: hexToBytes(vectors.peer.funding_pubkey),
+    remoteTlcBasePubkey: hexToBytes(vectors.peer.tlc_base_pubkey),
+    commitmentDelayEpoch: CHANNEL.commitmentDelayEpoch,
 };
 
 export type TenantDevice = {
@@ -57,8 +63,14 @@ export type TenantDeviceOptions = {
     storage: InMemorySignerStorage;
 };
 
-export function tenantNode(): InMemoryTenantNode {
-    return new InMemoryTenantNode({ channel: CHANNEL, deviceKeys: signingDeviceKeys(vectors), peerKeys: signingPeerKeys(vectors) });
+export function tenantNode(channelIndexes: readonly number[] = [CHANNEL_INDEX]): InMemoryTenantNode {
+    const masterSeed = hexToBytes(vectors.device.master_seed);
+    return new InMemoryTenantNode({
+        channel: CHANNEL,
+        lspPubkey: LSP_PUBKEY,
+        deviceKeys: channelIndexes.map((index) => deriveChannelKeys(deriveChannelSeed(masterSeed, index))),
+        peerKeys: signingPeerKeys(vectors),
+    });
 }
 
 // As the facade wires it.
@@ -105,7 +117,7 @@ export async function start(device: TenantDevice): Promise<void> {
     await flush();
 }
 
-export async function tick(device: TenantDevice, count = 1): Promise<void> {
+export async function tick(device: Pick<TenantDevice, "timer">, count = 1): Promise<void> {
     for (let index = 0; index < count; index++) {
         device.timer.advance(INTERVAL_MS);
         await flush();

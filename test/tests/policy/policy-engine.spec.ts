@@ -29,7 +29,15 @@ import type {
     WatchtowerSpendRecord,
     WatchtowerSpendRequest,
 } from "../../../src/policy";
-import { ChannelPinError, DebitIntentError, HoldInvoiceError, PolicyEngine, PolicyRefusalError, SignerStore } from "../../../src/policy";
+import {
+    ChannelPinError,
+    ChannelRegistrationError,
+    DebitIntentError,
+    HoldInvoiceError,
+    PolicyEngine,
+    PolicyRefusalError,
+    SignerStore,
+} from "../../../src/policy";
 import { buildSessionCommitment } from "../../../src/policy/utils";
 import { AsyncInMemorySignerStorage, InMemorySignerStorage } from "../../mocks/policy";
 import { fundedShannonsOf } from "../../utils/channel-opening";
@@ -76,11 +84,15 @@ const CLOSE_SCRIPT = toClosingTxInput(caseOf(digest.shutdown_cases, "ckb"), dige
 // What the "ckb" close pays the device: its settlement and reserve, less its 540-shannon fee.
 const CLOSE_LOCAL_CAPACITY = "71899999460";
 
-// The "ckb" cases' terms, which no request states: the host pins them from the node's opening context.
+// The "ckb" cases' terms, which no request vouches for, and their first-sight values: the host pins them from the node's
+// opening context.
 const TERMS: PolicyChannelTerms = {
     commitmentFeeRate: 1000n,
     remoteReservedCkbShannons: "6300000000",
     liquidCapacityShannons: "80500000000",
+    remoteFundingPubkey: hexToBytes("026372d1f1bf5f44d3bf185fe8f69502f36c9a01760029db0a15f6c7dedb4f5638"),
+    remoteTlcBasePubkey: hexToBytes("032559e1b167552782cab5be4294260d51edfc36aef4ca7cc165b3b21b15e98e21"),
+    commitmentDelayEpoch: 1099511627777n,
 };
 
 const OFFERED_HASH = "6844f645bb03ff9d1c9c48ee5e9e971be09bf34a3612c81b20c2a5a1bff2a6b6";
@@ -107,6 +119,9 @@ const TERMS_PINNED_PINS: ChannelPins = {
     liquidCapacityShannons: "80500000000",
     commitmentFeeRate: "1000",
     remoteReservedCkbShannons: "6300000000",
+    remoteFundingPubkey: "026372d1f1bf5f44d3bf185fe8f69502f36c9a01760029db0a15f6c7dedb4f5638",
+    remoteTlcBasePubkey: "032559e1b167552782cab5be4294260d51edfc36aef4ca7cc165b3b21b15e98e21",
+    commitmentDelayEpoch: "1099511627777",
 };
 
 // The terms and what the "ckb" cases state.
@@ -399,6 +414,16 @@ async function refusalOf(promise: Promise<unknown>): Promise<PolicyRefusalError>
     throw new Error("expected a policy refusal");
 }
 
+async function registrationErrorOf(promise: Promise<unknown>): Promise<ChannelRegistrationError> {
+    try {
+        await promise;
+    } catch (error) {
+        if (error instanceof ChannelRegistrationError) return error;
+        throw error;
+    }
+    throw new Error("expected a registration error");
+}
+
 describe("registerChannel", () => {
     it("creates a record with empty registries", async () => {
         const { engine, store } = newEngine();
@@ -438,9 +463,14 @@ describe("registerChannel", () => {
         await engine.registerChannel("temporary-id", CHANNEL_INDEX, FUNDED, CLOSE_SCRIPT);
         const stored = new Map(storage.map);
         for (const channelId of ["temporary-id", CHANNEL_ID]) {
-            await expect(engine.registerChannel(channelId, CHANNEL_INDEX, funded, closeScript)).rejects.toThrow(
-                new TypeError(`channel index ${CHANNEL_INDEX} is already registered with another funded amount or close script`),
-            );
+            const error = await registrationErrorOf(engine.registerChannel(channelId, CHANNEL_INDEX, funded, closeScript));
+            expect(error).toBeInstanceOf(TypeError);
+            expect(error).toMatchObject({
+                name: "ChannelRegistrationError",
+                message: `channel index ${CHANNEL_INDEX} is already registered with another funded amount or close script`,
+                channelId,
+                channelIndex: CHANNEL_INDEX,
+            });
         }
         expect(storage.map).toEqual(stored);
         await expect(store.getChannelRecord(CHANNEL_INDEX)).resolves.toMatchObject({ channelId: "temporary-id" });
@@ -449,7 +479,14 @@ describe("registerChannel", () => {
     it("rejects a re-registration under a different channel index", async () => {
         const { engine, storage } = newEngine();
         await engine.registerChannel(CHANNEL_ID, CHANNEL_INDEX, FUNDED, CLOSE_SCRIPT);
-        await expect(engine.registerChannel(CHANNEL_ID, CHANNEL_INDEX + 1, FUNDED, CLOSE_SCRIPT)).rejects.toThrow(TypeError);
+        const error = await registrationErrorOf(engine.registerChannel(CHANNEL_ID, CHANNEL_INDEX + 1, FUNDED, CLOSE_SCRIPT));
+        expect(error).toBeInstanceOf(TypeError);
+        expect(error).toMatchObject({
+            name: "ChannelRegistrationError",
+            message: `channel ${CHANNEL_ID} is already registered under a different channel index`,
+            channelId: CHANNEL_ID,
+            channelIndex: CHANNEL_INDEX + 1,
+        });
         expect([...storage.map.keys()].filter((key) => key.startsWith("fiber-lsp-sdk:channel:"))).toEqual([
             `fiber-lsp-sdk:channel:${CHANNEL_INDEX}`,
         ]);
@@ -464,6 +501,15 @@ describe("registerChannel", () => {
         ]);
 
         expect(outcomes.map((outcome) => outcome.status)).toEqual(["fulfilled", "rejected"]);
+        // The loser reads the name free and meets it taken at the claim.
+        const loser = outcomes[1];
+        const reason: unknown = loser.status === "rejected" ? loser.reason : null;
+        expect(reason).toBeInstanceOf(ChannelRegistrationError);
+        expect(reason).toMatchObject({
+            message: `the name at fiber-lsp-sdk:alias:${CHANNEL_ID} already resolves to channel index ${CHANNEL_INDEX}`,
+            channelId: CHANNEL_ID,
+            channelIndex: CHANNEL_INDEX + 1,
+        });
         await expect(engine.requireChannelIndex(CHANNEL_ID)).resolves.toBe(CHANNEL_INDEX);
         expect(storage.map.get(`fiber-lsp-sdk:alias:${CHANNEL_ID}`)).toBe(String(CHANNEL_INDEX));
     });
@@ -490,7 +536,12 @@ describe("registerChannel", () => {
         await engine.pinChannelTerms("temporary-id", TERMS);
         await engine.checkAndClaim(KEYS, commitmentRequest("ckb, no tlcs, for remote", { channelId: "temporary-id" }));
 
-        await expect(engine.registerChannel(CHANNEL_ID, CHANNEL_INDEX, FUNDED, CLOSE_SCRIPT)).rejects.toThrow(TypeError);
+        await expect(registrationErrorOf(engine.registerChannel(CHANNEL_ID, CHANNEL_INDEX, FUNDED, CLOSE_SCRIPT))).resolves.toMatchObject({
+            name: "ChannelRegistrationError",
+            message: `channel index ${CHANNEL_INDEX} already serves channel temporary-id`,
+            channelId: CHANNEL_ID,
+            channelIndex: CHANNEL_INDEX,
+        });
         await expect(store.getChannelRecord(CHANNEL_INDEX)).resolves.toMatchObject({ channelId: "temporary-id" });
         expect((await refusalOf(engine.requireChannelIndex(CHANNEL_ID))).code).toBe("unknown_channel");
     });
@@ -509,7 +560,28 @@ describe("registerChannel", () => {
             pins: REGISTERED_PINS,
             views: { remote: OPENING_VIEW, local: OPENING_VIEW },
         });
-        await expect(engine.registerChannel(CHANNEL_ID, CHANNEL_INDEX, FUNDED, CLOSE_SCRIPT)).rejects.toThrow(TypeError);
+        const error = await registrationErrorOf(engine.registerChannel(CHANNEL_ID, CHANNEL_INDEX, FUNDED, CLOSE_SCRIPT));
+        expect(error).toBeInstanceOf(TypeError);
+        expect(error).toMatchObject({
+            message: `channel index ${CHANNEL_INDEX} already serves channel temporary-id`,
+            channelId: CHANNEL_ID,
+            channelIndex: CHANNEL_INDEX,
+        });
+    });
+
+    // A broken store is no registration the records contradict: the host must not read it as one.
+    it.each([
+        ["a record", `fiber-lsp-sdk:channel:${CHANNEL_INDEX}`, "{}", "is not a channel policy record"],
+        ["a name", `fiber-lsp-sdk:alias:${CHANNEL_ID}`, "x", "is not a channel index"],
+    ])("throws a plain TypeError over %s the store holds corrupt, writing nothing", async (_, key, value, reason) => {
+        const { engine, storage } = newEngine();
+        storage.map.set(key, value);
+        const error: unknown = await engine
+            .registerChannel(CHANNEL_ID, CHANNEL_INDEX, FUNDED, CLOSE_SCRIPT)
+            .catch((caught: unknown) => caught);
+        expect(error).toEqual(new TypeError(`stored value at ${key} ${reason}`));
+        expect(error).not.toBeInstanceOf(ChannelRegistrationError);
+        expect(storage.map).toEqual(new Map([[key, value]]));
     });
 
     it.each([
@@ -740,7 +812,7 @@ describe("pinChannelTerms", () => {
         return context;
     }
 
-    it("pins the three terms no request states, beside the registration's pins", async () => {
+    it("pins the three terms no request vouches for and the opening's three first-sight values, beside the registration's pins", async () => {
         const { engine, store } = await bare();
         await engine.pinChannelTerms(CHANNEL_ID, TERMS);
         expect((await store.getChannelRecord(CHANNEL_INDEX))?.pins).toEqual(TERMS_PINNED_PINS);
@@ -749,15 +821,18 @@ describe("pinChannelTerms", () => {
     it("pins u64's maximum in each", async () => {
         const { engine, store } = await bare();
         await engine.pinChannelTerms(CHANNEL_ID, {
+            ...TERMS,
             commitmentFeeRate: 18446744073709551615n,
             remoteReservedCkbShannons: "18446744073709551615",
             liquidCapacityShannons: "18446744073709551615",
+            commitmentDelayEpoch: 18446744073709551615n,
         });
         await expect(store.getChannelRecord(CHANNEL_INDEX)).resolves.toMatchObject({
             pins: {
                 commitmentFeeRate: "18446744073709551615",
                 remoteReservedCkbShannons: "18446744073709551615",
                 liquidCapacityShannons: "18446744073709551615",
+                commitmentDelayEpoch: "18446744073709551615",
             },
         });
     });
@@ -786,6 +861,21 @@ describe("pinChannelTerms", () => {
             "another liquid capacity",
             { liquidCapacityShannons: "80500000001" },
             { field: "liquidCapacityShannons", pinned: "80500000000", stated: "80500000001" },
+        ],
+        [
+            "another peer funding key",
+            { remoteFundingPubkey: OTHER_FUNDING_PUBKEY },
+            { field: "remoteFundingPubkey", pinned: digest.remote.funding_pubkey, stated: bytesToHex(OTHER_FUNDING_PUBKEY) },
+        ],
+        [
+            "another peer TLC base key",
+            { remoteTlcBasePubkey: OTHER_FUNDING_PUBKEY },
+            { field: "remoteTlcBasePubkey", pinned: digest.remote.tlc_base_pubkey, stated: bytesToHex(OTHER_FUNDING_PUBKEY) },
+        ],
+        [
+            "another delay",
+            { commitmentDelayEpoch: 1099511627778n },
+            { field: "commitmentDelayEpoch", pinned: "1099511627777", stated: "1099511627778" },
         ],
     ])("throws a ChannelPinError on %s than pinned, naming both values, writing nothing", async (_, override, conflict) => {
         const { engine, storage } = await registeredEngine();
@@ -842,12 +932,188 @@ describe("pinChannelTerms", () => {
             { ...TERMS, liquidCapacityShannons: "18446744073709551616" },
             new RangeError("terms.liquidCapacityShannons must be at most 18446744073709551615, the most a CKB cell's capacity holds"),
         ],
+        [
+            "an absent peer funding key",
+            { ...TERMS, remoteFundingPubkey: undefined as unknown as Uint8Array },
+            new TypeError("terms.remoteFundingPubkey must be a Uint8Array"),
+        ],
+        [
+            "a peer funding key in hex",
+            { ...TERMS, remoteFundingPubkey: digest.remote.funding_pubkey as unknown as Uint8Array },
+            new TypeError("terms.remoteFundingPubkey must be a Uint8Array"),
+        ],
+        [
+            "a peer funding key of 32 bytes",
+            { ...TERMS, remoteFundingPubkey: hexToBytes(digest.remote.funding_pubkey).subarray(1) },
+            new TypeError("terms.remoteFundingPubkey must be 33 bytes, got 32"),
+        ],
+        [
+            "a peer funding key of 34 bytes",
+            { ...TERMS, remoteFundingPubkey: hexToBytes(`${digest.remote.funding_pubkey}00`) },
+            new TypeError("terms.remoteFundingPubkey must be 33 bytes, got 34"),
+        ],
+        [
+            "a peer funding key off the curve",
+            { ...TERMS, remoteFundingPubkey: hexToBytes(`02${"00".repeat(32)}`) },
+            new TypeError("terms.remoteFundingPubkey must be a compressed point on secp256k1"),
+        ],
+        [
+            "an absent peer TLC base key",
+            { ...TERMS, remoteTlcBasePubkey: undefined as unknown as Uint8Array },
+            new TypeError("terms.remoteTlcBasePubkey must be a Uint8Array"),
+        ],
+        [
+            "a peer TLC base key in hex",
+            { ...TERMS, remoteTlcBasePubkey: digest.remote.tlc_base_pubkey as unknown as Uint8Array },
+            new TypeError("terms.remoteTlcBasePubkey must be a Uint8Array"),
+        ],
+        [
+            "a peer TLC base key of 32 bytes",
+            { ...TERMS, remoteTlcBasePubkey: hexToBytes(digest.remote.tlc_base_pubkey).subarray(1) },
+            new TypeError("terms.remoteTlcBasePubkey must be 33 bytes, got 32"),
+        ],
+        [
+            "a peer TLC base key of 34 bytes",
+            { ...TERMS, remoteTlcBasePubkey: hexToBytes(`${digest.remote.tlc_base_pubkey}00`) },
+            new TypeError("terms.remoteTlcBasePubkey must be 33 bytes, got 34"),
+        ],
+        [
+            "a peer TLC base key off the curve",
+            { ...TERMS, remoteTlcBasePubkey: hexToBytes(`02${"00".repeat(32)}`) },
+            new TypeError("terms.remoteTlcBasePubkey must be a compressed point on secp256k1"),
+        ],
+        [
+            "an absent delay",
+            { ...TERMS, commitmentDelayEpoch: undefined as unknown as bigint },
+            new RangeError("terms.commitmentDelayEpoch must be a bigint between 0 and 18446744073709551615, got undefined"),
+        ],
+        [
+            "a delay that is a number",
+            { ...TERMS, commitmentDelayEpoch: 1099511627777 as unknown as bigint },
+            new RangeError("terms.commitmentDelayEpoch must be a bigint between 0 and 18446744073709551615, got 1099511627777"),
+        ],
+        [
+            "a negative delay",
+            { ...TERMS, commitmentDelayEpoch: -1n },
+            new RangeError("terms.commitmentDelayEpoch must be a bigint between 0 and 18446744073709551615, got -1"),
+        ],
+        [
+            "a delay above u64",
+            { ...TERMS, commitmentDelayEpoch: 18446744073709551616n },
+            new RangeError("terms.commitmentDelayEpoch must be a bigint between 0 and 18446744073709551615, got 18446744073709551616"),
+        ],
     ])("rejects %s, writing nothing", async (_, terms, error) => {
         const { engine, storage } = await bare();
         const stored = new Map(storage.map);
         await expect(engine.pinChannelTerms(CHANNEL_ID, terms)).rejects.toThrow(error);
         expect(storage.map).toEqual(stored);
     });
+
+    // Fiber asks for no message before the open is accepted, so only a close states a first-sight value ahead of the terms.
+    it("throws a ChannelPinError on a peer funding key other than the one a close pinned first, then pins the same one", async () => {
+        const { engine, store, storage } = await bare();
+        await engine.checkAndClaim(KEYS, closingRequest("ckb"));
+        const stored = new Map(storage.map);
+        const error: unknown = await engine
+            .pinChannelTerms(CHANNEL_ID, { ...TERMS, remoteFundingPubkey: OTHER_FUNDING_PUBKEY })
+            .catch((caught: unknown) => caught);
+        expect(error).toBeInstanceOf(ChannelPinError);
+        expect(error).toMatchObject({
+            conflict: { field: "remoteFundingPubkey", pinned: digest.remote.funding_pubkey, stated: bytesToHex(OTHER_FUNDING_PUBKEY) },
+        });
+        expect(storage.map).toEqual(stored);
+        await engine.pinChannelTerms(CHANNEL_ID, TERMS);
+        expect((await store.getChannelRecord(CHANNEL_INDEX))?.pins).toEqual({
+            ...TERMS_PINNED_PINS,
+            fundingOutPoint: `${FUNDING_TX_HASH}:0`,
+        });
+    });
+
+    // The terms pinned without the first-sight values, as before the host pinned them: the opening's commitment pins those.
+    async function firstSeen() {
+        const context = await bare();
+        await context.store.updateChannelRecord(CHANNEL_INDEX, (current) => {
+            if (current === null) throw new Error("the channel is registered");
+            const pins: ChannelPins = {
+                ...REGISTERED_PINS,
+                liquidCapacityShannons: "80500000000",
+                commitmentFeeRate: "1000",
+                remoteReservedCkbShannons: "6300000000",
+            };
+            return { ...current, pins };
+        });
+        await openChannel(context.engine);
+        return context;
+    }
+
+    it.each([
+        [
+            "peer funding key",
+            { remoteFundingPubkey: OTHER_FUNDING_PUBKEY },
+            { field: "remoteFundingPubkey", pinned: digest.remote.funding_pubkey, stated: bytesToHex(OTHER_FUNDING_PUBKEY) },
+        ],
+        [
+            "peer TLC base key",
+            { remoteTlcBasePubkey: OTHER_FUNDING_PUBKEY },
+            { field: "remoteTlcBasePubkey", pinned: digest.remote.tlc_base_pubkey, stated: bytesToHex(OTHER_FUNDING_PUBKEY) },
+        ],
+        [
+            "delay",
+            { commitmentDelayEpoch: 1099511627778n },
+            { field: "commitmentDelayEpoch", pinned: "1099511627777", stated: "1099511627778" },
+        ],
+    ])(
+        "throws a ChannelPinError on a %s other than the one a commitment pinned at first sight, writing nothing",
+        async (_, override, conflict) => {
+            const { engine, store, storage } = await firstSeen();
+            expect((await store.getChannelRecord(CHANNEL_INDEX))?.pins).toEqual(OPENED_PINS);
+            const stored = new Map(storage.map);
+            const error: unknown = await engine.pinChannelTerms(CHANNEL_ID, { ...TERMS, ...override }).catch((caught: unknown) => caught);
+            expect(error).toBeInstanceOf(ChannelPinError);
+            expect(error).toMatchObject({ conflict });
+            expect(storage.map).toEqual(stored);
+        },
+    );
+
+    it("writes nothing when it states the first-sight values a commitment pinned", async () => {
+        const { engine, store, storage } = await firstSeen();
+        storage.ops.length = 0;
+        await engine.pinChannelTerms(CHANNEL_ID, TERMS);
+        expect(storage.ops.filter((operation) => operation.startsWith("set"))).toEqual([]);
+        expect((await store.getChannelRecord(CHANNEL_INDEX))?.pins).toEqual(OPENED_PINS);
+    });
+
+    // The host's pin stands for the first sight: the channel's first commitment is held to it.
+    it.each([
+        [
+            "peer funding key",
+            { remoteFundingPubkey: OTHER_FUNDING_PUBKEY },
+            "remoteFundingPubkey",
+            bytesToHex(OTHER_FUNDING_PUBKEY),
+            digest.remote.funding_pubkey,
+        ],
+        [
+            "peer TLC base key",
+            { remoteTlcBasePubkey: OTHER_FUNDING_PUBKEY },
+            "remoteTlcBasePubkey",
+            bytesToHex(OTHER_FUNDING_PUBKEY),
+            digest.remote.tlc_base_pubkey,
+        ],
+        ["delay", { commitmentDelayEpoch: 1099511627778n }, "commitmentDelayEpoch", "1099511627778", "1099511627777"],
+    ])(
+        "has the channel's first commitment stating another %s than pinned refused at the claim, writing nothing",
+        async (_, override, field, stated, pinned) => {
+            const { engine, storage } = await registeredEngine();
+            const stored = new Map(storage.map);
+            const request = signedRequest({ kind: "commitment_tx", input: { ...ckbCommitment(), ...override } }, 11);
+            const refusal = await refusalOf(engine.checkAndClaim(KEYS, request));
+            expect(refusal).toMatchObject({
+                code: "policy_refusal",
+                message: `the request states ${field} ${stated}, but the channel pinned ${pinned}`,
+            });
+            expect(storage.map).toEqual(stored);
+        },
+    );
 
     it("throws on a channel this device never registered", async () => {
         const { engine } = newEngine();
@@ -1408,10 +1674,10 @@ describe("checkAndClaim", () => {
         );
 
         it("keeps the cell and the settlement body of the device's own commitment in its view", async () => {
-            const { engine, store } = await registered();
             const kase = caseOf(digest.commitment_cases, "ckb, three tlcs, for local");
             // Opened at the case's delay, which the "ckb" cases do not share.
             const delay = { commitmentDelayEpoch: BigInt(kase.delay_epoch) };
+            const { engine, store } = await registered(new InMemorySignerStorage(), FUNDED, { ...TERMS, ...delay });
             await engine.checkAndClaim(
                 KEYS,
                 signedRequest({ kind: "commitment_tx", input: { ...ckbCommitment(), ...delay, commitmentNumber: 10 } }, 10),

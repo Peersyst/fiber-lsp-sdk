@@ -1001,7 +1001,7 @@ describe("the signing step over the tenant node", () => {
 
         it("answers a method it does not serve as jsonrpsee does", async () => {
             const h = await openedUnderAllow();
-            const answer = await post(h.node, { jsonrpc: "2.0", id: 9, method: "open_tenant_channel", params: [{}] });
+            const answer = await post(h.node, { jsonrpc: "2.0", id: 9, method: "abandon_channel", params: [{}] });
             expect(answer).toEqual({ jsonrpc: "2.0", id: 9, error: { code: -32601, message: "Method not found" } });
         });
 

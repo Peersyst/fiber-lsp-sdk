@@ -1,4 +1,4 @@
-import { COMMITMENT_LOCK_MAINNET, COMMITMENT_LOCK_TESTNET } from "../digest";
+import { COMMITMENT_LOCK_MAINNET, COMMITMENT_LOCK_TESTNET, FUNDING_LOCK_MAINNET, FUNDING_LOCK_TESTNET } from "../digest";
 import { STORAGE_KEY_NAMESPACE } from "../policy";
 import type { RpcChannelStateFlag } from "../rpc";
 import { RPC_CALL_FAILED_CODE } from "../rpc";
@@ -15,12 +15,14 @@ const RELEASE_MILLISECONDS_PER_EPOCH = 14_400_000;
 export const SDK_NETWORK_PRESETS = {
     mainnet: {
         commitmentLock: COMMITMENT_LOCK_MAINNET,
+        fundingLock: FUNDING_LOCK_MAINNET,
         invoiceCurrency: "Fibb",
         fundingLockCellDepsCount: FUNDING_LOCK_CELL_DEPS_COUNT,
         millisecondsPerEpoch: RELEASE_MILLISECONDS_PER_EPOCH,
     },
     testnet: {
         commitmentLock: COMMITMENT_LOCK_TESTNET,
+        fundingLock: FUNDING_LOCK_TESTNET,
         invoiceCurrency: "Fibt",
         fundingLockCellDepsCount: FUNDING_LOCK_CELL_DEPS_COUNT,
         millisecondsPerEpoch: RELEASE_MILLISECONDS_PER_EPOCH,
@@ -53,6 +55,18 @@ export const ACTIVITY_RECORD_VERSION = 1;
 
 export const ACTIVITY_KINDS = ["channel", "payment", "invoice"] as const;
 
+/**
+ * One key, not one per channel: fiber keeps a single opening per tenant.
+ */
+export const PENDING_OPENING_RECORD_KEY = `${STORAGE_KEY_NAMESPACE}:opening`;
+
+export const PENDING_OPENING_RECORD_VERSION = 1;
+
+/**
+ * `stale` is fiber's channel restored from an old database, audited with the peer before it resumes.
+ */
+export const SDK_CHANNEL_STATES = ["opening", "ready", "closing", "closed", "stale"] as const;
+
 export const SDK_EVENT_TYPES = [
     "CHANNEL_READY",
     "CHANNEL_CLOSED",
@@ -79,4 +93,26 @@ export const WATCHTOWER_UNWATCHED_CLOSE_FLAGS = [
  */
 export const WATCHTOWER_UNWATCHED_ERROR = { code: RPC_CALL_FAILED_CODE, message: "watched channel not found" } as const;
 
-export const SDK_ERROR_CODES = ["poll_failed", "clock_before_floor", "unknown_channel"] as const;
+/**
+ * Where fiber's external funding puts the channel's cell in the funding tx it freezes.
+ */
+export const FUNDING_OUTPUT_INDEX = 0;
+
+/**
+ * Fiber's default, one epoch, sent rather than left to the node so the answer is checked against a known value.
+ */
+export const DEFAULT_COMMITMENT_DELAY_EPOCH = 0x10000000001n;
+
+/**
+ * Fiber's default, in shannons per kilobyte, sent for the same reason as the delay.
+ */
+export const DEFAULT_COMMITMENT_FEE_RATE = 1000n;
+
+export const SDK_ERROR_CODES = [
+    "poll_failed",
+    "clock_before_floor",
+    "unknown_channel",
+    "opening_rejected",
+    "opening_conflict",
+    "funding_tx_altered",
+] as const;

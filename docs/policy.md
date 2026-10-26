@@ -53,8 +53,14 @@ Registration is what may add a name, and it may only rename a record that has **
 slot or a moved counter belongs to a live channel, and handing it another name would be handing away its slots; that is a
 host error, not a node one, so it throws rather than refusing on the wire.
 
+Each contradiction registration finds in the records throws a `ChannelRegistrationError`, a `TypeError` carrying the
+`channelId` and `channelIndex` the host registered: the name already resolving to another index, the index registered
+with another funded amount or close script, a rename of a record that has served. A store that cannot be read throws a
+plain `TypeError` instead ([persistence.md](./persistence.md)), so a caller tells a registration the records refuse from
+a storage it cannot trust; the facade's opening turns only the first into `opening_conflict` ([sdk.md](./sdk.md)).
+
 A name is claimed, not written: the alias is read and set inside one critical section, and a name already resolving
-elsewhere throws. The check the engine runs before creating the record is the same rule stated early, so an ordinary
+elsewhere throws the same error. The check the engine runs before creating the record is the same rule stated early, so an ordinary
 mistake writes nothing at all; the claim is what settles two registrations racing for one name, since only one of them can
 read the alias free. The loser leaves an unreferenced record at its own index, which no name resolves to and which the
 winner's slots are unaffected by.
@@ -237,9 +243,9 @@ never paid into, and sign a digest of it. Check 5 holds each of them to one valu
 | `remoteReservedCkbShannons` | the host's terms                             | a commitment, a revocation                    |
 | `fundingOutPoint`           | the host, or the first sight                 | a commitment, a close, an announcement        |
 | `fundingCapacityShannons`   | the host, or the first sight                 | a commitment, a revocation                    |
-| `remoteFundingPubkey`       | the first sight                              | all four                                      |
-| `remoteTlcBasePubkey`       | the first sight                              | a commitment                                  |
-| `commitmentDelayEpoch`      | the first sight                              | a commitment, a revocation                    |
+| `remoteFundingPubkey`       | the host's terms, or the first sight         | all four                                      |
+| `remoteTlcBasePubkey`       | the host's terms, or the first sight         | a commitment                                  |
+| `commitmentDelayEpoch`      | the host's terms, or the first sight         | a commitment, a revocation                    |
 | `lockLayout`                | the first sight                              | a commitment, a revocation                    |
 
 What the device knows before the node states anything is fixed when the channel is registered: the amount the user
@@ -255,8 +261,16 @@ channel the node opens and the device then refuses to file is left open and unfi
 **The terms** are three values a request states but nothing in it vouches for, so a first sight of them would be a value the
 node chose: the commitment fee rate, the peer's reserve and the liquid capacity. `PolicyEngine.pinChannelTerms` takes them
 from the host, which reads them from the node's `opening_context` once the open is accepted and checks them against what the
-device asked. A commitment, a revocation or an announcement on a channel whose terms the host has not pinned is refused
-(`policy_refusal`), naming the first term that is missing; a close states none of them and needs none.
+device asked; the facade's opening does both ([sdk.md](./sdk.md)). A commitment, a revocation or an announcement on a
+channel whose terms the host has not pinned is refused (`policy_refusal`), naming the first term that is missing; a close
+states none of them and needs none.
+
+The same context states three first-sight values, and `pinChannelTerms` pins them beside the terms (`HOST_TERMS_PINS`):
+the peer's funding key, its TLC base key (fiber's `remote_settlement_key`) and the commitment delay, the full
+`EpochNumberWithFraction` value. Pinned by the host, they are the values the opening was checked with rather than the
+first a request states, and a request that states others is refused like any pin conflict. They stay first-sight pins: a
+channel the host pins no terms for takes them from its first signed message, as before. Each key must be a compressed
+point on the curve and the delay a u64, or the call throws a `TypeError` or a `RangeError` naming the field.
 
 `PolicyEngine.pinFundingCell` takes what the host knows from the funding tx it is to sign, the out point and the
 capacity of the funding output. Neither order is assumed, since fiber can ask for the device's own first commitment
@@ -291,7 +305,9 @@ Five choices sit in that table:
   the first commitment. Registration therefore computes the reserve under both layouts, and the layout a message states
   picks the value it is held to: only a commitment and a revocation state the reserve, and both state the layout beside
   it. "Computed, not seen" stays true: the node only ever chooses between two values the device computed, and choosing
-  one pins the layout with it. Pinned at first sight instead, a node could open with the whole funding as the device's
+  one pins the layout with it. The computation is exported as `reservedCkbShannons(closeScript, layout)`, fiber's
+  `reserved_capacity` over either side's close script: the facade sizes the peer's reserve with it over the opening
+  context's `remote_shutdown_script` before the host pins that term ([sdk.md](./sdk.md)). Pinned at first sight instead, a node could open with the whole funding as the device's
   reserve: the opening would still pay the funded amount, and none of it could be spent.
 - **The lock layout is pinned at first sight**, declared by a commitment and by a revocation (both size their fee over
   the commitment lock's mock, so both carry it), never by a close or an announcement, which do not depend on it. A
@@ -616,11 +632,13 @@ the difference to the fee. It can never redirect it: every output but the remain
   ([signing.md](./signing.md)).
 - **It cannot check a value the first time it sees it.** A pin taken from a request is a value the node chose once: the
   commitment delay and the peer's keys are held to their first value, not to a right one. The funded amount, the close
-  script, the device's reserve, the asset and, through the host, the funding cell and the terms are the exceptions, being
-  the device's own or checked by the host against the open it asked for.
-- **It does not check the funding output's lock.** The funding cell's out point and capacity are pinned, but whether its
-  lock is the 2-of-2 the device holds half of needs the peer's funding key before the host signs, which nothing gives it
-  (an open question with the Fiber team).
+  script, the device's reserve, the asset and, through the host, the funding cell, the terms and the three first-sight
+  values the opening context states are the exceptions, being the device's own or checked by the host against the open it
+  asked for.
+- **It does not check the funding output's lock.** The funding cell's out point and capacity are pinned, and whether its
+  lock is the 2-of-2 the device holds half of is the facade's check at the opening, over the peer's funding key the
+  opening context states ([sdk.md](./sdk.md)): a signing request never states the lock, so there is nothing for the gate
+  to hold to it.
 - **It judges the latest commitment of each view, never the ones it supersedes.** A commitment the device signed stays
   publishable until it is revoked. The device keeps the complete revocation of every superseded peer commitment as
   evidence (above), but its own superseded commitments are revoked by a signature only the node holds, and the gate has no
@@ -643,12 +661,12 @@ the difference to the fee. It can never redirect it: every output but the remain
 | ---------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `src/policy/policy-engine.ts`            | The six checks, sign-once and reuse, the claim, channel registration, the host's pins, the evidence, intents and hold invoices; the watchtower's approval, its claim, the signature recorded and the mark of a spend fiber applied |
 | `src/policy/watchtower-spend.ts`         | The watchtower's rules, pure: the structure, the source, the key, the remainder, the destination, the repeat and the claim                                                                                                         |
-| `src/policy/channel-opening.ts`          | What a channel opens with: the funded amount and close script checked, and the registration's pins                                                                                                                                 |
+| `src/policy/channel-opening.ts`          | What a channel opens with: the funded amount and close script checked, the registration's pins, and the reserve over either side's close script                                                                                    |
 | `src/policy/channel-pins.ts`             | Check 5's pins, pure: what each operation and the host's terms state, in the pins' forms, and the first conflict                                                                                                                   |
 | `src/policy/capacity-bounds.ts`          | Check 5's bounds, pure: the commitment fee and what a commitment pays out                                                                                                                                                          |
 | `src/policy/balance-rule.ts`             | Check 6 itself, pure: the opening, the three steps over two snapshots, and the close with its fee bound                                                                                                                            |
 | `src/policy/policy.constants.ts`         | The keyspace prefixes and the balance lane, the pins by who fixes them, the reuse modes and the lanes, the record versions, the watchtower's two bounds                                                                            |
-| `src/policy/policy.error.ts`             | `PolicyRefusalError`, carrying the wire error code, and `withPolicyRefusal`; the host's `DebitIntentError`, `HoldInvoiceError` and `ChannelPinError`                                                                               |
+| `src/policy/policy.error.ts`             | `PolicyRefusalError`, carrying the wire error code, and `withPolicyRefusal`; the host's `DebitIntentError`, `HoldInvoiceError`, `ChannelPinError` and `ChannelRegistrationError`                                                   |
 | `src/policy/utils/payment-hash.utils.ts` | The bound payment hash a payment record is keyed by, and whether a TLC under that key is the record's                                                                                                                              |
 | `src/policy/utils/slot.utils.ts`         | Operation and counter to slot and lane, where the shared close slot and the fixed announcement live                                                                                                                                |
 | `src/policy/utils/session.utils.ts`      | The session commitment and the shape a signable session must have                                                                                                                                                                  |
@@ -683,9 +701,10 @@ refused, both repeats idempotent with no write, a logged session still answered 
 refused, the other lane's revocation served on the slot one lane served, moving its own lane to the slot, a second
 session at its lane's last served and below it refused as stale, a second session held to its
 view's version, the pins, the balance rule and the close rule, its channel filed on its intents, and an unknown mode
-refused. The terms: pinned, at u64's maximum, repeated with no write under either name, each one conflicting with a
-`ChannelPinError` naming both values, each malformed argument refused by name, an unregistered channel and an alias with
-no record thrown, every operation but the close refused on a channel whose terms are unpinned, naming the first missing,
+refused. The terms: pinned with the three first-sight values, at u64's maximum, repeated with no write under either name,
+each one conflicting with a `ChannelPinError` naming both values, a first-sight value a message pinned first restated with
+no write and contradicted with that error, each malformed argument refused by name, an unregistered channel and an alias
+with no record thrown, every operation but the close refused on a channel whose terms are unpinned, naming the first missing,
 and the close signed there. The evidence: kept, repeated with no write under either name, replaced by another signature
 of its version, kept in ascending order, the record otherwise untouched, refused for a version whose revocation slot was
 never served, each malformed argument refused, the highest version the chain holds recorded, and an unregistered channel
@@ -720,15 +739,16 @@ whole hashes kept in the view, and a release held back by the invoice's own TLC 
 malformed request for an unregistered channel pins that the shape check answers first. Renaming has its own set: both names
 of a channel reaching one record, a repeat under the other name answered `already-signed`, a rename refused once the record
 has served, two names racing for the same slot, and two registrations racing for one name where the loser's index never
-takes it.
+takes it. Each contradicted registration, the lost race included, throws a `ChannelRegistrationError` carrying the
+registered name and index, and a record or a name the store holds corrupt a plain `TypeError`, writing nothing.
 
 Check 5 is pinned three ways. `test/tests/policy/channel-pins.spec.ts` reads what each operation of the vectors states,
 field for field, under both layouts, a close stating no capacity, reserve or layout, and the host's terms in their pin
 forms; it contrasts the reserve under the layout a statement declares, each conflict naming the computed value, throws on a
 reserve stated without its layout, and pins a term only from the host's statement, never from a message's.
 `test/tests/policy/channel-opening.spec.ts` checks both reserves against the ones fiber's own `occupied_capacity` sizes in
-the vectors, over scripts on both sides of the 57-byte and 58-byte edges, and puts the funded amount at each edge of what
-registration accepts, the `legacy` floor. `test/tests/policy/capacity-bounds.spec.ts` puts each bound at its exact edge and
+the vectors, over scripts on both sides of the 57-byte and 58-byte edges, refuses a malformed close script or layout by
+name, and puts the funded amount at each edge of what registration accepts, the `legacy` floor. `test/tests/policy/capacity-bounds.spec.ts` puts each bound at its exact edge and
 one shannon past it, the fees sized over the mock transactions fiber's own fees are pinned against, the commitment fee bound
 reached one byte sooner under the full-hash layout, and a close bounded by nothing there. The engine's spec refuses, per
 operation, every pin that operation states, moved by one field (the out point, its hash, the liquid capacity, a reserve, a
@@ -1217,3 +1237,40 @@ registered channel goes through and which fail on a record a broken storage lost
 | A lost record reaches the updater                | 7                 |
 | A lost record reads as absent instead of failing | 3                 |
 | The read helper names no channel                 | 3                 |
+
+The opening's part, the three first-sight values `pinChannelTerms` takes from the host, `reservedCkbShannons` over either
+side's close script, and the `ChannelRegistrationError` each contradicted registration throws, were broken the same way
+(`test/tests/policy`, still 100% on all four metrics):
+
+| Mutation                                                        | Tests that failed |
+| --------------------------------------------------------------- | ----------------- |
+| The keys are pinned 0x-prefixed                                 | 278               |
+| The peer's funding key pin is its TLC base key                  | 221               |
+| The delay is pinned in hex                                      | 210               |
+| The peer's TLC base key pin is its funding key                  | 182               |
+| The host pins the terms alone                                   | 15                |
+| The host does not pin the delay                                 | 10                |
+| The host does not pin the peer's TLC base key                   | 10                |
+| The registration error carries no channel id                    | 7                 |
+| The registration error carries no channel index                 | 7                 |
+| The host does not pin the peer's funding key                    | 6                 |
+| The delay bound refuses its own edge                            | 5                 |
+| The peer's TLC base key is not checked                          | 5                 |
+| The peer's TLC base key is refused under the funding key's name | 5                 |
+| The peer's funding key is not checked                           | 5                 |
+| The registration error is not a TypeError                       | 5                 |
+| The registration error keeps Error's name                       | 5                 |
+| The delay bound admits its edge plus one                        | 4                 |
+| The delay is not checked                                        | 4                 |
+| The reserve's close script is checked under another name        | 4                 |
+| The reserve's close script is not checked                       | 4                 |
+| A claimed name reports the index it resolves to                 | 2                 |
+| A claimed name throws a plain TypeError                         | 2                 |
+| A served record's rename reports the record's name              | 2                 |
+| A served record's rename throws a plain TypeError               | 2                 |
+| Another funded amount or close script reports the record's name | 2                 |
+| Another funded amount or close script throws a plain TypeError  | 2                 |
+| The reserve's layout is checked under another name              | 2                 |
+| The reserve's layout is not checked                             | 2                 |
+| A name at another index reports the index it is at              | 1                 |
+| A name at another index throws a plain TypeError                | 1                 |

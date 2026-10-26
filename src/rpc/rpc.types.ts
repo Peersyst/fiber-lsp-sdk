@@ -1,6 +1,6 @@
-import type { Script, TlcHashAlgorithm, Transaction } from "../common";
+import type { CellDep, Script, TlcHashAlgorithm, Transaction } from "../common";
 import type { InvoiceCurrency } from "../invoice";
-import type { BareHexWire, HexWire, ScriptWire, TlcHashAlgorithmWire, TransactionWire, UintHexWire, WireField } from "../wire";
+import type { BareHexWire, CellDepWire, HexWire, ScriptWire, TlcHashAlgorithmWire, TransactionWire, UintHexWire, WireField } from "../wire";
 import type { IFetchLike } from "./interfaces";
 import type {
     JSON_RPC_VERSION,
@@ -46,6 +46,7 @@ export type OpenChannelWithExternalFundingParamsWire = {
     public: boolean;
     shutdown_script: ScriptWire;
     funding_lock_script: ScriptWire;
+    funding_lock_script_cell_deps?: CellDepWire[];
 };
 
 export type OpenChannelWithExternalFundingResultWire = { channel_id: HexWire; unsigned_funding_tx: TransactionWire };
@@ -223,6 +224,10 @@ export type OpenChannelWithExternalFundingParams = {
     public: boolean;
     shutdownScript: Script;
     fundingLockScript: Script;
+    /**
+     * For a funding lock outside the node's genesis defaults.
+     */
+    fundingLockScriptCellDeps?: CellDep[];
 };
 
 export type OpenChannelWithExternalFundingResult = {
@@ -340,6 +345,10 @@ export type OpenTenantChannelParams = {
     fundingAmountShannons: string;
     shutdownScript: Script;
     fundingLockScript: Script;
+    /**
+     * For a funding lock outside the node's genesis defaults.
+     */
+    fundingLockScriptCellDeps?: CellDep[];
     /**
      * The full `EpochNumberWithFraction` value; the node's default when absent.
      */

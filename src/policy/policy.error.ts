@@ -83,3 +83,22 @@ export class ChannelPinError extends Error {
         this.conflict = conflict;
     }
 }
+
+export class ChannelRegistrationError extends TypeError {
+    readonly channelId: string;
+
+    readonly channelIndex: number;
+
+    /**
+     * Creates the error.
+     * @param channelId The name the host registered.
+     * @param channelIndex The index the host registered it under.
+     * @param message What in the records contradicts it.
+     */
+    constructor(channelId: string, channelIndex: number, message: string) {
+        super(message);
+        this.name = "ChannelRegistrationError";
+        this.channelId = channelId;
+        this.channelIndex = channelIndex;
+    }
+}
