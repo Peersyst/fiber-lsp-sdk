@@ -9,7 +9,7 @@ import { SignerDispatch } from "../../src/signer";
 import { TimerMock } from "../mocks/common";
 import type { InMemorySignerStorage } from "../mocks/policy";
 import { flush } from "./flush";
-import { signingDeviceKeys, signingPeerKeys } from "./signing-channel";
+import { SIGNING_MILLISECONDS_PER_EPOCH, signingDeviceKeys, signingPeerKeys } from "./signing-channel";
 import { loadSigningVectors } from "./signing-vectors";
 import { InMemoryTenantNode, tenantNodeChannelOf } from "./tenant-node";
 
@@ -70,6 +70,7 @@ export function tenantDevice(node: InMemoryTenantNode, options: TenantDeviceOpti
         masterSeed: hexToBytes(vectors.device.master_seed),
         commitmentLock: CHANNEL.commitmentLock,
         fundingLockCellDepsCount: CHANNEL.fundingLockCellDepsCount,
+        millisecondsPerEpoch: SIGNING_MILLISECONDS_PER_EPOCH,
         policy,
     });
     const events: SdkEvent[] = [];

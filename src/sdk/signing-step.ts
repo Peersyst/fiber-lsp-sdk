@@ -17,6 +17,15 @@ type SignedDispatchOutcome = Extract<DispatchOutcome, { kind: "signed" }>;
 const POLL = "signing";
 
 /**
+ * Writes a request's deadline as the `SIGNING` event carries it.
+ * @param deadlineMs The dispatch's deadline, `null` without one.
+ * @returns The event's field, or no field.
+ */
+function deadlineFieldOf(deadlineMs: bigint | null): { deadlineMs?: number } {
+    return deadlineMs === null ? {} : { deadlineMs: Number(deadlineMs) };
+}
+
+/**
  * Builds the poll step that answers the signing requests of every registered channel the node lists.
  * @param options The node's client, the store, the dispatch and the emitter.
  * @returns The step; it rejects only when the node's channels cannot be listed.
@@ -32,7 +41,7 @@ export function buildChannelSigningStep(options: ChannelSigningStepOptions): Pol
      */
     const submit = async (run: PollRun, channelId: string, outcome: SignedDispatchOutcome): Promise<void> => {
         if (run.abandoned) return;
-        const { requestId, partialSignature, nextMaterial, transition } = outcome;
+        const { requestId, partialSignature, nextMaterial, transition, deadlineMs } = outcome;
         // Both answers are success: `Applied` again while the request is pending, `AlreadyApplied` once it completed.
         await rpc.submitChannelSignature({ channelId, requestId, partialSignature, nextMaterial });
         deliverStepEvent(run, emit, {
@@ -40,6 +49,7 @@ export function buildChannelSigningStep(options: ChannelSigningStepOptions): Pol
             channelId,
             requestId: encodeSdkRequestId(requestId),
             transition,
+            ...deadlineFieldOf(deadlineMs),
             outcome: outcome.warnings.length === 0 ? "signed" : "warning",
         });
     };
@@ -73,6 +83,7 @@ export function buildChannelSigningStep(options: ChannelSigningStepOptions): Pol
                 channelId,
                 requestId: outcome.requestId === null ? null : encodeSdkRequestId(outcome.requestId),
                 transition: outcome.transition,
+                ...deadlineFieldOf(outcome.deadlineMs),
                 outcome: "refused",
                 error: { code: outcome.error.code, message: outcome.error.message },
             });

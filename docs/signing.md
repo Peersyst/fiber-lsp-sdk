@@ -43,11 +43,11 @@ Nothing on this path throws. A status is answered with one of four outcomes:
 
 - **idle**, for `NoSignatureRequired`, before the channel is even looked up;
 - **signed**, with the request id and transition, the slot, the number the message carries and its view (below), the
-  32-byte partial signature, the next material or `null`, the verdict (`fresh`, `already-signed` or `reused`) and the
-  warnings: a `reused` verdict carries `{ kind: "nonce-reused", slot }`;
-- **refused**, with the request id and transition once the status decoded, and one of the four codes with its message:
-  a `ProtocolError` of the decoder, a `PolicyRefusalError` of the gate or of the dispatch's own steps, and the type and
-  range errors the digest and the input builders throw over what the node sent, which are `malformed`;
+  32-byte partial signature, the next material or `null`, the verdict (`fresh`, `already-signed` or `reused`), the
+  warnings (a `reused` verdict carries `{ kind: "nonce-reused", slot }`) and the deadline (below);
+- **refused**, with the request id and transition once the status decoded, the deadline, and one of the four codes with
+  its message: a `ProtocolError` of the decoder, a `PolicyRefusalError` of the gate or of the dispatch's own steps, and
+  the type and range errors the digest and the input builders throw over what the node sent, which are `malformed`;
 - **fault**, carrying the cause: the storage throwing, a record or an alias the store refuses to read, a name resolving
   to an index with no record, a value whose reading throws for a reason no codec names, a bug. None of those is the
   node's, and answering one as a refusal would make the node treat a device fault as a security event; a fault after the
@@ -61,6 +61,38 @@ gate order ([policy.md](./policy.md)).
 
 Channel keys are derived per request and never cached. The master seed, copied at construction so the host may discard
 its own buffer, is the only secret the dispatch holds.
+
+## The deadline
+
+A channel whose request fiber is still waiting on, in `ChannelReady` or in `ShuttingDown` without
+`WAITING_COMMITMENT_CONFIRMATION`, is force-closed once any unresolved TLC reaches its expiry less two thirds of the
+commitment delay (`pending_tlc_signature_deadline` and `tlc_expiry_delay`, `fiber-lib/src/fiber/channel.rs:6532-6553`
+and `:5894-5899`); nothing of it travels in the status. The dispatch computes it and reports it as `deadlineMs`, a
+`bigint` of milliseconds since the epoch, on a signed outcome and on a refusal after decoding, and never acts on it:
+every request is answered when it is seen. It is `null` unless the request carries a settlement with at least one TLC,
+which only the two commitment transitions do, and the channel's delay is pinned; a refusal before decoding has none
+either. The pins are read after the claim, so the first commitment, whose claim pins the delay, already reports it, and
+a pin read that fails leaves the deadline `null` and the outcome as it was: a diagnostic never turns a signature or a
+refusal into a fault. The delay is the pinned one, not the transaction's, since a refused request's content may state
+another.
+
+It is an upper bound. Fiber takes every TLC whose removal is not confirmed (`all_tlcs()`), the snapshot only the
+commitment's, so fiber's deadline may come earlier, never later. On a refusal the expiries are the node's own statement,
+which nothing checked (they are bound to the message only once the transaction is rebuilt), so there the bound holds only
+as far as the node is honest. And `null` means the device cannot compute one, not that fiber has none: a revocation, the
+close, or a fulfil's commitment, which no longer lists the TLC it removes, still falls under fiber's deadline while a
+TLC's removal is unconfirmed.
+
+The port (`src/signer/signing-deadline.ts`, `tlcExpiryDelay` and `pendingTlcSignatureDeadline`) follows fiber's
+arithmetic to the bit. The delay is read as CKB's `EpochNumberWithFraction::from_full_value` reads it, the number in
+bits 0 to 23, the index in 24 to 39 and the length in 40 to 55, a zero length rewritten to the fraction 0/1 by its
+`normalize` (ckb-types 1.1.3, `core/extras.rs:468-489`). The sum `number + index / length` is multiplied by the epoch's
+length and by 2 and divided by 3 in that order, in f64, and cast as Rust's `as u64` casts: truncated, NaN and below zero
+to 0, from 2^64 up to `u64::MAX`. Each expiry less the result saturates at 0, and the earliest is the deadline. The
+epoch's length, fiber's `MILLI_SECONDS_PER_EPOCH`, is set by the node's build, 4 hours in release and 2 seconds in debug
+(`fiber-lib/src/fiber/config.rs:44-50`), so the device cannot deduce it: it comes in as the dispatch's
+`millisecondsPerEpoch`, a positive integer up to `Number.MAX_SAFE_INTEGER`, from the facade's network
+([sdk.md](./sdk.md)).
 
 ## Key orders
 
@@ -219,7 +251,8 @@ gives out three things:
 
 A nonce issued to another root signer is refused (`TypeError` naming `challenge.rootSignerPubkey`), as fiber's own
 `begin_registration` refuses it: signing it serves no one and hides a fault of the LSP or the host. The LSP's node id
-must be a point and the nonce 32 bytes. Which LSP the node id should be is the facade's to check against its options.
+must be a point and the nonce 32 bytes. Which LSP the node id should be is the facade's to check against its options
+([sdk.md](./sdk.md), "The tenant's registration").
 
 The SDK signs and never calls: both registration methods need the operator's token ([rpc.md](./rpc.md)), which a phone
 does not hold, so the host's backend (or an agent) asks for the nonce, has the device sign it, registers, and hands the
@@ -493,9 +526,10 @@ call that asks for closed ones, and a cooperative close as `ShuttingDown` and th
 
 | File                                      | Contents                                                                                                                      |
 | ----------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------- |
-| `src/signer/signer-dispatch.ts`           | The twelve steps, the four outcomes, and the opening; `handleWatchtower` and its four outcomes                                |
+| `src/signer/signer-dispatch.ts`           | The twelve steps, the four outcomes, the deadline of two, and the opening; `handleWatchtower` and its four outcomes           |
 | `src/signer/musig2-engine.ts`             | The public keys, points and nonces, the nonce sum, the partial signature, the peer's half verified, the aggregate             |
 | `src/signer/signer-material.ts`           | The opening block and the next material                                                                                       |
+| `src/signer/signing-deadline.ts`          | `tlcExpiryDelay` and `pendingTlcSignatureDeadline`: fiber's deadline for a pending request, its f64 arithmetic and casts      |
 | `src/signer/tenant-identity.ts`           | The RootSigner: its public key, the tenant id, the registry payload, its digest and the registration signature                |
 | `src/signer/onchain-signature.ts`         | `signOnchain`: the watchtower's recoverable signature under the key its purpose names                                         |
 | `src/signer/signer.constants.ts`          | The key order per transition, fiber's two tenant domains                                                                      |
@@ -666,3 +700,38 @@ same way (`test/tests/signer`, still 100% on all four metrics):
 
 Dropping the size check on the recovered signature fails no test, and cannot: noble's `recovered` format always writes 65
 bytes, so the check only guards a change of the library, whose frozen export no spec can stand in for.
+
+`test/tests/signer/signing-deadline.spec.ts` pins the port of fiber's `tlc_expiry_delay` and
+`pending_tlc_signature_deadline` with values computed by hand and checked against fiber's f64 arithmetic: one epoch at
+each build's `MILLI_SECONDS_PER_EPOCH`, fractions where f64 rounding departs from the exact value, a zero length read as
+CKB's `normalize` reads it, the cast's truncation and saturation, an expiry below, at and above the reserve, and the
+earliest of several TLCs. The dispatch's spec reads the deadline on both commitment transitions, signed and refused, from
+the pinned delay rather than the transaction's, and requires `null` on revocations, the close, a refusal before decoding,
+no TLC, no pin, and pins that fail to read, the outcome otherwise identical (`test/tests/signer`, still 100% on all four
+metrics):
+
+| Mutation                                                | Tests that failed |
+| ------------------------------------------------------- | ----------------- |
+| The delay is the whole commitment delay, not two thirds | 20                |
+| The index is read at the length's offset                | 19                |
+| The epoch length is not validated                       | 9                 |
+| The latest TLC is taken, not the earliest               | 8                 |
+| Only the first TLC counts                               | 7                 |
+| A failed pin read faults the outcome                    | 6                 |
+| The delay is taken from the default epoch, not the pin  | 6                 |
+| The fraction is dropped from the delay                  | 5                 |
+| The number mask keeps a bit of the index                | 5                 |
+| An expiry equal to the reserve is not zero              | 4                 |
+| A refusal after decoding carries no deadline            | 3                 |
+| A signature carries no deadline                         | 3                 |
+| The cast does not saturate                              | 3                 |
+| The deadline is read with no TLC                        | 3                 |
+| The thirds are taken before the epochs are summed       | 3                 |
+| A zero length is not normalized                         | 2                 |
+| The cast rounds instead of truncating                   | 2                 |
+| The subtraction wraps below zero                        | 2                 |
+| A zero length keeps its index                           | 1                 |
+| NaN is cast to u64::MAX                                 | 1                 |
+| No TLC gives a zero deadline                            | 1                 |
+| The network's epoch length is ignored                   | 1                 |
+| The saturation starts one ulp late                      | 1                 |

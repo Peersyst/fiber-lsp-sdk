@@ -617,6 +617,44 @@ describe("the signing step over the tenant node", () => {
         });
     });
 
+    describe("the deadline", () => {
+        function deadlinesOf(h: TenantFlow): string[] {
+            const served = h.node.served;
+            return h.device.events.map((event) => {
+                if (event.type !== "SIGNING") return event.type;
+                const slot = served.find((request) => request.requestId === event.requestId)?.slot ?? "an unserved request";
+                return `${event.transition ?? "unread"} ${slot} ${"deadlineMs" in event ? String(event.deadlineMs) : "absent"}`;
+            });
+        }
+
+        it("reports fiber's deadline on the add round's commitments, which state the TLC received, and none on the rest", async () => {
+            const h = await openedUnderAllow();
+            h.node.receivePayment(RECEIVED);
+            await tick(h.device, 4);
+            h.node.fulfil(RECEIVED.paymentHash);
+            await tick(h.device, 4);
+            h.node.shutdown();
+            await tick(h.device);
+            // RECEIVED's expiry, 1_760_580_000_000, less two thirds of the delay the open pinned, one epoch of 4 h: 9_600_000.
+            expect((await recordOf(h.device)).pins.commitmentDelayEpoch).toBe(CHANNEL.commitmentDelayEpoch.toString());
+            expect(CHANNEL.commitmentDelayEpoch).toBe((1n << 40n) | 1n);
+            expect(deadlinesOf(h)).toEqual([
+                "CompleteReceivedCommitment Commitment@1 absent",
+                "SendCommitmentSigned Commitment@1 absent",
+                "CompleteReceivedCommitment Commitment@2 1760570400000",
+                "SendRevokeAndAck Revocation@2 absent",
+                "SendCommitmentSigned Commitment@2 1760570400000",
+                "CompleteReceivedRevokeAndAck Revocation@2 absent",
+                // The fulfil's commitments no longer state the TLC.
+                "SendCommitmentSigned Commitment@3 absent",
+                "CompleteReceivedRevokeAndAck Revocation@3 absent",
+                "CompleteReceivedCommitment Commitment@4 absent",
+                "SendRevokeAndAck Revocation@3 absent",
+                "SendClosingSigned Commitment@4 absent",
+            ]);
+        });
+    });
+
     describe("a received revocation whose evidence write failed", () => {
         // The receive's add round up to its CompleteReceivedRevokeAndAck, whose claim lands and evidence write throws.
         async function failedEvidence(): Promise<TenantFlow> {

@@ -1,5 +1,6 @@
 export * from "./activity";
 export * from "./allocator";
+export * from "./channel-evidence";
 export * from "./fiber-lsp-sdk";
 export * from "./poller";
 export * from "./sdk.constants";

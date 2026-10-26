@@ -1206,3 +1206,14 @@ the record guard's new fields were broken the same way (`test/tests/policy`, sti
 | The verdict is fresh whatever the rules decided                                               | 1                 |
 | Two spends may share a commitment's unlock                                                    | 1                 |
 | Two spends may share a request                                                                | 1                 |
+
+The record's two accessors, `readRegisteredRecord` and `updateRegisteredRecord`, which every read and update of a
+registered channel goes through and which fail on a record a broken storage lost, were broken the same way
+(`test/tests/policy`, still 100% on all four metrics):
+
+| Mutation                                         | Tests that failed |
+| ------------------------------------------------ | ----------------- |
+| The updater's record is never written            | 216               |
+| A lost record reaches the updater                | 7                 |
+| A lost record reads as absent instead of failing | 3                 |
+| The read helper names no channel                 | 3                 |

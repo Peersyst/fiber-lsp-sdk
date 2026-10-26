@@ -1,6 +1,7 @@
 import { assertOneOf, assertPositiveInteger, assertScriptTemplate, isPlainObject } from "../../common";
 import { MAX_CELL_DEPS_COUNT } from "../../digest";
 import { INVOICE_CURRENCIES } from "../../invoice";
+import { MAX_MILLISECONDS_PER_EPOCH } from "../../signer";
 import { SDK_NETWORK_NAMES, SDK_NETWORK_PRESETS } from "../sdk.constants";
 import type { SdkNetwork, SdkNetworkConfig } from "../sdk.types";
 
@@ -19,9 +20,12 @@ export function resolveSdkNetwork(network: SdkNetwork): SdkNetworkConfig {
     assertOneOf("network.invoiceCurrency", network.invoiceCurrency, INVOICE_CURRENCIES);
     const count: unknown = network.fundingLockCellDepsCount;
     assertPositiveInteger("network.fundingLockCellDepsCount", count, MAX_CELL_DEPS_COUNT);
+    const millisecondsPerEpoch: unknown = network.millisecondsPerEpoch;
+    assertPositiveInteger("network.millisecondsPerEpoch", millisecondsPerEpoch, MAX_MILLISECONDS_PER_EPOCH);
     return {
         commitmentLock: { codeHash: Uint8Array.from(network.commitmentLock.codeHash), hashType: network.commitmentLock.hashType },
         invoiceCurrency: network.invoiceCurrency,
         fundingLockCellDepsCount: count,
+        millisecondsPerEpoch,
     };
 }

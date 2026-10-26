@@ -22,3 +22,8 @@ export const TENANT_REGISTRY_PROTOCOL = "fiber-hosted-lsp-tenant-registry/v1";
  * Fiber's `TENANT_ID_DOMAIN` (`fiber-types/src/hosted_lsp.rs:14`), the salt of the tenant id's hash.
  */
 export const TENANT_ID_DOMAIN = "fiber-hosted-lsp-tenant-id/v1";
+
+/**
+ * The epoch length enters `tlc_expiry_delay`'s f64 arithmetic, exact for integers up to here.
+ */
+export const MAX_MILLISECONDS_PER_EPOCH = Number.MAX_SAFE_INTEGER;

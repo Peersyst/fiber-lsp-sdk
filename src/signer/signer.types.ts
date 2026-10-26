@@ -22,10 +22,14 @@ export type SignerDispatchOptions = {
      * Fiber counts these into the commitment fee although the commitment tx carries none.
      */
     fundingLockCellDepsCount: number;
+    /**
+     * Fiber's `MILLI_SECONDS_PER_EPOCH`, which a build sets: 4 h in release, 2 s in debug.
+     */
+    millisecondsPerEpoch: number;
     policy: PolicyEngine;
 };
 
-export type SigningNetwork = Pick<SignerDispatchOptions, "commitmentLock" | "fundingLockCellDepsCount">;
+export type SigningNetwork = Pick<SignerDispatchOptions, "commitmentLock" | "fundingLockCellDepsCount" | "millisecondsPerEpoch">;
 
 export type SigningKeyOrder = (typeof SIGNING_KEY_ORDERS)[ChannelSigningTransition];
 
@@ -64,8 +68,22 @@ export type DispatchOutcome =
           nextMaterial: NextChannelSignerMaterial | null;
           status: "fresh" | "already-signed" | "reused";
           warnings: SigningWarning[];
+          /**
+           * Fiber's `pending_tlc_signature_deadline` in ms since the epoch; `null` without a TLC, a pinned delay or readable pins.
+           * An upper bound: fiber also counts the TLCs not confirmed removed.
+           */
+          deadlineMs: bigint | null;
       }
-    | { kind: "refused"; requestId: Uint8Array | null; transition: ChannelSigningTransition | null; error: SignerRefusal }
+    | {
+          kind: "refused";
+          requestId: Uint8Array | null;
+          transition: ChannelSigningTransition | null;
+          error: SignerRefusal;
+          /**
+           * As on a signature, over the refused request's unchecked expiries.
+           */
+          deadlineMs: bigint | null;
+      }
     | { kind: "fault"; cause: unknown };
 
 export type WatchtowerDispatchOutcome =
