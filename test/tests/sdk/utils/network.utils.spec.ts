@@ -1,21 +1,24 @@
 import { bytesToHex } from "@noble/hashes/utils.js";
-import { COMMITMENT_LOCK_MAINNET, COMMITMENT_LOCK_TESTNET } from "../../../../src/digest";
+import { COMMITMENT_LOCK_MAINNET, COMMITMENT_LOCK_TESTNET, FUNDING_LOCK_MAINNET, FUNDING_LOCK_TESTNET } from "../../../../src/digest";
 import { SDK_NETWORK_NAMES, SDK_NETWORK_PRESETS, resolveSdkNetwork } from "../../../../src/sdk";
 import type { SdkNetwork } from "../../../../src/sdk";
 
 const DEV_LOCK = { codeHash: new Uint8Array(32).fill(0x5d), hashType: "data1" } as const;
+const DEV_FUNDING_LOCK = { codeHash: new Uint8Array(32).fill(0x6c), hashType: "data2" } as const;
 
 describe("resolveSdkNetwork", () => {
-    it("pins the two presets to fiber's commitment locks, currencies and release epoch of 4 h", () => {
+    it("pins the two presets to fiber's commitment and funding locks, currencies and release epoch of 4 h", () => {
         expect(SDK_NETWORK_NAMES).toEqual(["mainnet", "testnet"]);
         expect(SDK_NETWORK_PRESETS.mainnet).toEqual({
             commitmentLock: COMMITMENT_LOCK_MAINNET,
+            fundingLock: FUNDING_LOCK_MAINNET,
             invoiceCurrency: "Fibb",
             fundingLockCellDepsCount: 2,
             millisecondsPerEpoch: 14_400_000,
         });
         expect(SDK_NETWORK_PRESETS.testnet).toEqual({
             commitmentLock: COMMITMENT_LOCK_TESTNET,
+            fundingLock: FUNDING_LOCK_TESTNET,
             invoiceCurrency: "Fibt",
             fundingLockCellDepsCount: 2,
             millisecondsPerEpoch: 14_400_000,
@@ -28,33 +31,48 @@ describe("resolveSdkNetwork", () => {
         );
         expect(SDK_NETWORK_PRESETS.mainnet.commitmentLock.hashType).toBe("type");
         expect(SDK_NETWORK_PRESETS.testnet.commitmentLock.hashType).toBe("type");
+        // The `FundingLock` of fiber's node configs, under the `type` hash type.
+        expect(bytesToHex(SDK_NETWORK_PRESETS.mainnet.fundingLock.codeHash)).toBe(
+            "e45b1f8f21bff23137035a3ab751d75b36a981deec3e7820194b9c042967f4f1",
+        );
+        expect(bytesToHex(SDK_NETWORK_PRESETS.testnet.fundingLock.codeHash)).toBe(
+            "6c67887fe201ee0c7853f1682c0b77c0e6214044c156c7558269390a8afa6d7c",
+        );
+        expect(SDK_NETWORK_PRESETS.mainnet.fundingLock.hashType).toBe("type");
+        expect(SDK_NETWORK_PRESETS.testnet.fundingLock.hashType).toBe("type");
     });
 
     it.each(SDK_NETWORK_NAMES)("resolves %s to its preset", (name) => {
         expect(resolveSdkNetwork(name)).toBe(SDK_NETWORK_PRESETS[name]);
     });
 
-    it("takes a development chain's own lock, currency, cell deps count and epoch, copying the code hash", () => {
+    it("takes a development chain's own locks, currency, cell deps count and epoch, copying the code hashes", () => {
         const codeHash = Uint8Array.from(DEV_LOCK.codeHash);
+        const fundingCodeHash = Uint8Array.from(DEV_FUNDING_LOCK.codeHash);
         const resolved = resolveSdkNetwork({
             commitmentLock: { ...DEV_LOCK, codeHash },
+            fundingLock: { ...DEV_FUNDING_LOCK, codeHash: fundingCodeHash },
             invoiceCurrency: "Fibd",
             fundingLockCellDepsCount: 3,
             millisecondsPerEpoch: 2_000,
         });
         expect(resolved).toEqual({
             commitmentLock: DEV_LOCK,
+            fundingLock: DEV_FUNDING_LOCK,
             invoiceCurrency: "Fibd",
             fundingLockCellDepsCount: 3,
             millisecondsPerEpoch: 2_000,
         });
         codeHash.fill(0);
+        fundingCodeHash.fill(0);
         expect(resolved.commitmentLock.codeHash).toEqual(DEV_LOCK.codeHash);
+        expect(resolved.fundingLock.codeHash).toEqual(DEV_FUNDING_LOCK.codeHash);
     });
 
     it.each([1, 2, 255])("accepts a cell deps count of %d, the bounds included", (fundingLockCellDepsCount) => {
         const resolved = resolveSdkNetwork({
             commitmentLock: DEV_LOCK,
+            fundingLock: DEV_FUNDING_LOCK,
             invoiceCurrency: "Fibd",
             fundingLockCellDepsCount,
             millisecondsPerEpoch: 2_000,
@@ -65,6 +83,7 @@ describe("resolveSdkNetwork", () => {
     it.each([1, 2_000, 14_400_000, Number.MAX_SAFE_INTEGER])("accepts an epoch of %d ms, the bounds included", (millisecondsPerEpoch) => {
         const resolved = resolveSdkNetwork({
             commitmentLock: DEV_LOCK,
+            fundingLock: DEV_FUNDING_LOCK,
             invoiceCurrency: "Fibd",
             fundingLockCellDepsCount: 2,
             millisecondsPerEpoch,
@@ -75,6 +94,7 @@ describe("resolveSdkNetwork", () => {
     it.each(["data", "type", "data1", "data2"] as const)("keeps a development chain's hash type %s", (hashType) => {
         const resolved = resolveSdkNetwork({
             commitmentLock: { ...DEV_LOCK, hashType },
+            fundingLock: DEV_FUNDING_LOCK,
             invoiceCurrency: "Fibd",
             fundingLockCellDepsCount: 2,
             millisecondsPerEpoch: 2_000,
@@ -82,9 +102,21 @@ describe("resolveSdkNetwork", () => {
         expect(resolved.commitmentLock.hashType).toBe(hashType);
     });
 
-    it("keeps nothing of the development chain's object but the four constants", () => {
+    it.each(["data", "type", "data1", "data2"] as const)("keeps a development chain's funding lock hash type %s", (hashType) => {
+        const resolved = resolveSdkNetwork({
+            commitmentLock: DEV_LOCK,
+            fundingLock: { ...DEV_FUNDING_LOCK, hashType },
+            invoiceCurrency: "Fibd",
+            fundingLockCellDepsCount: 2,
+            millisecondsPerEpoch: 2_000,
+        });
+        expect(resolved.fundingLock.hashType).toBe(hashType);
+    });
+
+    it("keeps nothing of the development chain's object but the five constants", () => {
         const network = {
             commitmentLock: { ...DEV_LOCK, args: new Uint8Array(20) },
+            fundingLock: { ...DEV_FUNDING_LOCK, args: new Uint8Array(20) },
             invoiceCurrency: "Fibt",
             fundingLockCellDepsCount: 2,
             millisecondsPerEpoch: 2_000,
@@ -92,6 +124,7 @@ describe("resolveSdkNetwork", () => {
         } as SdkNetwork;
         expect(resolveSdkNetwork(network)).toStrictEqual({
             commitmentLock: DEV_LOCK,
+            fundingLock: DEV_FUNDING_LOCK,
             invoiceCurrency: "Fibt",
             fundingLockCellDepsCount: 2,
             millisecondsPerEpoch: 2_000,
@@ -114,6 +147,7 @@ describe("resolveSdkNetwork", () => {
             "a code hash of 31 bytes",
             {
                 commitmentLock: { ...DEV_LOCK, codeHash: new Uint8Array(31) },
+                fundingLock: DEV_FUNDING_LOCK,
                 invoiceCurrency: "Fibt",
                 fundingLockCellDepsCount: 2,
                 millisecondsPerEpoch: 2_000,
@@ -124,6 +158,7 @@ describe("resolveSdkNetwork", () => {
             "an unknown hash type",
             {
                 commitmentLock: { ...DEV_LOCK, hashType: "data3" },
+                fundingLock: DEV_FUNDING_LOCK,
                 invoiceCurrency: "Fibt",
                 fundingLockCellDepsCount: 2,
                 millisecondsPerEpoch: 2_000,
@@ -131,13 +166,90 @@ describe("resolveSdkNetwork", () => {
             new TypeError("network.commitmentLock.hashType must be one of data, type, data1, data2"),
         ],
         [
+            "no funding lock",
+            { commitmentLock: DEV_LOCK, invoiceCurrency: "Fibt", fundingLockCellDepsCount: 2, millisecondsPerEpoch: 2_000 },
+            new TypeError("network.fundingLock must be an object"),
+        ],
+        [
+            "a null funding lock",
+            {
+                commitmentLock: DEV_LOCK,
+                fundingLock: null,
+                invoiceCurrency: "Fibt",
+                fundingLockCellDepsCount: 2,
+                millisecondsPerEpoch: 2_000,
+            },
+            new TypeError("network.fundingLock must be an object"),
+        ],
+        [
+            "a funding lock code hash of 31 bytes",
+            {
+                commitmentLock: DEV_LOCK,
+                fundingLock: { ...DEV_FUNDING_LOCK, codeHash: new Uint8Array(31) },
+                invoiceCurrency: "Fibt",
+                fundingLockCellDepsCount: 2,
+                millisecondsPerEpoch: 2_000,
+            },
+            new TypeError("network.fundingLock.codeHash must be 32 bytes, got 31"),
+        ],
+        [
+            "a funding lock code hash of 33 bytes",
+            {
+                commitmentLock: DEV_LOCK,
+                fundingLock: { ...DEV_FUNDING_LOCK, codeHash: new Uint8Array(33) },
+                invoiceCurrency: "Fibt",
+                fundingLockCellDepsCount: 2,
+                millisecondsPerEpoch: 2_000,
+            },
+            new TypeError("network.fundingLock.codeHash must be 32 bytes, got 33"),
+        ],
+        [
+            "a funding lock code hash in hex",
+            {
+                commitmentLock: DEV_LOCK,
+                fundingLock: { ...DEV_FUNDING_LOCK, codeHash: "6c".repeat(32) },
+                invoiceCurrency: "Fibt",
+                fundingLockCellDepsCount: 2,
+                millisecondsPerEpoch: 2_000,
+            },
+            new TypeError("network.fundingLock.codeHash must be a Uint8Array"),
+        ],
+        [
+            "a funding lock under an unknown hash type",
+            {
+                commitmentLock: DEV_LOCK,
+                fundingLock: { ...DEV_FUNDING_LOCK, hashType: "data3" },
+                invoiceCurrency: "Fibt",
+                fundingLockCellDepsCount: 2,
+                millisecondsPerEpoch: 2_000,
+            },
+            new TypeError("network.fundingLock.hashType must be one of data, type, data1, data2"),
+        ],
+        [
+            "a funding lock without a hash type",
+            {
+                commitmentLock: DEV_LOCK,
+                fundingLock: { codeHash: DEV_FUNDING_LOCK.codeHash },
+                invoiceCurrency: "Fibt",
+                fundingLockCellDepsCount: 2,
+                millisecondsPerEpoch: 2_000,
+            },
+            new TypeError("network.fundingLock.hashType must be one of data, type, data1, data2"),
+        ],
+        [
             "no currency",
-            { commitmentLock: DEV_LOCK, fundingLockCellDepsCount: 2, millisecondsPerEpoch: 2_000 },
+            { commitmentLock: DEV_LOCK, fundingLock: DEV_FUNDING_LOCK, fundingLockCellDepsCount: 2, millisecondsPerEpoch: 2_000 },
             new TypeError("network.invoiceCurrency must be one of Fibb, Fibt, Fibd"),
         ],
         [
             "an unknown currency",
-            { commitmentLock: DEV_LOCK, invoiceCurrency: "fibt", fundingLockCellDepsCount: 2, millisecondsPerEpoch: 2_000 },
+            {
+                commitmentLock: DEV_LOCK,
+                fundingLock: DEV_FUNDING_LOCK,
+                invoiceCurrency: "fibt",
+                fundingLockCellDepsCount: 2,
+                millisecondsPerEpoch: 2_000,
+            },
             new TypeError("network.invoiceCurrency must be one of Fibb, Fibt, Fibd"),
         ],
     ])("refuses %s", (_, network, error) => {
@@ -157,6 +269,7 @@ describe("resolveSdkNetwork", () => {
     ])("refuses %s", (_, count, shown) => {
         const network = {
             commitmentLock: DEV_LOCK,
+            fundingLock: DEV_FUNDING_LOCK,
             invoiceCurrency: "Fibt",
             fundingLockCellDepsCount: count,
             millisecondsPerEpoch: 2_000,
@@ -167,7 +280,12 @@ describe("resolveSdkNetwork", () => {
     });
 
     it("refuses a development chain without an epoch, which no field it signs states", () => {
-        const network = { commitmentLock: DEV_LOCK, invoiceCurrency: "Fibd", fundingLockCellDepsCount: 2 } as unknown as SdkNetwork;
+        const network = {
+            commitmentLock: DEV_LOCK,
+            fundingLock: DEV_FUNDING_LOCK,
+            invoiceCurrency: "Fibd",
+            fundingLockCellDepsCount: 2,
+        } as unknown as SdkNetwork;
         expect(() => resolveSdkNetwork(network)).toThrow(
             new RangeError("network.millisecondsPerEpoch must be an integer between 1 and 9007199254740991, got undefined"),
         );
@@ -188,6 +306,7 @@ describe("resolveSdkNetwork", () => {
     ])("refuses %s", (_, millisecondsPerEpoch, shown) => {
         const network = {
             commitmentLock: DEV_LOCK,
+            fundingLock: DEV_FUNDING_LOCK,
             invoiceCurrency: "Fibd",
             fundingLockCellDepsCount: 2,
             millisecondsPerEpoch,

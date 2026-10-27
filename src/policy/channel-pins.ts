@@ -26,7 +26,7 @@ export function fundingCellPins(fundingOutPoint: OutPoint, capacityShannons: str
 }
 
 /**
- * Builds the pins of the channel's terms as the host reads them from the node's opening context.
+ * Builds the pins of the channel's terms as the host reads them from the node's opening context, in the first sight's forms.
  * @param terms The terms.
  * @returns The pins.
  */
@@ -35,6 +35,9 @@ export function channelTermsPins(terms: PolicyChannelTerms): StatedChannelPins {
         liquidCapacityShannons: terms.liquidCapacityShannons,
         commitmentFeeRate: terms.commitmentFeeRate.toString(),
         remoteReservedCkbShannons: terms.remoteReservedCkbShannons,
+        remoteFundingPubkey: bytesToHex(terms.remoteFundingPubkey),
+        remoteTlcBasePubkey: bytesToHex(terms.remoteTlcBasePubkey),
+        commitmentDelayEpoch: terms.commitmentDelayEpoch.toString(),
     };
 }
 

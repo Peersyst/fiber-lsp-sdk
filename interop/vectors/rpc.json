@@ -151,7 +151,8 @@
               "code_hash": "9bd7e06f3ecf4be0f2fcd2188b23f1b9fcc88e5d4b65a8637b17723bbda3cce8",
               "hash_type": "type",
               "args": "7599ae0cac87618d753a381fcbbd97b11d711e60"
-            }
+            },
+            "funding_lock_script_cell_deps": null
           },
           "json": {
             "pubkey": "02106fa580a1c56411d6ee7deabcc98aae6f6479858f924487cf58c4c2ca302304",
@@ -195,7 +196,8 @@
               "code_hash": "d95cd4c4c4015fb0bf5f2c566179922dce7d8aa9638ea1184c6f894855eabfe2",
               "hash_type": "data",
               "args": "f6be49e1381c9dd75be3e35953589f6adf5027a9619040593e353b19151ef089"
-            }
+            },
+            "funding_lock_script_cell_deps": null
           },
           "json": {
             "pubkey": "02106fa580a1c56411d6ee7deabcc98aae6f6479858f924487cf58c4c2ca302304",
@@ -213,6 +215,81 @@
               "args": "0xf6be49e1381c9dd75be3e35953589f6adf5027a9619040593e353b19151ef089"
             },
             "funding_lock_script_cell_deps": null,
+            "commitment_delay_epoch": null,
+            "commitment_fee_rate": null,
+            "funding_fee_rate": null,
+            "tlc_expiry_delta": null,
+            "tlc_min_value": null,
+            "tlc_fee_proportional_millionths": null,
+            "max_tlc_value_in_flight": null,
+            "max_tlc_number_in_flight": null,
+            "external_channel_signer": null
+          }
+        },
+        {
+          "name": "with the funding lock's cell deps",
+          "values": {
+            "pubkey": "02106fa580a1c56411d6ee7deabcc98aae6f6479858f924487cf58c4c2ca302304",
+            "funding_amount": "16000000000",
+            "public": true,
+            "shutdown_script": {
+              "code_hash": "9bd7e06f3ecf4be0f2fcd2188b23f1b9fcc88e5d4b65a8637b17723bbda3cce8",
+              "hash_type": "type",
+              "args": "42149f078609fb2978e11ffd4d847bce9c854c44"
+            },
+            "funding_lock_script": {
+              "code_hash": "dbd2de5effd991a293d9762f8c679d62fdf4b58ae883ed4110f322f3ff5c0bf5",
+              "hash_type": "type",
+              "args": "57962cc567d1b96e58ed9abdc578d4679f206b65"
+            },
+            "funding_lock_script_cell_deps": [
+              {
+                "out_point": {
+                  "tx_hash": "c2b0f43d72be1ac4d48ba3365bf800941870d5a420b83f33ff1cfac6b572e654",
+                  "index": 0
+                },
+                "dep_type": "code"
+              },
+              {
+                "out_point": {
+                  "tx_hash": "dae676af846d505684fcaf118da6d9903157bd65ee051593661c64d1a9e57d92",
+                  "index": 3
+                },
+                "dep_type": "dep_group"
+              }
+            ]
+          },
+          "json": {
+            "pubkey": "02106fa580a1c56411d6ee7deabcc98aae6f6479858f924487cf58c4c2ca302304",
+            "funding_amount": "0x3b9aca000",
+            "public": true,
+            "funding_udt_type_script": null,
+            "shutdown_script": {
+              "code_hash": "0x9bd7e06f3ecf4be0f2fcd2188b23f1b9fcc88e5d4b65a8637b17723bbda3cce8",
+              "hash_type": "type",
+              "args": "0x42149f078609fb2978e11ffd4d847bce9c854c44"
+            },
+            "funding_lock_script": {
+              "code_hash": "0xdbd2de5effd991a293d9762f8c679d62fdf4b58ae883ed4110f322f3ff5c0bf5",
+              "hash_type": "type",
+              "args": "0x57962cc567d1b96e58ed9abdc578d4679f206b65"
+            },
+            "funding_lock_script_cell_deps": [
+              {
+                "out_point": {
+                  "tx_hash": "0xc2b0f43d72be1ac4d48ba3365bf800941870d5a420b83f33ff1cfac6b572e654",
+                  "index": "0x0"
+                },
+                "dep_type": "code"
+              },
+              {
+                "out_point": {
+                  "tx_hash": "0xdae676af846d505684fcaf118da6d9903157bd65ee051593661c64d1a9e57d92",
+                  "index": "0x3"
+                },
+                "dep_type": "dep_group"
+              }
+            ],
             "commitment_delay_epoch": null,
             "commitment_fee_rate": null,
             "funding_fee_rate": null,
@@ -2739,6 +2816,7 @@
               "hash_type": "type",
               "args": "2bc180262be625a55ba703d5fc79baf15dab28ad"
             },
+            "funding_lock_script_cell_deps": null,
             "commitment_delay_epoch": null,
             "commitment_fee_rate": null,
             "external_channel_signer": {
@@ -2805,6 +2883,7 @@
               "hash_type": "type",
               "args": "2bc180262be625a55ba703d5fc79baf15dab28ad"
             },
+            "funding_lock_script_cell_deps": null,
             "commitment_delay_epoch": "13194189864967",
             "commitment_fee_rate": "2500",
             "external_channel_signer": {
@@ -2871,6 +2950,7 @@
               "hash_type": "type",
               "args": "2bc180262be625a55ba703d5fc79baf15dab28ad"
             },
+            "funding_lock_script_cell_deps": null,
             "commitment_delay_epoch": null,
             "commitment_fee_rate": null,
             "external_channel_signer": {
@@ -2919,6 +2999,103 @@
               "next_commitment_nonce": "0x0270476d121d67343167a2add16cadd7f4d8e459f7de4a471181be845e99662fe802444cefc60413a7801cad1c930da82e4eb964b1aace9bc63889662ea98ecf1b50",
               "revocation_nonce": "0x03fd6919e4ecb2193ec2e14496fcc1374129f5c2102bc1cf9cf5e4b79ac2b22ea003a2d311bf2be08d89c22a211bb7a91c27338f7f375d2667e214bd048452036f60",
               "channel_announcement_nonce": "0x035dd940fb031acbdea04a4124216121efa30c9e0994c835fa2050b1438c7e6c5302b36ec2749330a2b8eecdc2b04c98c33e790c822f200684c66ec6fb4de20a60a5"
+            }
+          }
+        },
+        {
+          "name": "with the funding lock's cell deps",
+          "values": {
+            "pubkey": "02106fa580a1c56411d6ee7deabcc98aae6f6479858f924487cf58c4c2ca302304",
+            "funding_amount": "80500000000",
+            "shutdown_script": {
+              "code_hash": "9bd7e06f3ecf4be0f2fcd2188b23f1b9fcc88e5d4b65a8637b17723bbda3cce8",
+              "hash_type": "type",
+              "args": "b8a1b5af256eec8aa5ee12a08ec9085563496fe1"
+            },
+            "funding_lock_script": {
+              "code_hash": "dbd2de5effd991a293d9762f8c679d62fdf4b58ae883ed4110f322f3ff5c0bf5",
+              "hash_type": "type",
+              "args": "57962cc567d1b96e58ed9abdc578d4679f206b65"
+            },
+            "funding_lock_script_cell_deps": [
+              {
+                "out_point": {
+                  "tx_hash": "c2b0f43d72be1ac4d48ba3365bf800941870d5a420b83f33ff1cfac6b572e654",
+                  "index": 0
+                },
+                "dep_type": "code"
+              },
+              {
+                "out_point": {
+                  "tx_hash": "dae676af846d505684fcaf118da6d9903157bd65ee051593661c64d1a9e57d92",
+                  "index": 3
+                },
+                "dep_type": "dep_group"
+              }
+            ],
+            "commitment_delay_epoch": null,
+            "commitment_fee_rate": null,
+            "external_channel_signer": {
+              "funding_pubkey": "02c60f7c65d3f716c51b2f7a3564a836fc26bd271c0a65fdd9682307e3340c96bb",
+              "tlc_base_key": "03dd7d80244b9189ad177bae2fe7c2c30595a09fcaf6046e0332af28680cf7c09e",
+              "first_commitment_point": "038160436a7473e0ef8ee45c3e2e761228d94699d7b85d698416277eef6df95717",
+              "second_commitment_point": "03500270798f1bb65b22043499d16582e0575b238b6305d5f651eb8568268622b1",
+              "commitment_nonce": "03f52aa5e10a212f05b296ef547f1553b7fb86504eef047381c37f5e791f815d0c026b70e0d6d39820717bd087e23b91ebfdb3801ae7efb3bc3cff0cd2d1679fa7a7",
+              "next_commitment_nonce": "0270476d121d67343167a2add16cadd7f4d8e459f7de4a471181be845e99662fe802444cefc60413a7801cad1c930da82e4eb964b1aace9bc63889662ea98ecf1b50",
+              "revocation_nonce": "03fd6919e4ecb2193ec2e14496fcc1374129f5c2102bc1cf9cf5e4b79ac2b22ea003a2d311bf2be08d89c22a211bb7a91c27338f7f375d2667e214bd048452036f60",
+              "channel_announcement_nonce": null
+            }
+          },
+          "json": {
+            "pubkey": "02106fa580a1c56411d6ee7deabcc98aae6f6479858f924487cf58c4c2ca302304",
+            "funding_amount": "0x12be2c8500",
+            "public": false,
+            "funding_udt_type_script": null,
+            "shutdown_script": {
+              "code_hash": "0x9bd7e06f3ecf4be0f2fcd2188b23f1b9fcc88e5d4b65a8637b17723bbda3cce8",
+              "hash_type": "type",
+              "args": "0xb8a1b5af256eec8aa5ee12a08ec9085563496fe1"
+            },
+            "funding_lock_script": {
+              "code_hash": "0xdbd2de5effd991a293d9762f8c679d62fdf4b58ae883ed4110f322f3ff5c0bf5",
+              "hash_type": "type",
+              "args": "0x57962cc567d1b96e58ed9abdc578d4679f206b65"
+            },
+            "funding_lock_script_cell_deps": [
+              {
+                "out_point": {
+                  "tx_hash": "0xc2b0f43d72be1ac4d48ba3365bf800941870d5a420b83f33ff1cfac6b572e654",
+                  "index": "0x0"
+                },
+                "dep_type": "code"
+              },
+              {
+                "out_point": {
+                  "tx_hash": "0xdae676af846d505684fcaf118da6d9903157bd65ee051593661c64d1a9e57d92",
+                  "index": "0x3"
+                },
+                "dep_type": "dep_group"
+              }
+            ],
+            "commitment_delay_epoch": null,
+            "commitment_fee_rate": null,
+            "funding_fee_rate": null,
+            "tlc_expiry_delta": null,
+            "tlc_min_value": null,
+            "tlc_fee_proportional_millionths": null,
+            "max_tlc_value_in_flight": null,
+            "max_tlc_number_in_flight": null,
+            "external_channel_signer": {
+              "base_public_keys": {
+                "funding_pubkey": "02c60f7c65d3f716c51b2f7a3564a836fc26bd271c0a65fdd9682307e3340c96bb",
+                "tlc_base_key": "03dd7d80244b9189ad177bae2fe7c2c30595a09fcaf6046e0332af28680cf7c09e"
+              },
+              "first_commitment_point": "038160436a7473e0ef8ee45c3e2e761228d94699d7b85d698416277eef6df95717",
+              "second_commitment_point": "03500270798f1bb65b22043499d16582e0575b238b6305d5f651eb8568268622b1",
+              "commitment_nonce": "0x03f52aa5e10a212f05b296ef547f1553b7fb86504eef047381c37f5e791f815d0c026b70e0d6d39820717bd087e23b91ebfdb3801ae7efb3bc3cff0cd2d1679fa7a7",
+              "next_commitment_nonce": "0x0270476d121d67343167a2add16cadd7f4d8e459f7de4a471181be845e99662fe802444cefc60413a7801cad1c930da82e4eb964b1aace9bc63889662ea98ecf1b50",
+              "revocation_nonce": "0x03fd6919e4ecb2193ec2e14496fcc1374129f5c2102bc1cf9cf5e4b79ac2b22ea003a2d311bf2be08d89c22a211bb7a91c27338f7f375d2667e214bd048452036f60",
+              "channel_announcement_nonce": null
             }
           }
         }

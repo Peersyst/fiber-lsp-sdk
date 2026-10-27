@@ -14,7 +14,7 @@ import {
 import type { FiberChannelKeys } from "../derivation";
 import { pubkeyOf } from "../derivation";
 import type { ChannelAnnouncementInput } from "./digest.types";
-import { aggregateXOnlyPubkey, moleculeOutPoint } from "./utils";
+import { aggregateXOnlyPubkey, moleculeOutPoint, sortDistinctPubkeys } from "./utils";
 
 const SIGNATURE_PLACEHOLDER_LENGTH = 64;
 
@@ -28,14 +28,14 @@ export function computeChannelAnnouncementDigest(keys: FiberChannelKeys, input: 
     assertBytes("chainHash", input.chainHash, HASH256_LENGTH);
     assertBytes("nodeIds[0]", input.nodeIds[0], COMPRESSED_POINT_LENGTH);
     assertBytes("nodeIds[1]", input.nodeIds[1], COMPRESSED_POINT_LENGTH);
-    assertBytes("remoteFundingPubkey", input.remoteFundingPubkey, COMPRESSED_POINT_LENGTH);
+    const sortedFundingPubkeys = sortDistinctPubkeys(
+        "localFundingPubkey",
+        pubkeyOf(keys.fundingKey),
+        "remoteFundingPubkey",
+        input.remoteFundingPubkey,
+    );
     assertUnsignedBigInt("capacityShannons", input.capacityShannons, MAX_AMOUNT_SHANNONS);
 
-    const localFundingPubkey = pubkeyOf(keys.fundingKey);
-    const sortedFundingPubkeys: [Uint8Array, Uint8Array] =
-        compareBytes(localFundingPubkey, input.remoteFundingPubkey) <= 0
-            ? [localFundingPubkey, input.remoteFundingPubkey]
-            : [input.remoteFundingPubkey, localFundingPubkey];
     const [firstNode, secondNode] = input.nodeIds;
     const sortedNodeIds = compareBytes(firstNode, secondNode) <= 0 ? [firstNode, secondNode] : [secondNode, firstNode];
 

@@ -33,7 +33,7 @@ use serde_json::Value;
 
 use crate::{
     blake160, blake2b_256, build_announcement, build_commitment, build_revocation, build_shutdown, channel_seed, ckb_blake2b,
-    derive_public_key, fiber_pubkey, lock_layout_features, nonce_seed, packed_script, pubkey_of, reserved_capacity,
+    derive_public_key, derived_channel_id, fiber_pubkey, lock_layout_features, nonce_seed, packed_script, pubkey_of, reserved_capacity,
     AnnouncementCaseVector, CommitmentCaseVector, FiberSigner, OutPointVector, RevocationCaseVector, ScriptVector,
     ShutdownCaseVector, TlcVector, COMMITMENT_LOCK_TESTNET_CODE_HASH, DEFAULT_DELAY_EPOCH, FIBER_REF, MASTER_SEED,
     REMOTE_SIGNER_SEED, SINCE_RELATIVE_EPOCH_FLAGS,
@@ -43,8 +43,8 @@ use crate::{
 const DEVICE_CHANNEL_INDEX: u64 = 1_760_572_800;
 /// The funding lock's cell deps on the presets, which fiber sizes the commitment fee with (crates/fiber-lib/src/fiber/fee.rs:27-35).
 const FUNDING_LOCK_CELL_DEPS_COUNT: u32 = 2;
-const DEVICE: &str = "device";
-const PEER: &str = "peer";
+pub(crate) const DEVICE: &str = "device";
+pub(crate) const PEER: &str = "peer";
 
 // --- the vector file ---
 
@@ -61,19 +61,19 @@ struct SigningVectors {
 
 /// The SDK's master seed and channel index, so a TS signer derives these keys itself.
 #[derive(Serialize, Deserialize)]
-struct DeviceVector {
+pub(crate) struct DeviceVector {
     master_seed: String,
     channel_index: u64,
-    funding_pubkey: String,
-    tlc_base_pubkey: String,
+    pub(crate) funding_pubkey: String,
+    pub(crate) tlc_base_pubkey: String,
 }
 
 /// The node's end of the channel, a fiber `InMemorySigner`.
 #[derive(Serialize, Deserialize)]
-struct PeerVector {
+pub(crate) struct PeerVector {
     seed: String,
-    funding_pubkey: String,
-    tlc_base_pubkey: String,
+    pub(crate) funding_pubkey: String,
+    pub(crate) tlc_base_pubkey: String,
 }
 
 /// The channel of every case: the terms a signer pins and the builds' inputs.
@@ -544,7 +544,10 @@ fn signing_channel(signers: &Signers) -> SigningChannelVector {
     let local_close_script = close_script("device close");
     let remote_close_script = close_script("peer close");
     SigningChannelVector {
-        channel_id: format!("0x{}", hex::encode(blake2b_256(b"signing channel"))),
+        channel_id: derived_channel_id([
+            pubkey_of(&signers.device.tlc_base_key).serialize(),
+            pubkey_of(&signers.peer.tlc_base_key).serialize(),
+        ]),
         funding_out_point: OutPointVector { tx_hash: hex::encode(blake2b_256(b"signing funding tx")), index: 0 },
         lock_layout: "full_payment_hash".to_string(),
         commitment_lock: ScriptVector {
@@ -559,8 +562,9 @@ fn signing_channel(signers: &Signers) -> SigningChannelVector {
         to_local: "62000000000".to_string(),
         to_remote: "18500000000".to_string(),
         local_reserved: reserved_capacity(&local_close_script, features).to_string(),
-        // The reserve the peer declared at the open; the device pins it rather than computing it.
-        remote_reserved: "6300000000".to_string(),
+        // The node, the acceptor, sizes its reserve over its own close script under the channel's layout
+        // (`get_funding_and_reserved_amount`, crates/fiber-lib/src/fiber/network.rs:7586-7593, channel.rs:5811-5850).
+        remote_reserved: reserved_capacity(&remote_close_script, features).to_string(),
         local_close_script,
         remote_close_script,
         local_shutdown_fee_rate: "1000".to_string(),
@@ -2044,25 +2048,29 @@ fn signing_vectors() -> SigningVectors {
     let variants = signing_variants(&cases[0]);
     assert!(variants.iter().any(|variant| !variant.verdict.accepted), "the variants hold a refusal");
     let watchtower = watchtower_vectors(&signers, &channel);
+    let (device, peer) = party_vectors(&signers);
 
-    SigningVectors {
-        fiber_ref: FIBER_REF.to_string(),
-        device: DeviceVector {
-            master_seed: hex::encode(MASTER_SEED),
-            channel_index: DEVICE_CHANNEL_INDEX,
-            funding_pubkey: hex::encode(pubkey_of(&signers.device.funding_key).serialize()),
-            tlc_base_pubkey: hex::encode(pubkey_of(&signers.device.tlc_base_key).serialize()),
-        },
-        peer: PeerVector {
-            seed: hex::encode(REMOTE_SIGNER_SEED),
-            funding_pubkey: hex::encode(pubkey_of(&signers.peer.funding_key).serialize()),
-            tlc_base_pubkey: hex::encode(pubkey_of(&signers.peer.tlc_base_key).serialize()),
-        },
-        channel,
-        cases,
-        variants,
-        watchtower,
-    }
+    SigningVectors { fiber_ref: FIBER_REF.to_string(), device, peer, channel, cases, variants, watchtower }
+}
+
+/// The channel's two parties as `signing.json` writes them, which the funding lock case of `vectors.json` takes as well.
+pub(crate) fn channel_parties() -> (DeviceVector, PeerVector) {
+    party_vectors(&Signers::new(&REMOTE_SIGNER_SEED))
+}
+
+fn party_vectors(signers: &Signers) -> (DeviceVector, PeerVector) {
+    let device = DeviceVector {
+        master_seed: hex::encode(MASTER_SEED),
+        channel_index: DEVICE_CHANNEL_INDEX,
+        funding_pubkey: hex::encode(pubkey_of(&signers.device.funding_key).serialize()),
+        tlc_base_pubkey: hex::encode(pubkey_of(&signers.device.tlc_base_key).serialize()),
+    };
+    let peer = PeerVector {
+        seed: hex::encode(REMOTE_SIGNER_SEED),
+        funding_pubkey: hex::encode(pubkey_of(&signers.peer.funding_key).serialize()),
+        tlc_base_pubkey: hex::encode(pubkey_of(&signers.peer.tlc_base_key).serialize()),
+    };
+    (device, peer)
 }
 
 pub fn gen_signing_vectors(out_path: &str) {

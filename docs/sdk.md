@@ -3,9 +3,10 @@
 The facade: `FiberLspSdk`, the one object a wallet talks to. It is built once from the master seed and the host's
 effects, wires every other module behind it, and owns what none of them could: the lifecycle the host drives, the events
 the host listens to, the clock the device's indexes come from, and the list of what the device still has to ask the node
-about. This document covers that core, the tenant's registration and token, and the evidence of a channel. The four
-operations a wallet calls, opening a channel, listing channels, creating an invoice and paying one, are not built yet;
-each lands with its own section here.
+about. This document covers that core, the tenant's registration and token, the opening of a channel and the events that
+follow it, the listing of the channels, and the evidence of a channel. Of the four operations a wallet calls, opening a
+channel and listing channels are built; creating an invoice and paying one are not yet, and each lands with its own
+section here.
 
 ## The effects it is given
 
@@ -31,26 +32,27 @@ of them, since it is the first thing that lets a host construct any of the modul
 
 ## The options
 
-| Option           | What it is                                                                                                         |
-| ---------------- | ------------------------------------------------------------------------------------------------------------------ |
-| `network`        | `"mainnet"`, `"testnet"`, or `{ commitmentLock, invoiceCurrency, fundingLockCellDepsCount, millisecondsPerEpoch }` |
-| `rpcUrl`         | The node's JSON-RPC address                                                                                        |
-| `biscuitToken`   | The RPC's Biscuit token; omitted when the node's RPC has no auth on, or until the tenant registers                 |
-| `lspPubkey`      | The LSP node's key, the peer every channel opens to, as a compressed point on the curve; copied                    |
-| `pollIntervalMs` | How often the node is asked about what is watched; five seconds by default, at least one millisecond               |
-| `nonceReuse`     | `"refuse"` by default, or `"allow"`: whether a slot already served may serve a second session, never a third       |
-| `watchtower`     | `{ destination, maxFeeShannons }`, what the watchtower's spends may pay; omitted, every spend is refused           |
+| Option           | What it is                                                                                                                      |
+| ---------------- | ------------------------------------------------------------------------------------------------------------------------------- |
+| `network`        | `"mainnet"`, `"testnet"`, or `{ commitmentLock, fundingLock, invoiceCurrency, fundingLockCellDepsCount, millisecondsPerEpoch }` |
+| `rpcUrl`         | The node's JSON-RPC address                                                                                                     |
+| `biscuitToken`   | The RPC's Biscuit token; omitted when the node's RPC has no auth on, or until the tenant registers                              |
+| `lspPubkey`      | The LSP node's key, the peer every channel opens to, as a compressed point on the curve; copied                                 |
+| `pollIntervalMs` | How often the node is asked about what is watched; five seconds by default, at least one millisecond                            |
+| `nonceReuse`     | `"refuse"` by default, or `"allow"`: whether a slot already served may serve a second session, never a third                    |
+| `watchtower`     | `{ destination, maxFeeShannons }`, what the watchtower's spends may pay; omitted, every spend is refused                        |
 
-A network preset is the commitment lock fiber ships in its node config for that chain ([digest.md](./digest.md)), the
-currency its invoices carry there, `Fibb` on mainnet and `Fibt` on testnet, and the number of cell deps of the funding
-lock, 2 on both. That count is a network constant because the commitment tx carries no cell deps while fiber sizes its
+A network preset is the commitment lock and the funding lock fiber ships in its node config for that chain
+([digest.md](./digest.md)), the currency its invoices carry there, `Fibb` on mainnet and `Fibt` on testnet, and the
+number of cell deps of the funding lock, 2 on both. The funding lock is a template, a code hash and a hash type: its args
+are each channel's own, computed from the two funding keys, and the opening holds the node's funding cell to it (below). That count is a network constant because the commitment tx carries no cell deps while fiber sizes its
 fee as if it carried the funding lock's, so the device cannot read it from anything it signs. So is the length of an
 epoch in milliseconds, fiber's `MILLI_SECONDS_PER_EPOCH`, which the signing deadline is computed with
 ([signing.md](./signing.md)): fiber's build sets it, 4 hours in release (14,400,000, both presets) and 2 seconds in
 debug, which is what a development chain run from a debug build passes, and nothing the device reads states it. A
-development chain passes all four, the count a positive integer up to `MAX_CELL_DEPS_COUNT` (255), the epoch's length a
-positive integer up to `Number.MAX_SAFE_INTEGER`, and its code hash is copied so the host's bytes cannot move under the
-device. The token is optional for the same reason the rpc client's is: a hosted node without one fails at the first
+development chain passes all five, both locks templates of any of CKB's four hash types, the count a positive integer up
+to `MAX_CELL_DEPS_COUNT` (255), the epoch's length a positive integer up to `Number.MAX_SAFE_INTEGER`, and both code
+hashes are copied so the host's bytes cannot move under the device. The token is optional for the same reason the rpc client's is: a hosted node without one fails at the first
 call, loudly, while a required one would make a development chain unreachable; and a device only gets its tenant token
 once it registers, which it may do after construction (`setBiscuitToken`, below). Every value option (the network, the
 url, the token, the key, the poll interval and the nonce reuse mode) is checked at construction, with the error naming
@@ -79,20 +81,22 @@ fiber's watchtower pays today is the LSP node's own lock, and approving it is tr
 Construction builds, in order, the typed store over the storage, the policy engine over the store, the nonce reuse mode
 and the watchtower's approval, the signer dispatch over the seed, the network's commitment lock, funding lock cell deps
 count and epoch length, and the engine ([signing.md](./signing.md)), the rpc client over the url, the token and `fetch`,
-the tenant identity over the seed ([signing.md](./signing.md)), and the three pieces this document describes: the
-allocator and the activity tracker over the store, and the poller over the timer and its two steps. The dispatch copies
-the seed, and the identity keeps only the key it derives from it; the facade itself keeps nothing of it.
+the tenant identity over the seed ([signing.md](./signing.md)), and the pieces this document describes: the allocator,
+the activity tracker and the pending opening's store (`PendingOpeningStore`) over the store, and the poller over the timer
+and its three steps, the channel step first, then the signing step and the watchtower step. The dispatch copies the seed,
+and the identity keeps only the key it derives from it; the facade itself keeps nothing of it.
 
 Everything built is held in one context the facade's operations share: the network, the LSP's key, the clock, the
-store, the rpc client, the engine, the dispatch, the identity, the allocator, the tracker, the poller and the facade's
-own `emit`. The operations are thin entry points over that context, which is what keeps each flow a function of what it
+store, the rpc client, the engine, the dispatch, the identity, the allocator, the tracker, the pending opening's store
+(`openings`), the poller and the facade's own `emit`. The operations are thin entry points over that context, which is what keeps each flow a function of what it
 needs.
 
 ## `connect()` and `disconnect()`
 
 `connect()` is the host's foreground and `disconnect()` its background. `connect()` starts the poller and returns: there
 is no link to establish, so it cannot fail, and calling it while polling changes nothing. The device reaches the node
-only through the RPC, and what the node asks of the device is read by the poller's two steps, below.
+only through the RPC, and what the node asks of the device and what became of its channels are read by the poller's three
+steps, below.
 
 `disconnect()` never throws: it stops the poller, abandoning the step in flight so nothing of it is acted on and no tick
 follows. The instance stays usable: the next `connect()` starts polling again.
@@ -101,21 +105,26 @@ follows. The instance stays usable: the next `connect()` starts polling again.
 
 `onEvent(listener)` subscribes to every event and returns the function that unsubscribes. Nine events exist:
 
-| Event                | Payload                    | When                                                                                 |
-| -------------------- | -------------------------- | ------------------------------------------------------------------------------------ |
-| `CHANNEL_READY`      | `channelId`                | A channel the device opened is ready; read by the poller (not built yet)             |
-| `CHANNEL_CLOSED`     | `channelId`                | A channel the device watched is closed, by any of fiber's three ways (not built yet) |
-| `PAYMENT_SENT`       | `paymentHashHex`           | A payment the device started succeeded (not built yet)                               |
-| `PAYMENT_FAILED`     | `paymentHashHex`, `reason` | A payment the device started failed, with fiber's text (not built yet)               |
-| `PAYMENT_PENDING`    | `paymentHashHex`           | An invoice of the device has a payment held on it (not built yet)                    |
-| `PAYMENT_RECEIVED`   | `paymentHashHex`           | An invoice of the device was paid (not built yet)                                    |
-| `SIGNING`            | see below                  | A signing request was answered or refused by the poller's signing step               |
-| `WATCHTOWER_SIGNING` | see below                  | A watchtower spend was signed or refused by the poller's watchtower step             |
-| `ERROR`              | `error`                    | A failed poll step, or one channel's failure inside a step                           |
+| Event                | Payload                    | When                                                                                |
+| -------------------- | -------------------------- | ----------------------------------------------------------------------------------- |
+| `CHANNEL_READY`      | `channelId`                | A channel the device opened is ready; read by the poller's channel step             |
+| `CHANNEL_CLOSED`     | `channelId`                | A channel the device watched is closed, under any flag, an aborted opening included |
+| `PAYMENT_SENT`       | `paymentHashHex`           | A payment the device started succeeded (not built yet)                              |
+| `PAYMENT_FAILED`     | `paymentHashHex`, `reason` | A payment the device started failed, with fiber's text (not built yet)              |
+| `PAYMENT_PENDING`    | `paymentHashHex`           | An invoice of the device has a payment held on it (not built yet)                   |
+| `PAYMENT_RECEIVED`   | `paymentHashHex`           | An invoice of the device was paid (not built yet)                                   |
+| `SIGNING`            | see below                  | A signing request was answered or refused by the poller's signing step              |
+| `WATCHTOWER_SIGNING` | see below                  | A watchtower spend was signed or refused by the poller's watchtower step            |
+| `ERROR`              | `error`                    | A failed poll step, or one channel's failure inside a step                          |
 
 The six activity events are **at least once**: the poller emits the event and then records, in the activity list below,
 the status it was emitted for, so a crash between the two repeats it on the next tick. A host deduplicates on the
 event's type and id. `ERROR` is neither recorded nor repeated: it is a diagnostic.
+
+`CHANNEL_READY` is fiber's `ChannelReady`, seen once: a channel that leaves it for `ShuttingDown` is not announced again
+until it closes. `CHANNEL_CLOSED` is fiber's `Closed` under any flag, a cooperative close, either force close, an
+abandon, and an opening fiber aborted unfunded (`FUNDING_ABORTED`), which only the listing of the pending channels
+still shows; it may follow a `CHANNEL_READY` or come without one. Both are the channel step's (below).
 
 `SIGNING` carries `channelId`, `requestId` (the node's request id, `0x`-prefixed hex as fiber writes it, so it can be
 matched against the node's logs as it is; `null` when the status could not be read or answered for another channel),
@@ -155,18 +164,29 @@ event and nothing after.
 
 Every failure of the device's own is one `SdkError`, with a `code` a wallet can branch on and the module's own error
 underneath as its `cause`; a host's programming error, such as an option out of range, is a `TypeError` or a
-`RangeError`. The one exception is `channelEvidence`, a read of the device's own storage: a storage that throws, or a
-record or alias it holds that the store refuses, comes through as its own error, unwrapped (below):
+`RangeError`:
 
-| Code                 | When                                                              | Cause       |
-| -------------------- | ----------------------------------------------------------------- | ----------- |
-| `poll_failed`        | A step of a poll tick, or one channel of a step, failed           | What failed |
-| `clock_before_floor` | An index was asked of a clock reading before the allocation floor | None        |
-| `unknown_channel`    | An operation named a channel this device never registered         | None        |
+| Code                 | When                                                                                                      | Cause                       |
+| -------------------- | --------------------------------------------------------------------------------------------------------- | --------------------------- |
+| `poll_failed`        | A step of a poll tick, or one channel of a step, failed                                                   | What failed                 |
+| `clock_before_floor` | An index was asked of a clock reading before the allocation floor                                         | None                        |
+| `unknown_channel`    | An operation named a channel this device never registered                                                 | None                        |
+| `opening_rejected`   | The node's answer to an opening is not what the device asked; the message names the field                 | None                        |
+| `opening_conflict`   | The node's answer contradicts the device's record: a registration or a pin the policy refuses             | The policy's error          |
+| `funding_tx_altered` | The signed funding tx is not the one the opening froze, or the channel pins no funding cell to compare to | The pin's conflict, or none |
 
-A message says what failed and then the cause's own words. The codes grow with the operations; a wrong argument at
-construction is a `TypeError` or a `RangeError` naming the field, as everywhere in the SDK, since it is the host's
-programming error and not a condition of the device's.
+A message says what failed and then the cause's own words. The codes grow with the operations; a wrong argument is a
+`TypeError` or a `RangeError` naming the field, as everywhere in the SDK, since it is the host's programming error and
+not a condition of the device's. The amount of an opening is the policy's to bound, so one out of range is its
+`RangeError`, naming `fundedShannons`.
+
+What is not a condition of the device's comes through as its own error, unwrapped: the node's answers, through the rpc
+client's three errors ([rpc.md](./rpc.md)), on an opening, a submission and a listing; the host's own effects, a storage
+that throws or a record or alias it holds that the store refuses to read, wherever one is read, `channelEvidence`
+included; on an opening, whatever the host's signer throws; and on a submission, a signed tx that does not read as a
+transaction, a `TypeError` naming `signedTx`. An opening the device refuses drops its pending opening first, and when that
+drop fails the refusal keeps its code and its cause, its message ending with "the pending opening could not be dropped"
+and the drop's own words ([Opening a channel](#opening-a-channel)).
 
 ## Indexes that a wipe cannot reset
 
@@ -200,7 +220,8 @@ not yet closed, the payments not yet final and the invoices not yet paid, cancel
 knows it under (the channel id; the payment hash in hex) and with the last status an event was emitted for, `null` until
 the first. An entry is added when the operation that creates it starts watching, marked each time an event goes out, and
 dropped when it is final; a channel id is 32 bytes of 0x-prefixed lowercase hex, the one form `list_channels` is read
-in, so no entry can sit unmatched for good, a payment hash exactly 32 bytes of lowercase hex, and a status one of
+in, so no entry sits unmatched for its form (a channel neither of the node's listings shows still stays watched, below),
+a payment hash exactly 32 bytes of lowercase hex, and a status one of
 fiber's for that kind, which the record's guard pairs at every write. Marking something not watched is a programming
 error and throws; watching something again keeps its entry, status included; dropping what is not there writes nothing.
 
@@ -219,10 +240,38 @@ tick can be asked for at once, which the operations do after a `send_payment` or
 the interval; asked during a tick, it queues exactly one more, and a host cancel that throws does not stop it. A timer
 whose cancel does nothing cannot fire a stale tick, since the slot that holds the armed tick ignores a callback armed
 before the last clear. A host timer that throws when arming is reported as a `poll_failed` too, and ends the loop until
-the next `start()`, rather than rejecting a promise nobody awaits. Today a tick runs two steps, the signing step and then
-the watchtower step, below, each with its own listing and its own thirty seconds, so a slow channel read in one cannot
-spend the other's; the event steps, one `list_channels` for the channels, one `get_payment` per payment and one
-`get_invoice` per invoice, land with the operations.
+the next `start()`, rather than rejecting a promise nobody awaits. Today a tick runs three steps, in this order: the
+channel step, the signing step and the watchtower step, below, each with its own listing and its own thirty seconds, so
+a slow channel read in one cannot spend another's. The payment and invoice steps, one `get_payment` per payment and one
+`get_invoice` per invoice, land with their operations.
+
+## The channel step
+
+The channel step turns what the node lists into `CHANNEL_READY` and `CHANNEL_CLOSED` for the channels the activity list
+watches, which the opening adds (below). It reads that list first and, when no channel is watched, calls nothing. Otherwise
+it asks `list_channels` once with `include_closed`, read through `listChannelStates` for the ids and states alone, any
+state name or flag accepted ([rpc.md](./rpc.md)), and settles each watched channel the listing shows, in the node's
+order, one at a time:
+
+- `ChannelReady`, unless that is the status last announced: `CHANNEL_READY`, then the pending opening that names the
+  channel dropped, then the status recorded.
+- `Closed`, under any flag or none: `CHANNEL_CLOSED`, then the pending opening that names it dropped, then the channel
+  no longer watched.
+- Any other state, one a newer fiber adds included: nothing, and the channel stays watched.
+
+Fiber deletes an opening it aborted unfunded and leaves it out of that listing; it shows it, `Closed` with
+`FUNDING_ABORTED`, only to `only_pending` ([rpc.md](./rpc.md)). So when a watched channel is missing from the first
+listing, the step asks `only_pending` once in the tick, for every channel missing at once and not after its run was
+abandoned, and settles what it shows the same way. A channel neither listing shows emits nothing and stays watched, so
+it costs that second read on every tick: no answer of the node's says the channel is gone, and dropping it on a
+silence would lose its close.
+
+The events are at least once, as everywhere: each is emitted only while the run stands and before anything is written,
+and the run's `abandoned` is read again after it, so an event whose run was cut while it went out (a listener that calls
+`disconnect()`, say) is not recorded and goes out again on the next tick; no channel is settled once the run is
+abandoned. A watched channel whose drop or record fails is reported as a `poll_failed` naming it, its event repeated on
+the next tick, and the next channel is settled; only a watched list that cannot be read, or a listing that fails, fails
+the step.
 
 ## The signing step
 
@@ -314,6 +363,177 @@ leaves the previous one ([rpc.md](./rpc.md)). It takes no `null`: the token is r
 over, the host checks that the `tenant.tenant_id` the registration returned is the facade's `tenantId`, as fiber's own
 client does (`finish_registration`): the facade sees only the token, so it cannot tell a token issued to another tenant.
 
+## Opening a channel
+
+On fiber's side a tenant channel opens in two calls: `open_tenant_channel` blocks while the node agrees the channel with
+the LSP and answers with the funding tx it froze, and `submit_signed_funding_tx` takes that tx signed
+([rpc.md](./rpc.md)). The facade has three methods over them:
+
+- `prepareChannelOpen(amountShannons, userLock, userLockCellDeps?)` asks the node for a channel to the LSP, checks and
+  pins its answer, and returns `SdkChannelOpening`, `{ channelId, unsignedFundingTx, openingContext }`: the node's answer
+  as just read, which the device does not hold, so writing to it changes nothing the device keeps.
+- `submitFundingTx(channelId, signedTx)` hands the node the funding tx the host signed, once it is the one the opening
+  froze. It settles once the node took the tx; `CHANNEL_READY` tells when the channel is ready.
+- `openChannel(amountShannons, userLock, signFundingInputs, userLockCellDeps?)` is the two joined, the host's signer in
+  between, and returns the channel id once the node took the signed tx.
+
+The first two serve a host that signs outside the call (a hardware wallet, a backend, a user who confirms later).
+`amountShannons` is what the user pays in, in decimal shannons, the device's reserve included, as fiber's `local_amount`
+counts it. `userLock` is the lock whose cells fund the channel and also the device's shutdown script, so every close pays
+the device's side back to the lock that funded it, and the registration pins it as the close script
+([policy.md](./policy.md)). Both are checked before anything is allocated, written or sent, the amount as decimal
+shannons and the lock as a script, then as an opening the policy accepts (`assertChannelOpening`: from the device's
+least reserve over that lock to below a u64), and copied, so nothing the host changes during the call reaches the node
+or the pins.
+
+### What the device asks
+
+The request names the LSP's key as the peer and carries the amount, the user's lock as both `shutdown_script` and
+`funding_lock_script`, the lock's cell deps when given, the commitment delay and fee rate, and the device's signer
+material for the channel's index ([signing.md](./signing.md), "The public material"); the channel is private, as every
+tenant channel is ([rpc.md](./rpc.md)).
+
+The delay and the fee rate are fiber's own defaults, sent explicitly: one epoch (`DEFAULT_COMMITMENT_DELAY_EPOCH`,
+`0x10000000001` as fiber's `EpochNumberWithFraction`) and 1000 shannons per kilobyte (`DEFAULT_COMMITMENT_FEE_RATE`).
+Left to the node, the answer would state values the device has nothing to hold to; sent, the answer must repeat them.
+
+`userLockCellDeps` are the cell deps the node needs to spend the user's lock. Fiber builds the funding tx over the
+user's cells, and without them it resolves only the chain's genesis scripts, so a lock outside them cannot fund the
+channel ([rpc.md](./rpc.md)). Each is checked as a cell dep and refused by its position before anything is written. An
+empty list is none, as fiber reads it, so it is neither sent nor recorded; their order is part of the request.
+
+### The check of the answer
+
+The node answers with the channel's id, the unsigned funding tx and the opening context, the terms it froze, each read
+for its form by the rpc client ([rpc.md](./rpc.md)). `checkTenantOpening` then holds them to what was asked, before
+anything of them is written; every failure is `opening_rejected`, naming the field. In order:
+
+1. The peer's TLC base key, the context's `remoteSettlementKey`, is a point on the curve and not the device's own, and
+   the channel id is fiber's id of the two TLC base keys, `tenantChannelId` ([digest.md](./digest.md)).
+2. The commitment delay and the fee rate are the ones sent.
+3. `localAmountShannons` is the amount funded.
+4. The device's reserve is `reservedCkbShannons` over the user's lock under one of the two lock layouts, and the peer's
+   is the same over its `remoteShutdownScript` under a layout the device's matched: one layout for both
+   ([policy.md](./policy.md)).
+5. The local amount is at least the device's reserve, and the remote amount at least the peer's.
+6. Output 0 of the funding tx (`FUNDING_OUTPUT_INDEX`) exists, with no type script and empty data.
+7. The peer's funding key, the context's `remoteFundingKey`, is a point on the curve and not the device's own, and
+   output 0's lock is the network's funding lock over the args of the two funding keys, `fundingLockArgs`
+   ([digest.md](./digest.md)).
+8. The two amounts together fit a u64, and output 0's capacity is exactly them.
+
+Every other output and every input is left alone: the tx carries both parties' inputs and their change, which the device
+cannot judge without the chain, so they are the host signer's to check (below). The check returns what the policy pins:
+the terms and the funding cell's capacity.
+
+### The pins, before the tx is handed out
+
+Fiber may ask for the device's signature of the peer's first commitment before the funding tx is signed, so everything
+the signing gate holds the channel to is written before the tx leaves the device, in this order:
+
+1. The pending opening is named with the channel id (below).
+2. `registerChannel`, with the opening's index, the amount and the user's lock as the close script.
+3. `pinChannelTerms`: the fee rate, the peer's reserve, the liquid capacity (the two amounts less both reserves), and the
+   peer's funding key, its TLC base key and the delay, the values the check held ([policy.md](./policy.md)).
+4. `pinFundingCell`: output 0 of the unsigned tx, by CKB's hash of the tx, and its capacity. The hash covers the raw tx
+   and not the witnesses, so it is the hash of the tx signed as well.
+5. The channel is watched, so the channel step announces it.
+
+Once registered, the channel is served by the signing step, so its first commitments are signed while the host holds the
+tx. A registration or a pin the policy refuses, a `ChannelRegistrationError` (the id already another index's, the index
+another channel's, a lost race for the name) or a `ChannelPinError`, is `opening_conflict` with the policy's error as its
+cause: the node's answer contradicts what the device recorded. Any other failure, a storage that throws or a record it
+cannot read, passes through as itself.
+
+### The pending opening
+
+Fiber keeps one opening per tenant: it answers the identical request, signer material and nonces included, with the
+result it froze, and refuses another while the first is open ("tenant already has a different channel opening"). An
+opening whose answer never reached the device is therefore recovered only by sending the same request again, which
+takes the same index. So the device records the opening, under `fiber-lsp-sdk:opening`, before it asks
+([persistence.md](./persistence.md)):
+
+- **Fresh.** With no pending opening asked with the same amount, lock and cell deps, a fresh index is allocated and the
+  opening written under it with no channel yet, replacing any other; while fiber still holds that other one, it
+  refuses the fresh request as "a different channel opening" until it aborts it.
+- **Resumed.** A pending opening asked with the same three, the cell deps compared in order, is resumed under its index,
+  and the request sent again is identical, since the material is a function of the index. When it already names a
+  channel, the node is first asked `only_pending`: a channel it shows `Closed` was aborted, so the opening is dropped and
+  a fresh one starts; any other answer resumes it, and a listing that fails passes through and keeps it.
+- **Named** right after the check passes and before the registration, so an opening that fails past that point carries
+  the id that lets the next same call find it aborted.
+- **Dropped** when the device refuses the answer, `opening_rejected` or `opening_conflict`, by its index, so an opening
+  another call wrote meanwhile survives; and by the channel step, by its id, once the channel is ready or closed.
+- **Kept** on every failure of the request itself. Fiber answers an open interrupted after 30 seconds with "tenant opening
+  interrupted; retry the same request" (`rpc/channel.rs:345-370`) and a stopped one with "tenant channel opening
+  stopped" (`network.rs:8366-8370`), both keeping the opening on its side; neither can be told from a lost answer or any
+  other error, and a final refusal retried only meets the refusal again.
+
+An opening given up for good is not the device's to cancel: fiber aborts one left unfunded once its external funding
+timeout passes (`external_funding_timeout_seconds`, 300 by default), the channel step announces `CHANNEL_CLOSED` for it
+if it was watched, and the next same call opens afresh under a new index.
+
+| Failure                                               | Error                                                             | The pending opening                               |
+| ----------------------------------------------------- | ----------------------------------------------------------------- | ------------------------------------------------- |
+| An argument, the signer included                      | `TypeError`, or the policy's `RangeError` naming `fundedShannons` | Untouched: nothing written or sent                |
+| The index's allocation                                | `clock_before_floor`                                              | Untouched                                         |
+| `only_pending`, resuming a named one                  | The rpc client's                                                  | Kept                                              |
+| `open_tenant_channel`, its answer unreadable included | The rpc client's                                                  | Kept                                              |
+| The check                                             | `opening_rejected`                                                | Dropped                                           |
+| A registration or pin the policy refuses              | `opening_conflict`                                                | Dropped                                           |
+| The storage                                           | Its own                                                           | Kept as last written                              |
+| The host's signer, in `openChannel`                   | Its own                                                           | Kept, named; the channel registered and watched   |
+| The submission                                        | Below                                                             | Kept, until the channel step sees ready or closed |
+
+A drop that fails leaves the refusal its code and its cause, its message saying the opening could not be dropped and why;
+the next same call drops the leftover again, or finds it aborted.
+
+### The host's signer
+
+`SdkSignFundingInputs`, `(unsignedFundingTx: Transaction) => Promise<Transaction>`, is checked to be a function with
+the other arguments, before anything is written or sent, called without a receiver, and handed a copy of the tx as the
+node froze it, each input's witness the 65 zero bytes a secp256k1 signature takes. The device judged the funding cell alone: it cannot read the chain, so it
+knows neither the cells the inputs spend nor what they hold, and the change outputs, the user's and the LSP's, are what
+those amounts decide. Resolving each input and checking what it pays, that what the user's inputs hold, less the amount
+funded and the fee, comes back to the user, and that the fee is one the user accepts, is therefore the signer's duty,
+before it signs. It returns the tx with its witnesses signed and nothing else changed: a tx changed anywhere but its
+witnesses is refused at submission, since the funding cell is pinned by the tx's hash. What it throws comes through as itself, with
+the opening kept, so the identical call resumes it.
+
+### The submission
+
+`submitFundingTx(channelId, signedTx)` checks, in order: the channel id's form, 32 bytes of `0x` lowercase hex, a
+`TypeError`; the signed tx's form, an object whose witnesses are a list of byte arrays and which hashes as a CKB
+transaction, each a `TypeError` naming `signedTx`, with the hash's own refusal as its cause; the channel's record,
+`unknown_channel` for one this device never registered; a funding cell pinned with its capacity, else
+`funding_tx_altered`; and the tx's hash against the pinned out point, through the same `pinFundingCell`, so the frozen
+hash writes nothing and another is `funding_tx_altered`, the pin's conflict naming both cells as its cause. The tx is
+copied in the step it is hashed, so the node receives what was compared. Then `submit_signed_funding_tx`, whose errors
+pass through unwrapped, fiber's "Repeated processing message: Signed funding tx has already been submitted" to a second
+submission included. `openChannel` submits through the same path.
+
+## Listing the channels
+
+`listChannels()` asks `list_channels` with `include_closed` and returns one `SdkChannelInfo` per channel, in the node's
+order: `channelId`, `state`, the four balances in decimal shannons as the rpc client reads them
+(`localBalanceShannons`, `remoteBalanceShannons`, `offeredTlcBalanceShannons`, `receivedTlcBalanceShannons`), and
+`hasRecord`, whether this device registered the channel, read from its store. A channel without a record is one the node
+holds for the tenant that the device never filed, such as an opening whose answer was lost before it reached the
+device. The state is one of five, `SDK_CHANNEL_STATES`:
+
+| State     | Fiber's states                                                                                                      |
+| --------- | ------------------------------------------------------------------------------------------------------------------- |
+| `opening` | `NegotiatingFunding`, `CollaboratingFundingTx`, `SigningCommitment`, `AwaitingTxSignatures`, `AwaitingChannelReady` |
+| `ready`   | `ChannelReady`                                                                                                      |
+| `closing` | `ShuttingDown`                                                                                                      |
+| `closed`  | `Closed`, under any flag                                                                                            |
+| `stale`   | `Stale`: a channel fiber restored from an old database, audited with the peer before it resumes                     |
+
+The map is keyed by every state the rpc client knows, so one added there fails to compile until it is mapped; a state
+the client does not know is refused by its listing ([rpc.md](./rpc.md)) rather than guessed. An opening fiber aborted is
+not listed, since fiber deleted it: `CHANNEL_CLOSED` is what reported it. The node's errors and the store's pass through
+unwrapped, and nothing is written.
+
 ## A channel's evidence
 
 `channelEvidence(channelId)` reads, from the device's own store, what the record keeps of a channel for a wallet to show
@@ -337,54 +557,66 @@ the evidence is a copy: writing to it changes neither the record nor the next re
 
 `src/index.ts` exports the facade, `FiberLspSdk`, with its options, network and event types, `SdkError` with its codes,
 the event type list, the network names and the default poll interval, the nonce reuse mode, the watchtower option
-(`SdkWatchtowerOptions`), the registration's two forms (`SdkTenantChallenge`, `SdkTenantRegistration`) and the
-evidence (`SdkChannelEvidence`), and what `SIGNING` and `WATCHTOWER_SIGNING` name (`SigningEventOutcome`,
+(`SdkWatchtowerOptions`), the registration's two forms (`SdkTenantChallenge`, `SdkTenantRegistration`), the opening's
+forms (`SdkChannelOpening`, `SdkSignFundingInputs`, and the rpc client's `TenantChannelOpeningContext` the opening hands
+back), the listing's (`SdkChannelInfo`, `SdkChannelState`, `SDK_CHANNEL_STATES`) and the evidence
+(`SdkChannelEvidence`), and what `SIGNING` and `WATCHTOWER_SIGNING` name (`SigningEventOutcome`,
 `ChannelSigningTransition`, `WatchtowerKeyPurpose`, `SignerRefusal`); the injection interfaces of the modules behind it,
 `ISignerStorage`, `IAsyncSignerStorage`, `ITimer`, `IFetchLike` and their event and response types; the rpc client's
 three with the `RpcMethod` they name, which a wallet meets as causes; `decodeInvoice` with the invoice types and
-`InvoiceError`, since a wallet has to show what it is about to pay; and the `Script` types the options and the
-operations take. Nothing else of the modules: the store, the engine, the dispatch and the rpc client are reached through
-the facade alone.
+`InvoiceError`, since a wallet has to show what it is about to pay; and the chain's types the options and the operations
+take and return, `Script` with its template and hash type, and `Transaction` with `CellDep`, `CellInput`, `CellOutput`,
+`DepType` and `OutPoint`. Nothing else of the modules: the store, the engine, the dispatch and the rpc client are reached
+through the facade alone.
 
 ## What the facade deliberately does not do
 
-- **No wallet operation yet.** Opening a channel, listing channels, creating an invoice and paying one are not built
-  yet.
+- **No invoices or payments yet.** Creating an invoice and paying one are not built yet.
+- **No check of the funding inputs.** The device holds the funding cell to what it asked; what the inputs spend, the
+  change and the fee are the host signer's, which can read the chain.
 - **No operator call.** The facade signs the registration and takes the token; the two calls that need the operator's
   token are the host's.
 - **No deadline acted on.** `SIGNING`'s `deadlineMs` is reported, and every request is answered when it is seen.
 - **No app state.** The host calls `connect()` and `disconnect()`; the facade does not know whether the app is open.
-- **No retry of a call.** Whether a lost answer is read back from the node is each operation's decision, with the
-  rpc client's three errors telling it what it may conclude ([rpc.md](./rpc.md)).
+- **No automatic retry.** Whether a lost answer is read back from the node is each operation's decision, with the rpc
+  client's three errors telling it what it may conclude ([rpc.md](./rpc.md)). An opening whose request failed stays
+  pending, and its resume is the host's identical call: the facade never resends on its own, nor cancels an opening,
+  which fiber aborts when left unfunded.
 - **No public poll.** The extra tick is the operations' to ask for; whether a wallet's pull-to-refresh gets a method is
   for the API review.
 - **No history.** The facade reports what it is tracking; past payments are the node's.
 
 ## Where it lives
 
-| File                                     | Contents                                                                                                                                                            |
-| ---------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `src/sdk/fiber-lsp-sdk.ts`               | `FiberLspSdk`: the options checked, the wiring, `connect`, `disconnect`, the events, the registration, the token, the evidence                                      |
-| `src/sdk/channel-evidence.ts`            | `readSdkChannelEvidence`: a channel's record read and projected onto its evidence                                                                                   |
-| `src/sdk/sdk.types.ts`                   | The options, the network, the events, the error codes, the registration's forms, the evidence, the activity record, the context                                     |
-| `src/sdk/sdk.constants.ts`               | The network presets, the poll interval, the allocation floor, the storage keys, the event and error lists, the watchtower step's skipped flags and unwatched answer |
-| `src/sdk/sdk.error.ts`                   | `SdkError`                                                                                                                                                          |
-| `src/sdk/allocator.ts`                   | `IndexAllocator`: the channel and invoice indexes from the clock, the last one persisted                                                                            |
-| `src/sdk/activity.ts`                    | `ActivityTracker`: the persisted list of what is watched, and the status each event was emitted for                                                                 |
-| `src/sdk/poller.ts`                      | `ActivityPoller`: the tick, its steps and their runs and deadline, the interval, `start`, `stop`                                                                    |
-| `src/sdk/signing-step.ts`                | `buildChannelSigningStep`: the channels polled, the status read, the dispatch, the submission, `SIGNING`                                                            |
-| `src/sdk/watchtower-step.ts`             | `buildWatchtowerSigningStep`: the channels it may still watch, the unwatched answer, the dispatch, the submission, the mark, `WATCHTOWER_SIGNING`                   |
-| `src/sdk/utils/poll-step.utils.ts`       | What both steps share under their run: each channel in turn, the guarded event, the `poll_failed` report, the refusal of another channel's status                   |
-| `src/sdk/utils/request-id.utils.ts`      | `encodeSdkRequestId`, a request id as both signing events carry it                                                                                                  |
-| `src/sdk/utils/runtime-timer.utils.ts`   | The timer over the runtime's `setTimeout` and `clearTimeout`                                                                                                        |
-| `src/sdk/utils/network.utils.ts`         | The network option resolved to its four constants                                                                                                                   |
-| `src/sdk/utils/activity-record.utils.ts` | The activity record's guard, ids and statuses per kind                                                                                                              |
-| `src/sdk/utils/failure.utils.ts`         | An `SdkError`'s message from what failed and its cause; the guarded emit and the `poll_failed` report                                                               |
-| `src/policy/signer-store.ts`             | `getRecord` and `updateRecord`, the store's records of another module's format, used by the two above                                                               |
-| `src/common/utils/assert.utils.ts`       | `assertTimerDelayMs`, `assertScriptTemplate`, `assertCompressedPoint` and `assertFunction`                                                                          |
-| `src/common/utils/validate.utils.ts`     | `isCompressedPoint`, shared with the invoice codec                                                                                                                  |
-| `src/common/timer-slot.ts`               | `TimerSlot`: the one armed callback the poller holds                                                                                                                |
-| `src/common/listener-set.ts`             | `ListenerSet`: the events' fan-out                                                                                                                                  |
+| File                                     | Contents                                                                                                                                                                                                            |
+| ---------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `src/sdk/fiber-lsp-sdk.ts`               | `FiberLspSdk`: the options checked, the wiring, `connect`, `disconnect`, the events, the registration, the token, the opening's three methods, the listing, the evidence                                            |
+| `src/sdk/channel-opening.ts`             | `prepareSdkChannelOpen`, `submitSdkFundingTx` and `openSdkChannel`: the arguments, the request, the resume, the check's verdict, the pins, the refusals and the drop, the submission's checks                       |
+| `src/sdk/utils/opening-check.utils.ts`   | `checkTenantOpening`: the node's answer held to what was asked, each failure `opening_rejected`                                                                                                                     |
+| `src/sdk/pending-opening.ts`             | `PendingOpeningStore`: the pending opening's record, read, matched, written, named and dropped; `assertUserLockCellDeps`                                                                                            |
+| `src/sdk/channel-step.ts`                | `buildChannelStep`: the watched channels settled from both listings, `CHANNEL_READY`, `CHANNEL_CLOSED`                                                                                                              |
+| `src/sdk/channel-listing.ts`             | `listSdkChannels`: the node's channels as a wallet shows them, the five states, `hasRecord`                                                                                                                         |
+| `src/sdk/channel-evidence.ts`            | `readSdkChannelRecord`, a registered channel's record or `unknown_channel`, which the submission reads too; `readSdkChannelEvidence`: the record projected onto its evidence                                        |
+| `src/sdk/sdk.types.ts`                   | The options, the network, the events, the error codes, the registration's forms, the opening's and the listing's, the pending opening, the evidence, the activity record, the context                               |
+| `src/sdk/sdk.constants.ts`               | The network presets, the poll interval, the allocation floor, the storage keys, the event, error and state lists, the opening's output index and defaults, the watchtower step's skipped flags and unwatched answer |
+| `src/sdk/sdk.error.ts`                   | `SdkError`                                                                                                                                                                                                          |
+| `src/sdk/allocator.ts`                   | `IndexAllocator`: the channel and invoice indexes from the clock, the last one persisted                                                                                                                            |
+| `src/sdk/activity.ts`                    | `ActivityTracker`: the persisted list of what is watched, and the status each event was emitted for                                                                                                                 |
+| `src/sdk/poller.ts`                      | `ActivityPoller`: the tick, its steps and their runs and deadline, the interval, `start`, `stop`                                                                                                                    |
+| `src/sdk/signing-step.ts`                | `buildChannelSigningStep`: the channels polled, the status read, the dispatch, the submission, `SIGNING`                                                                                                            |
+| `src/sdk/watchtower-step.ts`             | `buildWatchtowerSigningStep`: the channels it may still watch, the unwatched answer, the dispatch, the submission, the mark, `WATCHTOWER_SIGNING`                                                                   |
+| `src/sdk/utils/poll-step.utils.ts`       | What the steps share under their run: each channel in turn, the guarded event, the `poll_failed` report, the refusal of another channel's status                                                                    |
+| `src/sdk/utils/request-id.utils.ts`      | `encodeSdkRequestId`, a request id as both signing events carry it                                                                                                                                                  |
+| `src/sdk/utils/runtime-timer.utils.ts`   | The timer over the runtime's `setTimeout` and `clearTimeout`                                                                                                                                                        |
+| `src/sdk/utils/network.utils.ts`         | The network option resolved to its five values                                                                                                                                                                      |
+| `src/sdk/utils/activity-record.utils.ts` | The activity record's guard, ids and statuses per kind                                                                                                                                                              |
+| `src/sdk/utils/failure.utils.ts`         | An `SdkError`'s message from what failed and its cause; the guarded emit and the `poll_failed` report                                                                                                               |
+| `src/policy/signer-store.ts`             | `getRecord` and `updateRecord`, the store's records of another module's format, used by the allocator, the activity and the pending opening                                                                         |
+| `src/common/utils/assert.utils.ts`       | `assertTimerDelayMs`, `assertScriptTemplate`, `assertCompressedPoint`, `assertFunction`, `assertCellDep` and `assertCellDeps`                                                                                       |
+| `src/common/utils/copy.utils.ts`         | The copies of a script, a template, an out point, a cell dep and a transaction, which the network and the opening take                                                                                              |
+| `src/common/utils/validate.utils.ts`     | `isCompressedPoint`, shared with the invoice codec                                                                                                                                                                  |
+| `src/common/timer-slot.ts`               | `TimerSlot`: the one armed callback the poller holds                                                                                                                                                                |
+| `src/common/listener-set.ts`             | `ListenerSet`: the events' fan-out                                                                                                                                                                                  |
 
 ## What the tests guarantee
 
@@ -393,9 +625,9 @@ in-memory storage and a `fetch` double. Beyond a happy path per feature:
 
 - **Construction**: every option refused with the error naming the field (the seed's length and type, the url, the LSP
   key's length and type, the poll interval below one, fractional and past the timer ceiling, an unknown network, a
-  development chain with a short code hash, an unknown currency, no funding lock cell deps count or no epoch length, a
-  token with a space); the edges accepted (the default interval, the ceiling, no token, both presets, a development
-  chain, no clock); nothing scheduled or read before `connect()`; the timer defaulting to the runtime's, read once, and
+  development chain with no funding lock or a short code hash on either lock, an unknown currency, no funding lock cell
+  deps count or no epoch length, a token with a space); the edges accepted (the default interval, the ceiling, no token,
+  both presets, each with its own funding lock, a development chain, its two locks copied, no clock); nothing scheduled or read before `connect()`; the timer defaulting to the runtime's, read once, and
   refused when the runtime has none; `fetch` the same.
 - **`connect()` and the poller**: ticking at the call, then at the interval; starting nothing twice; stopping at
   `disconnect()` with no timer left behind, and starting over at the next `connect()`; `disconnect()` a no-op before any
@@ -412,6 +644,13 @@ in-memory storage and a `fetch` double. Beyond a happy path per feature:
   as a copy, or none; the watchtower step run after the signing step in the same tick, after one that signed with each
   step's event in the steps' order, and after one that failed; every spend refused without an approval, nothing
   submitted, and judged by the approval when there is one.
+- **The opening and the listing through the facade**: an opening asked under the clock's index with what the node froze
+  handed back; the funding cell refused as `opening_rejected` under the mainnet preset and under a development chain's
+  other funding lock, and accepted on one that names testnet's; the signed tx submitted, and refused for an unregistered
+  channel as `unknown_channel`; the one-call opening through the host's signer; the cell deps passed from both entry
+  points, and cell deps that are not a list and a missing signer refused with nothing written or sent; the listing with
+  `hasRecord`; and the channel step polled before the signing steps, announcing the opened channel ready and dropping
+  its pending opening.
 
 `signing-step.spec.ts` pins the step with the real dispatch over the signing vectors and a scripted node
 (`test/mocks/rpc/scripted-node.mock.ts`): each of the five signable transitions submitted with the vectors' request id,
@@ -469,7 +708,7 @@ interval measured from the end of a held step, one step at a time, no step at al
 not an error, an emitter that throws leaving the loop, `stop()` cancelling the interval, abandoning the step in flight
 and running no further step, idempotent, and immune to a timer whose cancel does nothing, `start()` after `stop()`
 ticking again at once, the stopped tick reporting and arming nothing, and the extra tick now, queued once during a tick,
-dropped by a `stop()` and never carried across one. The utils specs pin the presets' code hashes, the network refusals
+dropped by a `stop()` and never carried across one. The utils specs pin the presets' code hashes, the funding locks' included, the network refusals
 field by field (the cell deps count at 1 and 255 accepted, and 0, 256, fractional, negative, absent, null, a string and a
 bigint refused), the runtime timer's functions read once and called without a receiver, and the record guard's refusals
 one field at a time. `signer-store.spec.ts` covers the store's generic records the same way as its typed ones.
@@ -590,9 +829,11 @@ swept against `test/tests/common`:
 | A positive integer may be 0             | 1                 |
 | A positive integer's bound is exclusive | 1                 |
 
-The wiring no operation reads yet (the dispatch's commitment lock, the clock) is read where it lands, in the facade's
-internal context, until the operations, once built, observe it through what they send and sign; the LSP's key and the
-identity are observed through the registration, the store through the evidence, and the rpc client's token through
+The wiring the operations do not yet observe whole (the network as resolved, the step's deadline, the records kept in
+the host's storage) is read where it lands, in the facade's internal context, until the invoices and the payments
+observe it through what they send and sign; the clock is observed through the opening's index, the network's funding
+lock through the funding cell the opening accepts, the LSP's key through the registration and the opening's peer, the
+identity through the registration, the store through the evidence and the listing, and the rpc client's token through
 `setBiscuitToken` and the headers of the poller's calls.
 
 The rows of the facade, the network, the runtime timer, the listener set and the poller were measured again once the
@@ -668,7 +909,10 @@ when both are wrong. `setBiscuitToken` puts the token on the poller's next calls
 without, and a refused token keeps the previous one. `channelEvidence` reads a signed channel's evidence from the host's
 storage and refuses an unknown channel, and a bare hex id before reading anything. `utils/network.utils.spec.ts` adds
 the epoch to the network's refusals field by field (1, 2,000, 14,400,000 and `Number.MAX_SAFE_INTEGER` accepted; absent,
-`undefined`, `null`, 0, negative, fractional, one past the bound, the infinities, NaN, a string and a bigint refused).
+`undefined`, `null`, 0, negative, fractional, one past the bound, the infinities, NaN, a string and a bigint refused). It
+pins the funding lock the same way: each preset's code hash and hash type, a development chain's copied with any of the
+four hash types kept and nothing else of the object, and one absent or null, a code hash short, long or in hex, and an
+unknown hash type refused.
 
 `channel-evidence.spec.ts` pins the projection over records written literally: a channel that signed nothing read as
 empty, every hash and signature as `0x` hex with the revocations' and the claims' order kept, a spend claimed and never
@@ -716,3 +960,345 @@ The tenant's surface (the registration, the token, the evidence, the network's e
 | A lost record reads as an unknown channel             | 1                 |
 | The dispatch reads the release epoch on every network | 1                 |
 | The registration carries no tenant id                 | 1                 |
+
+`channel-opening.spec.ts` pins the three operations over a scripted node, an in-memory storage and the real policy and
+dispatch. The preparation: the request with the device's material, the user's lock as both scripts and fiber's default
+delay and fee rate, and an answer at another delay or fee rate refused with nothing registered; the node's id, tx and
+context handed back; the opening recorded under a fresh index before the node is asked, then named, registered, pinned
+and watched before the tx is handed out, and the channel served by the signing step from then on and not before. The
+pending opening: resumed under its index with the identical request after a lost answer, an answer the client cannot
+read and fiber's interruption; kept through fiber's refusals (an opening stopped, a different opening, a channel already
+there, a channel already open); a named one resumed while the node lists it opening, lists nothing pending or another
+channel aborted, and dropped once its own is aborted, opening under a fresh index, dropped even when no fresh index can
+be allocated, and leaving an opening another call wrote; another amount or lock opening under a fresh index without a listing; kept
+when the pending channels cannot be listed; dropped on a failed check, pinning nothing; kept, named, when pinning fails
+short of a conflict, the same call then pinning the rest; and one that failed past its pins dropped once aborted and
+reopened without a conflict. The cell deps sent as fiber writes them and recorded, resumed with the same, and sent from
+the one-call opening too; the caller's lock and cell deps copied. Each conflict (other terms, another funding cell, a
+channel registered under another index, a resumed index holding another amount or serving another channel) is
+`opening_conflict` with the policy's refusal as cause; a drop the store refuses keeps `opening_rejected` and
+`opening_conflict`, cause included, telling the failure in the message; a corrupt channel record or alias comes through
+as itself with the opening kept, named. Each argument is refused with nothing written or sent (the amount absent, a
+number, a bigint, empty, negative, fractional or hex, below the least reserve and at a u64's whole capacity as the
+policy's `RangeError`; the lock absent, null, with a short code hash, an unknown hash type, or args absent or in hex),
+and the edges are asked (the least reserve, one below a u64). The submission: the tx submitted when its raw part is the
+frozen one, writing nothing; a refusal naming both funding cells; `unknown_channel`; no funding cell pinned, or an out
+point without its capacity, as `funding_tx_altered`; a pin failure short of a conflict as itself; its own copy submitted
+however the caller writes to its object during the checks; the node's refusal and a lost answer through unwrapped, the
+opening kept; each argument refused, the channel id first, the hash's refusal kept as the cause. The one-call opening:
+the host signing a copy, unbound, and its tx submitted; a tx the host wrote to before signing refused; the host's
+refusal through, with the opening kept and resumed; and a signer's answer that is not a transaction refused, nothing
+submitted.
+
+`utils/opening-check.utils.spec.ts` pins the check over a literal answer: accepted, with the terms and the capacity it
+returns and keys of its own; both reserves under the legacy layout, and either layout on a script whose args are as
+long as both layouts' lock args; each amount at exactly its reserve; a funding cell of a u64's whole capacity; outputs of
+any kind after it; and the funding lock's args whichever key sorts first. Then one refusal per field: another channel id
+and the id of the device's funding key; the settlement key off the curve, under the uncompressed prefix and the device's
+own; the delay, the fee rate and the local amount one either side; each reserve one either side, the device's at
+nothing, and the two under different layouts either way; the peer below its reserve and the device below its own; output
+0 missing, typed, without data and with data; the funding key off the curve and the device's own; output 0's lock under
+the mainnet funding lock, the commitment lock, another hash type, other args, longer args and none; the capacity past a
+u64 and one either side; and an answer for another network's funding lock. An answer wrong everywhere names each field
+in order as the ones before it are put right.
+
+`pending-opening.spec.ts` pins the record's key and JSON literally, the lock as molecule hex and the cell deps in their
+record form; a read of nothing, of a cleared opening, of another instance's write and of a named one, extra fields
+tolerated; every corrupt field refused on a read (the version, the opening, the index, the amount, the lock, each cell
+dep's field, the channel id), the cell deps' index bounds accepted, a record that is not JSON refused, and a format that
+refuses to write what it would refuse to read; the write replacing any other opening, over a cleared one, written before
+it resolves on an asynchronous storage, returning an opening the store does not hold, each argument refused by name, an
+empty list of cell deps kept as given; the match on the amount, the lock and the cell deps, none with none and an empty
+list with an empty list, and no match on fewer, more or reordered ones; the naming of the channel under its index alone,
+writing nothing when it is already named; and both drops, by the channel and by the index, leaving any other opening and
+writing nothing when there is none.
+
+`channel-step.spec.ts` pins the step over the scripted node: nothing called with no channel watched, with only payments
+and invoices watched, or once the last channel closed; `CHANNEL_READY` once, nothing for a channel still ready, the
+event before the drop of the pending opening before the record; `CHANNEL_CLOSED` under each of fiber's close flags and a
+pair of them, for an opening and for a ready channel, the event before the drop before the channel is forgotten; nothing
+for every other state (each opening state, `ShuttingDown` after ready, `Stale`, a state fiber may add), the channel still
+watched. A channel the listing leaves out: looked for among the pending channels once per tick, after the listed ones,
+and settled there as a listed one (an aborted opening closed, one still opening left); kept watched when neither listing
+shows it; no pending read when every watched channel is listed, and one settled once when both list it. Channels nobody
+watches are ignored in both, and the pending opening is kept when another channel turns ready or closed, when its own is
+in another state, and while it names none. A listing refused, unreachable or unreadable fails the step with nothing
+emitted or written, a failed pending listing after the listed ones are settled, and an unreadable activity list before
+any call; a mark or a pending opening that fails is a `poll_failed` naming the channel, the next one settled and the
+event emitted again on the next tick; a throwing listener changes nothing; and a run abandoned during either listing,
+during its own event or while settling emits, records and reads no further, the event going out again on the next tick.
+
+`channel-listing.spec.ts` pins the five states, every fiber state mapped as the table says, the listing asked with
+`include_closed`, each channel's own balances in the node's order and the largest u128 whole, `hasRecord` telling the
+registered channels from the others, an empty listing, and the node's error, an unknown state and a store failure
+rejected as themselves.
+
+`channel-opening.flow.spec.ts` runs the facade over the tenant node double ([signing.md](./signing.md), "The opening over
+the double"): the one-call opening up to `CHANNEL_READY`, signing the open's two commitments, and the force close
+announced after; a preparation and a submission, the listing showing the channel opening, ready, closing and closed; the
+peer's commitment signed while the funding tx waits for the host, the device's after the submission; an opening fiber
+aborts after the device signed the peer's commitment announced closed, dropped and gone from the listing; a lost answer
+resumed under the same index with the identical request, the listing showing the channel without a record meanwhile; an
+opening the host declined kept, announced closed once fiber aborts it, then reopened under a fresh index; one aborted
+while the device was away found through `only_pending` and reopened; the node's tampered answers (another delay, either
+reserve, another channel id, output 0 under another lock) refused as `opening_rejected` naming the field; a signed tx
+that is not the frozen one refused as `funding_tx_altered`, nothing sent; a submission whose answer was lost, its retry
+meeting fiber's repeated-submission refusal and `CHANNEL_READY` confirming it; an LSP the node is not, refused by the
+node; the node refusing what the facade never asks (a public channel, no signer, its open channel again) and a fresh
+opening while it holds one; and the user lock's cell deps handed to the node, which adds them to the funding tx unless
+it carries them already.
+
+The channel opening, `channel-opening.ts` with `utils/opening-check.utils.ts` and `pending-opening.ts`, the channel step and
+the listing, their wiring in the facade, the network's funding lock and the presets and defaults they read, were broken the
+same way (`test/tests/sdk`, its flow specs included, still 100% on all four metrics):
+
+| Mutation                                                          | Tests that failed |
+| ----------------------------------------------------------------- | ----------------- |
+| The pending opening's key is another                              | 115               |
+| The channel id is computed over the funding key                   | 112               |
+| The pending opening's version is 2                                | 97                |
+| The funding output is output 1                                    | 85                |
+| The material is prepared at another index                         | 82                |
+| The funding lock args take the TLC base key                       | 71                |
+| The funding cell's capacity leaves the remote amount out          | 70                |
+| The default delay is one more                                     | 62                |
+| The default fee rate is one more                                  | 58                |
+| The testnet preset takes the mainnet funding lock                 | 57                |
+| The funding output is checked against the commitment lock         | 56                |
+| The channel is not registered                                     | 55                |
+| A fresh opening is not recorded                                   | 48                |
+| A refusal does not name the field                                 | 48                |
+| A record with no opening is refused                               | 45                |
+| A rejected answer is opening_conflict                             | 40                |
+| The listed channels count as left out                             | 40                |
+| The step lists only the pending channels                          | 36                |
+| The pending channels are read with nothing left out               | 34                |
+| The funding cell is not pinned                                    | 33                |
+| The funding cell is pinned at output 1                            | 33                |
+| The user's lock is not sent as the shutdown script                | 31                |
+| The delay is left to the node                                     | 30                |
+| The fee rate is left to the node                                  | 30                |
+| The liquid capacity keeps the device's reserve                    | 30                |
+| The liquid capacity keeps the peer's reserve                      | 30                |
+| A failure of the request drops the pending opening                | 29                |
+| A pending opening is never resumed                                | 28                |
+| The pinned funding capacity is the local amount                   | 28                |
+| The pinned TLC base key is the funding key                        | 27                |
+| The node is asked with nothing watched                            | 25                |
+| The local balance is the remote one                               | 24                |
+| The pending opening never names its channel                       | 24                |
+| The remote balance is the local one                               | 24                |
+| hasRecord is inverted                                             | 24                |
+| The terms are not pinned                                          | 23                |
+| A closed channel is not announced                                 | 21                |
+| Every channel has a record                                        | 21                |
+| The cell deps check takes anything                                | 21                |
+| The opening returns the pending opening's channel id              | 20                |
+| The signed tx is checked at output 1                              | 20                |
+| A closed channel is announced as ready                            | 19                |
+| A ready channel is announced as closed                            | 19                |
+| The signed tx is never submitted                                  | 18                |
+| A closed channel stays watched                                    | 17                |
+| The facade's one-call opening opens nothing                       | 17                |
+| The stored cell deps are not checked                              | 16                |
+| An aborted opening is resumed                                     | 15                |
+| A retry with other cell deps resumes                              | 14                |
+| The channel is not watched                                        | 14                |
+| The preparation skips the argument checks                         | 14                |
+| The offered TLC balance is the received one                       | 13                |
+| The received TLC balance is the offered one                       | 13                |
+| The signed tx is not checked against the frozen one               | 13                |
+| The submission's pin conflict goes through unwrapped              | 12                |
+| The facade's listing is empty                                     | 11                |
+| The funding output's lock is not compared                         | 11                |
+| The stored index is not checked                                   | 11                |
+| A cell dep's tx hash is stored with a prefix                      | 10                |
+| A ready channel is not recorded                                   | 10                |
+| The channel step is not wired                                     | 10                |
+| A channel negotiating funding is listed as stale                  | 9                 |
+| A drop takes the opening it does not seek                         | 9                 |
+| The amount is not checked as decimal shannons                     | 9                 |
+| The facade's preparation is the one-call opening                  | 9                 |
+| The network's funding lock is not checked                         | 9                 |
+| The resumption reads every channel instead of the pending ones    | 9                 |
+| funding_tx_altered carries no cause                               | 9                 |
+| A channel the listing leaves out is never looked for              | 8                 |
+| A pending opening with no channel yet lists the pending channels  | 8                 |
+| The delay is not checked against the request                      | 8                 |
+| The opening returns no context                                    | 8                 |
+| The stored lock is not checked                                    | 8                 |
+| A ready channel is listed as opening                              | 7                 |
+| A ready channel keeps its pending opening                         | 7                 |
+| A rejected answer keeps the pending opening                       | 7                 |
+| A write keeps the opening it should replace                       | 7                 |
+| Naming the channel returns a value                                | 7                 |
+| The channel id is not checked                                     | 7                 |
+| The channels left out are looked for among all channels           | 7                 |
+| The facade's submission sends nothing                             | 7                 |
+| The network's funding lock is the commitment lock                 | 7                 |
+| The user's lock is not checked as a script                        | 7                 |
+| The write checks no cell deps                                     | 7                 |
+| A cell dep's index is stored as 0                                 | 6                 |
+| A cell dep's type is stored as code                               | 6                 |
+| A closed channel keeps its pending opening                        | 6                 |
+| A conflict keeps the pending opening                              | 6                 |
+| Any pending channel the node lists counts as aborted              | 6                 |
+| The drop by index returns a value                                 | 6                 |
+| The listing leaves the closed channels out                        | 6                 |
+| The write records no cell deps                                    | 6                 |
+| opening_conflict carries no cause                                 | 6                 |
+| A retry with another lock resumes                                 | 5                 |
+| A stored cell dep's index is not checked                          | 5                 |
+| A stored cell dep's tx hash is not checked                        | 5                 |
+| An aborted opening is dropped and resumed anyway                  | 5                 |
+| The cell deps are not sent to the node                            | 5                 |
+| The channel is named after the pins                               | 5                 |
+| The delay is checked against the node's own                       | 5                 |
+| The device's reserve is taken under no layout                     | 5                 |
+| The drop ignores the channel it names                             | 5                 |
+| The drop returns a value                                          | 5                 |
+| The host's signer is not checked to be a function                 | 5                 |
+| The preparation skips the cell deps check                         | 5                 |
+| The stored amount is not checked                                  | 5                 |
+| The stored channel id is not checked                              | 5                 |
+| A closed channel is listed as closing                             | 4                 |
+| A fresh opening is recorded without its cell deps                 | 4                 |
+| A peer key off the curve passes                                   | 4                 |
+| A ready channel is recorded before it is announced                | 4                 |
+| A signed tx the hash refuses is thrown unwrapped                  | 4                 |
+| The channel id is not compared                                    | 4                 |
+| The drop by index ignores the index                               | 4                 |
+| The drop by index takes any index                                 | 4                 |
+| The fee rate is not checked against the request                   | 4                 |
+| The network's commitment lock is not copied                       | 4                 |
+| The signed tx is not checked to be an object                      | 4                 |
+| The stored version is not checked                                 | 4                 |
+| A pin conflict is not opening_conflict                            | 3                 |
+| A registration conflict is not opening_conflict                   | 3                 |
+| An unwatched channel is settled                                   | 3                 |
+| The facade's one-call opening drops the cell deps                 | 3                 |
+| The funding output's capacity is not compared                     | 3                 |
+| The funding output's lock args are not compared                   | 3                 |
+| The local amount is not checked                                   | 3                 |
+| The mainnet preset takes the testnet funding lock                 | 3                 |
+| The network's funding lock is not copied                          | 3                 |
+| The one-call opening skips the argument checks                    | 3                 |
+| The one-call opening skips the cell deps check                    | 3                 |
+| The one-call opening submits the unsigned tx                      | 3                 |
+| The opening's floor is not checked                                | 3                 |
+| The peer's funding key is not checked                             | 3                 |
+| The settlement key is not checked before the id                   | 3                 |
+| The write takes any index                                         | 3                 |
+| A channel with no funding cell pinned is submitted                | 2                 |
+| A drop takes whichever opening is pending                         | 2                 |
+| A drop with nothing stored writes a record                        | 2                 |
+| A failed drop replaces the refusal                                | 2                 |
+| A failed drop's refusal does not tell why                         | 2                 |
+| A retry is matched without its cell deps                          | 2                 |
+| A retry with another amount resumes                               | 2                 |
+| A shutting down channel is listed as closed                       | 2                 |
+| A stored cell dep's type is not checked                           | 2                 |
+| A typed funding output passes                                     | 2                 |
+| An abandoned run reads the pending channels                       | 2                 |
+| An empty list of cell deps is kept as one                         | 2                 |
+| Any failure to pin is opening_conflict                            | 2                 |
+| Funding output data passes                                        | 2                 |
+| Naming the channel takes any id                                   | 2                 |
+| Naming the channel writes it again                                | 2                 |
+| None and an empty list compare equal                              | 2                 |
+| Null cell deps count as none                                      | 2                 |
+| The device's reserve is computed over the peer's script           | 2                 |
+| The drop takes any channel id                                     | 2                 |
+| The host's signed tx is submitted, not the copy                   | 2                 |
+| The local amount may exceed what was funded                       | 2                 |
+| The peer may state the device's own key                           | 2                 |
+| The peer's reserve bound is not checked                           | 2                 |
+| The peer's reserve is computed over the user's lock               | 2                 |
+| The peer's reserve may take the other layout                      | 2                 |
+| The pinned remote reserve is the device's                         | 2                 |
+| The stored cell deps need not be a list                           | 2                 |
+| The stored lock is not read as a script                           | 2                 |
+| The submission returns the node's answer                          | 2                 |
+| A channel awaiting ready is listed as ready                       | 1                 |
+| A channel with no funding capacity pinned is submitted            | 1                 |
+| A failed drop's refusal loses its cause                           | 1                 |
+| A failed drop's refusal sets an undefined cause                   | 1                 |
+| A failed drop's refusal takes another code                        | 1                 |
+| A missing funding output is not refused                           | 1                 |
+| A ready channel is announced again                                | 1                 |
+| A ready channel is recorded before its pending opening is dropped | 1                 |
+| A refused channel is watched                                      | 1                 |
+| A stale channel is listed as opening                              | 1                 |
+| A stored cell dep need not be an object                           | 1                 |
+| An abandoned run forgets a closed channel                         | 1                 |
+| An abandoned run records a ready channel                          | 1                 |
+| An aborted opening is not dropped                                 | 1                 |
+| Any closed pending channel counts as the aborted one              | 1                 |
+| Any failure of the submission's pin is funding_tx_altered         | 1                 |
+| Cell deps compare without the dep type                            | 1                 |
+| Cell deps compare without the index                               | 1                 |
+| Cell deps compare without the length                              | 1                 |
+| Cell deps compare without the tx hash                             | 1                 |
+| Missing funding output data is not refused                        | 1                 |
+| Naming the channel ignores the index                              | 1                 |
+| Naming the channel takes any index                                | 1                 |
+| The capacity bound admits a u64 plus one                          | 1                 |
+| The capacity bound refuses its own edge                           | 1                 |
+| The cell deps are held by reference                               | 1                 |
+| The channel step runs after the signing step                      | 1                 |
+| The device's reserve bound is not checked                         | 1                 |
+| The device's reserve bound refuses its own edge                   | 1                 |
+| The facade's preparation drops the cell deps                      | 1                 |
+| The fee rate is checked against the node's own                    | 1                 |
+| The funding output may hold more than the two amounts             | 1                 |
+| The host's signer is called with a receiver                       | 1                 |
+| The mainnet funding lock's code hash is another                   | 1                 |
+| The match checks no cell deps                                     | 1                 |
+| The peer's reserve bound refuses its own edge                     | 1                 |
+| The pending listing settles every watched channel                 | 1                 |
+| The pinned TLC base key is the answer's own bytes                 | 1                 |
+| The pinned funding key is the answer's own bytes                  | 1                 |
+| The signed tx is copied after the record is read                  | 1                 |
+| The signed tx's witnesses are not checked to be a list            | 1                 |
+| The signed tx's witnesses are not checked to be bytes             | 1                 |
+| The stored lock's hex is not checked                              | 1                 |
+| The submission checks the channel id after the tx                 | 1                 |
+| The user's lock is held by reference                              | 1                 |
+| The write records an empty list as none                           | 1                 |
+| The write takes any amount                                        | 1                 |
+
+The opening's copies and its cell deps' guards live in `common`: `src/common/utils/copy.utils.ts` and `assertCellDep` and
+`assertCellDeps` in `src/common/utils/assert.utils.ts`, at 100% on all four metrics, swept against `test/tests/common`.
+`copy.utils.spec.ts` pins each copy down to every byte array, so writing to the source changes nothing, a template keeping
+nothing else of its object and a transaction with empty lists; `assert.utils.spec.ts` pins a cell dep of either dep
+type accepted and one that is not an object, has no out point, no dep type or one in camel case refused, and a list of
+none, one or two accepted, a single cell dep or `null` refused, and a bad entry named by its position:
+
+| Mutation                                     | Tests that failed |
+| -------------------------------------------- | ----------------- |
+| A cell dep need not be an object             | 3                 |
+| A cell dep's out point is not checked        | 3                 |
+| A cell dep's type is named as its out point  | 3                 |
+| A cell dep's type is not checked             | 3                 |
+| A template's code hash is held by reference  | 3                 |
+| An out point's tx hash is held by reference  | 3                 |
+| A cell dep's out point is held by reference  | 2                 |
+| A cell dep's type is always code             | 2                 |
+| A list's cell deps are not checked           | 2                 |
+| A list's cell deps are not named by position | 2                 |
+| A script's args are held by reference        | 2                 |
+| A script's code hash is held by reference    | 2                 |
+| A template's hash type is always type        | 2                 |
+| An out point's index is 0                    | 2                 |
+| Cell deps need not be a list                 | 2                 |
+| A tx input's out point is held by reference  | 1                 |
+| A tx input's since is 0                      | 1                 |
+| A tx output's capacity is 0                  | 1                 |
+| A tx output's lock is held by reference      | 1                 |
+| A tx output's type is always dropped         | 1                 |
+| A tx output's type is held by reference      | 1                 |
+| A tx's cell deps are held by reference       | 1                 |
+| A tx's header deps are held by reference     | 1                 |
+| A tx's outputs data are held by reference    | 1                 |
+| A tx's version is 0                          | 1                 |
+| A tx's witnesses are held by reference       | 1                 |

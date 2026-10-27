@@ -80,6 +80,7 @@ export type OpenChannelParamsVector = {
     public: boolean;
     shutdown_script: ScriptVector;
     funding_lock_script: ScriptVector;
+    funding_lock_script_cell_deps: CellDepVector[] | null;
 };
 
 export type SubmitSignedFundingTxParamsVector = { channel_id: string; signed_funding_tx: TransactionVector };
@@ -129,6 +130,7 @@ export type OpenTenantChannelParamsVector = {
     funding_amount: string;
     shutdown_script: ScriptVector;
     funding_lock_script: ScriptVector;
+    funding_lock_script_cell_deps: CellDepVector[] | null;
     commitment_delay_epoch: string | null;
     commitment_fee_rate: string | null;
     external_channel_signer: ChannelOpenSignerMaterialVector;
@@ -248,14 +250,20 @@ export type RpcVectors = {
 
 type Parser<Value> = (value: unknown, path: string) => Value;
 
+function asCellDep(value: unknown, path: string): CellDepVector {
+    const entry = asRecord(value, path);
+    return { out_point: asOutPoint(entry.out_point, `${path}.out_point`), dep_type: asString(entry.dep_type, `${path}.dep_type`) };
+}
+
+function asCellDeps(value: unknown, path: string): CellDepVector[] {
+    return asList(value, path, asCellDep);
+}
+
 function asTransaction(value: unknown, path: string): TransactionVector {
     const record = asRecord(value, path);
     return {
         version: asNumber(record.version, `${path}.version`),
-        cell_deps: asList(record.cell_deps, `${path}.cell_deps`, (dep, at) => {
-            const entry = asRecord(dep, at);
-            return { out_point: asOutPoint(entry.out_point, `${at}.out_point`), dep_type: asString(entry.dep_type, `${at}.dep_type`) };
-        }),
+        cell_deps: asCellDeps(record.cell_deps, `${path}.cell_deps`),
         header_deps: asList(record.header_deps, `${path}.header_deps`, asString),
         inputs: asList(record.inputs, `${path}.inputs`, (input, at) => {
             const entry = asRecord(input, at);
@@ -473,6 +481,11 @@ const METHOD_PARSERS: {
                 public: asBoolean(record.public, `${path}.public`),
                 shutdown_script: asScript(record.shutdown_script, `${path}.shutdown_script`),
                 funding_lock_script: asScript(record.funding_lock_script, `${path}.funding_lock_script`),
+                funding_lock_script_cell_deps: asNullable(
+                    record.funding_lock_script_cell_deps,
+                    `${path}.funding_lock_script_cell_deps`,
+                    asCellDeps,
+                ),
                 ...asStringFields(record, path, ["pubkey", "funding_amount"] as const),
             };
         },
@@ -532,6 +545,11 @@ const METHOD_PARSERS: {
             return {
                 shutdown_script: asScript(record.shutdown_script, `${path}.shutdown_script`),
                 funding_lock_script: asScript(record.funding_lock_script, `${path}.funding_lock_script`),
+                funding_lock_script_cell_deps: asNullable(
+                    record.funding_lock_script_cell_deps,
+                    `${path}.funding_lock_script_cell_deps`,
+                    asCellDeps,
+                ),
                 commitment_delay_epoch: asNullable(record.commitment_delay_epoch, `${path}.commitment_delay_epoch`, asString),
                 commitment_fee_rate: asNullable(record.commitment_fee_rate, `${path}.commitment_fee_rate`, asString),
                 external_channel_signer: asSignerMaterial(record.external_channel_signer, `${path}.external_channel_signer`),

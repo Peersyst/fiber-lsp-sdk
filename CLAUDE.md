@@ -42,7 +42,8 @@ src/
   common/         Input guards, and the chain and protocol vocabulary that belongs to no single module
   derivation/     Fiber key scheme port + SDK-owned derivations
   digest/         Rebuilds the four messages fiber signs (no-blind-signing); the transaction serializers, CKB's tx hash and the
-                  settlement unlock a watchtower's spend carries
+                  settlement unlock a watchtower's spend carries; the funding lock's args and the channel id an opening is
+                  checked against
   invoice/        Fiber's invoice string, read and written bit for bit: bech32m, the arithmetic coder, the molecule, the signature
   signer/         The entry of a signing request over fiber's status, musig2 signing engine, the public material, the tenant identity,
                   the watchtower's on-chain signature

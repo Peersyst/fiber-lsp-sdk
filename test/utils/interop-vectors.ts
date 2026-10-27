@@ -5,6 +5,7 @@ import { NONCE_CONTEXTS } from "../../src/derivation/derivation.constants";
 import type { NonceContext } from "../../src/derivation/derivation.types";
 import type { SigningSettlement } from "../../src/digest/digest.types";
 import { asArray, asBoolean, asNullable, asNumber, asRecord, asString, asStringFields } from "./json-shape";
+import type { SigningDeviceVector, SigningKeyRole, SigningPeerVector } from "./signing-vectors";
 
 export const CHANNEL_KEY_FIELDS = [
     "funding_key",
@@ -153,6 +154,16 @@ export type DigestVectors = {
     reserve_cases: ReserveCaseVector[];
 };
 
+// The two parties of `signing.json`'s channel, with the funding lock and the id fiber derives for it.
+export type FundingLockVector = {
+    device: SigningDeviceVector;
+    peer: SigningPeerVector;
+    key_order: [SigningKeyRole, SigningKeyRole];
+    aggregated_pubkey: string;
+    lock: ScriptVector;
+    channel_id: string;
+};
+
 export type Vectors = {
     scheme_version: number;
     fiber_ref: string;
@@ -169,6 +180,7 @@ export type Vectors = {
     musig: MusigVector;
     digest: DigestVectors;
     tenant_registry: TenantRegistryVector;
+    funding_lock: FundingLockVector;
 };
 
 // fiber's `SigningSettlementTlc` as its JSON writes it: hex integers, a 0x-prefixed hash, bare-hex pubkeys.
@@ -382,6 +394,25 @@ function asDigestVectors(value: unknown): DigestVectors {
     };
 }
 
+function asFundingLockVector(value: unknown): FundingLockVector {
+    const root = asRecord(value, "funding_lock");
+    const device = asRecord(root.device, "funding_lock.device");
+    const [first, second, ...rest] = asArray(root.key_order, "funding_lock.key_order");
+    if (!((first === "device" && second === "peer") || (first === "peer" && second === "device")) || rest.length > 0) {
+        throw new Error("funding_lock.key_order must name the device and the peer once each");
+    }
+    return {
+        device: {
+            channel_index: asNumber(device.channel_index, "funding_lock.device.channel_index"),
+            ...asStringFields(device, "funding_lock.device", ["master_seed", "funding_pubkey", "tlc_base_pubkey"] as const),
+        },
+        peer: asStringFields(root.peer, "funding_lock.peer", ["seed", "funding_pubkey", "tlc_base_pubkey"] as const),
+        key_order: [first, second],
+        lock: asScript(root.lock, "funding_lock.lock"),
+        ...asStringFields(root, "funding_lock", ["aggregated_pubkey", "channel_id"] as const),
+    };
+}
+
 function asNonceContext(value: unknown, path: string): NonceContext {
     const raw = asString(value, path);
     const context = NONCE_CONTEXTS.find((known) => known === raw);
@@ -454,6 +485,7 @@ export function parseVectors(value: unknown): Vectors {
         musig: asStringFields(root.musig, "musig", MUSIG_FIELDS),
         digest: asDigestVectors(root.digest),
         tenant_registry: asStringFields(root.tenant_registry, "tenant_registry", TENANT_REGISTRY_FIELDS),
+        funding_lock: asFundingLockVector(root.funding_lock),
     };
 }
 

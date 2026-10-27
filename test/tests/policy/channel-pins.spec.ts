@@ -56,18 +56,39 @@ describe("fundingCellPins", () => {
 });
 
 describe("channelTermsPins", () => {
-    it("writes the fee rate in decimal, and the amounts as given", () => {
+    it("writes the fee rate and the delay in decimal, the keys in hex, and the amounts as given", () => {
         expect(
             channelTermsPins({
                 commitmentFeeRate: 18446744073709551615n,
                 remoteReservedCkbShannons: "0",
                 liquidCapacityShannons: "80500000000",
+                remoteFundingPubkey: hexToBytes(REMOTE_FUNDING_PUBKEY),
+                remoteTlcBasePubkey: hexToBytes(REMOTE_TLC_BASE_PUBKEY),
+                commitmentDelayEpoch: 18446744073709551615n,
             }),
         ).toEqual<StatedChannelPins>({
             liquidCapacityShannons: "80500000000",
             commitmentFeeRate: "18446744073709551615",
             remoteReservedCkbShannons: "0",
+            remoteFundingPubkey: REMOTE_FUNDING_PUBKEY,
+            remoteTlcBasePubkey: REMOTE_TLC_BASE_PUBKEY,
+            commitmentDelayEpoch: "18446744073709551615",
         });
+    });
+
+    // A request that later states the same values meets them equal, and the host's pin stands for its first sight.
+    it("writes every value in the form a commitment states it", () => {
+        const input = toCommitmentTxInput(caseOf(digest.commitment_cases, "ckb, no tlcs, for remote"), digest.remote);
+        const terms = channelTermsPins({
+            commitmentFeeRate: input.commitmentFeeRate,
+            remoteReservedCkbShannons: input.remoteReservedCkbShannons.toString(),
+            liquidCapacityShannons: input.liquidCapacityShannons.toString(),
+            remoteFundingPubkey: input.remoteFundingPubkey,
+            remoteTlcBasePubkey: input.remoteTlcBasePubkey,
+            commitmentDelayEpoch: input.commitmentDelayEpoch,
+        });
+        expect(Object.keys(terms)).toHaveLength(6);
+        expect(statedChannelPins({ kind: "commitment_tx", input })).toMatchObject(terms);
     });
 });
 

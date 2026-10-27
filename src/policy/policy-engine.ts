@@ -10,6 +10,7 @@ import {
     TRUNCATED_PAYMENT_HASH_LENGTH,
     UINT64_MAX,
     assertBytes,
+    assertCompressedPoint,
     assertDecimalShannons,
     assertHexBytes,
     assertNonEmptyString,
@@ -39,12 +40,20 @@ import {
     CHANNEL_POLICY_RECORD_VERSION,
     CHANNEL_TERMS_PINS,
     FIRST_SIGHT_CHANNEL_PINS,
+    HOST_TERMS_PINS,
     MAX_REVOKED_VERSION,
     NONCE_REUSE_MODES,
     PAYMENT_RECORD_VERSION,
     POLICY_VIEWS,
 } from "./policy.constants";
-import { ChannelPinError, DebitIntentError, HoldInvoiceError, refusePolicyRequest, withPolicyRefusal } from "./policy.error";
+import {
+    ChannelPinError,
+    ChannelRegistrationError,
+    DebitIntentError,
+    HoldInvoiceError,
+    refusePolicyRequest,
+    withPolicyRefusal,
+} from "./policy.error";
 import type {
     BalanceRuleContext,
     ChannelPins,
@@ -117,7 +126,11 @@ export class PolicyEngine {
         const pins = openingChannelPins(fundedShannons, localCloseScript);
         const aliased = await this.store.resolveChannelIndex(channelId);
         if (aliased !== null && aliased !== channelIndex) {
-            throw new TypeError(`channel ${channelId} is already registered under a different channel index`);
+            throw new ChannelRegistrationError(
+                channelId,
+                channelIndex,
+                `channel ${channelId} is already registered under a different channel index`,
+            );
         }
         const record = await this.store.updateChannelRecord(channelIndex, (current) => {
             if (current === null) {
@@ -134,10 +147,14 @@ export class PolicyEngine {
                 };
             }
             if (current.pins.fundedShannons !== pins.fundedShannons || current.pins.localCloseScript !== pins.localCloseScript) {
-                throw new TypeError(`channel index ${channelIndex} is already registered with another funded amount or close script`);
+                throw new ChannelRegistrationError(
+                    channelId,
+                    channelIndex,
+                    `channel index ${channelIndex} is already registered with another funded amount or close script`,
+                );
             }
             if (current.channelId !== channelId) {
-                assertUnservedRecord(channelIndex, current);
+                assertUnservedRecord(channelId, channelIndex, current);
                 return { ...current, channelId };
             }
             return current;
@@ -160,7 +177,7 @@ export class PolicyEngine {
     }
 
     /**
-     * Pins the terms no signing request states, throwing a {@link ChannelPinError} when the channel pinned others.
+     * Pins the terms and the first-sight values of the opening, throwing a {@link ChannelPinError} when the channel pinned others.
      * @param channelId Channel identifier, any name the channel was registered under.
      * @param terms The terms, from the node's opening context.
      */
@@ -170,7 +187,10 @@ export class PolicyEngine {
         assertUint64Shannons("terms.remoteReservedCkbShannons", terms.remoteReservedCkbShannons);
         // Liquid capacity sits in the funding cell, so a cell's u64 bounds it.
         assertUint64Shannons("terms.liquidCapacityShannons", terms.liquidCapacityShannons);
-        await this.pinHostValues(channelId, channelTermsPins(terms), CHANNEL_TERMS_PINS);
+        assertCompressedPoint("terms.remoteFundingPubkey", terms.remoteFundingPubkey);
+        assertCompressedPoint("terms.remoteTlcBasePubkey", terms.remoteTlcBasePubkey);
+        assertUnsignedBigInt("terms.commitmentDelayEpoch", terms.commitmentDelayEpoch, UINT64_MAX);
+        await this.pinHostValues(channelId, channelTermsPins(terms), HOST_TERMS_PINS);
     }
 
     /**
@@ -628,13 +648,18 @@ export class PolicyEngine {
 
 /**
  * Asserts that a record may still take a new channel name, which only one that has never served a slot may do.
+ * @param channelId The new name.
  * @param channelIndex Index the record is keyed by.
  * @param record The record found at that index.
  */
-function assertUnservedRecord(channelIndex: number, record: ChannelPolicyRecord): void {
+function assertUnservedRecord(channelId: string, channelIndex: number, record: ChannelPolicyRecord): void {
     const served = Object.keys(record.signedSessions).length > 0 || Object.keys(record.lastSignedCommitmentNumbers).length > 0;
     if (served) {
-        throw new TypeError(`channel index ${channelIndex} already serves channel ${record.channelId}`);
+        throw new ChannelRegistrationError(
+            channelId,
+            channelIndex,
+            `channel index ${channelIndex} already serves channel ${record.channelId}`,
+        );
     }
 }
 

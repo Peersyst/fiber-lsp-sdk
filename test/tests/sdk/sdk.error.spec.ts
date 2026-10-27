@@ -22,6 +22,13 @@ describe("SdkError", () => {
     });
 
     it("pins the codes", () => {
-        expect(SDK_ERROR_CODES).toEqual(["poll_failed", "clock_before_floor", "unknown_channel"]);
+        expect(SDK_ERROR_CODES).toEqual([
+            "poll_failed",
+            "clock_before_floor",
+            "unknown_channel",
+            "opening_rejected",
+            "opening_conflict",
+            "funding_tx_altered",
+        ]);
     });
 });

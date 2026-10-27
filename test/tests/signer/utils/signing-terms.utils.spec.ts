@@ -32,7 +32,8 @@ const PINS: ChannelPins = {
     udtTypeScript: null,
     liquidCapacityShannons: "80500000000",
     commitmentFeeRate: "1000",
-    remoteReservedCkbShannons: "6300000000",
+    // The node sizes its own the same way, over its close script of 20-byte args, under the channel's layout.
+    remoteReservedCkbShannons: "10000000000",
     lockLayout: "fullPaymentHash",
 };
 
@@ -139,7 +140,7 @@ describe("buildSignOperation", () => {
         expect(input.udtTypeScript).toBeNull();
         expect(input.liquidCapacityShannons).toBe(80500000000n);
         expect(input.localReservedCkbShannons).toBe(10000000000n);
-        expect(input.remoteReservedCkbShannons).toBe(6300000000n);
+        expect(input.remoteReservedCkbShannons).toBe(10000000000n);
         expect(input.commitmentLock).toBe(NETWORK.commitmentLock);
         expect(input.lockLayout).toBe("fullPaymentHash");
         expect(input.forRemote).toBe(true);

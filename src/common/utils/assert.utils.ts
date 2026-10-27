@@ -1,5 +1,5 @@
-import { COMPRESSED_POINT_LENGTH, HASH256_LENGTH, MAX_TIMER_DELAY_MS, SCRIPT_HASH_TYPES, UINT32_MAX } from "../common.constants";
-import type { OutPoint, Script, ScriptTemplate } from "../common.types";
+import { COMPRESSED_POINT_LENGTH, DEP_TYPES, HASH256_LENGTH, MAX_TIMER_DELAY_MS, SCRIPT_HASH_TYPES, UINT32_MAX } from "../common.constants";
+import type { CellDep, OutPoint, Script, ScriptTemplate } from "../common.types";
 import { isCompressedPoint, isDecimalShannons, isHexBytes, isNonEmptyString, isPlainObject, isUnsignedInteger } from "./validate.utils";
 
 /**
@@ -197,4 +197,25 @@ export function assertOutPoint(name: string, value: unknown): asserts value is O
     if (!isPlainObject(value)) throw new TypeError(`${name} must be an object`);
     assertBytes(`${name}.txHash`, value.txHash, HASH256_LENGTH);
     assertUnsignedInteger(`${name}.index`, value.index, UINT32_MAX);
+}
+
+/**
+ * Asserts that a value is a cell dep: an out point and one of CKB's dep types.
+ * @param name Name for the error message.
+ * @param value Value to check.
+ */
+export function assertCellDep(name: string, value: unknown): asserts value is CellDep {
+    if (!isPlainObject(value)) throw new TypeError(`${name} must be an object`);
+    assertOutPoint(`${name}.outPoint`, value.outPoint);
+    assertOneOf(`${name}.depType`, value.depType, DEP_TYPES);
+}
+
+/**
+ * Asserts that a value is a list of cell deps, each named by its position.
+ * @param name Name for the error message.
+ * @param value Value to check.
+ */
+export function assertCellDeps(name: string, value: unknown): asserts value is CellDep[] {
+    if (!Array.isArray(value)) throw new TypeError(`${name} must be an array`);
+    value.forEach((cellDep: unknown, index) => assertCellDep(`${name}[${index}]`, cellDep));
 }

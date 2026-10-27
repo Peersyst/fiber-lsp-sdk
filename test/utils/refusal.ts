@@ -1,5 +1,6 @@
 import { InvoiceError } from "../../src/invoice";
 import { PolicyRefusalError } from "../../src/policy";
+import { SdkError } from "../../src/sdk";
 import type { WireError } from "../../src/wire";
 import { asWireError } from "../../src/wire";
 
@@ -12,24 +13,26 @@ export function refusal(step: () => unknown): WireError {
     throw new Error("the step did not refuse");
 }
 
-export function invoiceRefusal(step: () => unknown): InvoiceError {
+export function refusalOf<Refusal extends Error>(errorClass: abstract new (...args: never[]) => Refusal, step: () => unknown): Refusal {
     try {
         step();
     } catch (error) {
-        if (error instanceof InvoiceError) return error;
+        if (error instanceof errorClass) return error;
         throw error;
     }
     throw new Error("the step did not refuse");
 }
 
+export function invoiceRefusal(step: () => unknown): InvoiceError {
+    return refusalOf(InvoiceError, step);
+}
+
 export function policyRefusal(step: () => unknown): PolicyRefusalError {
-    try {
-        step();
-    } catch (error) {
-        if (error instanceof PolicyRefusalError) return error;
-        throw error;
-    }
-    throw new Error("the step did not refuse");
+    return refusalOf(PolicyRefusalError, step);
+}
+
+export function sdkRefusal(step: () => unknown): SdkError {
+    return refusalOf(SdkError, step);
 }
 
 // The device's refusal of each watchtower variant fiber refuses, its record holding both views' commitments.

@@ -12,12 +12,22 @@ import type { SdkChannelEvidence } from "./sdk.types";
  * @returns A copy of the evidence.
  */
 export async function readSdkChannelEvidence(store: SignerStore, channelId: string): Promise<SdkChannelEvidence> {
+    return projectChannelEvidence(await readSdkChannelRecord(store, channelId));
+}
+
+/**
+ * Reads the record of a channel this device registered, refusing any other as `unknown_channel`.
+ * @param store The device's store.
+ * @param channelId The channel, under any name the node gave it.
+ * @returns The record.
+ */
+export async function readSdkChannelRecord(store: SignerStore, channelId: string): Promise<ChannelPolicyRecord> {
     assertWireHexBytes("channelId", channelId, HASH256_LENGTH);
     const channelIndex = await store.resolveChannelIndex(channelId);
     if (channelIndex === null) throw new SdkError("unknown_channel", unregisteredPolicyChannelMessage(channelId));
     const record = await store.getChannelRecord(channelIndex);
     if (record === null) throw missingPolicyRecord(channelId, channelIndex);
-    return projectChannelEvidence(record);
+    return record;
 }
 
 /**

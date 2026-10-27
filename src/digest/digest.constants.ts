@@ -88,3 +88,13 @@ export const COMMITMENT_LOCK_TESTNET: ScriptTemplate = {
     codeHash: hexToBytes("740dee83f87c6f309824d8fd3fbdd3c8380ee6fc9acc90b1a748438afcdf81d8"),
     hashType: "type",
 };
+
+export const FUNDING_LOCK_MAINNET: ScriptTemplate = {
+    codeHash: hexToBytes("e45b1f8f21bff23137035a3ab751d75b36a981deec3e7820194b9c042967f4f1"),
+    hashType: "type",
+};
+
+export const FUNDING_LOCK_TESTNET: ScriptTemplate = {
+    codeHash: hexToBytes("6c67887fe201ee0c7853f1682c0b77c0e6214044c156c7558269390a8afa6d7c"),
+    hashType: "type",
+};

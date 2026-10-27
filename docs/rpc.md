@@ -94,10 +94,12 @@ exchange did not complete, and how jsonrpsee maps its own failures to statuses i
 
 ## What the client deliberately does not do
 
-- **Retry.** No write is idempotent: a second `send_payment` for one hash restarts a failed payment, and a repeated open
-  is a second channel. Reconciling an unknown outcome means reading state, which is the caller's.
+- **Retry.** No write is idempotent: a second `send_payment` for one hash restarts a failed payment, and a repeated
+  external-funding open is a second channel. The tenant open is the exception fiber makes, one opening per tenant whose
+  identical repeat gets the same answer, and the facade's opening is what retries it ([sdk.md](./sdk.md)). Reconciling an
+  unknown outcome means reading state, which is the caller's.
 - **Time out.** The timeout is the host's `fetch`'s, where TLS, proxies and abort already live, and it has to allow
-  `open_channel_with_external_funding`, which blocks until the funding transaction is built.
+  both opens, which block until the funding transaction is built.
 - **Parse messages**, for the reason above.
 - **Batch, or speak WebSocket.** One request per POST; fiber's pubsub is not a device surface.
 
@@ -107,23 +109,27 @@ Four methods carry an externally funded channel from its open to its listing. Ea
 what the SDK decides, and leaves every other option to the node's default; each reads only the members the SDK uses, ignoring
 the rest even when they are malformed.
 
-| Method                               | Client method                    | Sends                                                                          | Reads                               |
-| ------------------------------------ | -------------------------------- | ------------------------------------------------------------------------------ | ----------------------------------- |
-| `open_channel_with_external_funding` | `openChannelWithExternalFunding` | `pubkey`, `funding_amount`, `public`, `shutdown_script`, `funding_lock_script` | `channel_id`, `unsigned_funding_tx` |
-| `submit_signed_funding_tx`           | `submitSignedFundingTx`          | `channel_id`, `signed_funding_tx`                                              | `channel_id`, `funding_tx_hash`     |
-| `abandon_channel`                    | `abandonChannel`                 | `channel_id`                                                                   | `null`                              |
-| `list_channels`                      | `listChannels`                   | nothing, or one of `include_closed` and `only_pending`                         | per channel, the fields below       |
-| `list_channels`                      | `listChannelIds`                 | the same as `listChannels`                                                     | each channel's `channel_id` alone   |
-| `list_channels`                      | `listChannelStates`              | the same as `listChannels`                                                     | each channel's id and state alone   |
+| Method                               | Client method                    | Sends                                                                                                                    | Reads                               |
+| ------------------------------------ | -------------------------------- | ------------------------------------------------------------------------------------------------------------------------ | ----------------------------------- |
+| `open_channel_with_external_funding` | `openChannelWithExternalFunding` | `pubkey`, `funding_amount`, `public`, `shutdown_script`, `funding_lock_script`; `funding_lock_script_cell_deps` if given | `channel_id`, `unsigned_funding_tx` |
+| `submit_signed_funding_tx`           | `submitSignedFundingTx`          | `channel_id`, `signed_funding_tx`                                                                                        | `channel_id`, `funding_tx_hash`     |
+| `abandon_channel`                    | `abandonChannel`                 | `channel_id`                                                                                                             | `null`                              |
+| `list_channels`                      | `listChannels`                   | nothing, or one of `include_closed` and `only_pending`                                                                   | per channel, the fields below       |
+| `list_channels`                      | `listChannelIds`                 | the same as `listChannels`                                                                                               | each channel's `channel_id` alone   |
+| `list_channels`                      | `listChannelStates`              | the same as `listChannels`                                                                                               | each channel's id and state alone   |
 
 - **The open blocks** until the peer has accepted and the funding transaction is built, and answers with the channel's
   **final** id, not the temporary one. Its answer is the only copy of the unsigned transaction: no other method returns it.
 - **`public` is always sent**, true included, and the peer's key is required: fiber defaults `public` to `true`, and whether a
   channel is announced is the SDK's decision, not an inherited default.
+- **The funding lock's cell deps are sent only when given**, as `fundingLockScriptCellDeps`: without them fiber resolves
+  the funding lock's deps among the chain's genesis scripts alone (`funding_tx.rs:223-238`), so a user's lock outside
+  them cannot fund the channel. Each is checked as a cell dep by `common`'s `assertCellDeps` (an out point and `code` or
+  `dep_group`), refused by its index before anything is sent, and written as CKB's JSON writes one. An empty list is sent
+  as `[]`, which fiber reads as none.
 - **Left to the node on the open**: `funding_udt_type_script` (the client opens CKB channels only until the SDK's multi-asset
-  shape is settled; adding it is additive), `funding_lock_script_cell_deps` (needed only by a lock whose deps are not among
-  the node's defaults, and additive when a host has one), and the commitment delay, both fee rates and the four TLC
-  settings, which are the node's policy.
+  shape is settled; adding it is additive), and the commitment delay, both fee rates and the four TLC settings, which are
+  the node's policy.
 - **The submit is checked byte for byte by fiber**, which refuses a transaction that differs from the unsigned one in
   anything but the witnesses; it answers before broadcast, and verifies no signature.
 - **The abandon answers `null`**, read as such; anything else is an answer the client cannot read.
@@ -246,13 +252,14 @@ A payment is read as:
 Two methods open and close a tenant's channel on the hosted node, which holds no channel key: the device supplies the
 public signer material at the open, and signs on request afterwards ([Signing request methods](#signing-request-methods)).
 
-| Method                | Sends                                                                                                                                                                             | Reads                                                  |
-| --------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------ |
-| `open_tenant_channel` | the open's `pubkey`, `funding_amount`, `public`, `shutdown_script`, `funding_lock_script`; `commitment_delay_epoch` and `commitment_fee_rate` if given; `external_channel_signer` | `channel_id`, `unsigned_funding_tx`, `opening_context` |
-| `shutdown_channel`    | `channel_id`; `close_script`, `fee_rate` and `force` if given                                                                                                                     | `null`                                                 |
+| Method                | Sends                                                                                                                                                                                                                           | Reads                                                  |
+| --------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------ |
+| `open_tenant_channel` | the open's `pubkey`, `funding_amount`, `public`, `shutdown_script`, `funding_lock_script`, and `funding_lock_script_cell_deps` if given; `commitment_delay_epoch` and `commitment_fee_rate` if given; `external_channel_signer` | `channel_id`, `unsigned_funding_tx`, `opening_context` |
+| `shutdown_channel`    | `channel_id`; `close_script`, `fee_rate` and `force` if given                                                                                                                                                                   | `null`                                                 |
 
-- **The open is the external-funding open plus the signer material**: the same five members, written by the same encoder,
-  with `public` always `false`. A tenant channel is private, fiber refuses to announce one, and the choice is the SDK's,
+- **The open is the external-funding open plus the signer material**, on the client as `openTenantChannel`, which the
+  facade's opening calls ([sdk.md](./sdk.md)): the same members, the funding lock's cell deps included, written by the
+  same encoder, with `public` always `false`. A tenant channel is private, fiber refuses to announce one, and the choice is the SDK's,
   not an inherited default; an input that carries `public: true` still sends `false`.
 - **`external_channel_signer` is the device's public material**: `base_public_keys` (`funding_pubkey`, `tlc_base_key`),
   `first_commitment_point`, `second_commitment_point`, each a 33-byte point written bare, and `commitment_nonce`,
@@ -261,10 +268,11 @@ public signer material at the open, and signs on request afterwards ([Signing re
   it opens, since fiber refuses the nonce on one.
 - **The two options are sent only when given**, as `U64Hex`: the delay as the full `EpochNumberWithFraction` value, the
   rate in shannons per kilobyte; absent, the node's defaults apply. Left to the node, as on the external-funding open:
-  `funding_udt_type_script`, `funding_lock_script_cell_deps`, `funding_fee_rate` and the four TLC settings.
-- **The answer is the channel's final id**, derived from both settlement keys, the unsigned funding transaction (the only
-  copy of it) and the `opening_context`: the terms the node froze, which the device checks its opening intent against
-  before signing anything. It is read field by field, each refusal naming its path:
+  `funding_udt_type_script`, `funding_fee_rate` and the four TLC settings.
+- **The answer is the channel's final id**, derived from both TLC base keys, the unsigned funding transaction (the only
+  copy of it) and the `opening_context`: the terms the node froze. The client reads their forms only; holding them to
+  what was asked, the id and the funding output included, is the facade's ([sdk.md](./sdk.md)). It is read field by
+  field, each refusal naming its path:
 
 | Field                                  | From                                    | Form                                    |
 | -------------------------------------- | --------------------------------------- | --------------------------------------- |
@@ -422,8 +430,8 @@ inputs do, and the host hands it to its CKB signer as it is.
   read; a body that cannot be read; every error envelope as an `RpcError` without calling the decoder; an unreadable
   envelope and a decoder's refusal as an `RpcResponseError` naming the field; a decoder's own bug passing through; the
   token absent from every error.
-- **The channel methods against fiber**: every params case of the four methods, encoded from its typed input, equal to what
-  fiber's serde wrote, and read back unchanged by fiber's own deserializers through `verify-rpc-params`; every result case
+- **The channel methods against fiber**: every params case of the four methods, the open with its funding lock's cell deps
+  of both dep types and without them, encoded from its typed input, equal to what fiber's serde wrote, and read back unchanged by fiber's own deserializers through `verify-rpc-params`; every result case
   decoded and compared with the vector's input values, not with the JSON it read: both opens, the submit, the abandon's
   `null`, and the three listings and the empty one, which carry every state and every close flag, read by
   `listChannelStates` too, each state as fiber's strings. That reading has its own refusals and acceptances: a literal
@@ -449,15 +457,20 @@ inputs do, and the host hands it to its CKB signer as it is.
   malformed.
 - **The hold invoice by construction**: no input makes `new_invoice` carry a preimage, a description is omitted rather than
   sent as `null` and sent when empty, and no refusal of a preimage carries its bytes.
+- **The funding lock's cell deps**: written after the funding lock when given and never otherwise, an empty list as `[]`,
+  the highest index an out point can name, and one refusal per field of a list or an entry (not a list, an entry not an
+  object, its out point missing, a short hash, an index past a u32, a dep type missing or unknown), with nothing sent.
 - **The forms**: the flag set against every rule above; the transaction read field by field from a literal, written back
   equal, one refusal per field with its path, a `hash` ignored on read and never written; the bare key, the new encoders and
   their refusals of typed input, which send nothing.
 - **The tenant channel methods against fiber**: every params case of the two methods (the open without options, with the
-  delay and the fee rate, and with the announcement nonce; the shutdown by id alone and with its three options) written as
-  fiber's serde wrote it and read back by its deserializers; both opening contexts decoded and compared with the vector's
-  values; a literal context read field by field with the amounts and reserves in decimal; the largest amounts, reserves,
-  delay and rate; `public` false even when the input says true; each option written on its own and never as `null`; the
-  exact body of a shutdown through `call`.
+  delay and the fee rate, with the announcement nonce, and with the funding lock's cell deps; the shutdown by id alone and
+  with its three options) written as fiber's serde wrote it and read back by its deserializers; both opening contexts
+  decoded and compared with the vector's values; a literal context read field by field with the amounts and reserves in
+  decimal; the largest amounts, reserves, delay and rate; `public` false even when the input says true; each option
+  written on its own and never as `null`; the exact body of a shutdown through `call`; and `openTenantChannel` sending
+  every params case and reading every result through the client, a bad param refused before any fetch, the node's refusal
+  as an `RpcError`, and a result without its opening context named by its path.
 - **The signing request methods against fiber**: every params case of the four (a submit with and without next material,
   the 65-byte watchtower signature) written as fiber's serde wrote it; `NoSignatureRequired` of both getters decoded and
   compared with the vector's values, which pins that fiber writes the unit variant as its tag alone; both outcomes of both
@@ -647,3 +660,13 @@ still 100% on all four metrics):
 | A token set later is ignored            | 4                 |
 | The printable range admits the space    | 3                 |
 | The printable range admits DEL          | 2                 |
+
+`openTenantChannel`, the client method over the tenant opening's codec, was broken the same way (`test/tests/rpc`, still
+100% on all four metrics):
+
+| Mutation                                                  | Tests that failed |
+| --------------------------------------------------------- | ----------------- |
+| The opening is sent as open_channel_with_external_funding | 5                 |
+| The opening's params go out unencoded                     | 4                 |
+| The opening's result is handed back undecoded             | 3                 |
+| The opening's result is read as an external funding's     | 3                 |

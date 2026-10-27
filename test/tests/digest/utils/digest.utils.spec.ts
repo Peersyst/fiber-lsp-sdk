@@ -1,6 +1,6 @@
-import { bytesToHex } from "@noble/hashes/utils.js";
+import { bytesToHex, hexToBytes } from "@noble/hashes/utils.js";
 import { pubkeyOf } from "../../../../src/derivation/fiber-scheme";
-import { aggregateXOnlyPubkey, commitmentCellValue, subtractTxFee } from "../../../../src/digest/utils/digest.utils";
+import { aggregateXOnlyPubkey, commitmentCellValue, sortDistinctPubkeys, subtractTxFee } from "../../../../src/digest/utils/digest.utils";
 
 const KEY_A = pubkeyOf(new Uint8Array(32).fill(0x11));
 const KEY_B = pubkeyOf(new Uint8Array(32).fill(0x22));
@@ -13,6 +13,45 @@ describe("aggregateXOnlyPubkey", () => {
 
     it("is order-sensitive, the property every lock args ordering rule exists for", () => {
         expect(bytesToHex(aggregateXOnlyPubkey([KEY_A, KEY_B]))).not.toBe(bytesToHex(aggregateXOnlyPubkey([KEY_B, KEY_A])));
+    });
+});
+
+describe("sortDistinctPubkeys", () => {
+    // G, -G and 2G: G and -G differ in their first byte alone, G and 2G share it.
+    const G = hexToBytes("0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798");
+    const NEG_G = hexToBytes("0379be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798");
+    const TWO_G = hexToBytes("02c6047f9441ed7d6d3045406e95c07cd85c778e4b8cef3ca7abac09b95c709ee5");
+
+    it("puts the lower key first, whichever order they come in", () => {
+        expect(sortDistinctPubkeys("first", G, "second", NEG_G)).toEqual([G, NEG_G]);
+        expect(sortDistinctPubkeys("first", NEG_G, "second", G)).toEqual([G, NEG_G]);
+    });
+
+    it("compares past the first byte", () => {
+        expect(sortDistinctPubkeys("first", TWO_G, "second", G)).toEqual([G, TWO_G]);
+        expect(sortDistinctPubkeys("first", G, "second", TWO_G)).toEqual([G, TWO_G]);
+    });
+
+    it.each([
+        ["absent", undefined, new TypeError("first must be a Uint8Array")],
+        ["of 32 bytes", KEY_A.subarray(1), new TypeError("first must be 33 bytes, got 32")],
+        ["off the curve", Uint8Array.of(0x02, ...new Uint8Array(32)), new TypeError("first must be a compressed point on secp256k1")],
+    ])("refuses the first key %s, naming it", (_, key, error) => {
+        expect(() => sortDistinctPubkeys("first", key, "second", KEY_B)).toThrow(error);
+    });
+
+    it.each([
+        ["absent", undefined, new TypeError("second must be a Uint8Array")],
+        ["of 32 bytes", KEY_B.subarray(1), new TypeError("second must be 33 bytes, got 32")],
+        ["off the curve", Uint8Array.of(0x02, ...new Uint8Array(32)), new TypeError("second must be a compressed point on secp256k1")],
+    ])("refuses the second key %s, naming it", (_, key, error) => {
+        expect(() => sortDistinctPubkeys("first", KEY_A, "second", key)).toThrow(error);
+    });
+
+    it("refuses the same key twice, naming both", () => {
+        expect(() => sortDistinctPubkeys("first", KEY_A, "second", Uint8Array.from(KEY_A))).toThrow(
+            new TypeError("first and second must be two distinct public keys"),
+        );
     });
 });
 

@@ -1,6 +1,6 @@
 import type { Script } from "../../../src/common";
 import type { ChannelPins } from "../../../src/policy";
-import { assertChannelOpening, openingChannelPins } from "../../../src/policy";
+import { assertChannelOpening, openingChannelPins, reservedCkbShannons } from "../../../src/policy";
 import { toScript, toShutdownTxInput } from "../../utils/digest-inputs";
 import { caseOf, loadInteropVectors } from "../../utils/interop-vectors";
 
@@ -103,6 +103,59 @@ describe("openingChannelPins", () => {
         expect(() => openingChannelPins("9899999999", CLOSE_SCRIPT)).toThrow(RangeError);
         expect(() => openingChannelPins("9900000000", { ...CLOSE_SCRIPT, codeHash: new Uint8Array(31) })).toThrow(
             new TypeError("localCloseScript.codeHash must be 32 bytes, got 31"),
+        );
+    });
+});
+
+describe("reservedCkbShannons", () => {
+    // Capacity, code hash and hash type take 41 bytes; the args count at no less than the lock's 57 under legacy, 58 under the full hash.
+    it.each([
+        [56, 9_900_000_000n, 10_000_000_000n],
+        [57, 9_900_000_000n, 10_000_000_000n],
+        [58, 10_000_000_000n, 10_000_000_000n],
+        [59, 10_100_000_000n, 10_100_000_000n],
+    ])("reserves over args of %i bytes %s under legacy and %s under the full hash", (argsLength, legacy, fullPaymentHash) => {
+        const script = { ...CLOSE_SCRIPT, args: new Uint8Array(argsLength) };
+        expect(reservedCkbShannons(script, "legacy")).toBe(legacy);
+        expect(reservedCkbShannons(script, "fullPaymentHash")).toBe(fullPaymentHash);
+    });
+
+    it.each(digest.reserve_cases.map((kase) => [kase.name, kase] as const))(
+        "reserves what fiber does over a script with %s, under each layout",
+        (_, kase) => {
+            const script = toScript(kase.shutdown_script);
+            expect(reservedCkbShannons(script, "legacy").toString()).toBe(kase.reserved.legacy);
+            expect(reservedCkbShannons(script, "fullPaymentHash").toString()).toBe(kase.reserved.full_payment_hash);
+        },
+    );
+
+    it("is the reserve registration pins under each layout", () => {
+        const script = { ...CLOSE_SCRIPT, args: new Uint8Array(58) };
+        expect(openingChannelPins("71900000000", script).localReservedCkbShannons).toEqual({
+            legacy: reservedCkbShannons(script, "legacy").toString(),
+            fullPaymentHash: reservedCkbShannons(script, "fullPaymentHash").toString(),
+        });
+    });
+
+    it.each([
+        ["no object", null as never, "closeScript must be an object"],
+        ["a short code hash", { ...CLOSE_SCRIPT, codeHash: new Uint8Array(31) }, "closeScript.codeHash must be 32 bytes, got 31"],
+        [
+            "an unknown hash type",
+            { ...CLOSE_SCRIPT, hashType: "data3" as never },
+            "closeScript.hashType must be one of data, type, data1, data2",
+        ],
+        ["args that are not bytes", { ...CLOSE_SCRIPT, args: "00" as never }, "closeScript.args must be a Uint8Array"],
+    ])("rejects a close script with %s, naming the field", (_, script, message) => {
+        expect(() => reservedCkbShannons(script, "legacy")).toThrow(new TypeError(message));
+    });
+
+    it.each([
+        ["an unknown layout", "fullHash"],
+        ["no layout", undefined],
+    ])("rejects %s", (_, layout) => {
+        expect(() => reservedCkbShannons(CLOSE_SCRIPT, layout as never)).toThrow(
+            new TypeError("lockLayout must be one of legacy, fullPaymentHash"),
         );
     });
 });

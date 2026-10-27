@@ -7,7 +7,7 @@ import type {
     ISignerStorage,
     SignerRecordFormat,
 } from "../../../src/policy";
-import { SignerStore } from "../../../src/policy";
+import { ChannelRegistrationError, SignerStore } from "../../../src/policy";
 
 const CHANNEL_ID = "0x1f".padEnd(66, "a");
 const CHANNEL_INDEX = 3;
@@ -122,9 +122,15 @@ describe("channel aliases", () => {
         const storage = new InMemorySignerStorage();
         const store = new SignerStore(storage);
         await store.claimChannelAlias(CHANNEL_ID, CHANNEL_INDEX);
-        await expect(store.claimChannelAlias(CHANNEL_ID, CHANNEL_INDEX + 1)).rejects.toThrow(
-            new TypeError(`the name at ${ALIAS_KEY} already resolves to channel index ${CHANNEL_INDEX}`),
-        );
+        const error: unknown = await store.claimChannelAlias(CHANNEL_ID, CHANNEL_INDEX + 1).catch((caught: unknown) => caught);
+        expect(error).toBeInstanceOf(ChannelRegistrationError);
+        expect(error).toBeInstanceOf(TypeError);
+        expect(error).toMatchObject({
+            name: "ChannelRegistrationError",
+            message: `the name at ${ALIAS_KEY} already resolves to channel index ${CHANNEL_INDEX}`,
+            channelId: CHANNEL_ID,
+            channelIndex: CHANNEL_INDEX + 1,
+        });
         expect(storage.map.get(ALIAS_KEY)).toBe(String(CHANNEL_INDEX));
     });
 

@@ -4,10 +4,12 @@ import {
     PUBLIC_NONCE_LENGTH,
     UINT64_MAX,
     assertBoolean,
+    assertCellDeps,
     assertOneOf,
     isPlainObject,
 } from "../common";
-import type { WireField, WireFieldReader } from "../wire";
+import type { CellDep } from "../common";
+import type { CellDepWire, WireField, WireFieldReader } from "../wire";
 import {
     assertWireHexBytes,
     decodeBareHexBytes,
@@ -22,6 +24,7 @@ import {
     decodeTransaction,
     decodeUintHex,
     encodeBareHexBytes,
+    encodeCellDep,
     encodeHexBytes,
     encodeScript,
     encodeTransaction,
@@ -74,13 +77,28 @@ export function encodeOpenChannelWithExternalFundingParams(
     params: OpenChannelWithExternalFundingParams,
 ): OpenChannelWithExternalFundingParamsWire {
     assertBoolean("public", params.public);
+    const { fundingLockScriptCellDeps } = params;
     return {
         pubkey: encodeBareHexBytes("peerPubkey", params.peerPubkey, COMPRESSED_POINT_LENGTH),
         funding_amount: encodeRpcShannons("fundingAmountShannons", params.fundingAmountShannons),
         public: params.public,
         shutdown_script: encodeScript("shutdownScript", params.shutdownScript),
         funding_lock_script: encodeScript("fundingLockScript", params.fundingLockScript),
+        ...(fundingLockScriptCellDeps === undefined
+            ? {}
+            : { funding_lock_script_cell_deps: encodeFundingLockScriptCellDeps(fundingLockScriptCellDeps) }),
     };
+}
+
+/**
+ * Writes the cell deps an open names for its funding lock, refusing a list or an entry of another shape.
+ * @param deps The cell deps.
+ * @returns The wire cell deps.
+ */
+function encodeFundingLockScriptCellDeps(deps: CellDep[]): CellDepWire[] {
+    const name = "fundingLockScriptCellDeps";
+    assertCellDeps(name, deps);
+    return deps.map((dep, index) => encodeCellDep(`${name}[${index}]`, dep));
 }
 
 /**
@@ -102,7 +120,8 @@ export function decodeOpenChannelWithExternalFundingResult(field: WireField): Op
  * @returns The wire params.
  */
 export function encodeOpenTenantChannelParams(params: OpenTenantChannelParams): OpenTenantChannelParamsWire {
-    const { peerPubkey, fundingAmountShannons, shutdownScript, fundingLockScript, commitmentDelayEpoch, commitmentFeeRate } = params;
+    const { peerPubkey, fundingAmountShannons, shutdownScript, fundingLockScript, fundingLockScriptCellDeps } = params;
+    const { commitmentDelayEpoch, commitmentFeeRate } = params;
     return {
         ...encodeOpenChannelWithExternalFundingParams({
             peerPubkey,
@@ -110,6 +129,7 @@ export function encodeOpenTenantChannelParams(params: OpenTenantChannelParams): 
             public: false,
             shutdownScript,
             fundingLockScript,
+            fundingLockScriptCellDeps,
         }),
         // Repeated after the spread to narrow `public` to the literal the wire type states.
         public: false,

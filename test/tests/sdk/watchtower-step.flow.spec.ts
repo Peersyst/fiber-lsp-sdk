@@ -7,6 +7,7 @@ import { FiberRpcClient, RpcError } from "../../../src/rpc";
 import type { SdkEvent } from "../../../src/sdk";
 import type { WireField } from "../../../src/wire";
 import { InMemorySignerStorage } from "../../mocks/policy";
+import { asList, asRecord } from "../../utils/json-shape";
 import { loadSigningVectors, toCkbCellDep, watchtowerApprovalOf } from "../../utils/signing-vectors";
 import { writesOf } from "../../utils/step-run";
 import type { TenantDevice, TenantFlow } from "../../utils/tenant-flow";
@@ -73,7 +74,7 @@ const OTHER_FUNDING_CELL_DEPS: CellDep[] = [
     ...FUNDING_CELL_DEPS.slice(1),
 ];
 // Other cells of the node's, under which the rebuilt spend's request id sorts below the first one's, and above.
-const LOWER_ID_SPONSOR = "node's spare";
+const LOWER_ID_SPONSOR = "node's backup";
 const HIGHER_ID_SPONSOR = "node's second";
 const ELSEWHERE: Script = {
     codeHash: hexToBytes("9bd7e06f3ecf4be0f2fcd2188b23f1b9fcc88e5d4b65a8637b17723bbda3cce8"),
@@ -712,7 +713,10 @@ async function listed(h: TenantFlow, params: object): Promise<unknown> {
     if (typeof answer !== "object" || answer === null || !("result" in answer)) throw new Error("the node refused the listing");
     const { result } = answer;
     if (typeof result !== "object" || result === null || !("channels" in result)) throw new Error("the listing holds no channels");
-    return result.channels;
+    return asList(result.channels, "channels", (channel, path) => {
+        const entry = asRecord(channel, path);
+        return { channel_id: entry.channel_id, state: entry.state };
+    });
 }
 
 function withRecoveryId(signature: Uint8Array, recoveryId: number): Uint8Array {

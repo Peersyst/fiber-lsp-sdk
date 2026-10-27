@@ -1,7 +1,8 @@
 import { bytesToHex, hexToBytes } from "@noble/hashes/utils.js";
 import { deriveChannelKeys, pubkeyOf } from "../../../src/derivation";
-import { COMMITMENT_LOCK_MAINNET, COMMITMENT_LOCK_TESTNET } from "../../../src/digest";
+import { COMMITMENT_LOCK_MAINNET, COMMITMENT_LOCK_TESTNET, FUNDING_LOCK_MAINNET, FUNDING_LOCK_TESTNET } from "../../../src/digest";
 import { CHANNEL_ALIAS_KEY_PREFIX } from "../../../src/policy";
+import type { Script, Transaction } from "../../../src/common";
 import type { FiberLspSdkOptions, SdkContext, SdkEvent } from "../../../src/sdk";
 import { DEFAULT_POLL_INTERVAL_MS, FiberLspSdk, POLL_STEP_TIMEOUT_MS, SdkError } from "../../../src/sdk";
 import type { ChannelSigningTransition } from "../../../src/protocol";
@@ -49,6 +50,7 @@ const signing = loadSigningVectors();
 const SIGNING_CHANNEL_ID = signing.channel.channel_id;
 const DEV_NETWORK = {
     commitmentLock: { codeHash: new Uint8Array(32).fill(0x5d), hashType: "data1" },
+    fundingLock: { codeHash: new Uint8Array(32).fill(0x6c), hashType: "data1" },
     invoiceCurrency: "Fibd",
     fundingLockCellDepsCount: 3,
     millisecondsPerEpoch: 2_000,
@@ -56,6 +58,81 @@ const DEV_NETWORK = {
 const APPROVAL = watchtowerApprovalOf(signing);
 const IDLE = { type: "NoSignatureRequired" };
 const READY = { state_name: "ChannelReady" };
+
+// An opening at NOW_MS's channel index, 1_791_367_200, of the master seed 0x24 repeated, to the signing vectors' peer: 720 CKB
+// funded, 285 CKB from the peer, both reserves 100 CKB, on testnet's funding lock.
+const OPENING_SEED = hexToBytes("24".repeat(32));
+const OPENING_LSP_PUBKEY = "02106fa580a1c56411d6ee7deabcc98aae6f6479858f924487cf58c4c2ca302304";
+const OPENING_AMOUNT = "72000000000";
+const OPENING_CHANNEL_ID = "0x5df11183f0223c41ea85677270eeaf085d3d2fa00f4a35b1b870b7af25b0287f";
+const OPENING_USER_LOCK: Script = {
+    codeHash: hexToBytes("537320e708e05f80a3d3a873b32eda052298e274ad93e7b9d5c2fc0ca201d769"),
+    hashType: "type",
+    args: hexToBytes("8d66477ba3b60a96feb27a3f57fe11f6697be87d"),
+};
+const OPENING_USER_LOCK_WIRE = {
+    code_hash: "0x537320e708e05f80a3d3a873b32eda052298e274ad93e7b9d5c2fc0ca201d769",
+    hash_type: "type",
+    args: "0x8d66477ba3b60a96feb27a3f57fe11f6697be87d",
+};
+const OPENING_PEER_LOCK_WIRE = {
+    code_hash: "0x4d62a160ec2d470f499fb511b77777e0af54af776d9d31ee9ecdc71d7378c2ba",
+    hash_type: "type",
+    args: "0x8f1e030962418183dc890ef5664b1f2a64b0064c",
+};
+const OPENING_SIGNED_WITNESS = `0x5500000010000000550000005500000041000000${"5a".repeat(65)}`;
+const OPENING_UNSIGNED_TX_WIRE = {
+    version: "0x0",
+    cell_deps: [
+        {
+            out_point: { tx_hash: "0xd8ef9125d4bc98b9c3716fcf61110e302098a55222a2e79344a8264352fe7b9d", index: "0x0" },
+            dep_type: "dep_group",
+        },
+    ],
+    header_deps: [],
+    inputs: [
+        { since: "0x0", previous_output: { tx_hash: "0x89dc569f9eec0e82ca13a353be098d150e9164d79f9c5201079e422a283c8ee4", index: "0x1" } },
+        { since: "0x0", previous_output: { tx_hash: "0xba99565f43b9baad46715753a94028906c73fdc052418acd24e473aebd15d47d", index: "0x0" } },
+    ],
+    outputs: [
+        {
+            capacity: "0x1766444d00",
+            lock: {
+                code_hash: "0x6c67887fe201ee0c7853f1682c0b77c0e6214044c156c7558269390a8afa6d7c",
+                hash_type: "type",
+                args: "0xd2062cbf42d7ba8d2a9c1ac3e81cef97e8fc0a78",
+            },
+            type: null,
+        },
+        { capacity: "0x2540be400", lock: OPENING_USER_LOCK_WIRE, type: null },
+        { capacity: "0x174876e800", lock: OPENING_PEER_LOCK_WIRE, type: null },
+    ],
+    outputs_data: ["0x", "0x", "0x"],
+    witnesses: [`0x5500000010000000550000005500000041000000${"00".repeat(65)}`],
+};
+const OPENING_ANSWER = {
+    channel_id: OPENING_CHANNEL_ID,
+    unsigned_funding_tx: OPENING_UNSIGNED_TX_WIRE,
+    opening_context: {
+        remote_funding_key: "026372d1f1bf5f44d3bf185fe8f69502f36c9a01760029db0a15f6c7dedb4f5638",
+        remote_settlement_key: "032559e1b167552782cab5be4294260d51edfc36aef4ca7cc165b3b21b15e98e21",
+        remote_shutdown_script: OPENING_PEER_LOCK_WIRE,
+        commitment_delay_epoch: "0x10000000001",
+        commitment_fee_rate: "0x3e8",
+        local_amount: "0x10c388d000",
+        remote_amount: "0x6a2bb7d00",
+        local_reserved_ckb_amount: "0x2540be400",
+        remote_reserved_ckb_amount: "0x2540be400",
+    },
+};
+const OPENING_SUBMIT_CALL = {
+    method: "submit_signed_funding_tx",
+    params: { channel_id: OPENING_CHANNEL_ID, signed_funding_tx: { ...OPENING_UNSIGNED_TX_WIRE, witnesses: [OPENING_SIGNED_WITNESS] } },
+};
+const OPENING_SUBMIT_ANSWER = {
+    channel_id: OPENING_CHANNEL_ID,
+    funding_tx_hash: "0x50683c27e89bd4d2373af33b667f91c6eb23e06af00680ec9a688148aaa04a89",
+};
 
 function harness(overrides: Partial<FiberLspSdkOptions> = {}, seed: Uint8Array = MASTER_SEED) {
     const timer = new TimerMock();
@@ -240,6 +317,18 @@ describe("FiberLspSdk", () => {
                 new TypeError("network.commitmentLock.codeHash must be 32 bytes, got 31"),
             ],
             [
+                "a development chain without a funding lock",
+                { network: { ...DEV_NETWORK, fundingLock: undefined as unknown as typeof DEV_NETWORK.fundingLock } },
+                MASTER_SEED,
+                new TypeError("network.fundingLock must be an object"),
+            ],
+            [
+                "a development chain with a short funding lock code hash",
+                { network: { ...DEV_NETWORK, fundingLock: { ...DEV_NETWORK.fundingLock, codeHash: new Uint8Array(31) } } },
+                MASTER_SEED,
+                new TypeError("network.fundingLock.codeHash must be 32 bytes, got 31"),
+            ],
+            [
                 "a development chain with an unknown currency",
                 { network: { ...DEV_NETWORK, invoiceCurrency: "Fibx" as unknown as "Fibd" } },
                 MASTER_SEED,
@@ -361,10 +450,18 @@ describe("FiberLspSdk", () => {
             expect(contextOf(harness({ network }).sdk).network.commitmentLock).toBe(lock);
         });
 
+        it.each([
+            ["testnet", FUNDING_LOCK_TESTNET],
+            ["mainnet", FUNDING_LOCK_MAINNET],
+        ] as const)("resolves the %s preset's funding lock", (network, lock) => {
+            expect(contextOf(harness({ network }).sdk).network.fundingLock).toBe(lock);
+        });
+
         it("keeps a copy of a development chain's network", () => {
             const h = harness({ network: DEV_NETWORK });
             expect(contextOf(h.sdk).network).toEqual(DEV_NETWORK);
             expect(contextOf(h.sdk).network.commitmentLock).not.toBe(DEV_NETWORK.commitmentLock);
+            expect(contextOf(h.sdk).network.fundingLock).not.toBe(DEV_NETWORK.fundingLock);
         });
 
         it.each(["testnet", "mainnet"] as const)("takes the %s funding lock's two cell deps from the preset", (network) => {
@@ -400,11 +497,16 @@ describe("FiberLspSdk", () => {
             expect(h.fetch.last.init.headers).toEqual({ "content-type": "application/json" });
         });
 
-        it("keeps the allocator's and the activity's records in the host's storage", async () => {
+        it("keeps the allocator's, the activity's and the pending opening's records in the host's storage", async () => {
             const h = harness();
             await contextOf(h.sdk).allocator.allocateChannelIndex();
             await contextOf(h.sdk).activity.watch("channel", CHANNEL_ID);
-            expect([...h.storage.map.keys()]).toEqual(["fiber-lsp-sdk:allocator:channel", "fiber-lsp-sdk:activity"]);
+            await contextOf(h.sdk).openings.write(7, "10000000000", OPENING_USER_LOCK);
+            expect([...h.storage.map.keys()]).toEqual([
+                "fiber-lsp-sdk:allocator:channel",
+                "fiber-lsp-sdk:activity",
+                "fiber-lsp-sdk:opening",
+            ]);
         });
 
         it("hands the poller the facade's own emit, so what a tick reports reaches the listeners", () => {
@@ -467,7 +569,7 @@ describe("FiberLspSdk", () => {
             };
             withRuntime(later, () => h.sdk.connect());
             await flush();
-            expect(delays).toEqual([POLL_STEP_TIMEOUT_MS, POLL_STEP_TIMEOUT_MS, POLL_INTERVAL_MS]);
+            expect(delays).toEqual([POLL_STEP_TIMEOUT_MS, POLL_STEP_TIMEOUT_MS, POLL_STEP_TIMEOUT_MS, POLL_INTERVAL_MS]);
             withRuntime(later, () => h.sdk.disconnect());
         });
     });
@@ -555,6 +657,7 @@ describe("FiberLspSdk", () => {
         const sent = signingCaseOf(signing, "SendCommitmentSigned");
         const vectorsChain = {
             commitmentLock: signingCommitmentLock(signing),
+            fundingLock: FUNDING_LOCK_TESTNET,
             invoiceCurrency: "Fibd",
             fundingLockCellDepsCount: signing.channel.funding_lock_cell_deps_count,
             millisecondsPerEpoch: SIGNING_MILLISECONDS_PER_EPOCH,
@@ -606,11 +709,14 @@ describe("FiberLspSdk", () => {
                 LIST_CHANNELS_WITH_CLOSED_CALL,
                 watchtowerStatusCall(SIGNING_CHANNEL_ID),
             ]);
+            // The delay the host pinned at the opening dates the refusal too.
             expect(h.events).toStrictEqual([
-                refusedEvent("SendCommitmentSigned", {
-                    code: "malformed",
-                    message: "the message does not match the attached channel state",
-                }),
+                withSigningDeadline(
+                    refusedEvent("SendCommitmentSigned", {
+                        code: "malformed",
+                        message: "the message does not match the attached channel state",
+                    }),
+                ),
             ]);
         });
 
@@ -625,11 +731,14 @@ describe("FiberLspSdk", () => {
                 LIST_CHANNELS_WITH_CLOSED_CALL,
                 watchtowerStatusCall(SIGNING_CHANNEL_ID),
             ]);
+            // The delay the host pinned at the opening dates the refusal too.
             expect(h.events).toStrictEqual([
-                refusedEvent("SendCommitmentSigned", {
-                    code: "malformed",
-                    message: "the message does not match the attached channel state",
-                }),
+                withSigningDeadline(
+                    refusedEvent("SendCommitmentSigned", {
+                        code: "malformed",
+                        message: "the message does not match the attached channel state",
+                    }),
+                ),
             ]);
         });
 
@@ -954,6 +1063,233 @@ describe("FiberLspSdk", () => {
                 new TypeError("channelId must be 32 bytes of 0x-prefixed lowercase hex"),
             );
             expect(h.storage.ops).toEqual([]);
+        });
+    });
+
+    describe("channel opening", () => {
+        async function openingHarness(overrides: Partial<FiberLspSdkOptions> = {}) {
+            const storage = new InMemorySignerStorage();
+            const node = new ScriptedNode();
+            const events: SdkEvent[] = [];
+            const sdk = new FiberLspSdk(OPENING_SEED, {
+                network: "testnet",
+                storage,
+                rpcUrl: RPC_URL,
+                lspPubkey: hexToBytes(OPENING_LSP_PUBKEY),
+                fetch: node.fetch,
+                timer: new TimerMock(),
+                now: () => NOW_MS,
+                pollIntervalMs: POLL_INTERVAL_MS,
+                ...overrides,
+            });
+            sdk.onEvent((event) => events.push(event));
+            return { sdk, node, storage, events };
+        }
+
+        const signed = async (tx: Transaction): Promise<Transaction> => ({
+            ...tx,
+            witnesses: [hexToBytes(OPENING_SIGNED_WITNESS.slice(2))],
+        });
+
+        it("asks the node for a channel to the LSP under the clock's index, and hands back what the node froze", async () => {
+            const h = await openingHarness();
+            h.node.result(OPENING_ANSWER);
+            const opening = await h.sdk.prepareChannelOpen(OPENING_AMOUNT, OPENING_USER_LOCK);
+            expect(opening.channelId).toBe(OPENING_CHANNEL_ID);
+            expect(opening.unsignedFundingTx.outputs[0]?.capacityShannons).toBe(100_500_000_000n);
+            expect(opening.openingContext.localAmountShannons).toBe(OPENING_AMOUNT);
+            expect(h.node.calls()).toEqual([
+                {
+                    method: "open_tenant_channel",
+                    params: expect.objectContaining({
+                        pubkey: OPENING_LSP_PUBKEY,
+                        funding_amount: "0x10c388d000",
+                        shutdown_script: OPENING_USER_LOCK_WIRE,
+                        funding_lock_script: OPENING_USER_LOCK_WIRE,
+                        commitment_delay_epoch: "0x10000000001",
+                        commitment_fee_rate: "0x3e8",
+                        external_channel_signer: expect.objectContaining({
+                            base_public_keys: {
+                                funding_pubkey: "033d7405b9260f20ed7352346928485f216a78f7f1a4cda82b629fc651d4e8dbfd",
+                                tlc_base_key: "0276151a3496ee4b719ef2adb2cf62247040b7e6d3bc7151c53d354f07a7c3807f",
+                            },
+                        }),
+                    }),
+                },
+            ]);
+            expect(JSON.parse(h.storage.map.get("fiber-lsp-sdk:opening") ?? "null")).toEqual({
+                version: 1,
+                opening: {
+                    channelIndex: 1_791_367_200,
+                    fundedShannons: OPENING_AMOUNT,
+                    userLock: expect.any(String),
+                    channelId: OPENING_CHANNEL_ID,
+                },
+            });
+        });
+
+        it.each([
+            ["the mainnet preset", { network: "mainnet" as const }],
+            ["a development chain under another funding lock", { network: DEV_NETWORK }],
+        ])("checks the funding cell against the network's funding lock, refusing testnet's under %s", async (_, overrides) => {
+            const h = await openingHarness(overrides);
+            h.node.result(OPENING_ANSWER);
+            expect(await rejection(h.sdk.prepareChannelOpen(OPENING_AMOUNT, OPENING_USER_LOCK))).toMatchObject({
+                code: "opening_rejected",
+                message:
+                    "the node's opening is refused: unsignedFundingTx.outputs[0].lock is not the network's funding lock over the two funding keys",
+            });
+        });
+
+        it("accepts the funding cell on a development chain that names testnet's funding lock", async () => {
+            const h = await openingHarness({ network: { ...DEV_NETWORK, fundingLock: FUNDING_LOCK_TESTNET } });
+            h.node.result(OPENING_ANSWER);
+            await expect(h.sdk.prepareChannelOpen(OPENING_AMOUNT, OPENING_USER_LOCK)).resolves.toMatchObject({
+                channelId: OPENING_CHANNEL_ID,
+            });
+        });
+
+        it("submits the tx the host signed over the opening's", async () => {
+            const h = await openingHarness();
+            h.node.result(OPENING_ANSWER).result(OPENING_SUBMIT_ANSWER);
+            const opening = await h.sdk.prepareChannelOpen(OPENING_AMOUNT, OPENING_USER_LOCK);
+            await expect(h.sdk.submitFundingTx(opening.channelId, await signed(opening.unsignedFundingTx))).resolves.toBeUndefined();
+            expect(h.node.calls().at(-1)).toEqual(OPENING_SUBMIT_CALL);
+        });
+
+        it("refuses to submit for a channel this device never registered as unknown_channel", async () => {
+            const h = await openingHarness();
+            const error = await rejection(
+                h.sdk.submitFundingTx(OPENING_CHANNEL_ID, {
+                    version: 0,
+                    cellDeps: [],
+                    headerDeps: [],
+                    inputs: [],
+                    outputs: [],
+                    outputsData: [],
+                    witnesses: [],
+                }),
+            );
+            expect(error).toMatchObject({ code: "unknown_channel" });
+            expect(h.node.calls()).toEqual([]);
+        });
+
+        it("opens in one call through the host's signer", async () => {
+            const h = await openingHarness();
+            h.node.result(OPENING_ANSWER).result(OPENING_SUBMIT_ANSWER);
+            await expect(h.sdk.openChannel(OPENING_AMOUNT, OPENING_USER_LOCK, signed)).resolves.toBe(OPENING_CHANNEL_ID);
+            expect(h.node.calls().map((call) => call.method)).toEqual(["open_tenant_channel", "submit_signed_funding_tx"]);
+        });
+
+        it("passes the user lock's cell deps to the node from both entry points", async () => {
+            const deps = [{ outPoint: { txHash: new Uint8Array(32).fill(0x25), index: 2 }, depType: "code" as const }];
+            const sentDeps = [{ out_point: { tx_hash: `0x${"25".repeat(32)}`, index: "0x2" }, dep_type: "code" }];
+            const prepared = await openingHarness();
+            prepared.node.reject(new Error("offline"));
+            await rejection(prepared.sdk.prepareChannelOpen(OPENING_AMOUNT, OPENING_USER_LOCK, deps));
+            const opened = await openingHarness();
+            opened.node.reject(new Error("offline"));
+            await rejection(opened.sdk.openChannel(OPENING_AMOUNT, OPENING_USER_LOCK, signed, deps));
+            for (const h of [prepared, opened]) {
+                expect(h.node.calls()).toEqual([
+                    { method: "open_tenant_channel", params: expect.objectContaining({ funding_lock_script_cell_deps: sentDeps }) },
+                ]);
+            }
+        });
+
+        it("refuses an open with cell deps that are not a list, writing and sending nothing", async () => {
+            const h = await openingHarness();
+            const deps = { outPoint: { txHash: new Uint8Array(32).fill(0x25), index: 2 }, depType: "code" };
+            await expect(h.sdk.openChannel(OPENING_AMOUNT, OPENING_USER_LOCK, signed, deps as never)).rejects.toEqual(
+                new TypeError("userLockCellDeps must be an array"),
+            );
+            expect(h.storage.ops).toEqual([]);
+            expect(h.node.calls()).toEqual([]);
+        });
+
+        it("refuses an open without a signer, writing and sending nothing", async () => {
+            const h = await openingHarness();
+            await expect(h.sdk.openChannel(OPENING_AMOUNT, OPENING_USER_LOCK, undefined as never)).rejects.toEqual(
+                new TypeError("signFundingInputs must be a function"),
+            );
+            expect(h.storage.ops).toEqual([]);
+            expect(h.node.calls()).toEqual([]);
+        });
+
+        it("lists the node's channels, closed ones included, telling the ones this device registered", async () => {
+            const h = await openingHarness();
+            h.node.result(OPENING_ANSWER);
+            await h.sdk.prepareChannelOpen(OPENING_AMOUNT, OPENING_USER_LOCK);
+            const listed = {
+                channel_id: OPENING_CHANNEL_ID,
+                is_public: false,
+                is_acceptor: false,
+                is_one_way: false,
+                channel_outpoint: null,
+                pubkey: OPENING_LSP_PUBKEY,
+                funding_udt_type_script: null,
+                state: { state_name: "NegotiatingFunding", state_flags: "AWAITING_EXTERNAL_FUNDING" },
+                local_balance: "0xe6f7cec00",
+                offered_tlc_balance: "0x0",
+                remote_balance: "0x44eaf9900",
+                received_tlc_balance: "0x0",
+                pending_tlcs: [],
+                latest_commitment_transaction_hash: null,
+                created_at: "0x19a4d4e6e00",
+                enabled: false,
+                tlc_expiry_delta: "0x5265c00",
+                tlc_fee_proportional_millionths: "0x3e8",
+                shutdown_transaction_hash: null,
+                failure_detail: null,
+            };
+            h.node.result({
+                channels: [listed, { ...listed, channel_id: CHANNEL_ID, state: { state_name: "Closed", state_flags: "COOPERATIVE" } }],
+            });
+            await expect(h.sdk.listChannels()).resolves.toStrictEqual([
+                {
+                    channelId: OPENING_CHANNEL_ID,
+                    state: "opening",
+                    localBalanceShannons: "62000000000",
+                    remoteBalanceShannons: "18500000000",
+                    offeredTlcBalanceShannons: "0",
+                    receivedTlcBalanceShannons: "0",
+                    hasRecord: true,
+                },
+                {
+                    channelId: CHANNEL_ID,
+                    state: "closed",
+                    localBalanceShannons: "62000000000",
+                    remoteBalanceShannons: "18500000000",
+                    offeredTlcBalanceShannons: "0",
+                    receivedTlcBalanceShannons: "0",
+                    hasRecord: false,
+                },
+            ]);
+            expect(h.node.calls().at(-1)).toEqual(LIST_CHANNELS_WITH_CLOSED_CALL);
+        });
+
+        it("polls the channel step before the signing steps, announcing the opened channel ready and dropping its opening", async () => {
+            const h = await openingHarness();
+            h.node.result(OPENING_ANSWER);
+            await h.sdk.prepareChannelOpen(OPENING_AMOUNT, OPENING_USER_LOCK);
+            h.node
+                .result({ channels: [{ channel_id: OPENING_CHANNEL_ID, state: READY }] })
+                .result({ channels: [{ channel_id: OPENING_CHANNEL_ID }] })
+                .result({ channel_id: OPENING_CHANNEL_ID, status: IDLE })
+                .result({ channels: [{ channel_id: OPENING_CHANNEL_ID, state: READY }] })
+                .result({ channel_id: OPENING_CHANNEL_ID, status: IDLE });
+            h.sdk.connect();
+            await flush();
+            h.sdk.disconnect();
+            expect(h.node.calls().slice(1)).toEqual([
+                LIST_CHANNELS_WITH_CLOSED_CALL,
+                LIST_CHANNELS_CALL,
+                signingStatusCall(OPENING_CHANNEL_ID),
+                LIST_CHANNELS_WITH_CLOSED_CALL,
+                watchtowerStatusCall(OPENING_CHANNEL_ID),
+            ]);
+            expect(h.events).toStrictEqual([{ type: "CHANNEL_READY", channelId: OPENING_CHANNEL_ID }]);
+            expect(JSON.parse(h.storage.map.get("fiber-lsp-sdk:opening") ?? "null")).toEqual({ version: 1, opening: null });
         });
     });
 

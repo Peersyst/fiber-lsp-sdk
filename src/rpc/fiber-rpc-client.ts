@@ -6,9 +6,11 @@ import {
     decodeListChannelStatesResult,
     decodeListChannelsResult,
     decodeOpenChannelWithExternalFundingResult,
+    decodeOpenTenantChannelResult,
     decodeSubmitSignedFundingTxResult,
     encodeListChannelsParams,
     encodeOpenChannelWithExternalFundingParams,
+    encodeOpenTenantChannelParams,
     encodeSubmitSignedFundingTxParams,
 } from "./channels";
 import type { FetchResponseLike, IFetchLike } from "./interfaces";
@@ -48,6 +50,8 @@ import type {
     NewInvoiceResult,
     OpenChannelWithExternalFundingParams,
     OpenChannelWithExternalFundingResult,
+    OpenTenantChannelParams,
+    OpenTenantChannelResult,
     RegisterTenantParams,
     RegisterTenantResult,
     RpcInvoice,
@@ -144,6 +148,15 @@ export class FiberRpcClient {
             encodeOpenChannelWithExternalFundingParams(params),
             decodeOpenChannelWithExternalFundingResult,
         );
+    }
+
+    /**
+     * Opens a private channel for the tenant, funded by the user's cells, with the device's public signer material.
+     * @param params The channel to open.
+     * @returns The final channel id, the unsigned funding transaction and the opening context the node commits to.
+     */
+    async openTenantChannel(params: OpenTenantChannelParams): Promise<OpenTenantChannelResult> {
+        return this.call("open_tenant_channel", encodeOpenTenantChannelParams(params), decodeOpenTenantChannelResult);
     }
 
     /**

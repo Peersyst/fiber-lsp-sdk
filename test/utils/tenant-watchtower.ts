@@ -43,8 +43,9 @@ const BLOCK_SIZE_OVERHEAD = 4;
 // Fiber's `XUDT_COMPATIBLE_WITNESS` (`fiber/channel.rs:11961`), an empty `WitnessArgs`.
 const XUDT_COMPATIBLE_WITNESS = moleculeTable([new Uint8Array(0), new Uint8Array(0), new Uint8Array(0)]);
 
-// The `WitnessArgs` the node's own input is signed into once the device's signature is in (`watchtower/actor.rs:1672-1674`).
-const SPONSOR_PLACEHOLDER_WITNESS = moleculeTable([
+// Fiber's `secp_sighash_placeholder_witness` (`ckb/funding/funding_tx.rs:58-69`): what a secp256k1 input is signed into, the
+// node's own on a spend once the device's signature is in (`watchtower/actor.rs:1672-1674`), each funding input before the host signs.
+export const SECP_PLACEHOLDER_WITNESS = moleculeTable([
     moleculeBytes(new Uint8Array(RECOVERABLE_ECDSA_SIGNATURE_LENGTH)),
     new Uint8Array(0),
     new Uint8Array(0),
@@ -204,7 +205,7 @@ export function buildWatchtowerSpend(
         ],
         outputs: [...kept, { capacityShannons: released, lock: context.payTo, type: null }],
         outputsData: [...kept, null].map(() => new Uint8Array(0)),
-        witnesses: [witness, SPONSOR_PLACEHOLDER_WITNESS],
+        witnesses: [witness, SECP_PLACEHOLDER_WITNESS],
     };
     const fee = calculateTxFee(WATCHTOWER_FEE_RATE, moleculeTx(draft).length + BLOCK_SIZE_OVERHEAD);
     const keptShannons = kept.reduce((sum, output) => sum + output.capacityShannons, 0n);

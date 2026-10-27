@@ -16,6 +16,7 @@ keys carry the `fiber-lsp-sdk:` namespace, because the host may back that storag
 | `fiber-lsp-sdk:preimage:<hash>`     | The device-held preimage of a hold invoice, 32 bytes hex             |
 | `fiber-lsp-sdk:allocator:<kind>`    | The last channel or invoice index handed out, a JSON integer         |
 | `fiber-lsp-sdk:activity`            | What the facade's poller still asks the node about, JSON             |
+| `fiber-lsp-sdk:opening`             | The channel opening the node may still hold for this tenant, JSON    |
 
 The prefixes are fixed and disjoint, so a channel id and a payment hash can be the same string without colliding.
 `<boundHash>` is the bound payment hash: the first 20 bytes of the payment hash, all a commitment binds under the
@@ -23,9 +24,9 @@ The prefixes are fixed and disjoint, so a channel id and a payment hash can be t
 12 find no invoice to pay for ([policy.md](./policy.md)). The record holds the whole hash, which is what a TLC under the
 `fullPaymentHash` layout is held to, and a record whose hash does not start with its key's reads as corruption.
 
-The last two are the facade's ([sdk.md](./sdk.md)): the allocator keeps, per kind, the last index it handed out, and the
+The last three are the facade's ([sdk.md](./sdk.md)): the allocator keeps, per kind, the last index it handed out, the
 activity record lists the channels, payments and invoices the poller watches with the last status an event was emitted
-for. They are kept through the same store, by `getRecord` and `updateRecord` over a format the facade supplies, so they
+for, and the pending opening is what a retried channel opening resumes. They are kept through the same store, by `getRecord` and `updateRecord` over a format the facade supplies, so they
 get the same parsing, the same corruption rule and the same per-key lanes as the policy's records without the policy
 module knowing what they hold. Those two methods refuse every key outside the namespace and every key the policy keeps
 its own records under, so no format of another module can read or write past the policy's guards.
@@ -46,7 +47,8 @@ that holds nothing. A record may take a new name only while it has served nothin
 served would hand a live channel's slots to another name.
 
 The alias is **claimed**, not written: `claimChannelAlias` reads and sets the key inside one critical section, and a name
-already resolving to another index throws instead of moving. Many names may point at one index, which is the whole point of
+already resolving to another index throws a `ChannelRegistrationError` instead of moving, as every registration the
+records contradict does ([policy.md](./policy.md)). Many names may point at one index, which is the whole point of
 the map, but a name never moves between indexes, so the two registrations of a channel cannot end up with the record at one
 index and its name at another.
 
@@ -199,6 +201,22 @@ payment hash in hex) to `{ status }`, the last status an event was emitted for o
 fiber's list for its kind at every write, unknown extra fields are tolerated, and a version from the future is refused,
 as for every other record. Entries are dropped once final, so unlike the records above this one does not grow for good.
 
+The pending opening is one key, not one per channel, because fiber keeps a single opening per tenant. Its record is
+`{ version, opening }`, and `opening` is `null` once dropped, since the storage has no delete, or:
+
+| Field              | What                                                                                                            |
+| ------------------ | --------------------------------------------------------------------------------------------------------------- |
+| `channelIndex`     | The index allocated to the opening, which its signer material derives from                                      |
+| `fundedShannons`   | The amount asked, reserve included, decimal shannons                                                            |
+| `userLock`         | The lock asked, as its molecule bytes in hex, so a retry compares it by equality                                |
+| `userLockCellDeps` | The lock's cell deps asked, as given, each `{ txHash, index, depType }` with the hash bare hex; absent for none |
+| `channelId`        | The channel the node answered, `null` until its answer passes the checks                                        |
+
+A field off its form reads as corruption, as everywhere else: an index past the derivation's, an amount that is not
+decimal shannons, a lock that is not a molecule script, a cell dep off CKB's forms, an id that is not 32 bytes of `0x`
+hex. When the facade writes, names and drops it is [sdk.md](./sdk.md)'s; the record holds at most one opening, so it
+does not grow either.
+
 ## Concurrency
 
 `SignerStore` serializes every operation per storage key. Operations on one key run in call order, one at a time, and each
@@ -231,7 +249,9 @@ host must give the SDK a single instance, or keep its storage private to one.
 
 From the mnemonic alone the host re-derives the master seed, and the SDK re-derives every channel key (see
 [derivation.md](./derivation.md)). What does not come back is the record: counters, the sign-once registry, the evidence and
-the view snapshots all start empty, and so do the intents and the invoices. So do the commitments a watchtower spend starts
+the view snapshots all start empty, and so do the intents and the invoices. So does the pending opening: an opening the
+node still holds for the tenant then refuses the fresh one, asked under another index, until fiber aborts it unfunded
+([sdk.md](./sdk.md)). So do the commitments a watchtower spend starts
 from: a device whose storage is gone signs none ([policy.md](./policy.md)). Losing the storage is therefore not losing
 funds, with one exception: hold-invoice preimages exist only on the device, so unclaimed held payments need the storage
 intact. They are refundable to the payer otherwise.

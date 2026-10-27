@@ -3,6 +3,8 @@ export {
     COMMITMENT_LOCK_LAYOUTS,
     COMMITMENT_LOCK_MAINNET,
     COMMITMENT_LOCK_TESTNET,
+    FUNDING_LOCK_MAINNET,
+    FUNDING_LOCK_TESTNET,
     MAX_CELL_DEPS_COUNT,
     MAX_SETTLEMENT_TLCS,
     REVOCATION_LOCK_ARGS_LENGTH,
@@ -37,6 +39,7 @@ export {
     readCommitmentLockVersion,
 } from "./commitment-tx";
 export { calculateCommitmentTxFee, calculateShutdownTxFee } from "./fee";
+export { fundingLockArgs, tenantChannelId } from "./funding-lock";
 export { computeRevocationDigest } from "./revocation";
 export { settlementToCommitmentInput } from "./settlement-input";
 export {

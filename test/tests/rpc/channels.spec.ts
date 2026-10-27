@@ -1,5 +1,5 @@
 import { hexToBytes } from "@noble/hashes/utils.js";
-import type { Script } from "../../../src/common";
+import type { CellDep, Script } from "../../../src/common";
 import type {
     ChannelOpenSignerMaterial,
     OpenChannelWithExternalFundingParams,
@@ -35,6 +35,7 @@ import { RPC_RESULT_PATH as RESULT, answering, refusing, resultField as result, 
 import {
     toChannel,
     toChannelState,
+    toOpenChannelWithExternalFundingParams,
     toOpenChannelWithExternalFundingResult,
     toOpenTenantChannelParams,
     toOpenTenantChannelResult,
@@ -69,6 +70,16 @@ const OPEN: OpenChannelWithExternalFundingParams = {
     shutdownScript: SHUTDOWN,
     fundingLockScript: FUNDING_LOCK,
 };
+
+// A wallet lock's code cell and dep group, one of each dep type.
+const FUNDING_LOCK_CELL_DEPS: CellDep[] = [
+    { outPoint: { txHash: hexToBytes("c3".repeat(32)), index: 0 }, depType: "code" },
+    { outPoint: { txHash: hexToBytes("d4".repeat(32)), index: 3 }, depType: "dep_group" },
+];
+const FUNDING_LOCK_CELL_DEPS_WIRE = [
+    { out_point: { tx_hash: `0x${"c3".repeat(32)}`, index: "0x0" }, dep_type: "code" },
+    { out_point: { tx_hash: `0x${"d4".repeat(32)}`, index: "0x3" }, dep_type: "dep_group" },
+];
 
 const READY_CHANNEL = {
     channel_id: CHANNEL_ID,
@@ -186,6 +197,35 @@ describe("open_channel_with_external_funding", () => {
             expect(encodeOpenChannelWithExternalFundingParams({ ...OPEN, public: true }).public).toBe(true);
         });
 
+        it("writes the funding lock's cell deps when given, after the funding lock", () => {
+            const wire = encodeOpenChannelWithExternalFundingParams({ ...OPEN, fundingLockScriptCellDeps: FUNDING_LOCK_CELL_DEPS });
+            expect(wire.funding_lock_script_cell_deps).toEqual(FUNDING_LOCK_CELL_DEPS_WIRE);
+            expect(Object.keys(wire)).toEqual([
+                "pubkey",
+                "funding_amount",
+                "public",
+                "shutdown_script",
+                "funding_lock_script",
+                "funding_lock_script_cell_deps",
+            ]);
+        });
+
+        it("writes an empty list of cell deps as given, and the highest index a cell dep can name", () => {
+            expect(
+                encodeOpenChannelWithExternalFundingParams({ ...OPEN, fundingLockScriptCellDeps: [] }).funding_lock_script_cell_deps,
+            ).toEqual([]);
+            const highest: CellDep = { outPoint: { txHash: hexToBytes("c3".repeat(32)), index: 2 ** 32 - 1 }, depType: "code" };
+            expect(encodeOpenChannelWithExternalFundingParams({ ...OPEN, fundingLockScriptCellDeps: [highest] })).toMatchObject({
+                funding_lock_script_cell_deps: [{ out_point: { tx_hash: `0x${"c3".repeat(32)}`, index: "0xffffffff" }, dep_type: "code" }],
+            });
+        });
+
+        it.each(open.params.map((entry) => [entry.name, entry] as const))("writes the %s case as fiber's serde does", (_, entry) => {
+            expect(encodeOpenChannelWithExternalFundingParams(toOpenChannelWithExternalFundingParams(entry.values))).toEqual(
+                withoutNulls(entry.json),
+            );
+        });
+
         it.each<[string, Partial<OpenChannelWithExternalFundingParams>, Error]>([
             ["a pubkey of 32 bytes", { peerPubkey: new Uint8Array(32) }, new TypeError("peerPubkey must be 33 bytes, got 32")],
             ["a pubkey as a string", { peerPubkey: PEER as unknown as Uint8Array }, new TypeError("peerPubkey must be a Uint8Array")],
@@ -214,6 +254,50 @@ describe("open_channel_with_external_funding", () => {
                 "a funding lock with an unknown hash type",
                 { fundingLockScript: { ...FUNDING_LOCK, hashType: "data3" as Script["hashType"] } },
                 new TypeError("fundingLockScript.hashType must be one of data, type, data1, data2"),
+            ],
+            [
+                "cell deps given as null",
+                { fundingLockScriptCellDeps: null as unknown as CellDep[] },
+                new TypeError("fundingLockScriptCellDeps must be an array"),
+            ],
+            [
+                "a single cell dep outside a list",
+                { fundingLockScriptCellDeps: FUNDING_LOCK_CELL_DEPS[0] as unknown as CellDep[] },
+                new TypeError("fundingLockScriptCellDeps must be an array"),
+            ],
+            [
+                "a cell dep given as null",
+                { fundingLockScriptCellDeps: [FUNDING_LOCK_CELL_DEPS[0], null] as unknown as CellDep[] },
+                new TypeError("fundingLockScriptCellDeps[1] must be an object"),
+            ],
+            [
+                "a cell dep without its out point",
+                { fundingLockScriptCellDeps: [{ depType: "code" }] as unknown as CellDep[] },
+                new TypeError("fundingLockScriptCellDeps[0].outPoint must be an object"),
+            ],
+            [
+                "a cell dep with a short tx hash",
+                { fundingLockScriptCellDeps: [{ outPoint: { txHash: new Uint8Array(31), index: 0 }, depType: "code" }] },
+                new TypeError("fundingLockScriptCellDeps[0].outPoint.txHash must be 32 bytes, got 31"),
+            ],
+            [
+                "a cell dep with an index past a u32",
+                { fundingLockScriptCellDeps: [{ outPoint: { txHash: new Uint8Array(32), index: 2 ** 32 }, depType: "code" }] },
+                new RangeError("fundingLockScriptCellDeps[0].outPoint.index must be an integer between 0 and 4294967295, got 4294967296"),
+            ],
+            [
+                "a cell dep without its dep type",
+                { fundingLockScriptCellDeps: [{ outPoint: { txHash: new Uint8Array(32), index: 0 } }] as unknown as CellDep[] },
+                new TypeError("fundingLockScriptCellDeps[0].depType must be one of code, dep_group"),
+            ],
+            [
+                "a cell dep with a dep type in another spelling",
+                {
+                    fundingLockScriptCellDeps: [
+                        { outPoint: { txHash: new Uint8Array(32), index: 0 }, depType: "depGroup" as CellDep["depType"] },
+                    ],
+                },
+                new TypeError("fundingLockScriptCellDeps[0].depType must be one of code, dep_group"),
             ],
         ])("refuses %s", (_, change, expected) => {
             expect(() => encodeOpenChannelWithExternalFundingParams({ ...OPEN, ...change })).toThrow(expected);
@@ -659,6 +743,27 @@ describe("open_tenant_channel", () => {
             expect(Object.keys(wire.external_channel_signer).at(-1)).toBe("channel_announcement_nonce");
         });
 
+        it("writes the funding lock's cell deps when given, between the funding lock and the two options", () => {
+            const wire = encodeOpenTenantChannelParams({
+                ...OPEN_TENANT,
+                fundingLockScriptCellDeps: FUNDING_LOCK_CELL_DEPS,
+                commitmentDelayEpoch: 0x10000000001n,
+                commitmentFeeRate: 1000n,
+            });
+            expect(wire.funding_lock_script_cell_deps).toEqual(FUNDING_LOCK_CELL_DEPS_WIRE);
+            expect(Object.keys(wire)).toEqual([
+                "pubkey",
+                "funding_amount",
+                "public",
+                "shutdown_script",
+                "funding_lock_script",
+                "funding_lock_script_cell_deps",
+                "commitment_delay_epoch",
+                "commitment_fee_rate",
+                "external_channel_signer",
+            ]);
+        });
+
         it("writes each option on its own", () => {
             expect(Object.keys(encodeOpenTenantChannelParams({ ...OPEN_TENANT, commitmentDelayEpoch: 1n }))).toContain(
                 "commitment_delay_epoch",
@@ -707,6 +812,11 @@ describe("open_tenant_channel", () => {
                 "a funding lock with an unknown hash type",
                 { fundingLockScript: { ...FUNDING_LOCK, hashType: "data3" } },
                 new TypeError("fundingLockScript.hashType must be one of data, type, data1, data2"),
+            ],
+            [
+                "a cell dep with a dep type in another spelling",
+                { fundingLockScriptCellDeps: [{ outPoint: { txHash: new Uint8Array(32), index: 0 }, depType: "depGroup" }] },
+                new TypeError("fundingLockScriptCellDeps[0].depType must be one of code, dep_group"),
             ],
             [
                 "a negative delay",

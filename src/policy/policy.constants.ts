@@ -50,6 +50,16 @@ export const FIRST_SIGHT_CHANNEL_PINS = [
  */
 export const CHANNEL_TERMS_PINS = ["liquidCapacityShannons", "commitmentFeeRate", "remoteReservedCkbShannons"] as const;
 
+/**
+ * The opening context states three first-sight values beside the terms, so the host may pin them before any request does.
+ */
+export const HOST_TERMS_PINS = [
+    ...CHANNEL_TERMS_PINS,
+    "remoteFundingPubkey",
+    "remoteTlcBasePubkey",
+    "commitmentDelayEpoch",
+] as const satisfies readonly ((typeof FIRST_SIGHT_CHANNEL_PINS)[number] | (typeof CHANNEL_TERMS_PINS)[number])[];
+
 export const NONCE_REUSE_MODES = ["refuse", "allow"] as const;
 
 export const SIGNING_LANES = ["COMMITMENT:local", "REVOKE:local", "REVOKE:remote", "ANNOUNCEMENT"] as const;
