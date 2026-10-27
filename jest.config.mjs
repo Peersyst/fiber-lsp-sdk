@@ -7,6 +7,8 @@ export default {
     transform: {
         "^.+\\.[tj]s$": ["ts-jest", { tsconfig: { allowJs: true } }],
     },
+    // The flow specs sign several musig2 rounds per test, past jest's 5 s default under CI's parallel run.
+    testTimeout: 20_000,
     transformIgnorePatterns: ["node_modules/(?!.*(@noble|@scure|micro-packed))"],
     // Barrels are re-export lists: counting their re-exports as uncovered functions
     // measures nothing, since every spec imports the file that declares the behavior.

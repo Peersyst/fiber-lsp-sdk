@@ -250,9 +250,6 @@ async function paidThrough(h: PaymentFlow): Promise<void> {
     await tick(h, 4);
 }
 
-// Two payments of eight signed rounds each pass jest's 5 s default under a full parallel run.
-jest.setTimeout(20_000);
-
 describe("payments over the tenant node", () => {
     it("pays with the app open through the LSP as trampoline, then refuses the same invoice as charged", async () => {
         const h = await opened();
