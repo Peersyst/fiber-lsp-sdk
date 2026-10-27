@@ -1,6 +1,5 @@
 import type { SdkEvent } from "../../src/sdk";
 import type { SignerDispatch } from "../../src/signer";
-import type { InMemorySignerStorage } from "../mocks/policy";
 
 export type StepRun = { abandoned: boolean };
 
@@ -26,10 +25,6 @@ export function summarized(events: SdkEvent[]): unknown[] {
     return events.map((event) =>
         event.type === "ERROR" ? { type: "ERROR", code: event.error.code, message: event.error.message, cause: event.error.cause } : event,
     );
-}
-
-export function writesOf(owner: { storage: InMemorySignerStorage }): string[] {
-    return owner.storage.ops.filter((op) => op.startsWith("set "));
 }
 
 function abandoningAfter<Args extends unknown[], Result>(

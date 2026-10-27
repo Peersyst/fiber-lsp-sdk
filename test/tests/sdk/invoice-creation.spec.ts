@@ -12,6 +12,7 @@ import { ScriptedNode } from "../../mocks/rpc";
 import { invoiceJson } from "../../utils/invoice-json";
 import { signInvoice } from "../../utils/invoice-signing";
 import { rejection } from "../../utils/rejection";
+import { storedAt, writes } from "../../utils/stored-records";
 
 const URL = "http://127.0.0.1:8227";
 const MASTER_SEED = hexToBytes("24".repeat(32));
@@ -116,15 +117,6 @@ function withAttributes(...attributes: UnsignedInvoice["attributes"]): UnsignedI
     };
 }
 
-function storedAt(h: Harness, key: string): unknown {
-    const raw = h.storage.map.get(key);
-    return raw === undefined ? undefined : JSON.parse(raw);
-}
-
-function writes(h: Harness): string[] {
-    return h.storage.ops.filter((op) => op.startsWith("set ")).map((op) => op.slice("set ".length));
-}
-
 function newInvoiceCall(params: unknown = NEW_INVOICE_PARAMS): SentCall {
     return { method: "new_invoice", params };
 }
@@ -158,12 +150,12 @@ describe("createSdkInvoice", () => {
         const h = harness();
         let recorded: unknown;
         h.node.onCall("new_invoice", () => {
-            recorded = storedAt(h, INVOICE_KEY);
+            recorded = storedAt(h.storage, INVOICE_KEY);
         });
         h.node.result(answerOf());
         await createSdkInvoice(h.context, AMOUNT);
         expect(recorded).toEqual(RECORD);
-        expect(storedAt(h, ALLOCATOR_KEY)).toBe(INDEX);
+        expect(storedAt(h.storage, ALLOCATOR_KEY)).toBe(INDEX);
     });
 
     it("asks the node nothing when the record cannot be written", async () => {
@@ -181,9 +173,9 @@ describe("createSdkInvoice", () => {
         const h = harness();
         h.node.result(answerOf());
         await createSdkInvoice(h.context, AMOUNT);
-        expect(writes(h)).toEqual([ALLOCATOR_KEY, INVOICE_KEY, ACTIVITY_KEY]);
-        expect(storedAt(h, INVOICE_KEY)).toEqual(RECORD);
-        expect(storedAt(h, ACTIVITY_KEY)).toEqual(watching(PAYMENT_HASH));
+        expect(writes(h.storage)).toEqual([ALLOCATOR_KEY, INVOICE_KEY, ACTIVITY_KEY]);
+        expect(storedAt(h.storage, INVOICE_KEY)).toEqual(RECORD);
+        expect(storedAt(h.storage, ACTIVITY_KEY)).toEqual(watching(PAYMENT_HASH));
     });
 
     it("sends the description and the expiry asked, and checks the string against them", async () => {
@@ -191,7 +183,7 @@ describe("createSdkInvoice", () => {
         h.node.result(answerOf(withAttributes({ type: "expiryTime", seconds: 7200n }, { type: "description", text: "coffee" })));
         await createSdkInvoice(h.context, AMOUNT, { description: "coffee", expirySeconds: 7200 });
         expect(h.node.calls()).toEqual([newInvoiceCall({ ...NEW_INVOICE_PARAMS, description: "coffee", expiry: "0x1c20" })]);
-        expect(storedAt(h, ACTIVITY_KEY)).toEqual(watching(PAYMENT_HASH));
+        expect(storedAt(h.storage, ACTIVITY_KEY)).toEqual(watching(PAYMENT_HASH));
     });
 
     it("sends an empty description when one is asked, which the string must carry", async () => {
@@ -235,7 +227,7 @@ describe("createSdkInvoice", () => {
         const h = harness();
         h.node.result(answerOf({ ...ANSWER_INVOICE, timestampMs }));
         await expect(createSdkInvoice(h.context, AMOUNT)).resolves.toMatchObject({ paymentHashHex: `0x${PAYMENT_HASH}` });
-        expect(storedAt(h, ACTIVITY_KEY)).toEqual(watching(PAYMENT_HASH));
+        expect(storedAt(h.storage, ACTIVITY_KEY)).toEqual(watching(PAYMENT_HASH));
     });
 
     it.each<[string, unknown]>([
@@ -249,7 +241,7 @@ describe("createSdkInvoice", () => {
         expect(await rejection(createSdkInvoice(h.context, AMOUNT))).toEqual(
             new RangeError(`now() must be an integer between 0 and 9007199254740991, got ${String(reading)}`),
         );
-        expect(writes(h)).toEqual([ALLOCATOR_KEY, INVOICE_KEY]);
+        expect(writes(h.storage)).toEqual([ALLOCATOR_KEY, INVOICE_KEY]);
     });
 
     it("checks the string under a development chain's currency", async () => {
@@ -357,8 +349,8 @@ describe("createSdkInvoice", () => {
             const error = await rejection(createSdkInvoice(h.context, AMOUNT, options));
             expect(error).toEqual(invoiceRejected(detail));
             expect(error).toMatchObject({ code: "invoice_rejected" });
-            expect(writes(h)).toEqual([ALLOCATOR_KEY, INVOICE_KEY]);
-            expect(storedAt(h, ACTIVITY_KEY)).toBeUndefined();
+            expect(writes(h.storage)).toEqual([ALLOCATOR_KEY, INVOICE_KEY]);
+            expect(storedAt(h.storage, ACTIVITY_KEY)).toBeUndefined();
         });
 
         it("is invoice_rejected over the decoder's refusal of a string fiber would write otherwise, the record kept", async () => {
@@ -367,8 +359,8 @@ describe("createSdkInvoice", () => {
             const error = await rejection(createSdkInvoice(h.context, AMOUNT));
             expect(error).toEqual(invoiceRejected("invoiceAddress does not decode: invoice must be lowercase"));
             expect((error as SdkError).cause).toBeInstanceOf(InvoiceError);
-            expect(storedAt(h, INVOICE_KEY)).toEqual(RECORD);
-            expect(storedAt(h, ACTIVITY_KEY)).toBeUndefined();
+            expect(storedAt(h.storage, INVOICE_KEY)).toEqual(RECORD);
+            expect(storedAt(h.storage, ACTIVITY_KEY)).toBeUndefined();
         });
     });
 
@@ -383,8 +375,8 @@ describe("createSdkInvoice", () => {
                 code: -32000,
                 message: "hosted invoice trampoline route hint does not match Public T",
             });
-            expect(writes(h)).toEqual([ALLOCATOR_KEY, INVOICE_KEY]);
-            expect(storedAt(h, INVOICE_KEY)).toEqual(RECORD);
+            expect(writes(h.storage)).toEqual([ALLOCATOR_KEY, INVOICE_KEY]);
+            expect(storedAt(h.storage, INVOICE_KEY)).toEqual(RECORD);
         });
 
         it.each([
@@ -394,7 +386,7 @@ describe("createSdkInvoice", () => {
             const h = harness();
             answer(h.node);
             expect(await rejection(createSdkInvoice(h.context, AMOUNT))).toBeInstanceOf(errorClass);
-            expect(writes(h)).toEqual([ALLOCATOR_KEY, INVOICE_KEY]);
+            expect(writes(h.storage)).toEqual([ALLOCATOR_KEY, INVOICE_KEY]);
         });
 
         it("leaves a retry to another index and another hash, both records kept, only the second watched", async () => {
@@ -407,9 +399,9 @@ describe("createSdkInvoice", () => {
                 newInvoiceCall(),
                 newInvoiceCall({ ...NEW_INVOICE_PARAMS, payment_hash: `0x${NEXT_PAYMENT_HASH}` }),
             ]);
-            expect(storedAt(h, INVOICE_KEY)).toEqual(RECORD);
-            expect(storedAt(h, NEXT_INVOICE_KEY)).toEqual({ ...RECORD, paymentHash: NEXT_PAYMENT_HASH, invoiceIndex: NEXT_INDEX });
-            expect(storedAt(h, ACTIVITY_KEY)).toEqual(watching(NEXT_PAYMENT_HASH));
+            expect(storedAt(h.storage, INVOICE_KEY)).toEqual(RECORD);
+            expect(storedAt(h.storage, NEXT_INVOICE_KEY)).toEqual({ ...RECORD, paymentHash: NEXT_PAYMENT_HASH, invoiceIndex: NEXT_INDEX });
+            expect(storedAt(h.storage, ACTIVITY_KEY)).toEqual(watching(NEXT_PAYMENT_HASH));
         });
     });
 
@@ -487,7 +479,7 @@ describe("createSdkInvoice", () => {
             h.node.reject(new Error("offline"));
             await rejection(createSdkInvoice(h.context, amount, options));
             expect(h.node.calls()).toEqual([newInvoiceCall({ ...NEW_INVOICE_PARAMS, ...sent })]);
-            expect(storedAt(h, INVOICE_KEY)).toEqual({ ...RECORD, amountShannons: amount });
+            expect(storedAt(h.storage, INVOICE_KEY)).toEqual({ ...RECORD, amountShannons: amount });
         });
     });
 });

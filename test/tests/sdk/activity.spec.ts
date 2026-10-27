@@ -95,6 +95,53 @@ describe("ActivityTracker", () => {
         });
     });
 
+    describe("watchIfAbsent", () => {
+        it("adds an entry with no status and tells it did", async () => {
+            const h = harness();
+            await expect(h.tracker.watchIfAbsent("payment", HASH)).resolves.toBe(true);
+            await expect(h.tracker.read()).resolves.toEqual({ ...EMPTY, payments: { [HASH]: { status: null } } });
+        });
+
+        it("leaves an entry already there as it was, status included, writing nothing, and tells it did not", async () => {
+            const h = harness();
+            await h.tracker.watch("payment", HASH);
+            await h.tracker.mark("payment", HASH, "Failed");
+            h.storage.ops.length = 0;
+            await expect(h.tracker.watchIfAbsent("payment", HASH)).resolves.toBe(false);
+            expect(h.storage.ops).toEqual([`get ${KEY}`]);
+            await expect(h.tracker.read()).resolves.toEqual({ ...EMPTY, payments: { [HASH]: { status: "Failed" } } });
+        });
+
+        it("judges the kind's entries alone: an invoice under the hash is no payment", async () => {
+            const h = harness();
+            await h.tracker.watch("invoice", HASH);
+            await expect(h.tracker.watchIfAbsent("payment", HASH)).resolves.toBe(true);
+        });
+
+        it("lets one of two concurrent callers add the entry, under an asynchronous storage", async () => {
+            const h = harness(new AsyncInMemorySignerStorage());
+            const added = await Promise.all([h.tracker.watchIfAbsent("payment", HASH), h.tracker.watchIfAbsent("payment", HASH)]);
+            expect(added).toEqual([true, false]);
+            await expect(h.tracker.read()).resolves.toEqual({ ...EMPTY, payments: { [HASH]: { status: null } } });
+        });
+
+        it("refuses a malformed id before touching the storage", async () => {
+            const h = harness();
+            await expect(h.tracker.watchIfAbsent("payment", `0x${HASH}`)).rejects.toThrow(
+                new TypeError("payment id must be 32 bytes of lowercase hex"),
+            );
+            expect(h.storage.ops).toEqual([]);
+        });
+
+        it("propagates a storage failure rather than tell what it did", async () => {
+            const h = harness();
+            h.storage.set = () => {
+                throw new Error("disk full");
+            };
+            await expect(h.tracker.watchIfAbsent("payment", HASH)).rejects.toThrow(new Error("disk full"));
+        });
+    });
+
     describe("mark", () => {
         it("records the status an event was emitted for", async () => {
             const h = harness();

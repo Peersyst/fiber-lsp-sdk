@@ -107,7 +107,7 @@ export type RpcInvoiceWire = NewInvoiceResultWire & { status: RpcInvoiceStatus }
 
 export type SettleInvoiceParamsWire = { payment_hash: HexWire; payment_preimage: HexWire };
 
-export type SendPaymentParamsWire = { invoice: string; max_fee_amount: UintHexWire; dry_run: boolean };
+export type SendPaymentParamsWire = { invoice: string; max_fee_amount: UintHexWire; dry_run: boolean; trampoline_hops?: BareHexWire[] };
 
 /**
  * The members the client reads; fiber writes more.
@@ -314,6 +314,10 @@ export type SendPaymentParams = {
     invoice: string;
     maxFeeAmountShannons: string;
     dryRun: boolean;
+    /**
+     * Compressed trampoline keys in route order; empty leaves the route to the node and the invoice's trampoline hint.
+     */
+    trampolineHops: Uint8Array[];
 };
 
 export type RpcPayment = {

@@ -7,6 +7,8 @@ export * from "./channel-step";
 export * from "./fiber-lsp-sdk";
 export * from "./invoice-creation";
 export * from "./invoice-step";
+export * from "./payment-sending";
+export * from "./payment-step";
 export * from "./pending-opening";
 export * from "./poller";
 export * from "./sdk.constants";

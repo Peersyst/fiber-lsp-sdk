@@ -131,7 +131,7 @@ type SdkEventPayloads = {
     CHANNEL_CLOSED: { channelId: string };
     PAYMENT_SENT: { paymentHashHex: string };
     /**
-     * `reason` is fiber's text, verbatim.
+     * `reason` is fiber's `failed_error`, verbatim, or the SDK's own when the node never ran the send or gave none.
      */
     PAYMENT_FAILED: { paymentHashHex: string; reason: string };
     PAYMENT_PENDING: { paymentHashHex: string };
@@ -282,6 +282,28 @@ export type SdkInvoice = {
  */
 export type SdkInvoiceRequest = NewInvoiceParams & { lspPubkey: Uint8Array };
 
+export type SdkTransferOptions = {
+    /**
+     * Decimal shannons, 0 allowed; defaults to fiber's 0.5% of the amount, rounded up, which is also fiber's cap.
+     * Under trampoline, to any payee but the LSP, a budget below `ceil(amount / 1000)` fails the route.
+     */
+    maxFeeShannons?: string;
+};
+
+export type SdkPayment = {
+    /**
+     * `0x`-prefixed lowercase hex, as the events carry it.
+     */
+    paymentHashHex: string;
+    amountShannons: string;
+    /**
+     * The fee budget sent, which the debit intent approves with the amount.
+     */
+    maxFeeShannons: string;
+};
+
+export type SdkPayableInvoice = { paymentHash: Uint8Array; amountShannons: string; payeePublicKey: Uint8Array };
+
 export type SdkTenantChallenge = GetTenantRegistryNonceResult;
 
 export type SdkTenantRegistration = RegisterTenantParams & { tenantId: string };
@@ -320,5 +342,15 @@ export type SdkContext = {
     activity: ActivityTracker;
     openings: PendingOpeningStore;
     poller: ActivityPoller;
+    /**
+     * Payment hashes, lowercase hex, whose `transfer` runs in this instance, which the payment step skips. In memory only:
+     * after a crash the step resolves what the call left watched.
+     */
+    sending: Set<string>;
+    /**
+     * Payment hashes, lowercase hex, whose answer the payment step is acting on, which `transfer` refuses, so the step never
+     * ends a payment on an answer older than a retry's send.
+     */
+    reading: Set<string>;
     emit: (event: SdkEvent) => void;
 };

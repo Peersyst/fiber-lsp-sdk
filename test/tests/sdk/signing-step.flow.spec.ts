@@ -12,7 +12,6 @@ import { InMemorySignerStorage } from "../../mocks/policy";
 import { signingDeviceKeys } from "../../utils/signing-channel";
 import { forgetSecondSession } from "../../utils/nonce-cap-bypass";
 import { loadSigningVectors } from "../../utils/signing-vectors";
-import { writesOf } from "../../utils/step-run";
 import type { TenantDevice, TenantFlow } from "../../utils/tenant-flow";
 import {
     CHANNEL,
@@ -31,6 +30,7 @@ import {
     ticks,
 } from "../../utils/tenant-flow";
 import type { InMemoryTenantNode, TenantNodePayment } from "../../utils/tenant-node";
+import { writes } from "../../utils/stored-records";
 
 const vectors = loadSigningVectors();
 const SIGNED_TICK = ["list_channels", "get_channel_signing_status", "submit_channel_signature"];
@@ -142,7 +142,7 @@ async function expectRefused(h: TenantFlow, served: string, refusal: string): Pr
     const sent = h.node.calls.length;
     h.device.storage.ops.length = 0;
     await tick(h.device, 2);
-    expect(writesOf(h.device)).toEqual([]);
+    expect(writes(h.device.storage)).toEqual([]);
     expect(h.node.calls.slice(sent).map((call) => call.method)).toEqual(ticks(UNSIGNED_TICK, 2));
     expect(requests(h).at(-1)).toBe(`${served} unanswered`);
     expect(signings(h).slice(-2)).toEqual([`${served} ${refusal}`, `${served} ${refusal}`]);
@@ -325,7 +325,7 @@ describe("the signing step over the tenant node", () => {
             await tick(h.device, 3);
             h.device.storage.ops.length = 0;
             await tick(h.device);
-            expect(writesOf(h.device)).toEqual([]);
+            expect(writes(h.device.storage)).toEqual([]);
             expect(methods(h)).toEqual([...ticks(SIGNED_TICK, 8), ...ticks(UNSIGNED_TICK, 2)]);
             expect(requests(h)).toEqual([
                 "CompleteReceivedCommitment Commitment@1 Applied",
@@ -553,7 +553,7 @@ describe("the signing step over the tenant node", () => {
             const h = { node, device: restarted };
             restarted.storage.ops.length = 0;
             await start(restarted);
-            expect(writesOf(restarted)).toEqual([]);
+            expect(writes(restarted.storage)).toEqual([]);
             await tick(restarted);
             const calls = node.calls;
             expect(calls.map((call) => call.method)).toEqual(ticks(SIGNED_TICK, 3));

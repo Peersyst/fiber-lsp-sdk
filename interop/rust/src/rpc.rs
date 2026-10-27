@@ -305,6 +305,7 @@ struct SendPaymentParamsValues {
     invoice: String,
     max_fee_amount: String,
     dry_run: bool,
+    trampoline_hops: Vec<String>,
 }
 
 #[derive(Serialize)]
@@ -1553,7 +1554,7 @@ fn methods() -> MethodVectors {
             max_fee_amount: Some(u128_of(&values.max_fee_amount)),
             max_fee_rate: None,
             max_parts: None,
-            trampoline_hops: None,
+            trampoline_hops: (!values.trampoline_hops.is_empty()).then(|| values.trampoline_hops.iter().map(|hop| pubkey(hop)).collect()),
             keysend: None,
             udt_type_script: None,
             allow_self_payment: None,
@@ -1975,6 +1976,7 @@ fn methods() -> MethodVectors {
                         invoice: invoice_address("held"),
                         max_fee_amount: "1250000".to_string(),
                         dry_run: true,
+                        trampoline_hops: vec![],
                     },
                 ),
                 send_payment(
@@ -1983,6 +1985,16 @@ fn methods() -> MethodVectors {
                         invoice: invoice_address("held"),
                         max_fee_amount: u128::MAX.to_string(),
                         dry_run: false,
+                        trampoline_hops: vec![],
+                    },
+                ),
+                send_payment(
+                    "trampoline hops",
+                    SendPaymentParamsValues {
+                        invoice: invoice_address("held"),
+                        max_fee_amount: "1250000".to_string(),
+                        dry_run: false,
+                        trampoline_hops: vec![pubkey_hex("trampoline one"), pubkey_hex("trampoline two")],
                     },
                 ),
             ],
@@ -2371,7 +2383,7 @@ fn check_rpc_params(methods: &MethodVectors, written: &BTreeMap<String, Vec<TsPa
 mod tests {
     use super::*;
 
-    const CASES: usize = 31;
+    const CASES: usize = 32;
 
     /// What a correct TS writer emits.
     fn identity() -> Value {

@@ -1,17 +1,15 @@
 import { bytesToHex, hexToBytes } from "@noble/hashes/utils.js";
-import { MILLISECONDS_PER_SECOND } from "../common";
-import { decodeInvoice, findInvoiceAttribute } from "../invoice";
+import { decodeInvoice } from "../invoice";
 import type { HoldInvoiceErrorCode, PolicyEngine } from "../policy";
 import { HoldInvoiceError } from "../policy";
 import type { FiberRpcClient, RpcInvoice } from "../rpc";
-import { RpcError } from "../rpc";
 import type { HoldInvoicePreimages } from "../signer";
 import { tlcExpiryDelay } from "../signer";
 import type { ActivityTracker } from "./activity";
 import type { PollRun, PollStep } from "./poller";
 import { SDK_INVOICE_ALREADY_PAID_ERROR, SDK_RELEASE_EXPIRY_SLACK_MS } from "./sdk.constants";
 import type { ActivityEntry, SdkEvent } from "./sdk.types";
-import { answerEachPolled, deliverStepEvent } from "./utils";
+import { answerEachPolled, assertSdkAnsweredHash, computeSdkInvoiceExpiryMs, deliverStepEvent, isFiberRefusal } from "./utils";
 
 export type InvoiceStepOptions = {
     rpc: FiberRpcClient;
@@ -47,21 +45,9 @@ const RELEASE_WAITS: readonly HoldInvoiceErrorCode[] = ["not_held", "expiry_too_
  */
 function isPastInvoiceExpiry(invoiceAddress: string, paymentHash: string, nowMs: number): boolean {
     const invoice = decodeInvoice(invoiceAddress);
-    const answered = bytesToHex(invoice.paymentHash);
-    if (answered !== paymentHash) throw new Error(`the node answered the invoice of 0x${paymentHash} with that of 0x${answered}`);
-    const expiry = findInvoiceAttribute(invoice, "expiryTime");
-    if (expiry === undefined) return false;
-    return invoice.timestampMs + expiry.seconds * MILLISECONDS_PER_SECOND < BigInt(nowMs);
-}
-
-/**
- * Tells whether `settle_invoice` failed only because the invoice is already paid.
- * @param error What the call threw.
- * @returns Whether it is fiber's answer for a paid invoice.
- */
-function isInvoiceAlreadyPaid(error: unknown): boolean {
-    const { code, message } = SDK_INVOICE_ALREADY_PAID_ERROR;
-    return error instanceof RpcError && error.code === code && error.message === message;
+    assertSdkAnsweredHash("invoice", paymentHash, invoice.paymentHash);
+    const expiresAtMs = computeSdkInvoiceExpiryMs(invoice);
+    return expiresAtMs !== null && expiresAtMs < BigInt(nowMs);
 }
 
 /**
@@ -103,7 +89,7 @@ export function buildInvoiceStep(options: InvoiceStepOptions): PollStep {
         try {
             await rpc.settleInvoice({ paymentHash: hexToBytes(paymentHash), paymentPreimage });
         } catch (error) {
-            if (!isInvoiceAlreadyPaid(error)) throw error;
+            if (!isFiberRefusal(error, SDK_INVOICE_ALREADY_PAID_ERROR)) throw error;
         }
     };
 

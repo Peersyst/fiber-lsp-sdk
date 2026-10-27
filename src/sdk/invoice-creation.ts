@@ -1,10 +1,10 @@
 import { bytesToHex } from "@noble/hashes/utils.js";
-import { assertPositiveDecimalShannons, assertPositiveInteger, assertUnsignedInteger, isPlainObject } from "../common";
+import { assertPositiveDecimalShannons, assertPositiveInteger, isPlainObject } from "../common";
 import type { NewInvoiceParams } from "../rpc";
 import { assertRpcInvoiceDescription } from "../rpc";
 import { DEFAULT_SDK_INVOICE_EXPIRY_SECONDS, SDK_INVOICE_FINAL_EXPIRY_DELTA_MS } from "./sdk.constants";
 import type { SdkContext, SdkInvoice, SdkInvoiceOptions } from "./sdk.types";
-import { checkTenantInvoice } from "./utils";
+import { checkTenantInvoice, readSdkClock } from "./utils";
 
 export type SdkInvoiceCreationContext = Pick<
     SdkContext,
@@ -43,10 +43,8 @@ export async function createSdkInvoice(
         ...(description === undefined ? {} : { description }),
     };
     const { invoiceAddress } = await context.rpc.newInvoice(params);
-    // Read after the node answered, so its timestamp is judged against a later reading; unbound, the host's clock gets no receiver.
-    const { now } = context;
-    const nowMs = now();
-    assertUnsignedInteger("now()", nowMs, Number.MAX_SAFE_INTEGER);
+    // Read after the node answered, so its timestamp is judged against a later reading.
+    const nowMs = readSdkClock(context.now);
     checkTenantInvoice(invoiceAddress, { ...params, lspPubkey: context.lspPubkey }, nowMs);
     await context.activity.watch("invoice", paymentHashHex);
     return { invoice: invoiceAddress, paymentHashHex: `0x${paymentHashHex}` };

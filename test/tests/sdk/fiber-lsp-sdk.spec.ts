@@ -8,6 +8,7 @@ import type { Script, Transaction } from "../../../src/common";
 import type { FiberLspSdkOptions, SdkContext, SdkEvent } from "../../../src/sdk";
 import { DEFAULT_POLL_INTERVAL_MS, FiberLspSdk, POLL_STEP_TIMEOUT_MS, SdkError } from "../../../src/sdk";
 import type { ChannelSigningTransition } from "../../../src/protocol";
+import type { IFetchLike } from "../../../src/rpc";
 import type { SignerRefusal } from "../../../src/signer";
 import { FetchMock, ScriptedNode } from "../../mocks/rpc";
 import { InMemorySignerStorage } from "../../mocks/policy";
@@ -573,6 +574,7 @@ describe("FiberLspSdk", () => {
             withRuntime(later, () => h.sdk.connect());
             await flush();
             expect(delays).toEqual([
+                POLL_STEP_TIMEOUT_MS,
                 POLL_STEP_TIMEOUT_MS,
                 POLL_STEP_TIMEOUT_MS,
                 POLL_STEP_TIMEOUT_MS,
@@ -1395,6 +1397,182 @@ describe("FiberLspSdk", () => {
             await expect(h.sdk.createInvoice("0")).rejects.toEqual(new RangeError("amountShannons must be greater than 0, got 0"));
             expect(h.storage.ops).toEqual([]);
             expect(h.node.calls()).toEqual([]);
+        });
+    });
+
+    describe("transfer()", () => {
+        const PAYMENT_HASH = "5a".repeat(32);
+        // Another tenant's invoice of 2.5 CKB, signed by the secret 0x11 repeated, its hour running out at 1_791_370_800_000.
+        const INVOICE = encodeInvoice(
+            signInvoice(
+                {
+                    currency: "Fibt",
+                    amountShannons: "250000000",
+                    timestampMs: 1_791_367_200_000n,
+                    paymentHash: hexToBytes(PAYMENT_HASH),
+                    attributes: [
+                        { type: "expiryTime", seconds: 3600n },
+                        { type: "feature", bits: Uint8Array.of(0x20) },
+                        { type: "trampolineRouteHint", nodeId: hexToBytes(OPENING_LSP_PUBKEY) },
+                        {
+                            type: "payeePublicKey",
+                            publicKey: hexToBytes("034f355bdcb7cc0af728ef3cceb9615d90684bb5b2ca5f859ab0f0b704075871aa"),
+                        },
+                    ],
+                },
+                hexToBytes("11".repeat(32)),
+            ),
+        );
+        const SENT_ANSWER = {
+            payment_hash: `0x${PAYMENT_HASH}`,
+            status: "Created",
+            created_at: "0x1a115cf2760",
+            last_updated_at: "0x1a115cf2760",
+            failed_error: null,
+            fee: "0x0",
+        };
+
+        function transferHarness(overrides: Partial<FiberLspSdkOptions> = {}) {
+            const storage = new InMemorySignerStorage();
+            const node = new ScriptedNode();
+            const sdk = new FiberLspSdk(OPENING_SEED, {
+                network: "testnet",
+                storage,
+                rpcUrl: RPC_URL,
+                lspPubkey: hexToBytes(OPENING_LSP_PUBKEY),
+                fetch: node.fetch,
+                timer: new TimerMock(),
+                now: () => NOW_MS,
+                ...overrides,
+            });
+            return { sdk, node, storage };
+        }
+
+        it("pays through the facade's LSP, its budget approved and its hash watched and held while sent, and asks for a tick", async () => {
+            const h = transferHarness();
+            const pollNow = jest.spyOn(contextOf(h.sdk).poller, "pollNow");
+            let held: unknown;
+            h.node.onCall("send_payment", () => {
+                held = [...contextOf(h.sdk).sending];
+            });
+            h.node.result(SENT_ANSWER);
+            await expect(h.sdk.transfer(INVOICE, { maxFeeShannons: "1000" })).resolves.toStrictEqual({
+                paymentHashHex: `0x${PAYMENT_HASH}`,
+                amountShannons: "250000000",
+                maxFeeShannons: "1000",
+            });
+            expect(h.node.calls()).toEqual([
+                {
+                    method: "send_payment",
+                    params: { invoice: INVOICE, max_fee_amount: "0x3e8", dry_run: false, trampoline_hops: [OPENING_LSP_PUBKEY] },
+                },
+            ]);
+            expect(JSON.parse(h.storage.map.get(`fiber-lsp-sdk:intent:${PAYMENT_HASH.slice(0, 40)}`) ?? "null")).toEqual({
+                version: 1,
+                paymentHash: PAYMENT_HASH,
+                maxShannons: "250001000",
+                open: true,
+                channelIndexes: [],
+            });
+            expect(JSON.parse(h.storage.map.get("fiber-lsp-sdk:activity") ?? "null")).toEqual({
+                version: 1,
+                channels: {},
+                payments: { [PAYMENT_HASH]: { status: null } },
+                invoices: {},
+            });
+            expect(pollNow).toHaveBeenCalledTimes(1);
+            expect(held).toEqual([PAYMENT_HASH]);
+            expect(contextOf(h.sdk).sending).toEqual(new Set());
+        });
+
+        it.each([
+            ["network's currency", { network: DEV_NETWORK }, "currency is Fibt, not the network's Fibd"],
+            ["clock", { now: () => 1_791_370_800_000 }, "expiryTime ran out at 1791370800000, the device's clock reading 1791370800000"],
+        ])("checks the invoice against the facade's own %s, writing and sending nothing", async (_, overrides, detail) => {
+            const h = transferHarness(overrides);
+            const error = await rejection(h.sdk.transfer(INVOICE));
+            expect(error).toEqual(new SdkError("invoice_unpayable", `the invoice cannot be paid: ${detail}`));
+            expect(error).toMatchObject({ code: "invoice_unpayable" });
+            expect(h.storage.ops).toEqual([]);
+            expect(h.node.calls()).toEqual([]);
+        });
+
+        it("shares with its payment step the hashes the context holds as read: a transfer during the read touches no storage", async () => {
+            const storage = new InMemorySignerStorage();
+            let duringRead: { error: unknown; ops: string[] } | undefined;
+            // The first send's outcome is unknown, so its payment stays watched; every other call is a listing of no channel.
+            const fetch: IFetchLike = async (_url, init) => {
+                const { id, method } = JSON.parse(init.body) as { id: number; method: string };
+                if (method === "send_payment") throw new Error("offline");
+                let result: unknown = { channels: [] };
+                if (method === "get_payment") {
+                    const ops = storage.ops.length;
+                    const error = await rejection(sdk.transfer(INVOICE));
+                    duringRead = { error, ops: storage.ops.slice(ops) };
+                    result = { ...SENT_ANSWER, status: "Inflight" };
+                }
+                return { status: 200, text: () => Promise.resolve(JSON.stringify({ jsonrpc: "2.0", id, result })) };
+            };
+            const sdk = new FiberLspSdk(OPENING_SEED, {
+                network: "testnet",
+                storage,
+                rpcUrl: RPC_URL,
+                lspPubkey: hexToBytes(OPENING_LSP_PUBKEY),
+                fetch,
+                timer: new TimerMock(),
+                now: () => NOW_MS,
+            });
+            await rejection(sdk.transfer(INVOICE));
+            sdk.connect();
+            await flush();
+            sdk.disconnect();
+            expect(duringRead?.ops).toEqual([]);
+            expect(duringRead?.error).toEqual(
+                new SdkError("payment_in_flight", `the device refuses the payment: the one under 0x${PAYMENT_HASH} is not reported yet`),
+            );
+            expect(duringRead?.error).toMatchObject({ code: "payment_in_flight" });
+        });
+
+        it("hands its payment step the hashes the context holds: a tick during the send reads nothing of it, the next reads it", async () => {
+            const timer = new TimerMock();
+            const calls: string[] = [];
+            let duringSend: string[] | undefined;
+            // Every other call is a listing of no channel.
+            const fetch: IFetchLike = async (_url, init) => {
+                const { id, method, params } = JSON.parse(init.body) as { id: number; method: string; params: { payment_hash?: string }[] };
+                const hash = params[0]?.payment_hash;
+                calls.push(hash === undefined ? method : `${method} ${hash}`);
+                let result: unknown = { channels: [] };
+                if (method === "send_payment") {
+                    timer.advance(DEFAULT_POLL_INTERVAL_MS);
+                    await flush();
+                    duringSend = [...calls];
+                    result = SENT_ANSWER;
+                }
+                if (method === "get_payment") result = { ...SENT_ANSWER, status: "Success" };
+                return { status: 200, text: () => Promise.resolve(JSON.stringify({ jsonrpc: "2.0", id, result })) };
+            };
+            const sdk = new FiberLspSdk(OPENING_SEED, {
+                network: "testnet",
+                storage: new InMemorySignerStorage(),
+                rpcUrl: RPC_URL,
+                lspPubkey: hexToBytes(OPENING_LSP_PUBKEY),
+                fetch,
+                timer,
+                now: () => NOW_MS,
+            });
+            const events: SdkEvent[] = [];
+            sdk.onEvent((event) => events.push(event));
+            sdk.connect();
+            await flush();
+            const idleTick = calls.splice(0);
+            await sdk.transfer(INVOICE);
+            expect(duringSend).toEqual(["send_payment", ...idleTick]);
+            await flush();
+            expect(idleTick).toEqual(["list_channels", "list_channels"]);
+            expect(calls).toEqual(["send_payment", ...idleTick, ...idleTick, `get_payment 0x${PAYMENT_HASH}`]);
+            expect(events).toEqual([{ type: "PAYMENT_SENT", paymentHashHex: `0x${PAYMENT_HASH}` }]);
+            sdk.disconnect();
         });
     });
 

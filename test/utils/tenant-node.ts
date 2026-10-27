@@ -15,6 +15,7 @@ import {
     SHANNONS_PER_CKB,
     UINT128_MAX,
     UINT64_MAX,
+    assertCompressedPoint,
     blake160,
     ckbBlake2b,
     compareBytes,
@@ -39,7 +40,7 @@ import {
 import { buildRevocationContent } from "../../src/digest/revocation";
 import { buildClosingTx } from "../../src/digest/shutdown-tx";
 import type { Invoice, InvoiceAttribute, InvoiceCurrency, UnsignedInvoice } from "../../src/invoice";
-import { INVOICE_CURRENCIES, encodeInvoice, findInvoiceAttribute } from "../../src/invoice";
+import { INVOICE_CURRENCIES, InvoiceError, decodeInvoice, encodeInvoice, findInvoiceAttribute } from "../../src/invoice";
 import type { PolicyView, SignSlot, WatchtowerKeyPurpose } from "../../src/policy";
 import { reservedCkbShannons } from "../../src/policy";
 import type { ChannelSigningTransition } from "../../src/protocol";
@@ -67,7 +68,10 @@ import type {
     RpcChannelWire,
     RpcInvoiceStatus,
     RpcPaymentHashParamsWire,
+    RpcPaymentStatus,
+    RpcPaymentWire,
     RpcSubmissionResult,
+    SendPaymentParamsWire,
     SettleInvoiceParamsWire,
     SubmitChannelSignatureParamsWire,
     SubmitSignedFundingTxParamsWire,
@@ -75,7 +79,7 @@ import type {
     TenantChannelOpeningContextWire,
 } from "../../src/rpc";
 import { RPC_CALL_FAILED_CODE } from "../../src/rpc";
-import type { WireField } from "../../src/wire";
+import type { HexWire, WireField } from "../../src/wire";
 import {
     WireError,
     decodeAnyHexBytes,
@@ -180,6 +184,46 @@ const MAX_DESCRIPTION_LENGTH = 639;
 // `fiber-types/src/protocol.rs:245`, `:271-277`).
 const TRAMPOLINE_FEATURE_BITS = Uint8Array.of(0x20);
 
+// `BASIC_MPP`, bits 2 and 3 of the vector's first byte (`fiber-types/src/protocol.rs:240-248`, `:287-296`).
+const BASIC_MPP_FEATURE_MASK = 0x0c;
+
+// Fiber's payment values, spelled here like the ones above: the default fee cap, 5 per mille rounded up (`fiber/payment.rs:50-51`,
+// `fee.rs:151-175`), a trampoline's forwarding fee rate per million (`channel.rs:349`, `graph.rs:1759-1783`), the cap on trampoline
+// hops (`payment.rs:49`), a forward's expiry delta and how many a trampoline segment budgets (`config.rs:42`, `graph.rs:49`), and
+// the payment actor's status check, which stops an actor whose payment is still in flight (`payment.rs:810`, `:1148-1188`).
+const DEFAULT_MAX_FEE_RATE = 5n;
+
+const MAX_FEE_RATE_DENOMINATOR = 1000n;
+
+const TRAMPOLINE_FEE_RATE = 1000n;
+
+const FEE_RATE_DENOMINATOR = 1_000_000n;
+
+const MAX_TRAMPOLINE_HOPS = 5;
+
+const DEFAULT_TLC_EXPIRY_DELTA_MS = 4n * 60n * 60n * 1000n;
+
+const TRAMPOLINE_FORWARDING_ROUTE_DELTA_COUNT = 3n;
+
+const PAYMENT_STATUS_CHECK_INTERVAL_MS = 60_000n;
+
+// The members of fiber's `SendPaymentCommandParams` (`fiber-json-types/src/payment.rs:163-268`) the SDK never sends.
+const UNSERVED_PAYMENT_MEMBERS = [
+    "target_pubkey",
+    "amount",
+    "payment_hash",
+    "final_tlc_expiry_delta",
+    "tlc_expiry_limit",
+    "timeout",
+    "max_fee_rate",
+    "max_parts",
+    "keysend",
+    "udt_type_script",
+    "allow_self_payment",
+    "custom_records",
+    "hop_hints",
+] as const;
+
 // The initiator's commitment_signed, the other side's revoke_and_ack, then the reverse.
 const ROUNDS = {
     tenant: ["SendCommitmentSigned", "CompleteReceivedRevokeAndAck", "CompleteReceivedCommitment", "SendRevokeAndAck"],
@@ -240,6 +284,50 @@ type InvoiceRequest = {
     allowMpp: boolean | null;
     allowTrampolineRouting: boolean | null;
 };
+
+type NodeSendPaymentParamsWire = SendPaymentParamsWire & Record<(typeof UNSERVED_PAYMENT_MEMBERS)[number] | "trampoline_hops", unknown>;
+
+// An absent option `null`.
+type PaymentRequest = {
+    invoice: string | null;
+    maxFeeShannons: bigint | null;
+    dryRun: boolean | null;
+    trampolineHops: Uint8Array[] | null;
+};
+
+// Fiber's `SendPaymentData`, the members the double routes on.
+type PaymentData = {
+    paymentHash: Uint8Array;
+    target: Uint8Array;
+    amountShannons: bigint;
+    // `min(max_fee_amount, cap)`, the cap when absent (`fiber/payment.rs:443-449`).
+    maxFeeShannons: bigint;
+    // What the request asked for, the cap when absent: what an overcharge goes past.
+    requestedMaxFeeShannons: bigint;
+    // The request's, else the invoice's hint (`payment.rs:401-408`).
+    trampolineHops: Uint8Array[] | null;
+    hashAlgorithm: TlcHashAlgorithm;
+    finalExpiryDeltaMs: bigint;
+};
+
+// A row of the tenant's payment store with its single attempt; the status as fiber derives it from the attempt
+// (`fiber-types/src/payment.rs:1098-1116`).
+type NodePayment = {
+    paymentHash: Uint8Array;
+    amountShannons: bigint;
+    trampoline: boolean;
+    status: RpcPaymentStatus;
+    createdAtMs: bigint;
+    // Moved by a failure alone (`fiber-types/src/payment.rs:1130-1134`): an attempt's success leaves it (`fiber/payment.rs:1936-1953`).
+    lastUpdatedAtMs: bigint;
+    failedError: string | null;
+    // What the attempt's first hop carries, `null` without one or once it failed (`fiber-types/src/payment.rs:728-730`, `:994-1006`).
+    sentShannons: bigint | null;
+    preimage: Uint8Array | null;
+};
+
+// Fiber's `GetPaymentCommandResult` as a release build writes it (`fiber-json-types/src/payment.rs:61-96`), `send_payment`'s too.
+type NodePaymentWire = RpcPaymentWire & { payment_preimage: HexWire | null; custom_records: null };
 
 // Each side's liquid amount, TLCs aside.
 type CommitmentState = { localShannons: bigint; remoteShannons: bigint; tlcs: NodeTlc[] };
@@ -363,6 +451,11 @@ export type TenantNodePayment = { paymentHash: string; amountShannons: string; h
 // Without an expiry the TLC pays an invoice of the node's, and expires at the node's clock plus the invoice's final expiry delta:
 // the least fiber accepts once it is committed (`channel.rs:1724-1726`).
 export type TenantNodeReceivedPayment = Omit<TenantNodePayment, "expiryMs"> & { expiryMs?: string };
+
+// A `TlcErrorCode` the LSP fails an offered TLC with (`fiber-types/src/payment.rs:804-830`), whose name the payment stores as its
+// `failed_error` (`:189-193`, `fiber/payment.rs:1993-1999`).
+export type TenantNodeTlcErrorCode =
+    "TemporaryNodeFailure" | "IncorrectOrUnknownPaymentDetails" | "InvoiceExpired" | "InvoiceCancelled" | "HoldTlcTimeout";
 
 // How the next `new_invoice` departs from fiber's build, every queued one applying; the row stores what it answered.
 export type TenantNodeInvoiceTamper =
@@ -598,6 +691,15 @@ export class InMemoryTenantNode {
 
     private readonly invoiceTampers: TenantNodeInvoiceTamper[] = [];
 
+    // The tenant's payment store, by payment hash in bare hex.
+    private readonly payments = new Map<string, NodePayment>();
+
+    private overcharge: bigint | null = null;
+
+    private dropBefore: string | null = null;
+
+    private dropped: { method: string; params: unknown } | null = null;
+
     constructor(options: TenantNodeOptions) {
         this.terms = options.channel;
         this.channel = options.channel;
@@ -611,6 +713,11 @@ export class InMemoryTenantNode {
             const request = JSON.parse(init.body) as { id: number; method: string; params: unknown[] };
             const params = request.params[0];
             this.sent.push({ method: request.method, params });
+            if (request.method === this.dropBefore) {
+                this.dropBefore = null;
+                this.dropped = { method: request.method, params };
+                throw new TypeError("fetch failed: the connection dropped before the call reached the node");
+            }
             const parkNext = this.parkNext;
             if (parkNext !== null && request.method === parkNext) {
                 this.parkNext = null;
@@ -722,16 +829,54 @@ export class InMemoryTenantNode {
     }
 
     // A received TLC an invoice holds asks for the preimage `settle_invoice` stored, as fiber's fulfil of a hold invoice's
-    // (`settle_tlc_set_command.rs:303-313`); any other is fulfilled as is.
-    fulfil(paymentHash: string): void {
+    // (`settle_tlc_set_command.rs:303-313`); the TLC of a payment `send_payment` made, for the preimage the peer's fulfil carries,
+    // the payment's `Success` once the removal is applied; any other is fulfilled as is.
+    fulfil(paymentHash: string, preimage?: string): void {
         const tlc = this.tlcs.find((candidate) => bytesToHex(candidate.paymentHash) === paymentHash);
         if (tlc === undefined) throw new Error(`no TLC under ${paymentHash} is in flight`);
         const entry = tlc.direction === "received" ? this.invoices.get(paymentHash) : undefined;
-        if (entry === undefined) {
+        const payment = tlc.direction === "offered" ? this.payments.get(paymentHash) : undefined;
+        if (entry !== undefined) {
+            this.fulfilHeld(tlc, entry);
+        } else if (payment === undefined) {
             this.removeTlc(tlc, true);
         } else {
-            this.fulfilHeld(tlc, entry);
+            if (preimage === undefined || !equalBytes(hashPreimage(tlc.hashAlgorithm, hexToBytes(preimage)), tlc.paymentHash)) {
+                throw new Error(`the payment under ${paymentHash} is fulfilled with its preimage`);
+            }
+            // The attempt's success completes the session (`fiber/payment.rs:1936-1953`), its preimage the payment's (`:640-643`).
+            this.removeTlc(tlc, true, () => {
+                payment.status = "Success";
+                payment.preimage = hexToBytes(preimage);
+            });
         }
+    }
+
+    // The LSP fails the offered TLC back with the code: the payment is `Failed` once the removal is applied, as fiber's payer gives
+    // up on a trampoline's failure (`history.rs:198-220`) and on the final node's permanent ones (`:312-338`).
+    failOffered(paymentHash: string, errorCode: TenantNodeTlcErrorCode): void {
+        const tlc = this.tlcs.find((candidate) => candidate.direction === "offered" && bytesToHex(candidate.paymentHash) === paymentHash);
+        if (tlc === undefined) throw new Error(`no offered TLC under ${paymentHash} is in flight`);
+        const payment = this.payments.get(paymentHash);
+        if (payment === undefined) {
+            this.removeTlc(tlc, false);
+            return;
+        }
+        if (!payment.trampoline && errorCode === "TemporaryNodeFailure") {
+            throw new Error("fiber retries a direct payment the final node fails temporarily (`history.rs:339-344`): the double does not");
+        }
+        // `set_attempt_fail_with_error` with no other attempt active (`fiber/payment.rs:1662-1677`, `:1644-1660`).
+        this.removeTlc(tlc, false, () => {
+            payment.status = "Failed";
+            payment.failedError = errorCode;
+            payment.lastUpdatedAtMs = BigInt(this.now());
+            payment.sentShannons = null;
+        });
+    }
+
+    // The next `send_payment` adds a TLC of so many shannons past the amount and the max fee its request asked for.
+    overchargeNextPayment(shannons: string): void {
+        this.overcharge = BigInt(shannons);
     }
 
     // Fiber's expiry maintenance (`channel.rs:3474-3507`): a committed received TLC expiring before the delay's two thirds and
@@ -861,6 +1006,19 @@ export class InMemoryTenantNode {
         this.dropNext = method;
     }
 
+    // The connection drops before the method's next call reaches the node, which handles it only on `landDroppedCall`.
+    dropNextCall(method: string): void {
+        this.dropBefore = method;
+    }
+
+    // The call the connection dropped reaches the node after all; its answer reaches no one.
+    landDroppedCall(): void {
+        const { dropped } = this;
+        if (dropped === null) throw new Error("no call was dropped");
+        this.dropped = null;
+        this.answer(dropped.method, dropped.params);
+    }
+
     private async beforeThirdSession(): Promise<void> {
         const pending = this.pending;
         if (this.forgetSecondSession === null || pending === null) return;
@@ -896,6 +1054,10 @@ export class InMemoryTenantNode {
                 return this.getInvoice(params);
             case "settle_invoice":
                 return this.settleInvoice(params);
+            case "send_payment":
+                return this.sendPaymentByRpc(params);
+            case "get_payment":
+                return this.getPayment(params);
             default:
                 return { error: { code: METHOD_NOT_FOUND_CODE, message: "Method not found" } };
         }
@@ -1326,7 +1488,9 @@ export class InMemoryTenantNode {
     }
 
     // The side the TLC pays removes it, the peer an offered one and the tenant's node a received one: a fulfil pays its payee, a
-    // fail returns it to its payer. `applied` runs before the round's last request: a received TLC's, the node's revoke_and_ack.
+    // fail returns it to its payer. `applied` runs where the node applies the removal: a received TLC's before the round's last
+    // request, the node's revoke_and_ack; an offered one's once the peer's revoke_and_ack is applied, after the round
+    // (`channel.rs:2484-2502`, `:1323-1349`), which tells the payer (`:1997-2008`).
     private removeTlc(tlc: NodeTlc, fulfilled: boolean, applied?: () => void): void {
         this.tlcs = this.tlcs.filter((candidate) => candidate !== tlc);
         if ((tlc.direction === "received") === fulfilled) {
@@ -1334,7 +1498,8 @@ export class InMemoryTenantNode {
         } else {
             this.remoteShannons += tlc.amountShannons;
         }
-        this.round(tlc.direction === "offered" ? "peer" : "tenant", applied, true);
+        const received = tlc.direction === "received";
+        this.round(received ? "tenant" : "peer", applied, received);
     }
 
     private leastExpiryOf(paymentHash: string): string {
@@ -1373,11 +1538,8 @@ export class InMemoryTenantNode {
         });
     }
 
-    // `is_expired` (`fiber-types/src/invoice.rs:866-878`): never without an expiry.
     private invoiceStatusOf(entry: NodeInvoice): NodeInvoiceStatus {
-        const expiry = findInvoiceAttribute(entry.invoice, "expiryTime");
-        const expired = expiry !== undefined && entry.invoice.timestampMs + expiry.seconds * MILLISECONDS_PER_SECOND < BigInt(this.now());
-        return entry.status === "Open" && expired ? "Expired" : entry.status;
+        return entry.status === "Open" && isInvoiceExpired(entry.invoice, BigInt(this.now())) ? "Expired" : entry.status;
     }
 
     // `new_invoice` on a tenant's path (`rpc/invoice.rs:184-197`, `:298-413`), its checks in order, then the LSP's registration
@@ -1518,8 +1680,175 @@ export class InMemoryTenantNode {
         return { result: {} };
     }
 
+    // `send_payment` on a tenant's path (`rpc/payment.rs:230-294`): the payment data checked by the network actor
+    // (`fiber/network.rs:3479-3496`), the payment actor's slot (`:5537-5555`) and store (`fiber/payment.rs:2185-2213`), the session
+    // (`:2215-2238`), its route (`graph.rs:1299-1365`) and the add, which the node sends without waiting for its result
+    // (`network.rs:4959-4961`): the answer says `Created`, the session is `Inflight` once the add lands (`payment.rs:1860-1867`).
+    private sendPaymentByRpc(params: unknown): RpcAnswer {
+        const request = readParams<NodeSendPaymentParamsWire, PaymentRequest>(params, readPaymentRequest);
+        if (request instanceof WireError) return invalidParams(params, request);
+        if (request.dryRun === true) throw new Error("the double serves no dry run");
+        // Fiber's conversion refuses a hop off the curve before the network actor (`rpc/payment.rs:240-249`); the SDK never sends one.
+        request.trampolineHops?.forEach((hop, index) => assertCompressedPoint(`trampoline_hops[${index}]`, hop));
+        const data = this.paymentDataOf(request);
+        if (typeof data === "string") return failed(`InvalidParameter: Failed to validate payment request: "${data}"`);
+        const key = bytesToHex(data.paymentHash);
+        const stored = this.payments.get(key);
+        if (stored !== undefined && this.actorAlive(stored)) {
+            return failed(`Payment session already exists, stop start new payment actor for ${hash256Of(key)}`);
+        }
+        // A failed one is retried with a fresh session, its attempts deleted.
+        if (stored !== undefined && stored.status !== "Failed") {
+            return failed(
+                `InvalidParameter: Payment session already exists: ${hash256Of(key)} with payment session status: ${stored.status}`,
+            );
+        }
+        const now = BigInt(this.now());
+        const payment: NodePayment = {
+            paymentHash: data.paymentHash,
+            amountShannons: data.amountShannons,
+            trampoline: data.trampolineHops !== null,
+            status: "Created",
+            createdAtMs: now,
+            lastUpdatedAtMs: now,
+            failedError: null,
+            sentShannons: null,
+            preimage: null,
+        };
+        this.payments.set(key, payment);
+        const refusal = this.routeRefusal(data);
+        if (refusal !== null) {
+            // `build_payment_routes` fails the session with the error it returns (`payment.rs:1386-1397`, `:1740-1747`).
+            payment.status = "Failed";
+            payment.failedError = `Send payment error: Failed to build route, ${refusal}`;
+            return failed(payment.failedError);
+        }
+        const overcharge = this.overcharge;
+        this.overcharge = null;
+        // Under trampoline the hop to the LSP carries the amount and the whole fee budget (`graph.rs:1647-1653`).
+        const sentShannons =
+            overcharge !== null
+                ? data.amountShannons + data.requestedMaxFeeShannons + overcharge
+                : data.amountShannons + (data.trampolineHops === null ? 0n : data.maxFeeShannons);
+        if (sentShannons > this.localShannons) throw new Error("the double adds no TLC past the channel's liquid balance");
+        payment.sentShannons = sentShannons;
+        this.sendPayment({
+            paymentHash: key,
+            amountShannons: sentShannons.toString(),
+            hashAlgorithm: data.hashAlgorithm,
+            expiryMs: (now + firstHopExpiryDeltaMs(data)).toString(),
+        });
+        const answer = { result: paymentWire(payment) };
+        payment.status = "Inflight";
+        return answer;
+    }
+
+    // `SendPaymentData::new` and its builder's `validate` (`fiber/payment.rs:382-569`, `:224-336`), their checks in order: a refusal
+    // is the message the network actor answers without a row (`network.rs:3479-3487`, `payment.rs:724-731`).
+    private paymentDataOf(request: PaymentRequest): PaymentData | string {
+        if (request.invoice === null) return "target_pubkey is missing";
+        let invoice: Invoice;
+        try {
+            invoice = decodeInvoice(request.invoice);
+        } catch (error) {
+            if (!(error instanceof InvoiceError)) throw error;
+            // The SDK's decoder refuses some strings fiber's parser reads (`fiber-types/src/invoice.rs:971-1021`).
+            return error.path === "flag" ? "invoice is not signed" : "invoice is invalid";
+        }
+        if (isInvoiceExpired(invoice, BigInt(this.now()))) return "invoice is expired";
+        const hint = findInvoiceAttribute(invoice, "trampolineRouteHint");
+        const trampolineHops = request.trampolineHops ?? (hint === undefined ? null : [hint.nodeId]);
+        const target = findInvoiceAttribute(invoice, "payeePublicKey")?.publicKey;
+        if (target === undefined) return "target_pubkey is missing";
+        if (invoice.amountShannons === null) return "amount is missing";
+        const amountShannons = BigInt(invoice.amountShannons);
+        const cap = ceilDiv(amountShannons * DEFAULT_MAX_FEE_RATE, MAX_FEE_RATE_DENOMINATOR);
+        const requestedMaxFeeShannons = request.maxFeeShannons ?? cap;
+        if (findInvoiceAttribute(invoice, "udtScript") !== undefined) throw new Error("the double serves no UDT payment");
+        const finalExpiryDeltaMs = finalExpiryDeltaOf(invoice);
+        if (allowsMpp(invoice)) throw new Error("the double serves no MPP payment");
+        if (amountShannons === 0n) return "amount must be greater than 0";
+        if (amountShannons >= UINT64_MAX) throw new Error("the double serves no payment of u64::MAX shannons or more");
+        if (finalExpiryDeltaMs < MIN_TLC_EXPIRY_DELTA_MS || finalExpiryDeltaMs > MAX_PAYMENT_TLC_EXPIRY_LIMIT_MS) {
+            return `invalid final_tlc_expiry_delta, expect between ${MIN_TLC_EXPIRY_DELTA_MS} and ${MAX_PAYMENT_TLC_EXPIRY_LIMIT_MS}`;
+        }
+        if (trampolineHops !== null) {
+            if (trampolineHops.length === 0) return "trampoline_hops must be non-empty when provided";
+            if (trampolineHops.length > MAX_TRAMPOLINE_HOPS) return `too many trampoline_hops, at most ${MAX_TRAMPOLINE_HOPS}`;
+            if (trampolineHops.some((hop) => equalBytes(hop, target))) return "trampoline_hops must not contain target_pubkey";
+            if (new Set(trampolineHops.map((hop) => bytesToHex(hop))).size !== trampolineHops.length) {
+                return "trampoline_hops must not contain duplicates";
+            }
+        }
+        return {
+            paymentHash: invoice.paymentHash,
+            target,
+            amountShannons,
+            maxFeeShannons: requestedMaxFeeShannons < cap ? requestedMaxFeeShannons : cap,
+            requestedMaxFeeShannons,
+            trampolineHops,
+            hashAlgorithm: hashAlgorithmOfInvoice(invoice),
+            finalExpiryDeltaMs,
+        };
+    }
+
+    // `build_route`'s checks (`graph.rs:1299-1350`), then the trampoline's (`:1553-1620`), each `PathFindError` in its display form
+    // (`:493-511`). The tenant's graph holds its own channel alone (`graph.rs:548-557`, `:618-624`): only the LSP is in reach.
+    private routeRefusal(data: PaymentData): string | null {
+        const source = pubkeyOf(TENANT_SECRET_KEY);
+        if (equalBytes(data.target, source)) return "Feature not enabled: allow_self_payment is not enabled, can not pay to self";
+        const outbound = this.outboundLiquidity();
+        if (outbound < data.amountShannons) {
+            return `Insufficient balance: max outbound liquidity ${outbound} is insufficient, required amount: ${data.amountShannons}`;
+        }
+        const hops = data.trampolineHops;
+        if (hops === null) return equalBytes(data.target, this.lspPubkey) ? null : "PathFind error: no path found";
+        const [first] = hops;
+        if (first === undefined) throw new Error("the payment data holds no empty trampoline hops");
+        if (equalBytes(first, source)) return "Feature not enabled: invalid trampoline_hops: first hop must not be source/target";
+        const least = trampolineFeeOf(data.amountShannons, 1n, hops.length);
+        if (data.maxFeeShannons < least) {
+            const most = trampolineFeeOf(data.amountShannons, 10n, hops.length);
+            const fees = `recommend_minimal_fee=${least}, maximal_fee=${most} current_fee=${data.maxFeeShannons}`;
+            return `Graph other error: max_fee_amount is too low for trampoline routing: ${fees}`;
+        }
+        // The path to the first trampoline carries the amount and the whole fee budget (`graph.rs:1604-1618`, `:2919-2930`).
+        const reached = equalBytes(first, this.lspPubkey) && outbound >= data.amountShannons + data.maxFeeShannons;
+        return reached ? null : "PathFind error: no path found";
+    }
+
+    // The channel's `to_local_amount` (`channel.rs:8037-8041`, `:7599-7601`); without a channel, none (`graph.rs:1320-1348`).
+    private outboundLiquidity(): bigint {
+        if (this.material === null) return 0n;
+        if (this.channelState.state_name !== "ChannelReady") throw new Error("the double routes a payment over a ready channel only");
+        return this.localShannons + this.inFlightShannons("offered");
+    }
+
+    // The payment's actor answers a second send for its hash until it stops, on the payment's final status or the status check
+    // after it (`fiber/payment.rs:1198-1214`, `:1148-1188`).
+    private actorAlive(payment: NodePayment): boolean {
+        const final = payment.status === "Success" || payment.status === "Failed";
+        return !final && BigInt(this.now()) < payment.createdAtMs + PAYMENT_STATUS_CHECK_INTERVAL_MS;
+    }
+
+    // `get_payment` (`rpc/payment.rs:296-306`), from the tenant's store (`fiber/network.rs:5455-5462`).
+    private getPayment(params: unknown): RpcAnswer {
+        const paymentHash = readParams<RpcPaymentHashParamsWire, Uint8Array>(params, (at) =>
+            decodeHexBytes(at("payment_hash"), PAYMENT_HASH_LENGTH),
+        );
+        if (paymentHash instanceof WireError) return invalidParams(params, paymentHash);
+        const key = bytesToHex(paymentHash);
+        const payment = this.payments.get(key);
+        if (payment === undefined) return failed(`InvalidParameter: Payment session not found: ${hash256Of(key)}`);
+        return { result: paymentWire(payment) };
+    }
+
     private state(): CommitmentState {
         return { localShannons: this.localShannons, remoteShannons: this.remoteShannons, tlcs: [...this.tlcs] };
+    }
+
+    private inFlightShannons(direction: TlcDirection): bigint {
+        return this.tlcs.filter((tlc) => tlc.direction === direction).reduce((sum, tlc) => sum + tlc.amountShannons, 0n);
     }
 
     private isChannel(channelId: string): boolean {
@@ -1574,10 +1903,8 @@ export class InMemoryTenantNode {
     // balance moves it at once.
     private listedChannel(): RpcChannelWire {
         const { channel, shutdownTxHash } = this;
-        const inFlight = (direction: TlcDirection): bigint =>
-            this.tlcs.filter((tlc) => tlc.direction === direction).reduce((sum, tlc) => sum + tlc.amountShannons, 0n);
-        const offered = inFlight("offered");
-        const received = inFlight("received");
+        const offered = this.inFlightShannons("offered");
+        const received = this.inFlightShannons("received");
         return {
             channel_id: channel.channelId,
             pubkey: encodeBareHexBytes("pubkey", this.lspPubkey, COMPRESSED_POINT_LENGTH),
@@ -2041,6 +2368,61 @@ function hashAlgorithmOfInvoice(invoice: Invoice): TlcHashAlgorithm {
     return findInvoiceAttribute(invoice, "hashAlgorithm")?.algorithm ?? "ckb-hash";
 }
 
+// `is_expired` (`fiber-types/src/invoice.rs:865-878`): never without an expiry.
+function isInvoiceExpired(invoice: Invoice, nowMs: bigint): boolean {
+    const expiry = findInvoiceAttribute(invoice, "expiryTime");
+    return expiry !== undefined && invoice.timestampMs + expiry.seconds * MILLISECONDS_PER_SECOND < nowMs;
+}
+
+// `allow_mpp` (`fiber-types/src/invoice.rs:842-847`).
+function allowsMpp(invoice: Invoice): boolean {
+    const [first] = findInvoiceAttribute(invoice, "feature")?.bits ?? [];
+    return ((first ?? 0) & BASIC_MPP_FEATURE_MASK) !== 0;
+}
+
+// `calculate_fee_with_base`'s rounding up (`fiber/fee.rs:151-175`).
+function ceilDiv(numerator: bigint, denominator: bigint): bigint {
+    return (numerator + denominator - 1n) / denominator;
+}
+
+// `estimate_trampoline_fee` (`graph.rs:1759-1783`): each hop's forwarding fee over what it forwards, from the payee back.
+function trampolineFeeOf(finalShannons: bigint, forwardHops: bigint, hopCount: number): bigint {
+    let forwarded = finalShannons;
+    for (let hop = 0; hop < hopCount; hop++) forwarded += ceilDiv(forwarded * TRAMPOLINE_FEE_RATE, FEE_RATE_DENOMINATOR) * forwardHops;
+    return forwarded - finalShannons;
+}
+
+// The first hop's expiry from now: the payee's final delta, or the forward delta of the trampoline segments (`graph.rs:1785-1820`);
+// fiber's random privacy delta on top is left out (`graph.rs:2189-2200`).
+function firstHopExpiryDeltaMs(data: PaymentData): bigint {
+    if (data.trampolineHops === null) return data.finalExpiryDeltaMs;
+    const base = data.finalExpiryDeltaMs > MIN_TLC_EXPIRY_DELTA_MS ? data.finalExpiryDeltaMs : MIN_TLC_EXPIRY_DELTA_MS;
+    const segment = DEFAULT_TLC_EXPIRY_DELTA_MS * TRAMPOLINE_FORWARDING_ROUTE_DELTA_COUNT + MIN_TLC_EXPIRY_DELTA_MS;
+    return base + segment * BigInt(data.trampolineHops.length);
+}
+
+// A direct route to the LSP pays no fee; under trampoline, the fee is what the first hop carries past the amount
+// (`fiber-types/src/payment.rs:994-1006`).
+function paymentWire(payment: NodePayment): NodePaymentWire {
+    const { sentShannons } = payment;
+    const fee = sentShannons === null || !payment.trampoline ? 0n : sentShannons - payment.amountShannons;
+    return {
+        payment_hash: encodeHexBytes("paymentHash", payment.paymentHash, PAYMENT_HASH_LENGTH),
+        payment_preimage: payment.preimage === null ? null : encodeHexBytes("paymentPreimage", payment.preimage, PREIMAGE_LENGTH),
+        status: payment.status,
+        created_at: encodeUintHex("createdAt", payment.createdAtMs, UINT64_MAX),
+        last_updated_at: encodeUintHex("lastUpdatedAt", payment.lastUpdatedAtMs, UINT64_MAX),
+        failed_error: payment.failedError,
+        fee: encodeUintHex("fee", fee, UINT128_MAX),
+        custom_records: null,
+    };
+}
+
+// `Hash256`'s display and debug forms alike (`fiber-types/src/primitives.rs:358-369`).
+function hash256Of(bareHex: string): string {
+    return `Hash256(0x${bareHex})`;
+}
+
 function slotKey(slot: NodeSlot): string {
     return `${slot.purpose}@${slot.commitmentNumber}`;
 }
@@ -2146,6 +2528,21 @@ function readInvoiceRequest(at: (name: keyof NodeNewInvoiceParamsWire & string) 
         hashAlgorithm: readOption(at("hash_algorithm"), (field) => hashAlgorithmOf(decodeEnum(field, Object.values(HASH_ALGORITHM_WIRE)))),
         allowMpp: readOption(at("allow_mpp"), decodeBoolean),
         allowTrampolineRouting: readOption(at("allow_trampoline_routing"), decodeBoolean),
+    };
+}
+
+// Each hop a `Pubkey` (`fiber-json-types/src/serde_utils.rs:217-223`), read in the bare form serde writes and the SDK sends.
+function readPaymentRequest(at: (name: keyof NodeSendPaymentParamsWire & string) => WireField): PaymentRequest {
+    for (const member of UNSERVED_PAYMENT_MEMBERS) {
+        if (readOption(at(member), (field) => field) !== null) throw new Error(`the double serves no ${member} on send_payment`);
+    }
+    return {
+        invoice: readOption(at("invoice"), decodeString),
+        maxFeeShannons: readOption(at("max_fee_amount"), (field) => decodeUintHex(field, UINT128_MAX)),
+        dryRun: readOption(at("dry_run"), decodeBoolean),
+        trampolineHops: readOption(at("trampoline_hops"), (field) =>
+            readArray(field).map((hop) => decodeBareHexBytes(hop, COMPRESSED_POINT_LENGTH)),
+        ),
     };
 }
 

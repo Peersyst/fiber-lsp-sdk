@@ -21,6 +21,8 @@ import { openSdkChannel, prepareSdkChannelOpen, submitSdkFundingTx } from "./cha
 import { buildChannelStep } from "./channel-step";
 import { createSdkInvoice } from "./invoice-creation";
 import { buildInvoiceStep } from "./invoice-step";
+import { transferSdkPayment } from "./payment-sending";
+import { buildPaymentStep } from "./payment-step";
 import { PendingOpeningStore } from "./pending-opening";
 import { ActivityPoller } from "./poller";
 import { DEFAULT_POLL_INTERVAL_MS, POLL_STEP_TIMEOUT_MS } from "./sdk.constants";
@@ -35,9 +37,11 @@ import type {
     SdkEventListener,
     SdkInvoice,
     SdkInvoiceOptions,
+    SdkPayment,
     SdkSignFundingInputs,
     SdkTenantChallenge,
     SdkTenantRegistration,
+    SdkTransferOptions,
 } from "./sdk.types";
 import { resolveSdkNetwork, runtimeTimer } from "./utils";
 import { buildWatchtowerSigningStep } from "./watchtower-step";
@@ -78,6 +82,8 @@ export class FiberLspSdk {
         const activity = new ActivityTracker(store);
         const openings = new PendingOpeningStore(store);
         const preimages = new HoldInvoicePreimages(masterSeed);
+        const sending = new Set<string>();
+        const reading = new Set<string>();
         const steps = [
             buildChannelStep({ rpc, activity, openings, emit }),
             buildChannelSigningStep({ rpc, store, dispatch, emit }),
@@ -92,6 +98,7 @@ export class FiberLspSdk {
                 emit,
                 pollNow: () => this.context.poller.pollNow(),
             }),
+            buildPaymentStep({ rpc, policy, activity, sending, reading, emit }),
         ];
         this.context = {
             network,
@@ -107,6 +114,8 @@ export class FiberLspSdk {
             activity,
             openings,
             poller: new ActivityPoller({ timer, intervalMs: pollIntervalMs, stepTimeoutMs: POLL_STEP_TIMEOUT_MS, steps, emit }),
+            sending,
+            reading,
             emit,
         };
     }
@@ -213,6 +222,16 @@ export class FiberLspSdk {
      */
     createInvoice(amountShannons: string, options?: SdkInvoiceOptions): Promise<SdkInvoice> {
         return createSdkInvoice(this.context, amountShannons, options);
+    }
+
+    /**
+     * Pays an invoice through the LSP once the device checked it; `PAYMENT_SENT` or `PAYMENT_FAILED` tells how it ended.
+     * @param encodedInvoice The invoice string.
+     * @param options The fee budget, fiber's 0.5% of the amount by default.
+     * @returns The payment hash the events name, the amount and the fee budget sent.
+     */
+    transfer(encodedInvoice: string, options?: SdkTransferOptions): Promise<SdkPayment> {
+        return transferSdkPayment(this.context, encodedInvoice, options);
     }
 
     /**

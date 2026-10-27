@@ -103,3 +103,8 @@ export const RPC_PAYMENT_STATUSES = ["Created", "Inflight", "Success", "Failed"]
 export const RPC_SUBMISSION_RESULTS = ["Applied", "AlreadyApplied"] as const;
 
 export const RPC_TENANT_RUNTIME_STATUSES = ["cold", "active"] as const;
+
+/**
+ * Fiber's `MAX_TRAMPOLINE_HOPS_LIMIT` (`fiber/payment.rs:49`).
+ */
+export const RPC_MAX_TRAMPOLINE_HOPS = 5;

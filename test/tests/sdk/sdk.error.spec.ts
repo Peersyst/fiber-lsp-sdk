@@ -30,6 +30,10 @@ describe("SdkError", () => {
             "opening_conflict",
             "funding_tx_altered",
             "invoice_rejected",
+            "invoice_unpayable",
+            "payment_in_flight",
+            "payment_charged",
+            "own_invoice",
         ]);
     });
 });

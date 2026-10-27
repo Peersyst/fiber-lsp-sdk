@@ -1391,12 +1391,14 @@ describe("debit intents", () => {
         expect([...storage.map.keys()]).toEqual([`fiber-lsp-sdk:intent:${OFFERED_HASH.slice(0, 40)}`]);
     });
 
-    // A host unsure whether the first call landed repeats it.
-    it("writes nothing when the same open intent is recorded again", async () => {
+    // A repeat would be a second payment under the hash; whether the first landed is the node's to say.
+    it("refuses the same open intent recorded again, and writes nothing", async () => {
         const { engine, store, storage } = newEngine();
         await engine.recordDebitIntent(OFFERED_HASH, OFFERED_AMOUNT);
         storage.ops.length = 0;
-        await engine.recordDebitIntent(OFFERED_HASH, OFFERED_AMOUNT);
+        const error = await engine.recordDebitIntent(OFFERED_HASH, OFFERED_AMOUNT).catch((cause: unknown) => cause);
+        expect(error).toBeInstanceOf(DebitIntentError);
+        expect(error).toMatchObject({ code: "intent_open", message: `a debit intent for ${OFFERED_HASH} is already open` });
         expect(storage.ops.filter((operation) => operation.startsWith("set"))).toEqual([]);
         await expect(store.getDebitIntent(OFFERED_HASH.slice(0, 40))).resolves.toMatchObject({ maxShannons: OFFERED_AMOUNT, open: true });
     });
@@ -1406,11 +1408,33 @@ describe("debit intents", () => {
         await engine.recordDebitIntent(OFFERED_HASH, OFFERED_AMOUNT);
         const error = await engine.recordDebitIntent(OFFERED_HASH, "9000000000").catch((cause: unknown) => cause);
         expect(error).toBeInstanceOf(DebitIntentError);
-        expect(error).toMatchObject({
-            code: "intent_open",
-            message: `a debit intent for ${OFFERED_HASH} is already open with another maximum`,
-        });
+        expect(error).toMatchObject({ code: "intent_open", message: `a debit intent for ${OFFERED_HASH} is already open` });
         await expect(store.getDebitIntent(OFFERED_HASH.slice(0, 40))).resolves.toMatchObject({ maxShannons: OFFERED_AMOUNT });
+    });
+
+    it("lets one of two concurrent records of the same intent through", async () => {
+        const { engine, store } = newEngine();
+        const outcomes = await Promise.allSettled([
+            engine.recordDebitIntent(OFFERED_HASH, OFFERED_AMOUNT),
+            engine.recordDebitIntent(OFFERED_HASH, "9000000000"),
+        ]);
+        expect(outcomes[0]).toEqual({ status: "fulfilled", value: undefined });
+        expect(outcomes[1]).toMatchObject({ status: "rejected", reason: { code: "intent_open" } });
+        await expect(store.getDebitIntent(OFFERED_HASH.slice(0, 40))).resolves.toMatchObject({ maxShannons: OFFERED_AMOUNT, open: true });
+    });
+
+    it("opens again a closed intent nothing was shown or charged under", async () => {
+        const { engine, store } = newEngine();
+        await engine.recordDebitIntent(OFFERED_HASH, OFFERED_AMOUNT);
+        await engine.closeDebitIntent(OFFERED_HASH);
+        await engine.recordDebitIntent(OFFERED_HASH, OFFERED_AMOUNT);
+        await expect(store.getDebitIntent(OFFERED_HASH.slice(0, 40))).resolves.toEqual<DebitIntentRecord>({
+            version: 1,
+            paymentHash: OFFERED_HASH,
+            maxShannons: OFFERED_AMOUNT,
+            open: true,
+            channelIndexes: [],
+        });
     });
 
     it("closes an intent, and closing it again writes nothing", async () => {
@@ -1484,15 +1508,31 @@ describe("debit intents", () => {
         });
     });
 
-    it("refuses a hash that shares its bound 20 bytes with a recorded one", async () => {
-        const { engine } = newEngine();
+    // A payee picks the hash freely, so a twin is the user's to refuse, not a host bug.
+    it("refuses as hash_twin a hash that shares its bound 20 bytes with a recorded intent, and writes nothing", async () => {
+        const { engine, store, storage } = newEngine();
         const twin = OFFERED_HASH.slice(0, 40) + "00".repeat(12);
         await engine.recordDebitIntent(OFFERED_HASH, OFFERED_AMOUNT);
         await engine.closeDebitIntent(OFFERED_HASH);
-        await expect(engine.recordDebitIntent(twin, OFFERED_AMOUNT)).rejects.toThrow(
-            new TypeError(`${twin} shares its bound 20 bytes with a recorded payment, ${OFFERED_HASH}`),
-        );
+        storage.ops.length = 0;
+        const error = await engine.recordDebitIntent(twin, OFFERED_AMOUNT).catch((cause: unknown) => cause);
+        expect(error).toBeInstanceOf(DebitIntentError);
+        expect(error).toMatchObject({ code: "hash_twin", message: `the 20 bytes of ${twin} a TLC's witness binds are another payment's` });
+        expect(storage.ops.filter((operation) => operation.startsWith("set"))).toEqual([]);
+        await expect(store.getDebitIntent(OFFERED_HASH.slice(0, 40))).resolves.toMatchObject({ paymentHash: OFFERED_HASH, open: false });
         await expect(engine.closeDebitIntent(twin)).rejects.toThrow(TypeError);
+    });
+
+    it("refuses as hash_twin a hash that shares its bound 20 bytes with a hold invoice, and writes nothing", async () => {
+        const { engine, store, storage } = newEngine();
+        const twin = RECEIVED_HASH.slice(0, 40) + "00".repeat(12);
+        await engine.recordHoldInvoice(RECEIVED_HASH, RECEIVED_AMOUNT, "sha256", INVOICE_INDEX);
+        storage.ops.length = 0;
+        const error = await engine.recordDebitIntent(twin, RECEIVED_AMOUNT).catch((cause: unknown) => cause);
+        expect(error).toBeInstanceOf(DebitIntentError);
+        expect(error).toMatchObject({ code: "hash_twin", message: `the 20 bytes of ${twin} a TLC's witness binds are another payment's` });
+        expect(storage.ops.filter((operation) => operation.startsWith("set"))).toEqual([]);
+        await expect(store.getDebitIntent(RECEIVED_HASH.slice(0, 40))).resolves.toBeNull();
     });
 
     it("refuses an intent under the hash of one of this device's hold invoices", async () => {
@@ -1546,6 +1586,61 @@ describe("debit intents", () => {
     it("rejects closing under a hash of the wrong shape", async () => {
         const { engine } = newEngine();
         await expect(engine.closeDebitIntent(OFFERED_HASH.slice(2))).rejects.toThrow(TypeError);
+    });
+
+    describe("readDebitIntent", () => {
+        it("reads the record by its full hash", async () => {
+            const { engine } = await openedEngine();
+            await recordThreeTlcIntents(engine);
+            await engine.checkAndClaim(KEYS, threeTlcRequest());
+            await engine.closeDebitIntent(OFFERED_HASH);
+            await expect(engine.readDebitIntent(OFFERED_HASH)).resolves.toEqual<DebitIntentRecord>({
+                version: 1,
+                paymentHash: OFFERED_HASH,
+                maxShannons: OFFERED_AMOUNT,
+                open: false,
+                channelIndexes: [CHANNEL_INDEX],
+            });
+        });
+
+        it("reads null under a hash no intent was recorded under", async () => {
+            const { engine } = newEngine();
+            await expect(engine.readDebitIntent(OFFERED_HASH)).resolves.toBeNull();
+        });
+
+        it("hands back a copy the store never sees changed", async () => {
+            const { engine, storage } = newEngine();
+            await engine.recordDebitIntent(OFFERED_HASH, OFFERED_AMOUNT);
+            const record = await engine.readDebitIntent(OFFERED_HASH);
+            if (record === null) throw new Error("the intent was recorded");
+            record.open = false;
+            record.channelIndexes.push(CHANNEL_INDEX);
+            storage.ops.length = 0;
+            await expect(engine.readDebitIntent(OFFERED_HASH)).resolves.toMatchObject({ open: true, channelIndexes: [] });
+            expect(storage.ops.filter((operation) => operation.startsWith("set"))).toEqual([]);
+        });
+
+        // The record under the bound bytes is another payment's, so a watch of the twin can end.
+        it("reads null under a hash that shares its bound 20 bytes with a recorded one", async () => {
+            const { engine } = newEngine();
+            const twin = OFFERED_HASH.slice(0, 40) + "00".repeat(12);
+            await engine.recordDebitIntent(OFFERED_HASH, OFFERED_AMOUNT);
+            await expect(engine.readDebitIntent(twin)).resolves.toBeNull();
+        });
+
+        it.each([
+            ["no hash", undefined],
+            ["a hash of 31 bytes", OFFERED_HASH.slice(2)],
+            ["an uppercase hash", OFFERED_HASH.toUpperCase()],
+        ])("rejects %s before touching the storage", async (_, hash) => {
+            const { engine, storage } = newEngine();
+            await engine.recordDebitIntent(OFFERED_HASH, OFFERED_AMOUNT);
+            storage.ops.length = 0;
+            await expect(engine.readDebitIntent(hash as string)).rejects.toThrow(
+                new TypeError("paymentHashHex must be 32 bytes of lowercase hex"),
+            );
+            expect(storage.ops).toEqual([]);
+        });
     });
 });
 

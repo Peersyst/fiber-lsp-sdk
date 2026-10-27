@@ -338,7 +338,12 @@ export function toSettleInvoiceParams(vector: SettleInvoiceParamsVector): Settle
 }
 
 export function toSendPaymentParams(vector: SendPaymentParamsVector): SendPaymentParams {
-    return { invoice: vector.invoice, maxFeeAmountShannons: vector.max_fee_amount, dryRun: vector.dry_run };
+    return {
+        invoice: vector.invoice,
+        maxFeeAmountShannons: vector.max_fee_amount,
+        dryRun: vector.dry_run,
+        trampolineHops: vector.trampoline_hops.map(hexToBytes),
+    };
 }
 
 export function toRpcPayment(vector: PaymentVector): RpcPayment {

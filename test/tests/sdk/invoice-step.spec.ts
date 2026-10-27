@@ -13,7 +13,8 @@ import { ScriptedNode } from "../../mocks/rpc";
 import { signInvoice } from "../../utils/invoice-signing";
 import { rejection } from "../../utils/rejection";
 import type { StepRun } from "../../utils/step-run";
-import { live, pollFailedEvent, summarized, writesOf } from "../../utils/step-run";
+import { live, pollFailedEvent, summarized } from "../../utils/step-run";
+import { writes } from "../../utils/stored-records";
 
 const URL = "http://127.0.0.1:8227";
 const ACTIVITY_KEY = "fiber-lsp-sdk:activity";
@@ -159,7 +160,7 @@ describe("buildInvoiceStep", () => {
             await h.step(live());
             expect(h.node.calls()).toEqual([]);
             expect(h.events).toEqual([]);
-            expect(writesOf(h)).toEqual([]);
+            expect(writes(h.storage)).toEqual([]);
         });
 
         it("calls nothing when only channels and payments are watched", async () => {
@@ -189,7 +190,7 @@ describe("buildInvoiceStep", () => {
             await h.step(live());
             expect(h.node.calls()).toEqual([getInvoiceCall(HASH)]);
             expect(h.events).toEqual([]);
-            expect(writesOf(h)).toEqual([]);
+            expect(writes(h.storage)).toEqual([]);
             expect(await invoicesOf(h)).toStrictEqual({ [HASH]: { status: null } });
         });
 
@@ -227,7 +228,7 @@ describe("buildInvoiceStep", () => {
             h.storage.ops.length = 0;
             await h.step(live());
             expect(h.events).toStrictEqual([{ type: "PAYMENT_PENDING", paymentHashHex: `0x${HASH}` }]);
-            expect(writesOf(h)).toEqual([]);
+            expect(writes(h.storage)).toEqual([]);
             expect(mark).toHaveBeenCalledTimes(2);
         });
 
@@ -708,7 +709,7 @@ describe("buildInvoiceStep", () => {
             );
             expect(h.node.calls()).toEqual([getInvoiceCall(HASH), getInvoiceCall(HASH)]);
             expect(summarized(h.events)).toStrictEqual([anomaly, anomaly]);
-            expect(writesOf(h)).toEqual([]);
+            expect(writes(h.storage)).toEqual([]);
             expect(await invoicesOf(h)).toStrictEqual({ [HASH]: { status: null } });
             expect(await releasedOf(h, HASH)).toBe(false);
         });
@@ -818,7 +819,7 @@ describe("buildInvoiceStep", () => {
             );
             expect(h.node.calls()).toEqual([getInvoiceCall(HASH), getInvoiceCall(HASH)]);
             expect(summarized(h.events)).toStrictEqual([anomaly, anomaly]);
-            expect(writesOf(h)).toEqual([]);
+            expect(writes(h.storage)).toEqual([]);
             expect(await invoicesOf(h)).toStrictEqual({ [HASH]: { status: null } });
         });
 
@@ -934,7 +935,7 @@ describe("buildInvoiceStep", () => {
             await h.step(run);
             expect(h.node.calls()).toEqual([getInvoiceCall(HASH)]);
             expect(h.events).toEqual([]);
-            expect(writesOf(h)).toEqual([]);
+            expect(writes(h.storage)).toEqual([]);
             expect(release).not.toHaveBeenCalled();
         });
 
@@ -946,7 +947,7 @@ describe("buildInvoiceStep", () => {
             h.storage.ops.length = 0;
             h.node.result(invoiceResult(HASH, "Received")).result(invoiceResult(HASH, "Received"));
             await h.step(run);
-            expect(writesOf(h)).toEqual([]);
+            expect(writes(h.storage)).toEqual([]);
             expect(release).not.toHaveBeenCalled();
             await h.step(live());
             expect(h.events.map((event) => event.type)).toEqual(["PAYMENT_PENDING", "PAYMENT_PENDING"]);
@@ -1027,7 +1028,7 @@ describe("buildInvoiceStep", () => {
             h.storage.ops.length = 0;
             h.node.result(invoiceResult(HASH, status)).result(invoiceResult(HASH, status));
             await h.step(run);
-            expect(writesOf(h)).toEqual([]);
+            expect(writes(h.storage)).toEqual([]);
             await h.step(live());
             expect(h.events.map((event) => event.type)).toEqual([type, type]);
             expect(await invoicesOf(h)).toStrictEqual({});

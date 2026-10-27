@@ -4,6 +4,7 @@ import { PENDING_OPENING_RECORD_KEY, PendingOpeningStore } from "../../../src/sd
 import { AsyncInMemorySignerStorage, InMemorySignerStorage } from "../../mocks/policy";
 import { rejection } from "../../utils/rejection";
 import { withField } from "../../utils/with-field";
+import { storedAt, writes } from "../../utils/stored-records";
 
 const KEY = "fiber-lsp-sdk:opening";
 const INDEX = 1_790_812_800;
@@ -34,15 +35,6 @@ const CORRUPT = `stored value at ${KEY} is not a pending opening record`;
 function harness(stored?: unknown, storage: InMemorySignerStorage | AsyncInMemorySignerStorage = new InMemorySignerStorage()) {
     if (stored !== undefined) storage.map.set(KEY, JSON.stringify(stored));
     return { openings: new PendingOpeningStore(new SignerStore(storage)), storage };
-}
-
-function storedOf(h: { storage: InMemorySignerStorage | AsyncInMemorySignerStorage }): unknown {
-    const raw = h.storage.map.get(KEY);
-    return raw === undefined ? undefined : JSON.parse(raw);
-}
-
-function writes(h: { storage: InMemorySignerStorage | AsyncInMemorySignerStorage }): string[] {
-    return h.storage.ops.filter((op) => op.startsWith("set "));
 }
 
 describe("PendingOpeningStore", () => {
@@ -187,7 +179,7 @@ describe("PendingOpeningStore", () => {
         ])("refuses it on %s, writing nothing", async (_, operation) => {
             const h = harness(withField(STORED, "opening.channelIndex", -1));
             await expect(operation(h.openings)).rejects.toThrow(new TypeError(CORRUPT));
-            expect(writes(h)).toEqual([]);
+            expect(writes(h.storage)).toEqual([]);
         });
     });
 
@@ -220,14 +212,14 @@ describe("PendingOpeningStore", () => {
             const h = harness();
             const recorded = { ...STORED.opening, userLockCellDeps: [] };
             await expect(h.openings.write(INDEX, FUNDED, LOCK, [])).resolves.toStrictEqual(recorded);
-            expect(storedOf(h)).toStrictEqual({ version: 1, opening: recorded });
+            expect(storedAt(h.storage, KEY)).toStrictEqual({ version: 1, opening: recorded });
             await expect(h.openings.read()).resolves.toStrictEqual(recorded);
         });
 
         it("replaces another opening, its channel id included", async () => {
             const h = harness(STORED_WITH_ID);
             await h.openings.write(OTHER_INDEX, "20000000000", { ...LOCK, hashType: "data1" });
-            expect(storedOf(h)).toStrictEqual({
+            expect(storedAt(h.storage, KEY)).toStrictEqual({
                 version: 1,
                 opening: {
                     channelIndex: OTHER_INDEX,
@@ -241,13 +233,13 @@ describe("PendingOpeningStore", () => {
         it("writes over a cleared opening", async () => {
             const h = harness(CLEARED);
             await h.openings.write(INDEX, FUNDED, LOCK);
-            expect(storedOf(h)).toStrictEqual(STORED);
+            expect(storedAt(h.storage, KEY)).toStrictEqual(STORED);
         });
 
         it("writes before it resolves, with an asynchronous storage too", async () => {
             const h = harness(undefined, new AsyncInMemorySignerStorage());
             await h.openings.write(INDEX, FUNDED, LOCK);
-            expect(storedOf(h)).toStrictEqual(STORED);
+            expect(storedAt(h.storage, KEY)).toStrictEqual(STORED);
         });
 
         it("returns an opening the store does not hold: writing to it changes nothing stored", async () => {
@@ -339,7 +331,7 @@ describe("PendingOpeningStore", () => {
         it("takes the largest safe integer as the index", async () => {
             const h = harness();
             await h.openings.write(Number.MAX_SAFE_INTEGER, FUNDED, LOCK);
-            expect(storedOf(h)).toStrictEqual(withField(STORED, "opening.channelIndex", Number.MAX_SAFE_INTEGER));
+            expect(storedAt(h.storage, KEY)).toStrictEqual(withField(STORED, "opening.channelIndex", Number.MAX_SAFE_INTEGER));
         });
     });
 
@@ -348,7 +340,7 @@ describe("PendingOpeningStore", () => {
             const h = harness(STORED_WITH_ID);
             const lock: Script = { codeHash: new Uint8Array(32).fill(0x9b), hashType: "type", args: new Uint8Array(20).fill(0x11) };
             await expect(h.openings.readMatching(FUNDED, lock)).resolves.toStrictEqual(STORED_WITH_ID.opening);
-            expect(writes(h)).toEqual([]);
+            expect(writes(h.storage)).toEqual([]);
         });
 
         it.each<[string, string, Script]>([
@@ -426,32 +418,32 @@ describe("PendingOpeningStore", () => {
         it("names the channel of the opening under the index", async () => {
             const h = harness(STORED);
             await expect(h.openings.setChannelId(INDEX, CHANNEL_ID)).resolves.toBeUndefined();
-            expect(storedOf(h)).toStrictEqual(STORED_WITH_ID);
+            expect(storedAt(h.storage, KEY)).toStrictEqual(STORED_WITH_ID);
         });
 
         it("renames the channel of the opening under the index", async () => {
             const h = harness(STORED_WITH_ID);
             await expect(h.openings.setChannelId(INDEX, OTHER_CHANNEL_ID)).resolves.toBeUndefined();
-            expect(storedOf(h)).toStrictEqual(withField(STORED_WITH_ID, "opening.channelId", OTHER_CHANNEL_ID));
+            expect(storedAt(h.storage, KEY)).toStrictEqual(withField(STORED_WITH_ID, "opening.channelId", OTHER_CHANNEL_ID));
         });
 
         it("writes nothing when the opening already names the channel", async () => {
             const h = harness(STORED_WITH_ID);
             await expect(h.openings.setChannelId(INDEX, CHANNEL_ID)).resolves.toBeUndefined();
-            expect(writes(h)).toEqual([]);
+            expect(writes(h.storage)).toEqual([]);
         });
 
         it("leaves an opening under another index alone", async () => {
             const h = harness(STORED);
             await expect(h.openings.setChannelId(OTHER_INDEX, CHANNEL_ID)).resolves.toBeUndefined();
-            expect(writes(h)).toEqual([]);
-            expect(storedOf(h)).toStrictEqual(STORED);
+            expect(writes(h.storage)).toEqual([]);
+            expect(storedAt(h.storage, KEY)).toStrictEqual(STORED);
         });
 
         it("leaves an opening under another index alone, even one that names the same channel", async () => {
             const h = harness(STORED_WITH_ID);
             await expect(h.openings.setChannelId(OTHER_INDEX, CHANNEL_ID)).resolves.toBeUndefined();
-            expect(writes(h)).toEqual([]);
+            expect(writes(h.storage)).toEqual([]);
         });
 
         it.each<[string, unknown]>([
@@ -460,7 +452,7 @@ describe("PendingOpeningStore", () => {
         ])("does nothing when %s", async (_, stored) => {
             const h = harness(stored);
             await expect(h.openings.setChannelId(INDEX, CHANNEL_ID)).resolves.toBeUndefined();
-            expect(writes(h)).toEqual([]);
+            expect(writes(h.storage)).toEqual([]);
         });
 
         it.each<[string, number, string, Error]>([
@@ -503,8 +495,8 @@ describe("PendingOpeningStore", () => {
         ])("leaves an opening that %s alone", async (_, stored) => {
             const h = harness(stored);
             await expect(h.openings.clear(OTHER_CHANNEL_ID)).resolves.toBeUndefined();
-            expect(writes(h)).toEqual([]);
-            expect(storedOf(h)).toStrictEqual(stored);
+            expect(writes(h.storage)).toEqual([]);
+            expect(storedAt(h.storage, KEY)).toStrictEqual(stored);
         });
 
         it.each<[string, unknown]>([
@@ -513,7 +505,7 @@ describe("PendingOpeningStore", () => {
         ])("does nothing when %s", async (_, stored) => {
             const h = harness(stored);
             await expect(h.openings.clear(CHANNEL_ID)).resolves.toBeUndefined();
-            expect(writes(h)).toEqual([]);
+            expect(writes(h.storage)).toEqual([]);
         });
 
         it.each<[string, unknown]>([
@@ -535,7 +527,7 @@ describe("PendingOpeningStore", () => {
         ])("drops the opening under the index, %s", async (_, stored) => {
             const h = harness(stored);
             await expect(h.openings.clearIndex(INDEX)).resolves.toBeUndefined();
-            expect(storedOf(h)).toStrictEqual(CLEARED);
+            expect(storedAt(h.storage, KEY)).toStrictEqual(CLEARED);
         });
 
         it.each<[string, unknown]>([
@@ -544,8 +536,8 @@ describe("PendingOpeningStore", () => {
         ])("leaves an opening under another index alone, %s", async (_, stored) => {
             const h = harness(stored);
             await expect(h.openings.clearIndex(OTHER_INDEX)).resolves.toBeUndefined();
-            expect(writes(h)).toEqual([]);
-            expect(storedOf(h)).toStrictEqual(stored);
+            expect(writes(h.storage)).toEqual([]);
+            expect(storedAt(h.storage, KEY)).toStrictEqual(stored);
         });
 
         it.each<[string, unknown]>([
@@ -554,7 +546,7 @@ describe("PendingOpeningStore", () => {
         ])("does nothing when %s", async (_, stored) => {
             const h = harness(stored);
             await expect(h.openings.clearIndex(INDEX)).resolves.toBeUndefined();
-            expect(writes(h)).toEqual([]);
+            expect(writes(h.storage)).toEqual([]);
         });
 
         it.each<[string, unknown, string]>([

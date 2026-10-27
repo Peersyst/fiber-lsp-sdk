@@ -25,7 +25,9 @@ const URL = "http://fiber.example:8227";
 const PAYMENT_HASH = "5a".repeat(32);
 const INVOICE = "fibt2500000001pq5yk5a6mzq0vc3hqwpf6t8a";
 
-const SEND: SendPaymentParams = { invoice: INVOICE, maxFeeAmountShannons: "1250000", dryRun: false };
+const SEND: SendPaymentParams = { invoice: INVOICE, maxFeeAmountShannons: "1250000", dryRun: false, trampolineHops: [] };
+const HOP_ONE = "0297f82b61f72137f0da4c633352f880e3590e1613e4245ecf813015780759a598";
+const HOP_TWO = "0227a70da5773b230be3ab25adeb84680e09106043c9dba3c7e3448a760babc58a";
 
 const INFLIGHT = {
     payment_hash: `0x${PAYMENT_HASH}`,
@@ -41,10 +43,23 @@ const FAILED = { ...INFLIGHT, status: "Failed", failed_error: "Failed to build r
 
 describe("send_payment", () => {
     describe("encodeSendPaymentParams", () => {
-        it("writes the invoice, the fee bound in hex and the dry run, leaving every other option to the node", () => {
+        it("writes the invoice, the fee bound in hex and the dry run, omitting an empty hop list and leaving every other option to the node", () => {
             const wire = encodeSendPaymentParams(SEND);
             expect(wire).toEqual({ invoice: INVOICE, max_fee_amount: "0x1312d0", dry_run: false });
             expect(Object.keys(wire)).toEqual(["invoice", "max_fee_amount", "dry_run"]);
+        });
+
+        it("writes the limit of hops and refuses one more", () => {
+            const hop = hexToBytes(HOP_ONE);
+            expect(encodeSendPaymentParams({ ...SEND, trampolineHops: Array(5).fill(hop) }).trampoline_hops).toHaveLength(5);
+            expect(() => encodeSendPaymentParams({ ...SEND, trampolineHops: Array(6).fill(hop) })).toThrow(
+                new TypeError("trampolineHops must have at most 5 entries"),
+            );
+        });
+
+        it("writes the hops in order as bare hex", () => {
+            const wire = encodeSendPaymentParams({ ...SEND, trampolineHops: [hexToBytes(HOP_ONE), hexToBytes(HOP_TWO)] });
+            expect(wire.trampoline_hops).toEqual([HOP_ONE, HOP_TWO]);
         });
 
         it.each(send.params.map((entry) => [entry.name, entry] as const))("writes the %s case as fiber's serde does", (_, entry) => {
@@ -99,6 +114,22 @@ describe("send_payment", () => {
             ],
             ["a dry run as a string", { dryRun: "false" }, new TypeError("dryRun must be a boolean")],
             ["a missing dry run", { dryRun: undefined }, new TypeError("dryRun must be a boolean")],
+            ["hops that are not an array", { trampolineHops: HOP_ONE }, new TypeError("trampolineHops must be an array")],
+            ["missing hops", { trampolineHops: undefined }, new TypeError("trampolineHops must be an array")],
+            ["a hop of 32 bytes", { trampolineHops: [new Uint8Array(32)] }, new TypeError("trampolineHops[0] must be 33 bytes, got 32")],
+            [
+                "a hop of 34 bytes",
+                { trampolineHops: [hexToBytes(HOP_ONE), new Uint8Array(34)] },
+                new TypeError("trampolineHops[1] must be 33 bytes, got 34"),
+            ],
+            ["a hop as a string", { trampolineHops: [HOP_ONE] }, new TypeError("trampolineHops[0] must be a Uint8Array")],
+            ["a null hop", { trampolineHops: [null] }, new TypeError("trampolineHops[0] must be a Uint8Array")],
+            ["a hole in the hops", { trampolineHops: new Array<Uint8Array>(1) }, new TypeError("trampolineHops[0] must be a Uint8Array")],
+            [
+                "a hop of 33 bytes off the curve",
+                { trampolineHops: [new Uint8Array(33)] },
+                new TypeError("trampolineHops[0] must be a compressed point on secp256k1"),
+            ],
         ])("refuses %s", (_, change, expected) => {
             expect(() => encodeSendPaymentParams({ ...SEND, ...change } as SendPaymentParams)).toThrow(expected);
         });

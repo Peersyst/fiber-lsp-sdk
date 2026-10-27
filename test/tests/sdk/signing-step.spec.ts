@@ -24,8 +24,9 @@ import {
 } from "../../utils/signing-channel";
 import type { SigningCaseVector } from "../../utils/signing-vectors";
 import { loadSigningVectors, signingCaseOf, signingStatusField } from "../../utils/signing-vectors";
-import { abandonAfterHandle, live, pollFailedEvent, summarized, writesOf } from "../../utils/step-run";
+import { abandonAfterHandle, live, pollFailedEvent, summarized } from "../../utils/step-run";
 import { withField } from "../../utils/with-field";
+import { writes } from "../../utils/stored-records";
 
 const vectors = loadSigningVectors();
 const CHANNEL_ID = vectors.channel.channel_id;
@@ -157,7 +158,7 @@ describe("buildChannelSigningStep", () => {
                 signingStatusCall(CHANNEL_ID),
                 signatureSubmissionCall(vectors, kase),
             ]);
-            expect(writesOf(h.channel)).toEqual([]);
+            expect(writes(h.channel.storage)).toEqual([]);
             expect(h.events).toStrictEqual([
                 withSigningDeadline(signedEventOf(vectors, kase)),
                 withSigningDeadline(signedEventOf(vectors, kase)),
@@ -235,7 +236,7 @@ describe("buildChannelSigningStep", () => {
                 .result(statusResult(withField(kase.result.status, "transition", "SignEverything")));
             await h.step(live());
             expect(h.node.calls()).toEqual([LIST_CHANNELS_CALL, signingStatusCall(CHANNEL_ID)]);
-            expect(writesOf(h.channel)).toEqual([]);
+            expect(writes(h.channel.storage)).toEqual([]);
             expect(h.events).toStrictEqual([
                 {
                     type: "SIGNING",
@@ -260,7 +261,7 @@ describe("buildChannelSigningStep", () => {
             h.node.result({ channels: [{ channel_id: CHANNEL_ID }] }).result(statusResult(kase.result.status, OTHER_ID));
             await h.step(live());
             expect(handle).not.toHaveBeenCalled();
-            expect(writesOf(h.channel)).toEqual([]);
+            expect(writes(h.channel.storage)).toEqual([]);
             expect(h.node.calls()).toEqual([LIST_CHANNELS_CALL, signingStatusCall(CHANNEL_ID)]);
             expect(h.events).toStrictEqual([
                 {
@@ -471,7 +472,7 @@ describe("buildChannelSigningStep", () => {
             h.node.result({ channels: [{ channel_id: CHANNEL_ID }] }).result(statusResult(IDLE));
             await h.step(live());
             expect(h.node.calls()).toEqual([LIST_CHANNELS_CALL, signingStatusCall(CHANNEL_ID)]);
-            expect(writesOf(h.channel)).toEqual([]);
+            expect(writes(h.channel.storage)).toEqual([]);
             expect(h.events).toEqual([]);
         });
 
@@ -624,7 +625,7 @@ describe("buildChannelSigningStep", () => {
                 .result(statusResult(kase.result.status));
             await h.step(run);
             expect(handle).not.toHaveBeenCalled();
-            expect(writesOf(h.channel)).toEqual([]);
+            expect(writes(h.channel.storage)).toEqual([]);
             expect(h.node.calls()).toEqual([LIST_CHANNELS_CALL, signingStatusCall(CHANNEL_ID)]);
             expect(h.events).toEqual([]);
 
@@ -663,7 +664,7 @@ describe("buildChannelSigningStep", () => {
                 signatureSubmissionCall(vectors, kase),
             ]);
             // The sign-once store answers with the bytes it signed, writing nothing.
-            expect(writesOf(h.channel)).toEqual([]);
+            expect(writes(h.channel.storage)).toEqual([]);
             expect(h.events).toStrictEqual([signedEventOf(vectors, kase)]);
         });
 

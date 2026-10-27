@@ -201,6 +201,10 @@ and three maps, `channels`, `payments` and `invoices`, each from the id the node
 payment hash in hex) to `{ status }`, the last status an event was emitted for or `null`. A status is checked against
 fiber's list for its kind at every write, unknown extra fields are tolerated, and a version from the future is refused,
 as for every other record. Entries are dropped once final, so unlike the records above this one does not grow for good.
+A payment's entry is never marked: its status stays `null` until the payment step drops it, since both of its events are
+final. What else the facade knows of a payment in flight, the hashes whose `transfer` is in progress (`sending`) and those
+the payment step is reading (`reading`), is held in memory alone and never written: a restart empties both, and the
+watched entry, with the intent the policy keeps, is what the next tick resumes from ([sdk.md](./sdk.md)).
 
 The pending opening is one key, not one per channel, because fiber keeps a single opening per tenant. Its record is
 `{ version, opening }`, and `opening` is `null` once dropped, since the storage has no delete, or:
@@ -259,6 +263,12 @@ preimage, and the index is in the record. The storage holds no secret, and the i
 the device's clock in milliseconds a moment before the node wrote the invoice's timestamp ([sdk.md](./sdk.md)), so the
 timestamp bounds the search. The SDK does not search for it today; a held payment whose index is lost times out and goes
 back to the payer.
+
+A payment sent and still in flight at a wipe loses its intent and its watch with the rest, so no event reports how it
+ends; the node's `get_payment` still holds it. A `transfer` of the same invoice then records a fresh intent and watches
+the hash again, and while the node's session has not failed fiber refuses the send as a session that exists, which the
+facade answers `payment_in_flight` and then follows to its end like any other ([sdk.md](./sdk.md)). Nothing of the
+payment is signed again: after a wipe every channel reads as unregistered (below).
 
 **Rebuilding that state is not something the SDK does today.** What a restore would have to rebuild before anything else is
 the alias map: which channel index each of the node's channels belongs to. `ISignerStorage` is `get` and `set` with no

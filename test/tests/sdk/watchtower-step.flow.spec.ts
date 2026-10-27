@@ -9,7 +9,6 @@ import type { WireField } from "../../../src/wire";
 import { InMemorySignerStorage } from "../../mocks/policy";
 import { asList, asRecord } from "../../utils/json-shape";
 import { loadSigningVectors, toCkbCellDep, watchtowerApprovalOf } from "../../utils/signing-vectors";
-import { writesOf } from "../../utils/step-run";
 import type { TenantDevice, TenantFlow } from "../../utils/tenant-flow";
 import {
     CHANNEL_ID,
@@ -28,6 +27,7 @@ import {
     ticks,
 } from "../../utils/tenant-flow";
 import type { InMemoryTenantNode, TenantNodeForceClose, TenantNodePayment } from "../../utils/tenant-node";
+import { writes } from "../../utils/stored-records";
 
 const vectors = loadSigningVectors();
 
@@ -193,7 +193,7 @@ async function expectRefused(h: TenantFlow, spend: string, refusal: string): Pro
     const sent = h.node.calls.length;
     h.device.storage.ops.length = 0;
     await tick(h.device, 2);
-    expect(writesOf(h.device)).toEqual([]);
+    expect(writes(h.device.storage)).toEqual([]);
     expect(methods(h, sent)).toEqual(ticks(UNSPENT_TICK, 2));
     expect(spends(h)).toEqual([`${spend} unanswered`]);
     const purpose = spend.split(" ")[0];
@@ -428,7 +428,7 @@ describe("the watchtower step over the tenant node", () => {
         restarted.storage.ops.length = 0;
         await start(restarted);
         // The repeat claims nothing: its one write marks the spend the node took.
-        expect(writesOf(restarted)).toEqual([`set ${CHANNEL_RECORD_KEY_PREFIX}${CHANNEL_INDEX}`]);
+        expect(writes(restarted.storage)).toEqual([`${CHANNEL_RECORD_KEY_PREFIX}${CHANNEL_INDEX}`]);
         await tick(restarted, 3);
         const calls = node.calls;
         expect(methods(h, parked + 1)).toEqual([...ticks(SPENT_TICK, 3), ...UNSPENT_TICK]);
