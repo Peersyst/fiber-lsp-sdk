@@ -1,12 +1,9 @@
 import {
-    PAYMENT_HASH_LENGTH,
-    PREIMAGE_LENGTH,
     TRUNCATED_PAYMENT_HASH_LENGTH,
     assertHexBytes,
     assertNonEmptyString,
     assertUnsignedInteger,
     isCanonicalDecimal,
-    isHexBytes,
     isUnsignedInteger,
 } from "../common";
 import { MAX_CHANNEL_INDEX } from "../derivation";
@@ -16,7 +13,6 @@ import {
     CHANNEL_ALIAS_KEY_PREFIX,
     CHANNEL_RECORD_KEY_PREFIX,
     DEBIT_INTENT_KEY_PREFIX,
-    HOLD_INVOICE_PREIMAGE_KEY_PREFIX,
     HOLD_INVOICE_RECORD_KEY_PREFIX,
     STORAGE_KEY_NAMESPACE,
 } from "./policy.constants";
@@ -37,7 +33,6 @@ const POLICY_KEYS = [
     CHANNEL_ALIAS_KEY_PREFIX,
     DEBIT_INTENT_KEY_PREFIX,
     HOLD_INVOICE_RECORD_KEY_PREFIX,
-    HOLD_INVOICE_PREIMAGE_KEY_PREFIX,
     BALANCE_LANE_KEY,
 ];
 
@@ -264,38 +259,6 @@ export class SignerStore {
      */
     async withBalanceLock<T>(operation: () => Promise<T>): Promise<T> {
         return this.serialize(BALANCE_LANE_KEY, operation);
-    }
-
-    /**
-     * Reads the device-held preimage of a hold invoice.
-     * @param paymentHashHex Payment hash of the invoice, 32 bytes of lowercase hex.
-     * @returns The 32-byte preimage as lowercase hex, or `null` if none is stored.
-     */
-    async getHoldInvoicePreimage(paymentHashHex: string): Promise<string | null> {
-        assertHexBytes("paymentHashHex", paymentHashHex, PAYMENT_HASH_LENGTH);
-        const key = HOLD_INVOICE_PREIMAGE_KEY_PREFIX + paymentHashHex;
-        return this.serialize(key, async () => {
-            const raw = (await this.storage.get(key)) ?? null;
-            if (raw === null) return null;
-            if (!isHexBytes(raw, PREIMAGE_LENGTH)) {
-                throw new TypeError(`stored value at ${key} is not a preimage`);
-            }
-            return raw;
-        });
-    }
-
-    /**
-     * Stores the device-held preimage of a hold invoice, overwriting any previous one.
-     * @param paymentHashHex Payment hash of the invoice, 32 bytes of lowercase hex.
-     * @param preimageHex The 32-byte preimage as lowercase hex.
-     */
-    async setHoldInvoicePreimage(paymentHashHex: string, preimageHex: string): Promise<void> {
-        assertHexBytes("paymentHashHex", paymentHashHex, PAYMENT_HASH_LENGTH);
-        assertHexBytes("preimageHex", preimageHex, PREIMAGE_LENGTH);
-        const key = HOLD_INVOICE_PREIMAGE_KEY_PREFIX + paymentHashHex;
-        await this.serialize(key, async () => {
-            await this.storage.set(key, preimageHex);
-        });
     }
 
     /**

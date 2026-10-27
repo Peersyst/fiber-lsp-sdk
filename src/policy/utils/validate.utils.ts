@@ -20,9 +20,10 @@ import {
     isNonEmptyHexBytes,
     isNonEmptyString,
     isPlainObject,
+    isPositiveDecimalShannons,
     isUnsignedInteger,
 } from "../../common";
-import { MAX_CHANNEL_INDEX, MAX_COMMITMENT_NUMBER, NONCE_CONTEXTS } from "../../derivation";
+import { MAX_CHANNEL_INDEX, MAX_COMMITMENT_NUMBER, MAX_INVOICE_INDEX, NONCE_CONTEXTS } from "../../derivation";
 import {
     COMMITMENT_LOCK_LAYOUTS,
     readCommitmentLockLayout,
@@ -123,8 +124,9 @@ export function isHoldInvoicePolicyRecord(value: unknown): value is HoldInvoiceP
     return (
         value.version === PAYMENT_RECORD_VERSION &&
         isHexBytes(value.paymentHash, PAYMENT_HASH_LENGTH) &&
-        isDecimalShannons(value.amountShannons) &&
+        isPositiveDecimalShannons(value.amountShannons) &&
         HASH_ALGORITHMS.includes(value.hashAlgorithm) &&
+        isUnsignedInteger(value.invoiceIndex, MAX_INVOICE_INDEX) &&
         typeof value.released === "boolean" &&
         isChannelIndexSet(value.channelIndexes)
     );

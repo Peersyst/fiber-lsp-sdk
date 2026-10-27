@@ -39,6 +39,8 @@ export type {
     SdkEvent,
     SdkEventListener,
     SdkEventType,
+    SdkInvoice,
+    SdkInvoiceOptions,
     SdkNetwork,
     SdkNetworkConfig,
     SdkNetworkName,

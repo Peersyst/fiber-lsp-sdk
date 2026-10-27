@@ -29,6 +29,7 @@ describe("SdkError", () => {
             "opening_rejected",
             "opening_conflict",
             "funding_tx_altered",
+            "invoice_rejected",
         ]);
     });
 });

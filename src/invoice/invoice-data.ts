@@ -11,6 +11,7 @@ import {
     assertBytes,
     assertOneOf,
     assertUnsignedBigInt,
+    encodeWellFormedUtf8,
     isCompressedPoint,
     isPlainObject,
     moleculeBytes,
@@ -26,7 +27,6 @@ import { refuseInvoice } from "./invoice.error";
 import type { InvoiceAttribute, InvoiceAttributeType, UnsignedInvoice } from "./invoice.types";
 import {
     decodeInvoiceUtf8,
-    encodeInvoiceUtf8,
     readInvoiceMoleculeBytes,
     readInvoiceMoleculeDynvec,
     readInvoiceMoleculeFixed,
@@ -66,13 +66,13 @@ function encodeAttributeItem(attribute: InvoiceAttribute, name: string): Uint8Ar
             assertUnsignedBigInt(`${name}.seconds`, attribute.seconds, UINT64_MAX);
             return uint64Le(attribute.seconds);
         case "description":
-            return moleculeTable([moleculeBytes(encodeInvoiceUtf8(`${name}.text`, attribute.text))]);
+            return moleculeTable([moleculeBytes(encodeWellFormedUtf8(`${name}.text`, attribute.text))]);
         case "finalHtlcTimeout":
         case "finalHtlcMinimumExpiryDelta":
             assertUnsignedBigInt(`${name}.milliseconds`, attribute.milliseconds, UINT64_MAX);
             return uint64Le(attribute.milliseconds);
         case "fallbackAddr":
-            return moleculeTable([moleculeBytes(encodeInvoiceUtf8(`${name}.address`, attribute.address))]);
+            return moleculeTable([moleculeBytes(encodeWellFormedUtf8(`${name}.address`, attribute.address))]);
         case "feature":
             assertAnyBytes(`${name}.bits`, attribute.bits);
             return moleculeTable([moleculeBytes(attribute.bits)]);

@@ -1,7 +1,12 @@
 import { bytesToHex } from "@noble/hashes/utils.js";
-import { MAX_CHANNEL_INDEX, MAX_COMMITMENT_NUMBER, NONCE_CONTEXTS } from "../../../src/derivation/derivation.constants";
+import { MAX_CHANNEL_INDEX, MAX_COMMITMENT_NUMBER, MAX_INVOICE_INDEX, NONCE_CONTEXTS } from "../../../src/derivation/derivation.constants";
 import type { NonceContext } from "../../../src/derivation/derivation.types";
-import { deriveChannelSeed, deriveNonceSeed, deriveWalletIdentityKey } from "../../../src/derivation/device-scheme";
+import {
+    deriveChannelSeed,
+    deriveHoldInvoicePreimage,
+    deriveNonceSeed,
+    deriveWalletIdentityKey,
+} from "../../../src/derivation/device-scheme";
 import { deriveChannelKeys } from "../../../src/derivation/fiber-scheme";
 
 const MASTER_SEED = new Uint8Array(32).fill(0x24);
@@ -63,6 +68,51 @@ describe("deriveChannelSeed", () => {
     });
 });
 
+describe("deriveHoldInvoicePreimage", () => {
+    it("is deterministic", () => {
+        expect(bytesToHex(deriveHoldInvoicePreimage(MASTER_SEED, 7))).toBe(bytesToHex(deriveHoldInvoicePreimage(MASTER_SEED, 7)));
+    });
+
+    it("is distinct for every invoice index in a range", () => {
+        const preimages = new Set<string>();
+        for (let invoiceIndex = 0; invoiceIndex <= 100; invoiceIndex++) {
+            preimages.add(bytesToHex(deriveHoldInvoicePreimage(MASTER_SEED, invoiceIndex)));
+        }
+        expect(preimages.size).toBe(101);
+    });
+
+    it("is bound to the master seed", () => {
+        expect(bytesToHex(deriveHoldInvoicePreimage(MASTER_SEED, 0))).not.toBe(bytesToHex(deriveHoldInvoicePreimage(OTHER_MASTER_SEED, 0)));
+    });
+
+    it("is not the seed of the channel of the same index", () => {
+        expect(bytesToHex(deriveHoldInvoicePreimage(MASTER_SEED, 0))).not.toBe(bytesToHex(deriveChannelSeed(MASTER_SEED, 0)));
+    });
+
+    it("accepts the highest exactly representable index", () => {
+        expect(MAX_INVOICE_INDEX).toBe(Number.MAX_SAFE_INTEGER);
+        expect(deriveHoldInvoicePreimage(MASTER_SEED, MAX_INVOICE_INDEX)).toHaveLength(32);
+    });
+
+    it.each([-1, 1.5, MAX_INVOICE_INDEX + 1, NaN, Infinity, undefined])("rejects the invoice index %p", (invoiceIndex) => {
+        expect(() => deriveHoldInvoicePreimage(MASTER_SEED, invoiceIndex as number)).toThrow(
+            new RangeError(`invoiceIndex must be an integer between 0 and ${MAX_INVOICE_INDEX}, got ${invoiceIndex}`),
+        );
+    });
+
+    it.each([31, 33])("rejects a %i-byte master seed", (length) => {
+        expect(() => deriveHoldInvoicePreimage(new Uint8Array(length), 0)).toThrow(
+            new TypeError(`masterSeed must be 32 bytes, got ${length}`),
+        );
+    });
+
+    it("rejects an absent master seed", () => {
+        expect(() => deriveHoldInvoicePreimage(undefined as unknown as Uint8Array, 0)).toThrow(
+            new TypeError("masterSeed must be a Uint8Array"),
+        );
+    });
+});
+
 describe("deriveNonceSeed", () => {
     it("returns a deterministic 32-byte seed", () => {
         expect(deriveNonceSeed(channelKeys, 0, "COMMITMENT")).toHaveLength(32);
@@ -115,6 +165,15 @@ describe("scheme v1 outputs", () => {
         expect(bytesToHex(deriveChannelSeed(MASTER_SEED, 0))).toBe("c457d413e86ae061a58581a01fd42ecdef1398cc1e39ecd06e0656e8a5a7037f");
         expect(bytesToHex(deriveChannelSeed(MASTER_SEED, MAX_CHANNEL_INDEX))).toBe(
             "30a8f54cdacc5ce91ab352639f846146e403e1568e1dd427f26affa76e8e182e",
+        );
+    });
+
+    it("derives the pinned hold invoice preimages", () => {
+        expect(bytesToHex(deriveHoldInvoicePreimage(MASTER_SEED, 0))).toBe(
+            "a6b4115ac71b6ef546f367b8c787b0fd2b12ae68e28c6ba5226ba31d0c7a9fdb",
+        );
+        expect(bytesToHex(deriveHoldInvoicePreimage(MASTER_SEED, MAX_INVOICE_INDEX))).toBe(
+            "97789786d535e8c1711ed07d498a9bb68ff8e158d392b8d8ea160b929dacce79",
         );
     });
 

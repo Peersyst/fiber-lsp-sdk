@@ -6,4 +6,5 @@ export * from "./molecule-reader.utils";
 export * from "./molecule.utils";
 export * from "./musig.utils";
 export * from "./payment-hash.utils";
+export * from "./utf8.utils";
 export * from "./validate.utils";

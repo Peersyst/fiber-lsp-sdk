@@ -38,6 +38,11 @@ export const MAX_COMMITMENT_NUMBER = 2 ** 48 - 1;
 export const MAX_CHANNEL_INDEX = Number.MAX_SAFE_INTEGER;
 
 /**
+ * Beyond this, two indices format to the same preimage string.
+ */
+export const MAX_INVOICE_INDEX = MAX_CHANNEL_INDEX;
+
+/**
  * A cooperative close signs in the `COMMITMENT` slot of its number: fiber's nonce purposes have no close of their own.
  */
 export const NONCE_CONTEXTS = ["COMMITMENT", "REVOKE", "ANNOUNCEMENT"] as const;

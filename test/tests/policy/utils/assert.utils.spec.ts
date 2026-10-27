@@ -71,6 +71,7 @@ describe("assertHoldInvoicePolicyRecord", () => {
                 paymentHash: "11".repeat(32),
                 amountShannons: "1",
                 hashAlgorithm: "ckb-hash",
+                invoiceIndex: 0,
                 released: true,
                 channelIndexes: [0],
             }),

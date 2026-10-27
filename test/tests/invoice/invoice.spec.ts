@@ -2,10 +2,11 @@ import { secp256k1 } from "@noble/curves/secp256k1.js";
 import { sha256 } from "@noble/hashes/sha2.js";
 import { bytesToHex, hexToBytes } from "@noble/hashes/utils.js";
 import type { Invoice, UnsignedInvoice } from "../../../src/invoice";
-import { InvoiceError, computeInvoiceDigest, decodeInvoice, encodeInvoice } from "../../../src/invoice";
+import { InvoiceError, computeInvoiceDigest, decodeInvoice, encodeInvoice, findInvoiceAttribute } from "../../../src/invoice";
 import { arEncompress } from "../../../src/invoice/arithmetic-coder";
 import { bytesToInvoiceGroups, decodeInvoiceBech32m, encodeInvoiceBech32m } from "../../../src/invoice/bech32m";
 import { encodeInvoiceData } from "../../../src/invoice/invoice-data";
+import { signInvoice } from "../../utils/invoice-signing";
 import { invoiceRefusal } from "../../utils/refusal";
 
 const PAYEE_SECRET_KEY = new Uint8Array(32).fill(0x11);
@@ -68,11 +69,6 @@ const MIN_UNSIGNED: UnsignedInvoice = {
 };
 const MIN_DIGEST = "bb44d36f99325d6ab2d40257bacf0b2af1212af535406809249d2b10186ece9d";
 
-function sign(invoice: UnsignedInvoice, key = PAYEE_SECRET_KEY): Invoice {
-    const recovered = secp256k1.sign(computeInvoiceDigest(invoice), key, { prehash: false, format: "recovered" });
-    return { ...invoice, signature: Uint8Array.from([...recovered.subarray(1), recovered[0] ?? 0]) };
-}
-
 // Writes a string from its parts as they are, so a test can break one part and keep the rest fiber's.
 function stringOf(hrp: string, flag: number, stream: Uint8Array, signature: Uint8Array): string {
     return encodeInvoiceBech32m(hrp, [flag, ...bytesToInvoiceGroups(stream), ...bytesToInvoiceGroups(signature)]);
@@ -118,11 +114,11 @@ describe("encodeInvoice", () => {
     });
 
     it("writes an invoice without an amount with the currency alone", () => {
-        expect(encodeInvoice(sign(MIN_UNSIGNED))).toBe(MIN_STRING);
+        expect(encodeInvoice(signInvoice(MIN_UNSIGNED, PAYEE_SECRET_KEY))).toBe(MIN_STRING);
     });
 
     it("writes the signature as given, without verifying it", () => {
-        const other = sign(HOLD_UNSIGNED, OTHER_SECRET_KEY);
+        const other = signInvoice(HOLD_UNSIGNED, OTHER_SECRET_KEY);
         expect(decodeInvoiceBech32m(encodeInvoice(other)).groups.slice(-104)).toEqual(bytesToInvoiceGroups(other.signature));
     });
 
@@ -149,6 +145,26 @@ describe("encodeInvoice", () => {
     });
 });
 
+describe("findInvoiceAttribute", () => {
+    it("finds the attribute of the type asked, typed by it", () => {
+        expect(findInvoiceAttribute(HOLD_UNSIGNED, "expiryTime")).toStrictEqual({ type: "expiryTime", seconds: 3600n });
+        expect(findInvoiceAttribute(HOLD_UNSIGNED, "payeePublicKey")?.publicKey).toStrictEqual(hexToBytes(PAYEE));
+    });
+
+    it("is undefined for a type the invoice does not carry", () => {
+        expect(findInvoiceAttribute(HOLD_UNSIGNED, "fallbackAddr")).toBeUndefined();
+        expect(findInvoiceAttribute({ attributes: [] }, "description")).toBeUndefined();
+    });
+
+    it("takes the first of a type written twice, in string order", () => {
+        const attributes: UnsignedInvoice["attributes"] = [
+            { type: "description", text: "coffee" },
+            { type: "description", text: "tea" },
+        ];
+        expect(findInvoiceAttribute({ attributes }, "description")).toStrictEqual({ type: "description", text: "coffee" });
+    });
+});
+
 describe("decodeInvoice", () => {
     it("reads the hold invoice fiber wrote", () => {
         expect(decodeInvoice(HOLD_STRING)).toEqual(HOLD);
@@ -167,18 +183,20 @@ describe("decodeInvoice", () => {
     });
 
     it("reads an invoice without an amount", () => {
-        expect(decodeInvoice(MIN_STRING)).toEqual(sign(MIN_UNSIGNED));
+        expect(decodeInvoice(MIN_STRING)).toEqual(signInvoice(MIN_UNSIGNED, PAYEE_SECRET_KEY));
     });
 
     it("reads a zero amount and u128's largest", () => {
         for (const amountShannons of ["0", "340282366920938463463374607431768211455"]) {
-            expect(decodeInvoice(encodeInvoice(sign({ ...HOLD_UNSIGNED, amountShannons }))).amountShannons).toBe(amountShannons);
+            expect(decodeInvoice(encodeInvoice(signInvoice({ ...HOLD_UNSIGNED, amountShannons }, PAYEE_SECRET_KEY))).amountShannons).toBe(
+                amountShannons,
+            );
         }
     });
 
     it("reads an invoice without a payee key whatever key its signature recovers to, as fiber does", () => {
         const unsigned: UnsignedInvoice = { ...MIN_UNSIGNED, attributes: [{ type: "expiryTime", seconds: 60n }] };
-        const byOther = sign(unsigned, OTHER_SECRET_KEY);
+        const byOther = signInvoice(unsigned, OTHER_SECRET_KEY);
         expect(decodeInvoice(encodeInvoice(byOther))).toEqual(byOther);
         const flipped = Uint8Array.from(byOther.signature);
         flipped[64] = (flipped[64] ?? 0) ^ 1;
@@ -315,7 +333,7 @@ describe("decodeInvoice", () => {
             ],
             [
                 "a signature by another key than the payee's",
-                () => encodeInvoice(sign(HOLD_UNSIGNED, OTHER_SECRET_KEY)),
+                () => encodeInvoice(signInvoice(HOLD_UNSIGNED, OTHER_SECRET_KEY)),
                 new InvoiceError("signature", "must be by the payee key the invoice carries"),
             ],
             [

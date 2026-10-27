@@ -12,9 +12,11 @@ import {
     assertNonEmptyString,
     assertOneOf,
     assertOutPoint,
+    assertPositiveDecimalShannons,
     assertScript,
     assertScriptTemplate,
     assertString,
+    assertPositiveBigInt,
     assertPositiveInteger,
     assertTimerDelayMs,
     assertUnsignedBigInt,
@@ -118,6 +120,25 @@ describe("assertUnsignedBigInt", () => {
     });
 });
 
+describe("assertPositiveBigInt", () => {
+    it.each([1n, 2n, 10n])("accepts %p within the range", (value) => {
+        expect(() => assertPositiveBigInt("delay", value, 10n)).not.toThrow();
+    });
+
+    it.each<[unknown, string]>([
+        [0n, "0"],
+        [-1n, "-1"],
+        [11n, "11"],
+        [1, "1"],
+        ["5", "5"],
+        [undefined, "undefined"],
+    ])("rejects %p, naming it", (value, shown) => {
+        expect(() => assertPositiveBigInt("delay", value as bigint, 10n)).toThrow(
+            new RangeError(`delay must be a bigint between 1 and 10, got ${shown}`),
+        );
+    });
+});
+
 describe("assertHexBytes", () => {
     it("accepts a valid value", () => {
         expect(() => assertHexBytes("digest", "ab".repeat(32), 32)).not.toThrow();
@@ -165,6 +186,24 @@ describe("assertDecimalShannons", () => {
 
     it.each(["", "01", "0x10", "-1", 42 as unknown as string])("rejects %p", (value) => {
         expect(() => assertDecimalShannons("amountShannons", value)).toThrow(
+            new TypeError("amountShannons must be an amount in decimal shannons"),
+        );
+    });
+});
+
+describe("assertPositiveDecimalShannons", () => {
+    it.each(["1", "62000000000"])("accepts %p", (value) => {
+        expect(() => assertPositiveDecimalShannons("amountShannons", value)).not.toThrow();
+    });
+
+    it("rejects zero", () => {
+        expect(() => assertPositiveDecimalShannons("amountShannons", "0")).toThrow(
+            new RangeError("amountShannons must be greater than 0, got 0"),
+        );
+    });
+
+    it.each(["", "00", "01", "0x10", "-1", 42 as unknown as string])("rejects %p as no amount in decimal shannons", (value) => {
+        expect(() => assertPositiveDecimalShannons("amountShannons", value)).toThrow(
             new TypeError("amountShannons must be an amount in decimal shannons"),
         );
     });

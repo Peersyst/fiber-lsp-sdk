@@ -15,16 +15,16 @@ export function deliverStepEvent(run: PollRun, emit: (event: SdkEvent) => void, 
 }
 
 /**
- * Reports a channel's failure as a `poll_failed` error naming it, unless the run was abandoned.
+ * Reports one polled item's failure as a `poll_failed` error naming it, unless the run was abandoned.
  * @param run The run.
  * @param emit The host's emitter.
  * @param poll What the step polls, as its messages name it.
- * @param channelId The channel.
+ * @param id The failed item's id.
  * @param cause What failed.
  */
-export function reportStepFailure(run: PollRun, emit: (event: SdkEvent) => void, poll: string, channelId: string, cause: unknown): void {
+export function reportStepFailure(run: PollRun, emit: (event: SdkEvent) => void, poll: string, id: string, cause: unknown): void {
     if (run.abandoned) return;
-    emitPollFailure(emit, `the ${poll} poll of ${channelId} failed`, cause);
+    emitPollFailure(emit, `the ${poll} poll of ${id} failed`, cause);
 }
 
 /**
@@ -39,26 +39,28 @@ export function misansweredStatusRefusal(poll: string, channelId: string, answer
 }
 
 /**
- * Answers each channel in turn while the run lives, reporting each one's failure.
+ * Answers each polled item in turn while the run lives, reporting each one's failure.
  * @param run The run.
  * @param emit The host's emitter.
  * @param poll What the step polls, as its messages name it.
- * @param channels The channels, their ids or their listings.
- * @param answer Answers one channel.
+ * @param items The polled items.
+ * @param idOf Names one in its failure.
+ * @param answer Answers one.
  */
-export async function answerEachChannel<Channel extends string | { channelId: string }>(
+export async function answerEachPolled<Item>(
     run: PollRun,
     emit: (event: SdkEvent) => void,
     poll: string,
-    channels: readonly Channel[],
-    answer: (channel: Channel) => Promise<void>,
+    items: readonly Item[],
+    idOf: (item: Item) => string,
+    answer: (item: Item) => Promise<void>,
 ): Promise<void> {
-    for (const channel of channels) {
+    for (const item of items) {
         if (run.abandoned) return;
         try {
-            await answer(channel);
+            await answer(item);
         } catch (cause) {
-            reportStepFailure(run, emit, poll, typeof channel === "string" ? channel : channel.channelId, cause);
+            reportStepFailure(run, emit, poll, idOf(item), cause);
         }
     }
 }

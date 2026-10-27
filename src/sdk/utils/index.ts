@@ -1,5 +1,6 @@
 export * from "./activity-record.utils";
 export * from "./failure.utils";
+export * from "./invoice-check.utils";
 export * from "./network.utils";
 export * from "./opening-check.utils";
 export * from "./poll-step.utils";

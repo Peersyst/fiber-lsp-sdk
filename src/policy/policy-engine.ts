@@ -16,6 +16,7 @@ import {
     assertNonEmptyString,
     assertOneOf,
     assertOutPoint,
+    assertPositiveDecimalShannons,
     assertScript,
     assertString,
     assertUnsignedBigInt,
@@ -23,7 +24,7 @@ import {
     isPlainObject,
 } from "../common";
 import type { FiberChannelKeys } from "../derivation";
-import { MAX_CHANNEL_INDEX } from "../derivation";
+import { MAX_CHANNEL_INDEX, MAX_INVOICE_INDEX } from "../derivation";
 import {
     buildCommitmentTxAndSettlement,
     computeChannelAnnouncementDigest,
@@ -36,6 +37,7 @@ import { judgeClosingTx, judgeCommitment, judgeOpeningCommitment, toPolicyViewTl
 import { judgeCapacityBounds } from "./capacity-bounds";
 import { openingChannelPins } from "./channel-opening";
 import { channelTermsPins, findChannelPinConflict, fundingCellPins, statedChannelPins, withChannelPins } from "./channel-pins";
+import { judgeHoldInvoiceRelease, listHoldInvoiceTlcs } from "./hold-invoice-release";
 import {
     CHANNEL_POLICY_RECORD_VERSION,
     CHANNEL_TERMS_PINS,
@@ -46,14 +48,7 @@ import {
     PAYMENT_RECORD_VERSION,
     POLICY_VIEWS,
 } from "./policy.constants";
-import {
-    ChannelPinError,
-    ChannelRegistrationError,
-    DebitIntentError,
-    HoldInvoiceError,
-    refusePolicyRequest,
-    withPolicyRefusal,
-} from "./policy.error";
+import { ChannelPinError, ChannelRegistrationError, DebitIntentError, refusePolicyRequest, withPolicyRefusal } from "./policy.error";
 import type {
     BalanceRuleContext,
     ChannelPins,
@@ -62,6 +57,7 @@ import type {
     DebitIntentRecord,
     FirstSightChannelPin,
     HoldInvoicePolicyRecord,
+    HoldInvoiceReleaseTiming,
     NonceReuseMode,
     PolicyChannelTerms,
     PolicyEngineOptions,
@@ -82,7 +78,7 @@ import type {
     WatchtowerSpendVerdict,
 } from "./policy.types";
 import type { SignerStore } from "./signer-store";
-import { assertSignSession, boundPaymentHashOf, buildSessionCommitment, isTlcOfPaymentRecord, resolveSignSlot, signSlotKey } from "./utils";
+import { assertSignSession, boundPaymentHashOf, buildSessionCommitment, resolveSignSlot, signSlotKey } from "./utils";
 import { decideWatchtowerSpend } from "./watchtower-spend";
 
 export class PolicyEngine {
@@ -449,15 +445,23 @@ export class PolicyEngine {
     }
 
     /**
-     * Records a hold invoice whose preimage this device holds, before the node hears of its hash.
+     * Records a hold invoice whose preimage this device derives, before the node hears of its hash.
      * @param paymentHashHex The payment hash, 32 bytes of lowercase hex.
      * @param amountShannons The invoice's amount, in decimal shannons.
      * @param hashAlgorithm The algorithm the invoice locks its payment with.
+     * @param invoiceIndex The index the preimage derives from.
      */
-    async recordHoldInvoice(paymentHashHex: string, amountShannons: string, hashAlgorithm: TlcHashAlgorithm): Promise<void> {
+    async recordHoldInvoice(
+        paymentHashHex: string,
+        amountShannons: string,
+        hashAlgorithm: TlcHashAlgorithm,
+        invoiceIndex: number,
+    ): Promise<void> {
         assertHexBytes("paymentHashHex", paymentHashHex, PAYMENT_HASH_LENGTH);
-        assertDecimalShannons("amountShannons", amountShannons);
+        // Zero would be released before any channel held a shannon of it.
+        assertPositiveDecimalShannons("amountShannons", amountShannons);
         assertOneOf("hashAlgorithm", hashAlgorithm, TLC_HASH_ALGORITHMS);
+        assertUnsignedInteger("invoiceIndex", invoiceIndex, MAX_INVOICE_INDEX);
         const key = boundPaymentHashOf(paymentHashHex);
         await this.store.withBalanceLock(async () => {
             // A host bug, not the user's: the preimage is derived per invoice.
@@ -471,13 +475,20 @@ export class PolicyEngine {
                         paymentHash: paymentHashHex,
                         amountShannons,
                         hashAlgorithm,
+                        invoiceIndex,
                         released: false,
                         channelIndexes: [],
                     };
                 }
                 assertSameHash(current, paymentHashHex);
-                if (current.amountShannons !== amountShannons || current.hashAlgorithm !== hashAlgorithm) {
-                    throw new TypeError(`a hold invoice for ${paymentHashHex} is already recorded with another amount or algorithm`);
+                if (
+                    current.amountShannons !== amountShannons ||
+                    current.hashAlgorithm !== hashAlgorithm ||
+                    current.invoiceIndex !== invoiceIndex
+                ) {
+                    throw new TypeError(
+                        `a hold invoice for ${paymentHashHex} is already recorded with another amount, algorithm or invoice index`,
+                    );
                 }
                 return current;
             });
@@ -485,44 +496,82 @@ export class PolicyEngine {
     }
 
     /**
-     * Marks a hold invoice's preimage as released, from when on every commitment must pay for its received TLCs.
+     * Marks a hold invoice's preimage as released once its channels hold it, from when on every commitment must pay for it.
      * @param paymentHashHex The payment hash, 32 bytes of lowercase hex.
+     * @param timing The clock and the release margin.
      */
-    async markHoldInvoiceReleased(paymentHashHex: string): Promise<void> {
+    async markHoldInvoiceReleased(paymentHashHex: string, timing: HoldInvoiceReleaseTiming): Promise<void> {
         assertHexBytes("paymentHashHex", paymentHashHex, PAYMENT_HASH_LENGTH);
-        const key = boundPaymentHashOf(paymentHashHex);
+        if (!isPlainObject(timing)) throw new TypeError("timing must be an object");
+        const { now, releaseMarginMs } = timing;
+        if (typeof now !== "function") throw new TypeError("timing.now must be a function");
+        if (typeof releaseMarginMs !== "function") throw new TypeError("timing.releaseMarginMs must be a function");
         await this.store.withBalanceLock(async () => {
-            const current = await this.store.getHoldInvoiceRecord(key);
-            if (current === null) throw new TypeError(`no hold invoice was recorded for ${paymentHashHex}`);
-            assertSameHash(current, paymentHashHex);
+            const current = await this.requireHoldInvoice(paymentHashHex);
+            // Released once, released for good: the commitments signed since rely on it.
             if (current.released) return;
-            // An offered TLC failing beside a released held one could pass for both being paid.
-            for (const index of current.channelIndexes) {
-                const record = await this.store.getChannelRecord(index);
-                if (record === null) throw unlistedRecord(index);
-                const tlcs = POLICY_VIEWS.flatMap((view) => record.views[view].tlcs);
-                // Received only: no intent can take this hash. A twin under the full-hash layout is not the invoice's.
-                const held = tlcs.filter((tlc) => tlc.boundPaymentHash === key && isTlcOfPaymentRecord(tlc, current));
-                // The preimage does not open a TLC under another algorithm.
-                if (held.some((tlc) => tlc.hashAlgorithm !== current.hashAlgorithm)) {
-                    throw new HoldInvoiceError(
-                        "algorithm_mismatch",
-                        `channel index ${index} lists a TLC under ${paymentHashHex} locked with another algorithm than the invoice's`,
-                    );
-                }
-                const holds = held.length > 0;
-                if (holds && tlcs.some((tlc) => tlc.direction === "offered")) {
-                    throw new HoldInvoiceError(
-                        "offered_in_flight",
-                        `channel index ${index} lists an offered TLC, so the preimage of ${paymentHashHex} is not released yet`,
-                    );
-                }
-            }
-            await this.store.updateHoldInvoiceRecord(key, (latest) => {
+            const channels = await this.readListedChannels(current);
+            // Read last, so no wait for the lock or the storage ages it.
+            const nowMs = now();
+            assertUnsignedInteger("timing.now()", nowMs, Number.MAX_SAFE_INTEGER);
+            judgeHoldInvoiceRelease(current, channels, { nowMs, releaseMarginMs });
+            await this.store.updateHoldInvoiceRecord(boundPaymentHashOf(paymentHashHex), (latest) => {
                 if (latest === null) throw vanishedPaymentRecord();
                 return { ...latest, released: true };
             });
         });
+    }
+
+    /**
+     * Reads a hold invoice's record by its full hash.
+     * @param paymentHashHex The payment hash, 32 bytes of lowercase hex.
+     * @returns The record; throws a host error when none was recorded.
+     */
+    async readHoldInvoice(paymentHashHex: string): Promise<HoldInvoicePolicyRecord> {
+        assertHexBytes("paymentHashHex", paymentHashHex, PAYMENT_HASH_LENGTH);
+        return this.requireHoldInvoice(paymentHashHex);
+    }
+
+    /**
+     * Tells whether the last commitment of either view of a channel a hold invoice lists still shows a TLC of it.
+     * @param paymentHashHex The payment hash, 32 bytes of lowercase hex.
+     * @returns Whether some view of some channel lists one.
+     */
+    async listsHoldInvoiceTlc(paymentHashHex: string): Promise<boolean> {
+        assertHexBytes("paymentHashHex", paymentHashHex, PAYMENT_HASH_LENGTH);
+        // Outside the balance lane: the answer is a snapshot either way, and a channel shows a TLC only once filed on the invoice.
+        const invoice = await this.requireHoldInvoice(paymentHashHex);
+        const channels = await this.readListedChannels(invoice);
+        return [...channels.values()].some((record) =>
+            POLICY_VIEWS.some((view) => listHoldInvoiceTlcs(record.views[view], invoice).length > 0),
+        );
+    }
+
+    /**
+     * Reads the hold invoice recorded under a full payment hash.
+     * @param paymentHashHex The payment hash, already checked.
+     * @returns The record; throws a host error when none was recorded, or a twin was.
+     */
+    private async requireHoldInvoice(paymentHashHex: string): Promise<HoldInvoicePolicyRecord> {
+        const record = await this.store.getHoldInvoiceRecord(boundPaymentHashOf(paymentHashHex));
+        if (record === null) throw new TypeError(`no hold invoice was recorded for ${paymentHashHex}`);
+        assertSameHash(record, paymentHashHex);
+        return record;
+    }
+
+    /**
+     * Reads the record of every channel a payment record lists.
+     * @param payment The payment record.
+     * @returns The records, keyed by channel index in the order listed.
+     */
+    private async readListedChannels(payment: { channelIndexes: number[] }): Promise<Map<number, ChannelPolicyRecord>> {
+        const channels = new Map<number, ChannelPolicyRecord>();
+        for (const index of payment.channelIndexes) {
+            const record = await this.store.getChannelRecord(index);
+            if (record === null) throw unlistedRecord(index);
+            channels.set(index, record);
+        }
+        return channels;
     }
 
     /**
@@ -637,12 +686,8 @@ export class PolicyEngine {
      */
     private async chargedAnywhere(intent: DebitIntentRecord): Promise<boolean> {
         const hash = boundPaymentHashOf(intent.paymentHash);
-        for (const index of intent.channelIndexes) {
-            const record = await this.store.getChannelRecord(index);
-            if (record === null) throw unlistedRecord(index);
-            if (POLICY_VIEWS.some((view) => record.views[view].chargedShannons[hash] !== undefined)) return true;
-        }
-        return false;
+        const channels = await this.readListedChannels(intent);
+        return [...channels.values()].some((record) => POLICY_VIEWS.some((view) => record.views[view].chargedShannons[hash] !== undefined));
     }
 }
 

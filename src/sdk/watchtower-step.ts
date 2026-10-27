@@ -5,7 +5,7 @@ import type { SignerDispatch, WatchtowerDispatchOutcome } from "../signer";
 import type { PollRun, PollStep } from "./poller";
 import { WATCHTOWER_UNWATCHED_CLOSE_FLAGS, WATCHTOWER_UNWATCHED_ERROR } from "./sdk.constants";
 import type { SdkEvent } from "./sdk.types";
-import { answerEachChannel, deliverStepEvent, encodeSdkRequestId, misansweredStatusRefusal, reportStepFailure } from "./utils";
+import { answerEachPolled, deliverStepEvent, encodeSdkRequestId, misansweredStatusRefusal, reportStepFailure } from "./utils";
 
 export type WatchtowerSigningStepOptions = {
     rpc: FiberRpcClient;
@@ -118,6 +118,13 @@ export function buildWatchtowerSigningStep(options: WatchtowerSigningStepOptions
         // A force-closed channel is the one the watchtower spends from, and the default listing leaves it out.
         const channels = await rpc.listChannelStates({ filter: "include_closed" });
         const watched = channels.filter((channel) => !isUnwatchedChannel(channel));
-        await answerEachChannel(run, emit, POLL, watched, (channel) => answer(run, channel));
+        await answerEachPolled(
+            run,
+            emit,
+            POLL,
+            watched,
+            (channel) => channel.channelId,
+            (channel) => answer(run, channel),
+        );
     };
 }

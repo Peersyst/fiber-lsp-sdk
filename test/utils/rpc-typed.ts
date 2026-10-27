@@ -315,6 +315,7 @@ export function toNewInvoiceParams(vector: NewInvoiceParamsVector): NewInvoicePa
         paymentHash: hexToBytes(vector.payment_hash),
         hashAlgorithm,
         expirySeconds: BigInt(vector.expiry),
+        finalExpiryDeltaMs: BigInt(vector.final_expiry_delta),
     };
     if (vector.description !== null) params.description = vector.description;
     return params;

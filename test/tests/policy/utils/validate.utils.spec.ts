@@ -717,6 +717,7 @@ describe("isHoldInvoicePolicyRecord", () => {
             paymentHash: "11".repeat(32),
             amountShannons: "2250000000",
             hashAlgorithm: "ckb-hash",
+            invoiceIndex: 1761475200000,
             released: false,
             channelIndexes: [7],
         };
@@ -724,6 +725,14 @@ describe("isHoldInvoicePolicyRecord", () => {
 
     it("accepts a valid record", () => {
         expect(isHoldInvoicePolicyRecord(invoice())).toBe(true);
+    });
+
+    it.each([0, Number.MAX_SAFE_INTEGER])("accepts the invoice index %p, at either end of the range", (invoiceIndex) => {
+        expect(isHoldInvoicePolicyRecord({ ...invoice(), invoiceIndex })).toBe(true);
+    });
+
+    it("accepts the amount of one shannon, the least above zero", () => {
+        expect(isHoldInvoicePolicyRecord({ ...invoice(), amountShannons: "1" })).toBe(true);
     });
 
     it("tolerates unknown extra fields", () => {
@@ -745,6 +754,12 @@ describe("isHoldInvoicePolicyRecord", () => {
         ["a string version", { version: "1" }],
         ["a truncated hash", { paymentHash: "11".repeat(20) }],
         ["an amount that is not decimal", { amountShannons: "-5" }],
+        ["an amount of zero", { amountShannons: "0" }],
+        ["an algorithm fiber does not define", { hashAlgorithm: "ckb_hash" }],
+        ["a fractional invoice index", { invoiceIndex: 1.5 }],
+        ["a negative invoice index", { invoiceIndex: -1 }],
+        ["an invoice index past the highest a preimage derives from", { invoiceIndex: 2 ** 53 }],
+        ["an invoice index in a string", { invoiceIndex: "1761475200000" }],
         ["a numeric flag", { released: 0 }],
         ["a fractional channel index", { channelIndexes: [1.5] }],
         ["a repeated channel index", { channelIndexes: [7, 7] }],

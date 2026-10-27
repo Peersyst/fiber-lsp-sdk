@@ -1,7 +1,7 @@
 import { writeFileSync } from "node:fs";
 import { secp256k1 } from "@noble/curves/secp256k1.js";
 import { bytesToHex, hexToBytes } from "@noble/hashes/utils.js";
-import { SCRIPT_HASH_TYPES } from "../../../src/common";
+import { SCRIPT_HASH_TYPES, encodeWellFormedUtf8 } from "../../../src/common";
 import type { Invoice, InvoiceAttribute, InvoiceAttributeType, UnsignedInvoice } from "../../../src/invoice";
 import {
     INVOICE_ATTRIBUTE_TYPES,
@@ -13,8 +13,9 @@ import {
 } from "../../../src/invoice";
 import { arDecompress, arEncompress } from "../../../src/invoice/arithmetic-coder";
 import { encodeInvoiceData } from "../../../src/invoice/invoice-data";
-import { decodeInvoiceUtf8, encodeInvoiceUtf8 } from "../../../src/invoice/utils";
+import { decodeInvoiceUtf8 } from "../../../src/invoice/utils";
 import { caseOf } from "../../utils/interop-vectors";
+import { signInvoice } from "../../utils/invoice-signing";
 import { toInvoice, toInvoiceValuesVector, toUnsignedInvoice } from "../../utils/invoice-typed";
 import { loadInvoiceVectors } from "../../utils/invoice-vectors";
 
@@ -31,11 +32,6 @@ const DELIBERATE_REFUSALS: Record<string, string> = {
     "duplicate trampoline route hint, another key second": "data.attributes[1] must not repeat an attribute type",
     "udt script with hash type 9": "data.attributes[0].udtScript.value.hashType must be one of data, type, data1, data2",
 };
-
-function sign(invoice: UnsignedInvoice): Invoice {
-    const recovered = secp256k1.sign(computeInvoiceDigest(invoice), PAYEE_SECRET_KEY, { prehash: false, format: "recovered" });
-    return { ...invoice, signature: Uint8Array.from([...recovered.subarray(1), recovered[0] ?? 0]) };
-}
 
 function decodeOrRefusal(text: string): Invoice | InvoiceError {
     try {
@@ -146,7 +142,7 @@ describe("invoice interop vectors", () => {
         it.each(vectors.invoices.filter((entry) => entry.signature !== null).map((entry) => [entry.name, entry] as const))(
             "%s: the SDK's signature over its own digest is fiber's",
             (_, entry) => {
-                expect(bytesToHex(sign(toUnsignedInvoice(entry.values)).signature)).toBe(entry.signature);
+                expect(bytesToHex(signInvoice(toUnsignedInvoice(entry.values), PAYEE_SECRET_KEY).signature)).toBe(entry.signature);
             },
         );
 
@@ -186,7 +182,7 @@ describe("invoice interop vectors", () => {
                 expect(() => decodeInvoiceUtf8(hexToBytes(entry.bytes), "text")).toThrow(new InvoiceError("text", "must be UTF-8"));
             } else {
                 expect(decodeInvoiceUtf8(hexToBytes(entry.bytes), "text")).toBe(entry.text);
-                expect(bytesToHex(encodeInvoiceUtf8("text", entry.text))).toBe(entry.bytes);
+                expect(bytesToHex(encodeWellFormedUtf8("text", entry.text))).toBe(entry.bytes);
             }
         });
     });
@@ -222,7 +218,7 @@ describe("invoice interop vectors", () => {
 
     describe("strings the SDK writes, for fiber's decoder", () => {
         const signed = vectors.invoices.filter((entry) => entry.signature !== null);
-        const generated = generatedInvoices(64).map(sign);
+        const generated = generatedInvoices(64).map((invoice) => signInvoice(invoice, PAYEE_SECRET_KEY));
         const written = [
             ...signed.map((entry) => ({ name: entry.name, invoice: toInvoice(entry) })),
             ...generated.map((invoice, index) => ({ name: `generated ${index}`, invoice })),

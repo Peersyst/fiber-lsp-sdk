@@ -8,6 +8,7 @@ import {
     isNonEmptyHexBytes,
     isNonEmptyString,
     isPlainObject,
+    isPositiveDecimalShannons,
     isUnsignedInteger,
 } from "../../../../src/common/utils/validate.utils";
 
@@ -118,6 +119,16 @@ describe("isDecimalShannons", () => {
 
     it.each([5, 5n, null, undefined])("rejects the non-string %p", (value) => {
         expect(isDecimalShannons(value)).toBe(false);
+    });
+});
+
+describe("isPositiveDecimalShannons", () => {
+    it.each(["1", "10", "340282366920938463463374607431768211455"])("accepts %s", (value) => {
+        expect(isPositiveDecimalShannons(value)).toBe(true);
+    });
+
+    it.each(["0", "00", "-0", "", "01", "340282366920938463463374607431768211456", 1, 1n, null, undefined])("rejects %p", (value) => {
+        expect(isPositiveDecimalShannons(value)).toBe(false);
     });
 });
 

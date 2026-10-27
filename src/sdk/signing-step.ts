@@ -3,7 +3,7 @@ import type { FiberRpcClient } from "../rpc";
 import type { DispatchOutcome, SignerDispatch } from "../signer";
 import type { PollRun, PollStep } from "./poller";
 import type { SdkEvent } from "./sdk.types";
-import { answerEachChannel, deliverStepEvent, encodeSdkRequestId, misansweredStatusRefusal, reportStepFailure } from "./utils";
+import { answerEachPolled, deliverStepEvent, encodeSdkRequestId, misansweredStatusRefusal, reportStepFailure } from "./utils";
 
 export type ChannelSigningStepOptions = {
     rpc: FiberRpcClient;
@@ -94,6 +94,13 @@ export function buildChannelSigningStep(options: ChannelSigningStepOptions): Pol
 
     return async (run) => {
         const channelIds = await rpc.listChannelIds();
-        await answerEachChannel(run, emit, POLL, channelIds, (channelId) => answer(run, channelId));
+        await answerEachPolled(
+            run,
+            emit,
+            POLL,
+            channelIds,
+            (channelId) => channelId,
+            (channelId) => answer(run, channelId),
+        );
     };
 }

@@ -19,6 +19,16 @@ export const RPC_METHODS = [
     "lsp_register_tenant",
 ] as const;
 
+/**
+ * Fiber's `MAX_PAYMENT_TLC_EXPIRY_LIMIT`: 14 days.
+ */
+export const RPC_MAX_FINAL_EXPIRY_DELTA_MS = 14n * 24n * 60n * 60n * 1000n;
+
+/**
+ * Fiber's `MAX_DESCRIPTION_LENGTH`, compared with `String::len`, so in UTF-8 bytes (`invoice/invoice_impl.rs:214-219`).
+ */
+export const RPC_MAX_INVOICE_DESCRIPTION_BYTES = 639;
+
 export const JSON_RPC_VERSION = "2.0";
 
 export const RPC_CONTENT_TYPE = "application/json";

@@ -1,11 +1,9 @@
 import { secp256k1 } from "@noble/curves/secp256k1.js";
 import { bytesToNumberBE, equalBytes } from "@noble/curves/utils.js";
-import { sha256 } from "@noble/hashes/sha2.js";
 import { concatBytes, utf8ToBytes } from "@noble/hashes/utils.js";
-import type { CellDep, CellOutput, OutPoint, Script, TlcDirection, TlcHashAlgorithm, Transaction } from "../../src/common";
+import type { CellDep, CellOutput, OutPoint, Script, TlcDirection, Transaction } from "../../src/common";
 import {
     MILLISECONDS_PER_SECOND,
-    PREIMAGE_LENGTH,
     RECOVERABLE_ECDSA_SIGNATURE_LENGTH,
     SHANNONS_PER_CKB,
     ckbBlake2b,
@@ -32,6 +30,7 @@ import { serializeRawTransaction } from "../../src/digest/tx-message";
 import { moleculeTransaction } from "../../src/digest/utils/molecule.utils";
 import type { FiberChannelKeys } from "../../src/derivation";
 import type { WatchtowerKeyPurpose } from "../../src/policy";
+import { hashPreimage } from "./preimage-hash";
 
 // A literal there (`watchtower/actor.rs:1746`); ckb's fee rate truncates (`ckb-types/src/core/fee_rate.rs:34-37`), as
 // `calculateTxFee` does.
@@ -286,12 +285,6 @@ function mulEpoch(delay: bigint, numerator: bigint, denominator: bigint): bigint
     const fraction =
         ((fullDenominator / scale) << EPOCH_LENGTH_OFFSET) | (((fullNumerator % fullDenominator) / scale) << EPOCH_INDEX_OFFSET);
     return fraction | (fullNumerator / fullDenominator);
-}
-
-// Fiber's `HashAlgorithm::hash`, which `verified_watch_preimage` checks a held preimage with (`watchtower/actor.rs:1212-1231`).
-function hashPreimage(algorithm: TlcHashAlgorithm, preimage: Uint8Array): Uint8Array {
-    if (preimage.length !== PREIMAGE_LENGTH) throw new Error(`a preimage is ${PREIMAGE_LENGTH} bytes`);
-    return algorithm === "sha256" ? sha256(preimage) : ckbBlake2b(preimage);
 }
 
 function readRecordSince(record: Uint8Array): bigint {

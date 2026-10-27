@@ -74,6 +74,7 @@ export const SDK_EVENT_TYPES = [
     "PAYMENT_FAILED",
     "PAYMENT_PENDING",
     "PAYMENT_RECEIVED",
+    "PAYMENT_EXPIRED",
     "SIGNING",
     "WATCHTOWER_SIGNING",
     "ERROR",
@@ -92,6 +93,11 @@ export const WATCHTOWER_UNWATCHED_CLOSE_FLAGS = [
  * Fiber's answer while no watch row exists, which `RemoteTxComplete` creates (`rpc/watchtower.rs:386-391`, `event_handler.rs:41-67`).
  */
 export const WATCHTOWER_UNWATCHED_ERROR = { code: RPC_CALL_FAILED_CODE, message: "watched channel not found" } as const;
+
+/**
+ * Fiber's answer to `settle_invoice` once the fulfil is applied (`fiber/network.rs:4854`, `rpc/utils.rs:90-131`): the settlement is done.
+ */
+export const SDK_INVOICE_ALREADY_PAID_ERROR = { code: RPC_CALL_FAILED_CODE, message: "Invoice is already paid" } as const;
 
 /**
  * Where fiber's external funding puts the channel's cell in the funding tx it freezes.
@@ -115,4 +121,25 @@ export const SDK_ERROR_CODES = [
     "opening_rejected",
     "opening_conflict",
     "funding_tx_altered",
+    "invoice_rejected",
 ] as const;
+
+/**
+ * Fiber has no default, and a tenant's invoice without an expiry fails after its row is stored.
+ */
+export const DEFAULT_SDK_INVOICE_EXPIRY_SECONDS = 3600n;
+
+/**
+ * Fiber's `DEFAULT_FINAL_TLC_EXPIRY_DELTA`; `new_invoice`'s own default, two thirds of an epoch, leaves a held TLC no margin to release.
+ */
+export const SDK_INVOICE_FINAL_EXPIRY_DELTA_MS = 86_400_000n;
+
+/**
+ * How far ahead of the device's clock the node's invoice timestamp may be: fiber counts the expiry from it.
+ */
+export const SDK_INVOICE_TIMESTAMP_SKEW_MS = 600_000n;
+
+/**
+ * Past fiber's 60 s channel check, the time the poller takes to sign the fulfil before the node would fail the held TLC.
+ */
+export const SDK_RELEASE_EXPIRY_SLACK_MS = 600_000n;

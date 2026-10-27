@@ -14,8 +14,17 @@ const CHANNEL_INDEX = 3;
 const CHANNEL_KEY = `fiber-lsp-sdk:channel:${CHANNEL_INDEX}`;
 const ALIAS_KEY = `fiber-lsp-sdk:alias:${CHANNEL_ID}`;
 const PAYMENT_HASH = "11".repeat(32);
-const PREIMAGE_KEY = `fiber-lsp-sdk:preimage:${PAYMENT_HASH}`;
-const PREIMAGE = "22".repeat(32);
+const BOUND_PAYMENT_HASH = PAYMENT_HASH.slice(0, 40);
+const INVOICE_KEY = `fiber-lsp-sdk:invoice:${BOUND_PAYMENT_HASH}`;
+const INVOICE: HoldInvoicePolicyRecord = {
+    version: 1,
+    paymentHash: PAYMENT_HASH,
+    amountShannons: "2250000000",
+    hashAlgorithm: "ckb-hash",
+    invoiceIndex: 1761475200000,
+    released: false,
+    channelIndexes: [],
+};
 
 function counters(commitment: number): ChannelPolicyRecord["lastSignedCommitmentNumbers"] {
     return { "COMMITMENT:local": commitment, "REVOKE:remote": 4 };
@@ -747,23 +756,24 @@ describe("concurrency", () => {
         await expect(next).resolves.toMatchObject({ lastSignedCommitmentNumbers: counters(2) });
     });
 
-    it("applies writes on one payment hash in call order, even when the first one is slower", async () => {
+    it("applies writes on one payment record in call order, even when the first one is slower", async () => {
         const applied: string[] = [];
+        const first = JSON.stringify(INVOICE);
         const storage: IAsyncSignerStorage = {
             get: () => Promise.resolve(null),
             set: async (_key, value) => {
-                for (let tick = 0; tick < (value === PREIMAGE ? 6 : 1); tick++) await Promise.resolve();
+                for (let tick = 0; tick < (value === first ? 6 : 1); tick++) await Promise.resolve();
                 applied.push(value);
             },
         };
         const store = new SignerStore(storage);
 
         await Promise.all([
-            store.setHoldInvoicePreimage(PAYMENT_HASH, PREIMAGE),
-            store.setHoldInvoicePreimage(PAYMENT_HASH, "33".repeat(32)),
+            store.updateHoldInvoiceRecord(BOUND_PAYMENT_HASH, () => INVOICE),
+            store.updateHoldInvoiceRecord(BOUND_PAYMENT_HASH, () => ({ ...INVOICE, released: true })),
         ]);
 
-        expect(applied).toEqual([PREIMAGE, "33".repeat(32)]);
+        expect(applied).toEqual([first, JSON.stringify({ ...INVOICE, released: true })]);
     });
 
     it("drops a key's lane once nothing is queued behind it", async () => {
@@ -774,7 +784,7 @@ describe("concurrency", () => {
             store.updateChannelRecord(CHANNEL_INDEX, () => record()),
             store.updateChannelRecord(4, () => record({ channelId: "other-channel" })),
             store.claimChannelAlias(CHANNEL_ID, CHANNEL_INDEX),
-            store.setHoldInvoicePreimage(PAYMENT_HASH, PREIMAGE),
+            store.updateHoldInvoiceRecord(BOUND_PAYMENT_HASH, () => INVOICE),
             store.getChannelRecord(CHANNEL_INDEX),
         ]);
         expect(lanes.size).toBe(0);
@@ -795,9 +805,9 @@ describe("concurrency", () => {
             store.updateChannelRecord(CHANNEL_INDEX, () => record()),
             store.updateChannelRecord(CHANNEL_INDEX, () => record()),
             store.claimChannelAlias(CHANNEL_ID, CHANNEL_INDEX),
-            store.setHoldInvoicePreimage(PAYMENT_HASH, PREIMAGE),
+            store.updateHoldInvoiceRecord(BOUND_PAYMENT_HASH, () => INVOICE),
         ];
-        expect([...lanes.keys()].sort()).toEqual([ALIAS_KEY, CHANNEL_KEY, PREIMAGE_KEY].sort());
+        expect([...lanes.keys()].sort()).toEqual([ALIAS_KEY, CHANNEL_KEY, INVOICE_KEY].sort());
 
         await Promise.all(pending);
         expect(lanes.size).toBe(0);
@@ -805,7 +815,6 @@ describe("concurrency", () => {
 });
 
 describe("payment records", () => {
-    const TRUNCATED_HASH = PAYMENT_HASH.slice(0, 40);
     const INTENT: DebitIntentRecord = {
         version: 1,
         paymentHash: PAYMENT_HASH,
@@ -813,19 +822,10 @@ describe("payment records", () => {
         open: true,
         channelIndexes: [3, 0],
     };
-    const INVOICE: HoldInvoicePolicyRecord = {
-        version: 1,
-        paymentHash: PAYMENT_HASH,
-        amountShannons: "2250000000",
-        hashAlgorithm: "ckb-hash",
-        released: false,
-        channelIndexes: [],
-    };
-
     const KINDS = [
         {
             kind: "debit intent record",
-            key: `fiber-lsp-sdk:intent:${TRUNCATED_HASH}`,
+            key: `fiber-lsp-sdk:intent:${BOUND_PAYMENT_HASH}`,
             record: INTENT as DebitIntentRecord | HoldInvoicePolicyRecord,
             corrupt: { ...INTENT, open: "yes" },
             get: (store: SignerStore, hash: string) => store.getDebitIntent(hash),
@@ -833,7 +833,7 @@ describe("payment records", () => {
         },
         {
             kind: "hold invoice record",
-            key: `fiber-lsp-sdk:invoice:${TRUNCATED_HASH}`,
+            key: INVOICE_KEY,
             record: INVOICE as DebitIntentRecord | HoldInvoicePolicyRecord,
             corrupt: { ...INVOICE, released: 1 },
             get: (store: SignerStore, hash: string) => store.getHoldInvoiceRecord(hash),
@@ -846,31 +846,31 @@ describe("payment records", () => {
         it("round-trips through a synchronous storage, under the bound 20 bytes of the hash", async () => {
             const storage = new InMemorySignerStorage();
             const store = new SignerStore(storage);
-            await update(store, TRUNCATED_HASH, stored);
-            await expect(get(store, TRUNCATED_HASH)).resolves.toEqual(stored);
+            await update(store, BOUND_PAYMENT_HASH, stored);
+            await expect(get(store, BOUND_PAYMENT_HASH)).resolves.toEqual(stored);
             expect([...storage.map.keys()]).toEqual([key]);
         });
 
         it("round-trips through an asynchronous storage", async () => {
             const store = new SignerStore(new AsyncInMemorySignerStorage());
-            await update(store, TRUNCATED_HASH, stored);
-            await expect(get(store, TRUNCATED_HASH)).resolves.toEqual(stored);
+            await update(store, BOUND_PAYMENT_HASH, stored);
+            await expect(get(store, BOUND_PAYMENT_HASH)).resolves.toEqual(stored);
         });
 
         it("returns null when none was written", async () => {
-            await expect(get(new SignerStore(new InMemorySignerStorage()), TRUNCATED_HASH)).resolves.toBeNull();
+            await expect(get(new SignerStore(new InMemorySignerStorage()), BOUND_PAYMENT_HASH)).resolves.toBeNull();
         });
 
         it("writes nothing when the updater hands back the record it was given", async () => {
             const storage = new InMemorySignerStorage();
             const store = new SignerStore(storage);
-            await update(store, TRUNCATED_HASH, stored);
+            await update(store, BOUND_PAYMENT_HASH, stored);
             storage.ops.length = 0;
-            const unchanged = await get(store, TRUNCATED_HASH);
+            const unchanged = await get(store, BOUND_PAYMENT_HASH);
             const updater =
                 kind === "debit intent record" ? store.updateDebitIntent.bind(store) : store.updateHoldInvoiceRecord.bind(store);
             await (updater as (hash: string, update: (current: unknown) => unknown) => Promise<unknown>)(
-                TRUNCATED_HASH,
+                BOUND_PAYMENT_HASH,
                 (current) => current,
             );
             expect(storage.ops).toEqual([`get ${key}`, `get ${key}`]);
@@ -879,7 +879,7 @@ describe("payment records", () => {
 
         it("refuses to write a record with the wrong shape", async () => {
             const storage = new InMemorySignerStorage();
-            await expect(update(new SignerStore(storage), TRUNCATED_HASH, corrupt)).rejects.toThrow(
+            await expect(update(new SignerStore(storage), BOUND_PAYMENT_HASH, corrupt)).rejects.toThrow(
                 new TypeError(`updated record is not a valid ${kind}`),
             );
             expect(storage.map.size).toBe(0);
@@ -889,7 +889,7 @@ describe("payment records", () => {
         it("refuses to write a record under the bound bytes of another hash", async () => {
             const storage = new InMemorySignerStorage();
             await expect(update(new SignerStore(storage), "22".repeat(20), stored)).rejects.toThrow(
-                new TypeError(`updated record does not belong at ${key.replace(TRUNCATED_HASH, "22".repeat(20))}`),
+                new TypeError(`updated record does not belong at ${key.replace(BOUND_PAYMENT_HASH, "22".repeat(20))}`),
             );
             expect(storage.map.size).toBe(0);
         });
@@ -901,13 +901,15 @@ describe("payment records", () => {
         ])("throws on a stored value %s", async (_, raw, reason) => {
             const storage = new InMemorySignerStorage();
             storage.map.set(key, raw());
-            await expect(get(new SignerStore(storage), TRUNCATED_HASH)).rejects.toThrow(new TypeError(`stored value at ${key} ${reason}`));
+            await expect(get(new SignerStore(storage), BOUND_PAYMENT_HASH)).rejects.toThrow(
+                new TypeError(`stored value at ${key} ${reason}`),
+            );
         });
 
         it.each([
             ["a full 32-byte hash", PAYMENT_HASH],
             ["an uppercase hash", "AB".repeat(20)],
-            ["a 0x-prefixed hash", "0x" + TRUNCATED_HASH.slice(2)],
+            ["a 0x-prefixed hash", "0x" + BOUND_PAYMENT_HASH.slice(2)],
         ])("rejects %s as the key", async (_, hash) => {
             const store = new SignerStore(new InMemorySignerStorage());
             const error = new TypeError("boundPaymentHashHex must be 20 bytes of lowercase hex");
@@ -949,96 +951,6 @@ describe("the balance lane", () => {
         const storage = new InMemorySignerStorage();
         await new SignerStore(storage).withBalanceLock(() => Promise.resolve());
         expect(storage.ops).toEqual([]);
-    });
-});
-
-describe("hold-invoice preimages", () => {
-    it("round-trips a preimage through a synchronous storage", async () => {
-        const store = new SignerStore(new InMemorySignerStorage());
-        await store.setHoldInvoicePreimage(PAYMENT_HASH, PREIMAGE);
-        await expect(store.getHoldInvoicePreimage(PAYMENT_HASH)).resolves.toBe(PREIMAGE);
-    });
-
-    it("round-trips a preimage through an asynchronous storage", async () => {
-        const store = new SignerStore(new AsyncInMemorySignerStorage());
-        await store.setHoldInvoicePreimage(PAYMENT_HASH, PREIMAGE);
-        await expect(store.getHoldInvoicePreimage(PAYMENT_HASH)).resolves.toBe(PREIMAGE);
-    });
-
-    it("returns null when no preimage is stored", async () => {
-        const store = new SignerStore(new InMemorySignerStorage());
-        await expect(store.getHoldInvoicePreimage(PAYMENT_HASH)).resolves.toBeNull();
-    });
-
-    it("namespaces the preimage key by payment hash", async () => {
-        const storage = new InMemorySignerStorage();
-        await new SignerStore(storage).setHoldInvoicePreimage(PAYMENT_HASH, PREIMAGE);
-        expect([...storage.map.keys()]).toEqual([PREIMAGE_KEY]);
-    });
-
-    it.each([
-        ["an uppercase hash", "11".repeat(31) + "AB"],
-        ["a 0x-prefixed hash", "0x" + "11".repeat(31)],
-        ["a short hash", "11".repeat(31)],
-        ["a long hash", "11".repeat(33)],
-        ["an empty hash", ""],
-        ["a non-hex hash", "zz".repeat(32)],
-    ])("rejects %s", async (_, badHash) => {
-        const store = new SignerStore(new InMemorySignerStorage());
-        await expect(store.getHoldInvoicePreimage(badHash)).rejects.toThrow(
-            new TypeError("paymentHashHex must be 32 bytes of lowercase hex"),
-        );
-        await expect(store.setHoldInvoicePreimage(badHash, PREIMAGE)).rejects.toThrow(
-            new TypeError("paymentHashHex must be 32 bytes of lowercase hex"),
-        );
-    });
-
-    it("rejects an invalid preimage on write", async () => {
-        const store = new SignerStore(new InMemorySignerStorage());
-        await expect(store.setHoldInvoicePreimage(PAYMENT_HASH, "33".repeat(16))).rejects.toThrow(
-            new TypeError("preimageHex must be 32 bytes of lowercase hex"),
-        );
-    });
-
-    it("does not echo the rejected preimage in the error", async () => {
-        const store = new SignerStore(new InMemorySignerStorage());
-        const bogus = "AB".repeat(32);
-        const error = await store.setHoldInvoicePreimage(PAYMENT_HASH, bogus).catch((cause: unknown) => cause);
-        expect(error).toBeInstanceOf(TypeError);
-        expect((error as TypeError).message).not.toContain(bogus);
-    });
-
-    it("throws on a stored value that is not a preimage", async () => {
-        const storage = new InMemorySignerStorage();
-        storage.map.set(PREIMAGE_KEY, "not-a-preimage");
-        await expect(new SignerStore(storage).getHoldInvoicePreimage(PAYMENT_HASH)).rejects.toThrow(
-            new TypeError(`stored value at ${PREIMAGE_KEY} is not a preimage`),
-        );
-    });
-
-    it("overwrites a previously stored preimage", async () => {
-        const store = new SignerStore(new InMemorySignerStorage());
-        await store.setHoldInvoicePreimage(PAYMENT_HASH, PREIMAGE);
-        await store.setHoldInvoicePreimage(PAYMENT_HASH, "33".repeat(32));
-        await expect(store.getHoldInvoicePreimage(PAYMENT_HASH)).resolves.toBe("33".repeat(32));
-    });
-
-    it("treats an empty stored string as corruption, not absence", async () => {
-        const storage = new InMemorySignerStorage();
-        storage.map.set(PREIMAGE_KEY, "");
-        await expect(new SignerStore(storage).getHoldInvoicePreimage(PAYMENT_HASH)).rejects.toThrow(
-            new TypeError(`stored value at ${PREIMAGE_KEY} is not a preimage`),
-        );
-    });
-
-    it("keeps the three keyspaces disjoint", async () => {
-        const storage = new InMemorySignerStorage();
-        const store = new SignerStore(storage);
-        await store.setChannelRecord(CHANNEL_INDEX, record());
-        await store.claimChannelAlias(PAYMENT_HASH, CHANNEL_INDEX);
-        await store.setHoldInvoicePreimage(PAYMENT_HASH, PREIMAGE);
-        expect([...storage.map.keys()].sort()).toEqual([CHANNEL_KEY, `fiber-lsp-sdk:alias:${PAYMENT_HASH}`, PREIMAGE_KEY].sort());
-        await expect(store.getHoldInvoicePreimage(PAYMENT_HASH)).resolves.toBe(PREIMAGE);
     });
 });
 
@@ -1144,7 +1056,6 @@ describe("records of another module's format", () => {
         ["a channel alias", `fiber-lsp-sdk:alias:0x${"1f".repeat(32)}`],
         ["a debit intent", `fiber-lsp-sdk:intent:${"ab".repeat(20)}`],
         ["a hold invoice record", `fiber-lsp-sdk:invoice:${"ab".repeat(20)}`],
-        ["a hold invoice preimage", `fiber-lsp-sdk:preimage:${"ab".repeat(32)}`],
         ["the balance lane", "fiber-lsp-sdk:balance"],
     ])("refuses the key of %s, the policy's own, before touching the storage", async (_, key) => {
         const storage = new InMemorySignerStorage();

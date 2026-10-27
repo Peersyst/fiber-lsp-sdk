@@ -8,6 +8,7 @@ import {
     assertOneOf,
     assertString,
     compareBytes,
+    encodeWellFormedUtf8,
     isDecimalShannons,
 } from "../common";
 import { arDecompress, arEncompress } from "./arithmetic-coder";
@@ -15,10 +16,7 @@ import { bytesToInvoiceGroups, decodeInvoiceBech32m, encodeInvoiceBech32m, invoi
 import { decodeInvoiceData, encodeInvoiceData } from "./invoice-data";
 import { INVOICE_CURRENCIES, INVOICE_CURRENCY_PREFIXES, INVOICE_SIGNATURE_GROUPS, INVOICE_SIGNATURE_LENGTH } from "./invoice.constants";
 import { refuseInvoice } from "./invoice.error";
-import type { Invoice, InvoiceAttribute, InvoiceCurrency, UnsignedInvoice } from "./invoice.types";
-import { encodeInvoiceUtf8 } from "./utils";
-
-type PayeeAttribute = Extract<InvoiceAttribute, { type: "payeePublicKey" }>;
+import type { Invoice, InvoiceAttribute, InvoiceAttributeType, InvoiceCurrency, UnsignedInvoice } from "./invoice.types";
 
 const SIGNED_FLAG = 1;
 const MAX_RECOVERY_ID = 3;
@@ -57,7 +55,7 @@ function parseHrp(hrp: string): Pick<UnsignedInvoice, "currency" | "amountShanno
  */
 function signedDigest(hrp: string, compressed: Uint8Array): Uint8Array {
     const padding = compressed.length % DIGEST_BLOCK === 0 ? new Uint8Array(0) : new Uint8Array(1);
-    return sha256(concatBytes(encodeInvoiceUtf8("hrp", hrp), compressed, padding));
+    return sha256(concatBytes(encodeWellFormedUtf8("hrp", hrp), compressed, padding));
 }
 
 /**
@@ -110,6 +108,19 @@ function verifySignature(signature: Uint8Array, digest: Uint8Array, payeePublicK
 }
 
 /**
+ * Finds an invoice's first attribute of a type.
+ * @param invoice The invoice.
+ * @param type The attribute type.
+ * @returns The attribute, or `undefined` when there is none.
+ */
+export function findInvoiceAttribute<Type extends InvoiceAttributeType>(
+    invoice: Pick<UnsignedInvoice, "attributes">,
+    type: Type,
+): Extract<InvoiceAttribute, { type: Type }> | undefined {
+    return invoice.attributes.find((attribute): attribute is Extract<InvoiceAttribute, { type: Type }> => attribute.type === type);
+}
+
+/**
  * Reads a signed invoice string, refusing every string fiber's encoder would not have written for what it carries.
  * @param text The bech32m string.
  * @returns The invoice.
@@ -126,7 +137,7 @@ export function decodeInvoice(text: string): Invoice {
     // Fiber ignores what follows the end marker and the low bits of the last byte; the coder writes them one way.
     if (compareBytes(arEncompress(molecule), compressed) !== 0) refuseInvoice("compressed", "must be the stream fiber's coder writes");
     const data = decodeInvoiceData(molecule);
-    const payee = data.attributes.find((attribute): attribute is PayeeAttribute => attribute.type === "payeePublicKey");
+    const payee = findInvoiceAttribute(data, "payeePublicKey");
     verifySignature(signature, signedDigest(hrp, compressed), payee?.publicKey);
     return { currency, amountShannons, ...data, signature };
 }

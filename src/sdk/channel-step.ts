@@ -3,7 +3,7 @@ import type { ActivityTracker } from "./activity";
 import type { PendingOpeningStore } from "./pending-opening";
 import type { PollRun, PollStep } from "./poller";
 import type { ActivityEntry, SdkEvent } from "./sdk.types";
-import { answerEachChannel, deliverStepEvent } from "./utils";
+import { answerEachPolled, deliverStepEvent } from "./utils";
 
 export type ChannelStepOptions = {
     rpc: FiberRpcClient;
@@ -56,7 +56,14 @@ export function buildChannelStep(options: ChannelStepOptions): PollStep {
             const entry = watched[channel.channelId];
             return entry === undefined ? [] : [{ ...channel, entry }];
         });
-        await answerEachChannel(run, emit, POLL, listed, (channel) => settle(run, channel, channel.entry));
+        await answerEachPolled(
+            run,
+            emit,
+            POLL,
+            listed,
+            (channel) => channel.channelId,
+            (channel) => settle(run, channel, channel.entry),
+        );
     };
 
     return async (run) => {
