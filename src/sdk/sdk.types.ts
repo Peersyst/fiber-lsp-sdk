@@ -290,6 +290,13 @@ export type SdkTransferOptions = {
     maxFeeShannons?: string;
 };
 
+export type SdkCloseOptions = {
+    /**
+     * The device's own, in shannons per kilobyte; defaults to the channel's commitment fee rate, which fiber refuses to go below.
+     */
+    feeRate?: bigint;
+};
+
 export type SdkPayment = {
     /**
      * `0x`-prefixed lowercase hex, as the events carry it.

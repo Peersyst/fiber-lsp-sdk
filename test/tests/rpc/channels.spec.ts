@@ -1208,6 +1208,42 @@ describe("FiberRpcClient channel methods", () => {
         });
     });
 
+    it("shuts a channel down, sending every option and resolving with nothing", async () => {
+        const mock = answering(null);
+        const client = new FiberRpcClient({ url: URL, fetch: mock.fetch });
+        await expect(
+            client.shutdownChannel({ channelId: CHANNEL_ID, closeScript: CLOSE_SCRIPT, feeRate: 1000n, force: true }),
+        ).resolves.toBeUndefined();
+        expect(sent(mock)).toEqual({
+            jsonrpc: "2.0",
+            id: 1,
+            method: "shutdown_channel",
+            params: [{ channel_id: CHANNEL_ID, close_script: CLOSE_SCRIPT_WIRE, fee_rate: "0x3e8", force: true }],
+        });
+    });
+
+    it("shuts a channel down with no option, leaving all of them out", async () => {
+        const mock = answering(null);
+        await expect(
+            new FiberRpcClient({ url: URL, fetch: mock.fetch }).shutdownChannel({ channelId: CHANNEL_ID }),
+        ).resolves.toBeUndefined();
+        expect(sent(mock)).toEqual({ jsonrpc: "2.0", id: 1, method: "shutdown_channel", params: [{ channel_id: CHANNEL_ID }] });
+    });
+
+    it("refuses a shutdown result that is not null", async () => {
+        const mock = answering({});
+        const error = await rejection(new FiberRpcClient({ url: URL, fetch: mock.fetch }).shutdownChannel({ channelId: CHANNEL_ID }));
+        expect(error).toBeInstanceOf(RpcResponseError);
+        expect(error).toMatchObject({ method: "shutdown_channel", path: "response.result" });
+    });
+
+    it("refuses shutdown params it cannot write before sending anything", async () => {
+        const mock = new FetchMock();
+        const client = new FiberRpcClient({ url: URL, fetch: mock.fetch });
+        await expect(client.shutdownChannel({ channelId: "11" })).rejects.toThrow(TypeError);
+        expect(mock.requests).toHaveLength(0);
+    });
+
     it("abandons a channel, resolving with nothing", async () => {
         const mock = answering(null);
         await expect(

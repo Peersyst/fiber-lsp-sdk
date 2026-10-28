@@ -64,6 +64,7 @@ describe("isChannelPolicyRecord", () => {
             commitmentDelayEpoch: "1099511627777",
             commitmentFeeRate: "1000",
             remoteReservedCkbShannons: "6300000000",
+            remoteCloseScript: "55000000100000003000000031000000" + "01".repeat(32) + "02" + "20000000" + "06".repeat(32),
             lockLayout: "legacy",
         };
     }
@@ -286,6 +287,12 @@ describe("isChannelPolicyRecord", () => {
         ["a close script of half a byte", { localCloseScript: "abc" }],
         ["a close script that is not hex", { localCloseScript: "zz" }],
         ["a close script that is not a string", { localCloseScript: 5 }],
+        ["an empty peer close script", { remoteCloseScript: "" }],
+        ["an uppercase peer close script", { remoteCloseScript: "AB" }],
+        ["a peer close script of half a byte", { remoteCloseScript: "abc" }],
+        ["a peer close script that is not hex", { remoteCloseScript: "zz" }],
+        ["a peer close script that is not a string", { remoteCloseScript: 5 }],
+        ["a null peer close script", { remoteCloseScript: null }],
         ["a UDT script", { udtTypeScript: "ab".repeat(53) }],
         ["an absent UDT script", { udtTypeScript: undefined }],
         ["an out point without an index", { fundingOutPoint: "6f".repeat(32) }],

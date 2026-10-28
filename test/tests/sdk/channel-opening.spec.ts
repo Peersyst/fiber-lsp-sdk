@@ -80,6 +80,9 @@ const PEER_LOCK: Script = {
 // The molecule table of USER_LOCK, the policy's pin form.
 const USER_LOCK_HEX =
     "49000000100000003000000031000000537320e708e05f80a3d3a873b32eda052298e274ad93e7b9d5c2fc0ca201d76901140000008d66477ba3b60a96feb27a3f57fe11f6697be87d";
+// The molecule table of PEER_LOCK, the pin of the peer's close script.
+const PEER_LOCK_HEX =
+    "490000001000000030000000310000004d62a160ec2d470f499fb511b77777e0af54af776d9d31ee9ecdc71d7378c2ba01140000008f1e030962418183dc890ef5664b1f2a64b0064c";
 const USER_LOCK_WIRE = {
     code_hash: "0x537320e708e05f80a3d3a873b32eda052298e274ad93e7b9d5c2fc0ca201d769",
     hash_type: "type",
@@ -235,6 +238,7 @@ const PINS = {
     liquidCapacityShannons: "80500000000",
     commitmentFeeRate: "1000",
     remoteReservedCkbShannons: "10000000000",
+    remoteCloseScript: PEER_LOCK_HEX,
     remoteFundingPubkey: PEER_FUNDING_PUBKEY,
     remoteTlcBasePubkey: PEER_TLC_BASE_PUBKEY,
     commitmentDelayEpoch: "1099511627777",
@@ -734,6 +738,21 @@ describe("prepareSdkChannelOpen", () => {
             expect(error.message).toBe(
                 `the node's opening of channel ${CHANNEL_ID} conflicts with the device's record: ` +
                     `channel ${CHANNEL_ID} already pins liquidCapacityShannons to 80500000000, not 82000000000`,
+            );
+        });
+
+        it("is opening_conflict when the channel pins another close script of the peer", async () => {
+            const h = await opened();
+            h.node
+                .result({ channels: [{ channel_id: CHANNEL_ID, state: OPENING_STATE }] })
+                .result(
+                    withField(OPEN_ANSWER, "opening_context.remote_shutdown_script.args", "0x8f1e030962418183dc890ef5664b1f2a64b0064d"),
+                );
+            const error = await conflictOf(h);
+            expect(error.cause).toBeInstanceOf(ChannelPinError);
+            expect(error.message).toBe(
+                `the node's opening of channel ${CHANNEL_ID} conflicts with the device's record: ` +
+                    `channel ${CHANNEL_ID} already pins remoteCloseScript to ${PEER_LOCK_HEX}, not ${PEER_LOCK_HEX.slice(0, -1)}d`,
             );
         });
 

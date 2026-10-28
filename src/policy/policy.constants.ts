@@ -47,10 +47,15 @@ export const FIRST_SIGHT_CHANNEL_PINS = [
 /**
  * Pinned by the host alone: a message stating one before the host pinned it is refused, never taken as the first sight.
  */
-export const CHANNEL_TERMS_PINS = ["liquidCapacityShannons", "commitmentFeeRate", "remoteReservedCkbShannons"] as const;
+export const CHANNEL_TERMS_PINS = [
+    "liquidCapacityShannons",
+    "commitmentFeeRate",
+    "remoteReservedCkbShannons",
+    "remoteCloseScript",
+] as const;
 
 /**
- * The opening context states three first-sight values beside the terms, so the host may pin them before any request does.
+ * The opening context states three first-sight values beside the terms, and the host pins them with the terms.
  */
 export const HOST_TERMS_PINS = [
     ...CHANNEL_TERMS_PINS,

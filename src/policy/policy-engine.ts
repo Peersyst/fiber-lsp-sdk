@@ -183,6 +183,7 @@ export class PolicyEngine {
         assertUint64Shannons("terms.remoteReservedCkbShannons", terms.remoteReservedCkbShannons);
         // Liquid capacity sits in the funding cell, so a cell's u64 bounds it.
         assertUint64Shannons("terms.liquidCapacityShannons", terms.liquidCapacityShannons);
+        assertScript("terms.remoteCloseScript", terms.remoteCloseScript);
         assertCompressedPoint("terms.remoteFundingPubkey", terms.remoteFundingPubkey);
         assertCompressedPoint("terms.remoteTlcBasePubkey", terms.remoteTlcBasePubkey);
         assertUnsignedBigInt("terms.commitmentDelayEpoch", terms.commitmentDelayEpoch, UINT64_MAX);

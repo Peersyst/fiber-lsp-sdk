@@ -35,6 +35,7 @@ export function channelTermsPins(terms: PolicyChannelTerms): StatedChannelPins {
         liquidCapacityShannons: terms.liquidCapacityShannons,
         commitmentFeeRate: terms.commitmentFeeRate.toString(),
         remoteReservedCkbShannons: terms.remoteReservedCkbShannons,
+        remoteCloseScript: scriptPin(terms.remoteCloseScript),
         remoteFundingPubkey: bytesToHex(terms.remoteFundingPubkey),
         remoteTlcBasePubkey: bytesToHex(terms.remoteTlcBasePubkey),
         commitmentDelayEpoch: terms.commitmentDelayEpoch.toString(),
@@ -69,7 +70,9 @@ export function statedChannelPins(operation: SignOperation): StatedChannelPins {
                 udtTypeScript: null,
                 fundingOutPoint: outPointPin(input.fundingOutPoint),
                 remoteFundingPubkey: bytesToHex(input.remoteFundingPubkey),
+                // The device's first, so a swapped close is refused naming the device's script.
                 localCloseScript: scriptPin(input.localCloseScript),
+                remoteCloseScript: scriptPin(input.remoteCloseScript),
             };
         }
         case "revocation": {

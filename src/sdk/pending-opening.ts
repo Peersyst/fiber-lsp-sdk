@@ -7,13 +7,13 @@ import {
     assertCellDeps,
     assertDecimalShannons,
     assertUnsignedInteger,
+    decodeMoleculeScript,
     isDecimalShannons,
     isHexBytes,
     isNonEmptyHexBytes,
     isPlainObject,
     isUnsignedInteger,
     moleculeScript,
-    readMoleculeScript,
 } from "../common";
 import { MAX_CHANNEL_INDEX } from "../derivation";
 import type { SignerRecordFormat, SignerStore } from "../policy";
@@ -21,8 +21,6 @@ import { isWireHex } from "../wire";
 import { assertActivityId } from "./utils";
 import { PENDING_OPENING_RECORD_KEY, PENDING_OPENING_RECORD_VERSION } from "./sdk.constants";
 import type { PendingOpening, PendingOpeningCellDep, PendingOpeningRecord } from "./sdk.types";
-
-const LOCK_FIELD_NAMES = { codeHash: "codeHash", hashType: "hashType", args: "args" };
 
 /**
  * Asserts the cell deps an opening names for the user's lock.
@@ -78,14 +76,6 @@ function sameCellDeps(a: readonly PendingOpeningCellDep[] | undefined, b: readon
 }
 
 /**
- * Ends a molecule read of a stored lock, which the guard turns into a refusal.
- * @param path Path of the broken part.
- */
-function refuseLock(path: string): never {
-    throw new TypeError(`${path} is not a molecule script`);
-}
-
-/**
  * Checks that a value is a script's molecule bytes as lowercase hex, the form the policy pins a script in.
  * @param value Value to check.
  * @returns Whether the value reads as a script.
@@ -93,7 +83,7 @@ function refuseLock(path: string): never {
 function isLockHex(value: unknown): value is string {
     if (!isNonEmptyHexBytes(value)) return false;
     try {
-        readMoleculeScript(hexToBytes(value), "userLock", LOCK_FIELD_NAMES, refuseLock);
+        decodeMoleculeScript(hexToBytes(value), "userLock");
         return true;
     } catch {
         return false;

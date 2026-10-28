@@ -98,6 +98,7 @@ const PINS = {
         commitmentFeeRate: 1000n,
         remoteReservedCkbShannons: "10000000000",
         liquidCapacityShannons: "80500000000",
+        remoteCloseScript: PEER_LOCK,
         remoteFundingPubkey: hexToBytes(PEER_FUNDING_PUBKEY),
         remoteTlcBasePubkey: hexToBytes(PEER_TLC_BASE_PUBKEY),
         commitmentDelayEpoch: 0x10000000001n,
@@ -118,11 +119,13 @@ describe("checkTenantOpening", () => {
         expect(checkTenantOpening(REQUEST, ANSWER)).toStrictEqual(PINS);
     });
 
-    it("returns keys of its own: writing to the answer afterwards changes nothing it returned", () => {
+    it("returns keys and a close script of its own: writing to the answer afterwards changes nothing it returned", () => {
         const answer = structuredClone(ANSWER);
         const pins = checkTenantOpening(REQUEST, answer);
         answer.openingContext.remoteFundingKey.fill(0);
         answer.openingContext.remoteSettlementKey.fill(0);
+        answer.openingContext.remoteShutdownScript.codeHash.fill(0);
+        answer.openingContext.remoteShutdownScript.args.fill(0);
         expect(pins).toStrictEqual(PINS);
     });
 
@@ -146,7 +149,12 @@ describe("checkTenantOpening", () => {
             ["openingContext.remoteReservedCkbShannons", "10000000000"],
         ]);
         expect(checkTenantOpening(REQUEST, answer)).toStrictEqual({
-            terms: { ...PINS.terms, remoteReservedCkbShannons: "10000000000", liquidCapacityShannons: "80600000000" },
+            terms: {
+                ...PINS.terms,
+                remoteReservedCkbShannons: "10000000000",
+                liquidCapacityShannons: "80600000000",
+                remoteCloseScript: longLock,
+            },
             fundingCapacityShannons: "100500000000",
         });
     });

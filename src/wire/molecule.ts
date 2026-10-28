@@ -6,7 +6,7 @@ import type { WireField } from "./wire.types";
 
 const CELL_OUTPUT_FIELDS = 3;
 
-const SCRIPT_FIELD_NAMES = { codeHash: "code_hash", hashType: "hash_type", args: "args" };
+const SCRIPT_WIRE_FIELD_NAMES = { codeHash: "code_hash", hashType: "hash_type", args: "args" };
 
 /**
  * Refuses a field's molecule bytes as a wire error.
@@ -30,7 +30,7 @@ export function decodeMoleculeCellOutput(field: WireField): CellOutput {
     ];
     return {
         capacityShannons: readMoleculeUint(capacity, UINT64_LENGTH, `${field.path}.capacity`, refuseMolecule),
-        lock: readMoleculeScript(lock, `${field.path}.lock`, SCRIPT_FIELD_NAMES, refuseMolecule),
-        type: type.length === 0 ? null : readMoleculeScript(type, `${field.path}.type`, SCRIPT_FIELD_NAMES, refuseMolecule),
+        lock: readMoleculeScript(lock, `${field.path}.lock`, SCRIPT_WIRE_FIELD_NAMES, refuseMolecule),
+        type: type.length === 0 ? null : readMoleculeScript(type, `${field.path}.type`, SCRIPT_WIRE_FIELD_NAMES, refuseMolecule),
     };
 }

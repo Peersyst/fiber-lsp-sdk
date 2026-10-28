@@ -15,6 +15,7 @@ import { FiberRpcClient } from "../rpc";
 import { HoldInvoicePreimages, SignerDispatch, TenantIdentity } from "../signer";
 import { ActivityTracker } from "./activity";
 import { IndexAllocator } from "./allocator";
+import { closeSdkChannel } from "./channel-closing";
 import { readSdkChannelEvidence } from "./channel-evidence";
 import { listSdkChannels } from "./channel-listing";
 import { openSdkChannel, prepareSdkChannelOpen, submitSdkFundingTx } from "./channel-opening";
@@ -32,6 +33,7 @@ import type {
     SdkChannelEvidence,
     SdkChannelInfo,
     SdkChannelOpening,
+    SdkCloseOptions,
     SdkContext,
     SdkEvent,
     SdkEventListener,
@@ -204,6 +206,16 @@ export class FiberLspSdk {
         userLockCellDeps?: CellDep[],
     ): Promise<string> {
         return openSdkChannel(this.context, amountShannons, userLock, signFundingInputs, userLockCellDeps);
+    }
+
+    /**
+     * Asks the node to close a channel cooperatively once the device's fee on it is one it signs; `CHANNEL_CLOSED` tells when it closed.
+     * @param channelId The channel, under any name the node gave it.
+     * @param options The device's fee rate, the channel's commitment fee rate by default.
+     * @returns Settles once the node took the request.
+     */
+    closeChannel(channelId: string, options?: SdkCloseOptions): Promise<void> {
+        return closeSdkChannel(this.context, channelId, options);
     }
 
     /**

@@ -20,6 +20,9 @@ import type { PreparedSignOperation, SigningNetwork } from "../signer.types";
 
 type RevocationContent = Extract<ChannelSigningContent, { kind: "revocation" }>;
 
+// The peer's close script is molecule hex, never read as a bigint.
+type NumericTermsPin = Exclude<ChannelTermsPin, "remoteCloseScript">;
+
 // Unreachable through the dispatch, which refuses the announcement first.
 const NO_ANNOUNCEMENT = "a channel announcement is refused before its content is read";
 
@@ -196,7 +199,7 @@ function readChannelTerms(pins: ChannelPins, lockLayout: CommitmentLockLayout, n
  * @param field The term.
  * @returns Its value.
  */
-function readPinnedTerm(pins: ChannelPins, field: ChannelTermsPin): bigint {
+function readPinnedTerm(pins: ChannelPins, field: NumericTermsPin): bigint {
     const value = pins[field];
     if (value === undefined) {
         refusePolicyRequest("policy_refusal", `the message is a function of ${field}, which the host has not pinned for the channel yet`);

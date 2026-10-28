@@ -91,8 +91,9 @@ submission `Applied` or `AlreadyApplied`). The list is in the order claimed, and
 
 `pins` holds four values from the registration, `fundedShannons` (base 10), `localReservedCkbShannons` (a map from each
 lock layout, `legacy` and `fullPaymentHash`, to the reserve computed under it in base 10, exactly those two keys),
-`localCloseScript` (the script's molecule bytes, hex) and `udtTypeScript` (always `null`); three terms only the host
-pins, `liquidCapacityShannons`, `commitmentFeeRate` and `remoteReservedCkbShannons` (base 10); and six more that are
+`localCloseScript` (the script's molecule bytes, hex) and `udtTypeScript` (always `null`); four terms only the host
+pins, `liquidCapacityShannons`, `commitmentFeeRate`, `remoteReservedCkbShannons`, those three in base 10, and
+`remoteCloseScript` (the peer's close script, its molecule bytes, hex); and six more that are
 absent until the host or the first message stating them sets them: `fundingOutPoint` (`<tx hash hex>:<index>`),
 `fundingCapacityShannons` and `commitmentDelayEpoch` (base 10), `remoteFundingPubkey` and `remoteTlcBasePubkey` (33
 bytes, hex), and `lockLayout` (`legacy` or `fullPaymentHash`, which picks the reserve). One canonical string per value, so

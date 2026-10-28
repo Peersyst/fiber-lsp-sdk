@@ -1,5 +1,6 @@
 export * from "./activity";
 export * from "./allocator";
+export * from "./channel-closing";
 export * from "./channel-evidence";
 export * from "./channel-listing";
 export * from "./channel-opening";
