@@ -2639,7 +2639,8 @@
           "values": {
             "invoice": "fibt1-fixture-held",
             "max_fee_amount": "1250000",
-            "dry_run": true
+            "dry_run": true,
+            "trampoline_hops": []
           },
           "json": {
             "target_pubkey": null,
@@ -2666,7 +2667,8 @@
           "values": {
             "invoice": "fibt1-fixture-held",
             "max_fee_amount": "340282366920938463463374607431768211455",
-            "dry_run": false
+            "dry_run": false,
+            "trampoline_hops": []
           },
           "json": {
             "target_pubkey": null,
@@ -2680,6 +2682,40 @@
             "max_fee_rate": null,
             "max_parts": null,
             "trampoline_hops": null,
+            "keysend": null,
+            "udt_type_script": null,
+            "allow_self_payment": null,
+            "custom_records": null,
+            "hop_hints": null,
+            "dry_run": false
+          }
+        },
+        {
+          "name": "trampoline hops",
+          "values": {
+            "invoice": "fibt1-fixture-held",
+            "max_fee_amount": "1250000",
+            "dry_run": false,
+            "trampoline_hops": [
+              "0297f82b61f72137f0da4c633352f880e3590e1613e4245ecf813015780759a598",
+              "0227a70da5773b230be3ab25adeb84680e09106043c9dba3c7e3448a760babc58a"
+            ]
+          },
+          "json": {
+            "target_pubkey": null,
+            "amount": null,
+            "payment_hash": null,
+            "final_tlc_expiry_delta": null,
+            "tlc_expiry_limit": null,
+            "invoice": "fibt1-fixture-held",
+            "timeout": null,
+            "max_fee_amount": "0x1312d0",
+            "max_fee_rate": null,
+            "max_parts": null,
+            "trampoline_hops": [
+              "0297f82b61f72137f0da4c633352f880e3590e1613e4245ecf813015780759a598",
+              "0227a70da5773b230be3ab25adeb84680e09106043c9dba3c7e3448a760babc58a"
+            ],
             "keysend": null,
             "udt_type_script": null,
             "allow_self_payment": null,

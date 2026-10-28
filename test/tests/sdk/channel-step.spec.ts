@@ -9,6 +9,7 @@ import { rejection } from "../../utils/rejection";
 import { LIST_CHANNELS_WITH_CLOSED_CALL } from "../../utils/rpc-answers";
 import type { StepRun } from "../../utils/step-run";
 import { live, pollFailedEvent, summarized } from "../../utils/step-run";
+import { writes } from "../../utils/stored-records";
 
 const URL = "http://127.0.0.1:8227";
 const ACTIVITY_KEY = "fiber-lsp-sdk:activity";
@@ -65,10 +66,6 @@ async function channelsOf(h: Harness): Promise<Record<string, { status: string |
     return (await h.activity.read()).channels;
 }
 
-function writesOf(h: Harness): string[] {
-    return h.storage.ops.filter((op) => op.startsWith("set "));
-}
-
 function listing(...channels: [string, unknown][]): unknown {
     return { channels: channels.map(([channelId, state]) => ({ channel_id: channelId, state })) };
 }
@@ -80,7 +77,7 @@ describe("buildChannelStep", () => {
             await h.step(live());
             expect(h.node.calls()).toEqual([]);
             expect(h.events).toEqual([]);
-            expect(writesOf(h)).toEqual([]);
+            expect(writes(h.storage)).toEqual([]);
         });
 
         it("calls nothing when only payments and invoices are watched", async () => {
@@ -121,7 +118,7 @@ describe("buildChannelStep", () => {
             await h.step(live());
             expect(h.node.calls()).toEqual([LIST_CHANNELS_WITH_CLOSED_CALL, LIST_CHANNELS_WITH_CLOSED_CALL]);
             expect(h.events).toStrictEqual([{ type: "CHANNEL_READY", channelId: CHANNEL_ID }]);
-            expect(writesOf(h)).toEqual([]);
+            expect(writes(h.storage)).toEqual([]);
         });
 
         it("emits, then drops its pending opening, then records it", async () => {
@@ -218,7 +215,7 @@ describe("buildChannelStep", () => {
             await h.step(live());
             expect(h.node.calls()).toEqual([LIST_CHANNELS_WITH_CLOSED_CALL]);
             expect(h.events).toEqual([]);
-            expect(writesOf(h)).toEqual([]);
+            expect(writes(h.storage)).toEqual([]);
             expect(await channelsOf(h)).toStrictEqual({ [CHANNEL_ID]: { status: null } });
         });
 
@@ -280,7 +277,7 @@ describe("buildChannelStep", () => {
             await h.step(live());
             expect(h.node.calls()).toEqual([LIST_CHANNELS_WITH_CLOSED_CALL, ONLY_PENDING_CALL]);
             expect(h.events).toEqual([]);
-            expect(writesOf(h)).toEqual([]);
+            expect(writes(h.storage)).toEqual([]);
         });
 
         it("reads no pending channels when every watched channel is listed", async () => {
@@ -311,7 +308,7 @@ describe("buildChannelStep", () => {
             h.node.result(listing([UNWATCHED_ID, READY], [OTHER_ID, COOPERATIVE])).result(listing([UNWATCHED_ID, ABORTED]));
             await h.step(live());
             expect(h.events).toEqual([]);
-            expect(writesOf(h)).toEqual([]);
+            expect(writes(h.storage)).toEqual([]);
             expect(await channelsOf(h)).toStrictEqual({ [CHANNEL_ID]: { status: null } });
         });
     });
@@ -373,7 +370,7 @@ describe("buildChannelStep", () => {
             expect((error as Error).message).toBe(message);
             expect(h.node.calls()).toEqual([LIST_CHANNELS_WITH_CLOSED_CALL]);
             expect(h.events).toEqual([]);
-            expect(writesOf(h)).toEqual([]);
+            expect(writes(h.storage)).toEqual([]);
         });
 
         it("rejects the step when the pending listing fails, the listed channels already settled", async () => {
@@ -462,7 +459,7 @@ describe("buildChannelStep", () => {
             await h.step(run);
             expect(h.node.calls()).toEqual([LIST_CHANNELS_WITH_CLOSED_CALL]);
             expect(h.events).toEqual([]);
-            expect(writesOf(h)).toEqual([]);
+            expect(writes(h.storage)).toEqual([]);
         });
 
         it("emits nothing once abandoned during the pending listing", async () => {
@@ -477,7 +474,7 @@ describe("buildChannelStep", () => {
             await h.step(run);
             expect(h.node.calls()).toEqual([LIST_CHANNELS_WITH_CLOSED_CALL, ONLY_PENDING_CALL]);
             expect(h.events).toEqual([]);
-            expect(writesOf(h)).toEqual([]);
+            expect(writes(h.storage)).toEqual([]);
         });
 
         it("records nothing once abandoned by its own event, and emits it again on the next tick", async () => {
@@ -489,7 +486,7 @@ describe("buildChannelStep", () => {
             h.node.result(listing([CHANNEL_ID, READY], [OTHER_ID, READY])).result(listing([CHANNEL_ID, READY]));
             await h.step(run);
             expect(h.events).toStrictEqual([{ type: "CHANNEL_READY", channelId: CHANNEL_ID }]);
-            expect(writesOf(h)).toEqual([]);
+            expect(writes(h.storage)).toEqual([]);
             await h.step(live());
             expect(h.events).toStrictEqual([
                 { type: "CHANNEL_READY", channelId: CHANNEL_ID },
@@ -507,7 +504,7 @@ describe("buildChannelStep", () => {
             h.storage.ops.length = 0;
             h.node.result(listing([CHANNEL_ID, COOPERATIVE])).result(listing([CHANNEL_ID, COOPERATIVE]));
             await h.step(run);
-            expect(writesOf(h)).toEqual([]);
+            expect(writes(h.storage)).toEqual([]);
             expect(await channelsOf(h)).toStrictEqual({ [CHANNEL_ID]: { status: null } });
             await h.step(live());
             expect(h.events).toStrictEqual([

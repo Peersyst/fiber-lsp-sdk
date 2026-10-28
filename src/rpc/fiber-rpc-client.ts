@@ -240,7 +240,7 @@ export class FiberRpcClient {
 
     /**
      * Pays an invoice, or with a dry run only finds its route.
-     * @param params The invoice to pay and the fee bound.
+     * @param params The invoice to pay, the fee bound and the trampoline hops.
      * @returns The payment as it stands, rarely final.
      */
     async sendPayment(params: SendPaymentParams): Promise<RpcPayment> {

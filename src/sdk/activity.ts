@@ -44,8 +44,23 @@ export class ActivityTracker {
      * @param id The id the node knows it under.
      */
     async watch(kind: ActivityKind, id: string): Promise<void> {
+        await this.watchIfAbsent(kind, id);
+    }
+
+    /**
+     * Starts watching something unless it already is, decided in the record's lane so two callers never both add it.
+     * @param kind What it is.
+     * @param id The id the node knows it under.
+     * @returns Whether this call added the entry.
+     */
+    async watchIfAbsent(kind: ActivityKind, id: string): Promise<boolean> {
         assertActivityId(kind, id);
-        await this.update(kind, (entries) => (Object.hasOwn(entries, id) ? entries : { ...entries, [id]: { status: null } }));
+        let added = false;
+        await this.update(kind, (entries) => {
+            added = !Object.hasOwn(entries, id);
+            return added ? { ...entries, [id]: { status: null } } : entries;
+        });
+        return added;
     }
 
     /**

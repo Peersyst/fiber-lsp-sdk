@@ -103,7 +103,7 @@ export type PaymentHashParamsVector = { payment_hash: string };
 
 export type SettleInvoiceParamsVector = { payment_hash: string; payment_preimage: string };
 
-export type SendPaymentParamsVector = { invoice: string; max_fee_amount: string; dry_run: boolean };
+export type SendPaymentParamsVector = { invoice: string; max_fee_amount: string; dry_run: boolean; trampoline_hops: string[] };
 
 export type OpenChannelResultVector = { channel_id: string; unsigned_funding_tx: TransactionVector };
 
@@ -541,6 +541,7 @@ const METHOD_PARSERS: {
             const record = asRecord(value, path);
             return {
                 dry_run: asBoolean(record.dry_run, `${path}.dry_run`),
+                trampoline_hops: asList(record.trampoline_hops, `${path}.trampoline_hops`, asString),
                 ...asStringFields(record, path, ["invoice", "max_fee_amount"] as const),
             };
         },

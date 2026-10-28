@@ -392,7 +392,7 @@ export class PolicyEngine {
     }
 
     /**
-     * Records the budget the user approved for a payment, which an offered TLC under its hash needs.
+     * Records the budget the user approved for a payment, which an offered TLC under its hash needs; an open one is refused.
      * @param paymentHashHex The payment hash, 32 bytes of lowercase hex.
      * @param maxShannons Highest amount the payment may take, fee budget included, in decimal shannons.
      */
@@ -401,17 +401,17 @@ export class PolicyEngine {
         assertDecimalShannons("maxShannons", maxShannons);
         const key = boundPaymentHashOf(paymentHashHex);
         await this.store.withBalanceLock(async () => {
-            // The rule would read the hash both as a payment out and as an invoice.
-            if ((await this.store.getHoldInvoiceRecord(key)) !== null) {
+            const invoice = await this.store.getHoldInvoiceRecord(key);
+            if (invoice !== null) {
+                refuseHashTwin(invoice, paymentHashHex);
+                // The rule would read the hash both as a payment out and as an invoice.
                 throw new DebitIntentError("own_invoice", `${paymentHashHex} is the hash of a hold invoice of this device`);
             }
             const current = await this.store.getDebitIntent(key);
             if (current !== null) {
-                assertSameHash(current, paymentHashHex);
-                if (current.open) {
-                    if (current.maxShannons === maxShannons) return;
-                    throw new DebitIntentError("intent_open", `a debit intent for ${paymentHashHex} is already open with another maximum`);
-                }
+                refuseHashTwin(current, paymentHashHex);
+                // Whatever the maximum: a repeat would be a second payment under the hash.
+                if (current.open) throw new DebitIntentError("intent_open", `a debit intent for ${paymentHashHex} is already open`);
                 if (await this.chargedAnywhere(current)) {
                     throw new DebitIntentError(
                         "intent_charged",
@@ -442,6 +442,18 @@ export class PolicyEngine {
                 return current.open ? { ...current, open: false } : current;
             });
         });
+    }
+
+    /**
+     * Reads a payment's debit intent by its full hash.
+     * @param paymentHashHex The payment hash, 32 bytes of lowercase hex.
+     * @returns The record, or null when none was recorded under this full hash.
+     */
+    async readDebitIntent(paymentHashHex: string): Promise<DebitIntentRecord | null> {
+        assertHexBytes("paymentHashHex", paymentHashHex, PAYMENT_HASH_LENGTH);
+        const record = await this.store.getDebitIntent(boundPaymentHashOf(paymentHashHex));
+        // A twin's record is another payment's, never this one's.
+        return record?.paymentHash === paymentHashHex ? record : null;
     }
 
     /**
@@ -1043,6 +1055,20 @@ function assertSameHash(record: { paymentHash: string }, paymentHashHex: string)
     if (record.paymentHash !== paymentHashHex) {
         throw new TypeError(
             `${paymentHashHex} shares its bound ${TRUNCATED_PAYMENT_HASH_LENGTH} bytes with a recorded payment, ${record.paymentHash}`,
+        );
+    }
+}
+
+/**
+ * Refuses a payment whose hash shares the bytes a TLC's witness binds with another recorded payment's.
+ * @param record The record filed under the bound payment hash.
+ * @param paymentHashHex The full payment hash the user would pay.
+ */
+function refuseHashTwin(record: { paymentHash: string }, paymentHashHex: string): void {
+    if (record.paymentHash !== paymentHashHex) {
+        throw new DebitIntentError(
+            "hash_twin",
+            `the ${TRUNCATED_PAYMENT_HASH_LENGTH} bytes of ${paymentHashHex} a TLC's witness binds are another payment's`,
         );
     }
 }

@@ -25,6 +25,7 @@ import { asRecord } from "../../utils/json-shape";
 import { rejection } from "../../utils/rejection";
 import { LIST_CHANNELS_CALL, signingStatusCall } from "../../utils/rpc-answers";
 import { withField } from "../../utils/with-field";
+import { storedAt, writes } from "../../utils/stored-records";
 
 const URL = "http://127.0.0.1:8227";
 const MASTER_SEED = hexToBytes("24".repeat(32));
@@ -274,11 +275,6 @@ function harness(): Harness {
     return { storage, store, policy, node, options };
 }
 
-function storedAt(h: Harness, key: string): unknown {
-    const raw = h.storage.map.get(key);
-    return raw === undefined ? undefined : JSON.parse(raw);
-}
-
 function pendingOf(channelIndex: number, channelId: string | null, fundedShannons: string = AMOUNT): unknown {
     return { version: 1, opening: { channelIndex, fundedShannons, userLock: USER_LOCK_HEX, channelId } };
 }
@@ -311,10 +307,6 @@ function seeded(opening: unknown): Harness {
     h.storage.map.set(OPENING_KEY, JSON.stringify(opening));
     h.storage.map.set(ALLOCATOR_KEY, JSON.stringify(INDEX));
     return h;
-}
-
-function writes(h: Harness): string[] {
-    return h.storage.ops.filter((op) => op.startsWith("set ")).map((op) => op.slice("set ".length));
 }
 
 function openCall(params: unknown = OPEN_PARAMS): SentCall {
@@ -369,21 +361,35 @@ describe("prepareSdkChannelOpen", () => {
         const h = harness();
         let pending: unknown;
         h.node.onCall("open_tenant_channel", () => {
-            pending = storedAt(h, OPENING_KEY);
+            pending = storedAt(h.storage, OPENING_KEY);
         });
         h.node.result(OPEN_ANSWER);
         await prepareSdkChannelOpen(h.options, AMOUNT, USER_LOCK);
         expect(pending).toEqual(pendingOf(INDEX, null));
-        expect(storedAt(h, ALLOCATOR_KEY)).toBe(INDEX);
+        expect(storedAt(h.storage, ALLOCATOR_KEY)).toBe(INDEX);
     });
 
     it("names the opening, then registers and pins the whole answer and watches the channel, all before handing the tx out", async () => {
         const h = await opened();
-        expect(writes(h)).toEqual([ALLOCATOR_KEY, OPENING_KEY, OPENING_KEY, RECORD_KEY, ALIAS_KEY, RECORD_KEY, RECORD_KEY, ACTIVITY_KEY]);
+        expect(writes(h.storage)).toEqual([
+            ALLOCATOR_KEY,
+            OPENING_KEY,
+            OPENING_KEY,
+            RECORD_KEY,
+            ALIAS_KEY,
+            RECORD_KEY,
+            RECORD_KEY,
+            ACTIVITY_KEY,
+        ]);
         expect(await h.store.resolveChannelIndex(CHANNEL_ID)).toBe(INDEX);
         expect((await h.store.getChannelRecord(INDEX))?.pins).toStrictEqual(PINS);
-        expect(storedAt(h, ACTIVITY_KEY)).toEqual({ version: 1, channels: { [CHANNEL_ID]: { status: null } }, payments: {}, invoices: {} });
-        expect(storedAt(h, OPENING_KEY)).toEqual(pendingOf(INDEX, CHANNEL_ID));
+        expect(storedAt(h.storage, ACTIVITY_KEY)).toEqual({
+            version: 1,
+            channels: { [CHANNEL_ID]: { status: null } },
+            payments: {},
+            invoices: {},
+        });
+        expect(storedAt(h.storage, OPENING_KEY)).toEqual(pendingOf(INDEX, CHANNEL_ID));
     });
 
     it("leaves the channel served by the signing step before its tx is submitted, and not before it is prepared", async () => {
@@ -407,19 +413,19 @@ describe("prepareSdkChannelOpen", () => {
             const h = harness();
             h.node.reject(new Error("offline"));
             expect(await rejection(prepareSdkChannelOpen(h.options, AMOUNT, USER_LOCK))).toBeInstanceOf(RpcTransportError);
-            expect(storedAt(h, OPENING_KEY)).toEqual(pendingOf(INDEX, null));
+            expect(storedAt(h.storage, OPENING_KEY)).toEqual(pendingOf(INDEX, null));
             h.node.result(OPEN_ANSWER);
             await expect(prepareSdkChannelOpen(h.options, AMOUNT, USER_LOCK)).resolves.toStrictEqual(OPENING);
             expect(h.node.calls()).toEqual([openCall(), openCall()]);
-            expect(writes(h).filter((key) => key === ALLOCATOR_KEY)).toHaveLength(1);
-            expect(storedAt(h, OPENING_KEY)).toEqual(pendingOf(INDEX, CHANNEL_ID));
+            expect(writes(h.storage).filter((key) => key === ALLOCATOR_KEY)).toHaveLength(1);
+            expect(storedAt(h.storage, OPENING_KEY)).toEqual(pendingOf(INDEX, CHANNEL_ID));
         });
 
         it("keeps it when the node's answer cannot be read, an outcome as unknown as a lost one", async () => {
             const h = harness();
             h.node.result({ channel_id: CHANNEL_ID });
             expect(await rejection(prepareSdkChannelOpen(h.options, AMOUNT, USER_LOCK))).toBeInstanceOf(RpcResponseError);
-            expect(storedAt(h, OPENING_KEY)).toEqual(pendingOf(INDEX, null));
+            expect(storedAt(h.storage, OPENING_KEY)).toEqual(pendingOf(INDEX, null));
         });
 
         it("keeps it through an interruption fiber answers as an error, and the next call resends the identical request", async () => {
@@ -432,11 +438,11 @@ describe("prepareSdkChannelOpen", () => {
                 code: -32000,
                 message: "tenant opening interrupted; retry the same request: Timeout",
             });
-            expect(storedAt(h, OPENING_KEY)).toEqual(pendingOf(INDEX, null));
+            expect(storedAt(h.storage, OPENING_KEY)).toEqual(pendingOf(INDEX, null));
             h.node.result(OPEN_ANSWER);
             await expect(prepareSdkChannelOpen(h.options, AMOUNT, USER_LOCK)).resolves.toStrictEqual(OPENING);
             expect(h.node.calls()).toEqual([openCall(), openCall()]);
-            expect(writes(h).filter((key) => key === ALLOCATOR_KEY)).toHaveLength(1);
+            expect(writes(h.storage).filter((key) => key === ALLOCATOR_KEY)).toHaveLength(1);
         });
 
         it.each([
@@ -447,7 +453,7 @@ describe("prepareSdkChannelOpen", () => {
             const h = harness();
             h.node.error(-32000, message);
             expect(await rejection(prepareSdkChannelOpen(h.options, AMOUNT, USER_LOCK))).toMatchObject({ code: -32000, message });
-            expect(storedAt(h, OPENING_KEY)).toEqual(pendingOf(INDEX, null));
+            expect(storedAt(h.storage, OPENING_KEY)).toEqual(pendingOf(INDEX, null));
         });
 
         it("resumes one that named its channel while the node lists the channel opening, pinning nothing new", async () => {
@@ -457,7 +463,7 @@ describe("prepareSdkChannelOpen", () => {
             await expect(prepareSdkChannelOpen(h.options, AMOUNT, USER_LOCK)).resolves.toStrictEqual(OPENING);
             expect(h.node.calls()).toEqual([openCall(), ONLY_PENDING_CALL, openCall()]);
             expect(h.storage.map.get(RECORD_KEY)).toBe(record);
-            expect(writes(h)).toHaveLength(8);
+            expect(writes(h.storage)).toHaveLength(8);
         });
 
         it("drops one whose channel the node aborted, and opens under a fresh index", async () => {
@@ -466,7 +472,7 @@ describe("prepareSdkChannelOpen", () => {
             expect(await rejection(prepareSdkChannelOpen(h.options, AMOUNT, USER_LOCK))).toBeInstanceOf(RpcTransportError);
             expect(h.node.calls()).toEqual([ONLY_PENDING_CALL, expect.objectContaining({ method: "open_tenant_channel" })]);
             expect(baseKeysSent(h, 1)).toEqual(NEXT_BASE_PUBLIC_KEYS);
-            expect(storedAt(h, OPENING_KEY)).toEqual(pendingOf(NEXT_INDEX, null));
+            expect(storedAt(h.storage, OPENING_KEY)).toEqual(pendingOf(NEXT_INDEX, null));
         });
 
         it("drops only the aborted opening: one another call wrote meanwhile is not cleared", async () => {
@@ -477,7 +483,7 @@ describe("prepareSdkChannelOpen", () => {
             h.node.result({ channels: [{ channel_id: CHANNEL_ID, state: ABORTED }] }).reject(new Error("offline"));
             await rejection(prepareSdkChannelOpen(h.options, AMOUNT, USER_LOCK));
             // No write clears the other call's opening before the fresh one replaces it.
-            expect(writes(h)).toEqual([ALLOCATOR_KEY, OPENING_KEY]);
+            expect(writes(h.storage)).toEqual([ALLOCATOR_KEY, OPENING_KEY]);
         });
 
         it("drops one whose channel the node aborted even when no fresh index can be allocated", async () => {
@@ -486,7 +492,7 @@ describe("prepareSdkChannelOpen", () => {
             h.node.result({ channels: [{ channel_id: CHANNEL_ID, state: ABORTED }] });
             expect(await rejection(prepareSdkChannelOpen(h.options, AMOUNT, USER_LOCK))).toEqual(new Error("storage offline"));
             expect(h.node.calls()).toEqual([ONLY_PENDING_CALL]);
-            expect(storedAt(h, OPENING_KEY)).toEqual({ version: 1, opening: null });
+            expect(storedAt(h.storage, OPENING_KEY)).toEqual({ version: 1, opening: null });
         });
 
         it.each([
@@ -497,14 +503,14 @@ describe("prepareSdkChannelOpen", () => {
             h.node.result({ channels }).reject(new Error("offline"));
             await rejection(prepareSdkChannelOpen(h.options, AMOUNT, USER_LOCK));
             expect(h.node.calls()).toEqual([ONLY_PENDING_CALL, openCall()]);
-            expect(storedAt(h, OPENING_KEY)).toEqual(pendingOf(INDEX, CHANNEL_ID));
+            expect(storedAt(h.storage, OPENING_KEY)).toEqual(pendingOf(INDEX, CHANNEL_ID));
         });
 
         it("keeps one that named its channel when fiber refuses the resumed request as already open", async () => {
             const h = seeded(pendingOf(INDEX, CHANNEL_ID));
             h.node.result({ channels: [] }).error(-32000, "tenant channel is already open");
             expect(await rejection(prepareSdkChannelOpen(h.options, AMOUNT, USER_LOCK))).toBeInstanceOf(RpcError);
-            expect(storedAt(h, OPENING_KEY)).toEqual(pendingOf(INDEX, CHANNEL_ID));
+            expect(storedAt(h.storage, OPENING_KEY)).toEqual(pendingOf(INDEX, CHANNEL_ID));
         });
 
         it("drops only its own unnamed opening when the answer fails the check: one written meanwhile survives", async () => {
@@ -513,7 +519,7 @@ describe("prepareSdkChannelOpen", () => {
             h.node.onCall("open_tenant_channel", () => h.storage.map.set(OPENING_KEY, JSON.stringify(meanwhile)));
             h.node.result(withField(OPEN_ANSWER, "opening_context.commitment_delay_epoch", "0x10000000000"));
             expect(await rejection(prepareSdkChannelOpen(h.options, AMOUNT, USER_LOCK))).toMatchObject({ code: "opening_rejected" });
-            expect(storedAt(h, OPENING_KEY)).toEqual(meanwhile);
+            expect(storedAt(h.storage, OPENING_KEY)).toEqual(meanwhile);
         });
 
         it("keeps it when the pending channels cannot be listed, asking nothing more", async () => {
@@ -521,7 +527,7 @@ describe("prepareSdkChannelOpen", () => {
             h.node.reject(new Error("offline"));
             expect(await rejection(prepareSdkChannelOpen(h.options, AMOUNT, USER_LOCK))).toBeInstanceOf(RpcTransportError);
             expect(h.node.calls()).toEqual([ONLY_PENDING_CALL]);
-            expect(storedAt(h, OPENING_KEY)).toEqual(pendingOf(INDEX, CHANNEL_ID));
+            expect(storedAt(h.storage, OPENING_KEY)).toEqual(pendingOf(INDEX, CHANNEL_ID));
         });
 
         it.each<[string, string, Script]>([
@@ -553,8 +559,8 @@ describe("prepareSdkChannelOpen", () => {
                 code: "opening_rejected",
                 message: "the node's opening is refused: openingContext.commitmentDelayEpoch is 1099511627776, not the 1099511627777 asked",
             });
-            expect(storedAt(h, OPENING_KEY)).toEqual({ version: 1, opening: null });
-            expect(writes(h)).toEqual([ALLOCATOR_KEY, OPENING_KEY, OPENING_KEY]);
+            expect(storedAt(h.storage, OPENING_KEY)).toEqual({ version: 1, opening: null });
+            expect(writes(h.storage)).toEqual([ALLOCATOR_KEY, OPENING_KEY, OPENING_KEY]);
         });
 
         it("keeps it, named, when pinning fails short of a conflict, and the same call then pins what is left", async () => {
@@ -562,11 +568,11 @@ describe("prepareSdkChannelOpen", () => {
             jest.spyOn(h.options.activity, "watch").mockRejectedValueOnce(new Error("storage offline"));
             h.node.result(OPEN_ANSWER);
             expect(await rejection(prepareSdkChannelOpen(h.options, AMOUNT, USER_LOCK))).toEqual(new Error("storage offline"));
-            expect(storedAt(h, OPENING_KEY)).toEqual(pendingOf(INDEX, CHANNEL_ID));
+            expect(storedAt(h.storage, OPENING_KEY)).toEqual(pendingOf(INDEX, CHANNEL_ID));
             h.node.result({ channels: [{ channel_id: CHANNEL_ID, state: OPENING_STATE }] }).result(OPEN_ANSWER);
             await expect(prepareSdkChannelOpen(h.options, AMOUNT, USER_LOCK)).resolves.toStrictEqual(OPENING);
             expect(h.node.calls()).toEqual([openCall(), ONLY_PENDING_CALL, openCall()]);
-            expect(storedAt(h, ACTIVITY_KEY)).toEqual({
+            expect(storedAt(h.storage, ACTIVITY_KEY)).toEqual({
                 version: 1,
                 channels: { [CHANNEL_ID]: { status: null } },
                 payments: {},
@@ -582,7 +588,7 @@ describe("prepareSdkChannelOpen", () => {
             h.node.result({ channels: [{ channel_id: CHANNEL_ID, state: ABORTED }] }).result(nextIndexAnswer());
             await expect(prepareSdkChannelOpen(h.options, AMOUNT, USER_LOCK)).resolves.toMatchObject({ channelId: NEXT_CHANNEL_ID });
             expect(baseKeysSent(h, 2)).toEqual(NEXT_BASE_PUBLIC_KEYS);
-            expect(storedAt(h, OPENING_KEY)).toEqual(pendingOf(NEXT_INDEX, NEXT_CHANNEL_ID));
+            expect(storedAt(h.storage, OPENING_KEY)).toEqual(pendingOf(NEXT_INDEX, NEXT_CHANNEL_ID));
             expect(await h.store.resolveChannelIndex(NEXT_CHANNEL_ID)).toBe(NEXT_INDEX);
         });
     });
@@ -593,7 +599,7 @@ describe("prepareSdkChannelOpen", () => {
             h.node.reject(new Error("offline"));
             await rejection(prepareSdkChannelOpen(h.options, AMOUNT, USER_LOCK, CELL_DEPS));
             expect(h.node.calls()).toEqual([openCall({ ...OPEN_PARAMS, funding_lock_script_cell_deps: CELL_DEPS_WIRE })]);
-            expect(storedAt(h, OPENING_KEY)).toEqual(pendingWithDepsOf(INDEX, null));
+            expect(storedAt(h.storage, OPENING_KEY)).toEqual(pendingWithDepsOf(INDEX, null));
         });
 
         it.each<[string, CellDep[] | undefined]>([
@@ -604,7 +610,7 @@ describe("prepareSdkChannelOpen", () => {
             h.node.reject(new Error("offline"));
             await rejection(prepareSdkChannelOpen(h.options, AMOUNT, USER_LOCK, deps));
             expect(h.node.calls()).toEqual([openCall()]);
-            expect(storedAt(h, OPENING_KEY)).toEqual(pendingOf(INDEX, null));
+            expect(storedAt(h.storage, OPENING_KEY)).toEqual(pendingOf(INDEX, null));
         });
 
         it("resumes the opening asked with the same cell deps, resending the identical request", async () => {
@@ -614,7 +620,7 @@ describe("prepareSdkChannelOpen", () => {
             await rejection(prepareSdkChannelOpen(h.options, AMOUNT, USER_LOCK, structuredClone(CELL_DEPS)));
             const [first, second] = h.node.calls();
             expect(second).toEqual(first);
-            expect(storedAt(h, OPENING_KEY)).toEqual(pendingWithDepsOf(INDEX, null));
+            expect(storedAt(h.storage, OPENING_KEY)).toEqual(pendingWithDepsOf(INDEX, null));
         });
 
         it.each<[string, unknown, CellDep[] | undefined]>([
@@ -688,7 +694,7 @@ describe("prepareSdkChannelOpen", () => {
             h.node.result(OPEN_ANSWER);
             await expect(prepareSdkChannelOpen(h.options, AMOUNT, lock)).resolves.toStrictEqual(OPENING);
             expect((await h.store.getChannelRecord(INDEX))?.pins).toStrictEqual(PINS);
-            expect(storedAt(h, OPENING_KEY)).toEqual(pendingOf(INDEX, CHANNEL_ID));
+            expect(storedAt(h.storage, OPENING_KEY)).toEqual(pendingOf(INDEX, CHANNEL_ID));
         });
 
         it("keeps its own copy of the cell deps: writing to the caller's before they are recorded changes nothing", async () => {
@@ -701,7 +707,7 @@ describe("prepareSdkChannelOpen", () => {
             });
             h.node.reject(new Error("offline"));
             await rejection(prepareSdkChannelOpen(h.options, AMOUNT, USER_LOCK, deps));
-            expect(storedAt(h, OPENING_KEY)).toEqual(pendingWithDepsOf(INDEX, null));
+            expect(storedAt(h.storage, OPENING_KEY)).toEqual(pendingWithDepsOf(INDEX, null));
             expect(h.node.calls()).toEqual([openCall({ ...OPEN_PARAMS, funding_lock_script_cell_deps: CELL_DEPS_WIRE })]);
         });
     });
@@ -711,7 +717,7 @@ describe("prepareSdkChannelOpen", () => {
             const error = await rejection(prepareSdkChannelOpen(h.options, AMOUNT, USER_LOCK));
             if (!(error instanceof SdkError)) throw new Error("not an SdkError");
             expect(error.code).toBe("opening_conflict");
-            expect(storedAt(h, OPENING_KEY)).toEqual({ version: 1, opening: null });
+            expect(storedAt(h.storage, OPENING_KEY)).toEqual({ version: 1, opening: null });
             return error;
         }
 
@@ -798,7 +804,7 @@ describe("prepareSdkChannelOpen", () => {
                     "the pending opening could not be dropped: storage offline",
             });
             expect(error).not.toHaveProperty("cause");
-            expect(storedAt(h, OPENING_KEY)).toEqual(pendingOf(INDEX, null));
+            expect(storedAt(h.storage, OPENING_KEY)).toEqual(pendingOf(INDEX, null));
         });
 
         it("keeps opening_conflict and its cause, telling the failed drop in its message, and leaves the opening", async () => {
@@ -820,7 +826,7 @@ describe("prepareSdkChannelOpen", () => {
                     "the pending opening could not be dropped: storage offline",
             });
             expect((error as SdkError).cause).toBeInstanceOf(ChannelPinError);
-            expect(storedAt(h, OPENING_KEY)).toEqual(pendingOf(INDEX, CHANNEL_ID));
+            expect(storedAt(h.storage, OPENING_KEY)).toEqual(pendingOf(INDEX, CHANNEL_ID));
         });
     });
 
@@ -836,7 +842,7 @@ describe("prepareSdkChannelOpen", () => {
             expect(error).toEqual(new TypeError(message));
             expect(error).not.toBeInstanceOf(ChannelRegistrationError);
             expect(error).not.toBeInstanceOf(SdkError);
-            expect(storedAt(h, OPENING_KEY)).toEqual(pendingOf(INDEX, CHANNEL_ID));
+            expect(storedAt(h.storage, OPENING_KEY)).toEqual(pendingOf(INDEX, CHANNEL_ID));
         });
     });
 
@@ -920,7 +926,7 @@ describe("submitSdkFundingTx", () => {
         h.node.result(SUBMIT_ANSWER);
         await expect(submitSdkFundingTx(h.options, CHANNEL_ID, SIGNED_TX)).resolves.toBeUndefined();
         expect(h.node.calls().at(-1)).toEqual(SUBMIT_CALL);
-        expect(writes(h)).toHaveLength(8);
+        expect(writes(h.storage)).toHaveLength(8);
     });
 
     it.each<[string, string, unknown]>([
@@ -980,7 +986,7 @@ describe("submitSdkFundingTx", () => {
         await h.policy.registerChannel(OTHER_ID, 7, AMOUNT, USER_LOCK);
         // A close states the funding out point and no capacity, so it may pin the one without the other.
         const key = "fiber-lsp-sdk:channel:7";
-        const record = storedAt(h, key) as { pins: object };
+        const record = storedAt(h.storage, key) as { pins: object };
         h.storage.map.set(key, JSON.stringify({ ...record, pins: { ...record.pins, fundingOutPoint: `${FUNDING_TX_HASH}:0` } }));
         const error = await rejection(submitSdkFundingTx(h.options, OTHER_ID, SIGNED_TX));
         expect(error).toEqual(
@@ -1042,7 +1048,7 @@ describe("submitSdkFundingTx", () => {
         const h = await opened();
         h.node.reject(new Error("offline"));
         expect(await rejection(submitSdkFundingTx(h.options, CHANNEL_ID, SIGNED_TX))).toBeInstanceOf(RpcTransportError);
-        expect(storedAt(h, OPENING_KEY)).toEqual(pendingOf(INDEX, CHANNEL_ID));
+        expect(storedAt(h.storage, OPENING_KEY)).toEqual(pendingOf(INDEX, CHANNEL_ID));
     });
 
     describe("its arguments", () => {
@@ -1147,7 +1153,7 @@ describe("openSdkChannel", () => {
         h.node.result(OPEN_ANSWER);
         expect(await rejection(openSdkChannel(h.options, AMOUNT, USER_LOCK, sign))).toMatchObject({ code: "funding_tx_altered" });
         expect(h.node.calls()).toEqual([openCall()]);
-        expect(storedAt(h, OPENING_KEY)).toEqual(pendingOf(INDEX, CHANNEL_ID));
+        expect(storedAt(h.storage, OPENING_KEY)).toEqual(pendingOf(INDEX, CHANNEL_ID));
     });
 
     it("lets the host's refusal through, keeping the opening for a retry that resumes it", async () => {
@@ -1156,7 +1162,7 @@ describe("openSdkChannel", () => {
         h.node.result(OPEN_ANSWER);
         expect(await rejection(openSdkChannel(h.options, AMOUNT, USER_LOCK, () => Promise.reject(declined)))).toBe(declined);
         expect(h.node.calls()).toEqual([openCall()]);
-        expect(storedAt(h, OPENING_KEY)).toEqual(pendingOf(INDEX, CHANNEL_ID));
+        expect(storedAt(h.storage, OPENING_KEY)).toEqual(pendingOf(INDEX, CHANNEL_ID));
         h.node
             .result({ channels: [{ channel_id: CHANNEL_ID, state: OPENING_STATE }] })
             .result(OPEN_ANSWER)

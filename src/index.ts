@@ -44,9 +44,11 @@ export type {
     SdkNetwork,
     SdkNetworkConfig,
     SdkNetworkName,
+    SdkPayment,
     SdkSignFundingInputs,
     SdkTenantChallenge,
     SdkTenantRegistration,
+    SdkTransferOptions,
     SdkWatchtowerOptions,
     SigningEventOutcome,
 } from "./sdk";

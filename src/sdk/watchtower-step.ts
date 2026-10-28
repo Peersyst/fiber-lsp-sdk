@@ -1,11 +1,17 @@
 import type { PolicyEngine, SignerStore } from "../policy";
 import type { FiberRpcClient, RpcListedChannelState, RpcSigningStatusResult } from "../rpc";
-import { RpcError } from "../rpc";
 import type { SignerDispatch, WatchtowerDispatchOutcome } from "../signer";
 import type { PollRun, PollStep } from "./poller";
 import { WATCHTOWER_UNWATCHED_CLOSE_FLAGS, WATCHTOWER_UNWATCHED_ERROR } from "./sdk.constants";
 import type { SdkEvent } from "./sdk.types";
-import { answerEachPolled, deliverStepEvent, encodeSdkRequestId, misansweredStatusRefusal, reportStepFailure } from "./utils";
+import {
+    answerEachPolled,
+    deliverStepEvent,
+    encodeSdkRequestId,
+    isFiberRefusal,
+    misansweredStatusRefusal,
+    reportStepFailure,
+} from "./utils";
 
 export type WatchtowerSigningStepOptions = {
     rpc: FiberRpcClient;
@@ -39,8 +45,7 @@ async function readWatchtowerStatus(rpc: FiberRpcClient, channel: RpcListedChann
     try {
         return await rpc.getWatchtowerSigningStatus({ channelId: channel.channelId });
     } catch (error) {
-        const { code, message } = WATCHTOWER_UNWATCHED_ERROR;
-        if (channel.stateName !== "Closed" && error instanceof RpcError && error.code === code && error.message === message) return null;
+        if (channel.stateName !== "Closed" && isFiberRefusal(error, WATCHTOWER_UNWATCHED_ERROR)) return null;
         throw error;
     }
 }

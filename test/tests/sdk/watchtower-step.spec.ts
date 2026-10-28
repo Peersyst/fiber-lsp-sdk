@@ -18,8 +18,9 @@ import {
     watchtowerVariantOf,
 } from "../../utils/signing-vectors";
 import { rejection } from "../../utils/rejection";
-import { abandonAfterHandleWatchtower, live, pollFailedEvent, summarized, writesOf } from "../../utils/step-run";
+import { abandonAfterHandleWatchtower, live, pollFailedEvent, summarized } from "../../utils/step-run";
 import { withField } from "../../utils/with-field";
+import { writes } from "../../utils/stored-records";
 
 const vectors = loadSigningVectors();
 // Registered on an index with no record: polled, and idle wherever it is listed.
@@ -93,7 +94,7 @@ async function appliedOf(h: Harness): Promise<[string, boolean][]> {
 }
 
 function markWrite(h: Harness): string[] {
-    return [`set ${CHANNEL_RECORD_KEY_PREFIX}${h.channel.channelIndex}`];
+    return [`${CHANNEL_RECORD_KEY_PREFIX}${h.channel.channelIndex}`];
 }
 
 function signedEvent(channelId: string, spend: SigningWatchtowerSpendVector): SdkEvent {
@@ -168,7 +169,7 @@ describe("buildWatchtowerSigningStep", () => {
                 },
             ]);
             expect(mark).not.toHaveBeenCalled();
-            expect(writesOf(h.channel)).toEqual([]);
+            expect(writes(h.channel.storage)).toEqual([]);
             expect(await appliedOf(h)).toEqual([[SETTLEMENT.request_id, true]]);
             expect(h.events).toStrictEqual([signedEvent(id, SETTLEMENT), { ...signedEvent(id, SETTLEMENT), requestId: supersededId }]);
         });
@@ -195,7 +196,7 @@ describe("buildWatchtowerSigningStep", () => {
                 watchtowerStatusCall(id),
                 submissionCall(id, SETTLEMENT),
             ]);
-            expect(writesOf(h.channel)).toEqual([]);
+            expect(writes(h.channel.storage)).toEqual([]);
             expect(h.events).toStrictEqual([signedEvent(id, SETTLEMENT), signedEvent(id, SETTLEMENT)]);
         });
 
@@ -232,7 +233,7 @@ describe("buildWatchtowerSigningStep", () => {
             h.node.result({ channels: [{ channel_id: id, state: READY }] }).result(spendResult(id, OUTBOUND_TLC));
             await h.step(live());
             expect(h.node.calls()).toEqual([LIST_CHANNELS_WITH_CLOSED_CALL, watchtowerStatusCall(id)]);
-            expect(writesOf(h.channel)).toEqual([]);
+            expect(writes(h.channel.storage)).toEqual([]);
             expect(h.events).toStrictEqual([
                 {
                     type: "WATCHTOWER_SIGNING",
@@ -278,7 +279,7 @@ describe("buildWatchtowerSigningStep", () => {
             h.node.result({ channels: [{ channel_id: id, state: READY }] }).result(statusResult(id, status));
             await h.step(live());
             expect(h.node.calls()).toEqual([LIST_CHANNELS_WITH_CLOSED_CALL, watchtowerStatusCall(id)]);
-            expect(writesOf(h.channel)).toEqual([]);
+            expect(writes(h.channel.storage)).toEqual([]);
             expect(h.events).toStrictEqual([
                 {
                     type: "WATCHTOWER_SIGNING",
@@ -302,7 +303,7 @@ describe("buildWatchtowerSigningStep", () => {
             h.node.result({ channels: [{ channel_id: id, state: READY }] }).result(spendResult(OTHER_ID, SETTLEMENT));
             await h.step(live());
             expect(handle).not.toHaveBeenCalled();
-            expect(writesOf(h.channel)).toEqual([]);
+            expect(writes(h.channel.storage)).toEqual([]);
             expect(h.node.calls()).toEqual([LIST_CHANNELS_WITH_CLOSED_CALL, watchtowerStatusCall(id)]);
             expect(h.events).toStrictEqual([
                 {
@@ -442,7 +443,7 @@ describe("buildWatchtowerSigningStep", () => {
             h.node.result({ channels: [{ channel_id: id, state: READY }] }).result(statusResult(id, IDLE));
             await h.step(live());
             expect(h.node.calls()).toEqual([LIST_CHANNELS_WITH_CLOSED_CALL, watchtowerStatusCall(id)]);
-            expect(writesOf(h.channel)).toEqual([]);
+            expect(writes(h.channel.storage)).toEqual([]);
             expect(h.events).toEqual([]);
         });
 
@@ -552,7 +553,7 @@ describe("buildWatchtowerSigningStep", () => {
                     watchtowerStatusCall(id),
                     submissionCall(id, SETTLEMENT),
                 ]);
-                expect(writesOf(h.channel)).toEqual(markWrite(h));
+                expect(writes(h.channel.storage)).toEqual(markWrite(h));
                 expect(await appliedOf(h)).toEqual([[SETTLEMENT.request_id, true]]);
                 expect(h.events.at(-1)).toStrictEqual(signedEvent(id, SETTLEMENT));
             },
@@ -654,7 +655,7 @@ describe("buildWatchtowerSigningStep", () => {
                 .result(spendResult(id, SETTLEMENT));
             await h.step(run);
             expect(handle).not.toHaveBeenCalled();
-            expect(writesOf(h.channel)).toEqual([]);
+            expect(writes(h.channel.storage)).toEqual([]);
             expect(h.node.calls()).toEqual([LIST_CHANNELS_WITH_CLOSED_CALL, watchtowerStatusCall(id)]);
             expect(h.events).toEqual([]);
 
@@ -693,7 +694,7 @@ describe("buildWatchtowerSigningStep", () => {
                 submissionCall(id, INBOUND_TLC),
             ]);
             // The record answers with the signature it holds: the one write is the mark.
-            expect(writesOf(h.channel)).toEqual(markWrite(h));
+            expect(writes(h.channel.storage)).toEqual(markWrite(h));
             expect(h.events).toStrictEqual([signedEvent(id, INBOUND_TLC)]);
         });
 

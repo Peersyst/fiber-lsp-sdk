@@ -41,6 +41,7 @@ import {
     watchtowerStatusField,
 } from "../../utils/signing-vectors";
 import { withField } from "../../utils/with-field";
+import { writes } from "../../utils/stored-records";
 
 const vectors = loadSigningVectors();
 const KEYS = signingDeviceKeys(vectors);
@@ -108,16 +109,12 @@ function faultOf(outcome: DispatchOutcome): unknown {
     return outcome.cause;
 }
 
-function writesOf(storage: InMemorySignerStorage): string[] {
-    return storage.ops.filter((op) => op.startsWith("set "));
-}
-
 // Handles a status that must be refused before the claim: nothing is written, nor is the record changed.
 async function refusedUnclaimed(channel: SigningChannel, status: WireField, channelId = channel.channelId): Promise<SignerRefusal> {
     const before = [...channel.storage.map.entries()];
     channel.storage.ops.length = 0;
     const outcome = refusedOf(await channel.dispatch.handle(channelId, status));
-    expect(writesOf(channel.storage)).toEqual([]);
+    expect(writes(channel.storage)).toEqual([]);
     expect([...channel.storage.map.entries()]).toEqual(before);
     return outcome.error;
 }
@@ -491,7 +488,7 @@ describe("refusals, in the order of the steps", () => {
                 expect(bytesToHex(outcome.requestId ?? new Uint8Array())).toBe(
                     (caseOf(transition).result.status as { request_id: string }).request_id.slice(2),
                 );
-                expect(writesOf(channel.storage)).toEqual([]);
+                expect(writes(channel.storage)).toEqual([]);
             },
         );
     });
@@ -928,7 +925,7 @@ describe("re-delivery", () => {
         signedOf(await channel.dispatch.handle(channel.channelId, statusOf("SendCommitmentSigned")));
         channel.storage.ops.length = 0;
         signedOf(await channel.dispatch.handle(channel.channelId, statusOf("SendCommitmentSigned")));
-        expect(writesOf(channel.storage)).toEqual([]);
+        expect(writes(channel.storage)).toEqual([]);
     });
 
     it("writes the revocation evidence again on the delivery after it was lost", async () => {
@@ -1031,7 +1028,7 @@ describe("a second session on a served slot", () => {
         expect(firstAgain.status).toBe("already-signed");
         expect(firstAgain.warnings).toEqual([]);
         expect(bytesToHex(firstAgain.partialSignature)).toBe(caseOf("SendCommitmentSigned").expected.partial_signature);
-        expect(writesOf(channel.storage)).toEqual([]);
+        expect(writes(channel.storage)).toEqual([]);
     });
 
     it("keeps the complete revocation signature of a received revocation reused under allow", async () => {
@@ -1288,7 +1285,7 @@ describe("faults", () => {
         channel.storage.map.set(key, "garbage");
         channel.storage.ops.length = 0;
         expect(faultOf(await channel.dispatch.handle(channel.channelId, statusOf("SendCommitmentSigned")))).toBeInstanceOf(TypeError);
-        expect(writesOf(channel.storage)).toEqual([]);
+        expect(writes(channel.storage)).toEqual([]);
         channel.storage.map.set(key, record);
         expect(signedOf(await channel.dispatch.handle(channel.channelId, statusOf("SendCommitmentSigned"))).status).toBe("fresh");
     });
@@ -1322,7 +1319,7 @@ describe("faults", () => {
             policy: new PolicyEngine(new SignerStore(storage)),
         });
         expect(faultOf(await dispatch.handle(vectors.channel.channel_id, statusOf("SendCommitmentSigned")))).toBeInstanceOf(TypeError);
-        expect(writesOf(storage)).toEqual([]);
+        expect(writes(storage)).toEqual([]);
     });
 });
 
@@ -1414,7 +1411,7 @@ describe("handleWatchtower", () => {
         try {
             const outcome = watchtowerRefusedOf(await channel.dispatch.handleWatchtower(channelId, status));
             expect(sign).not.toHaveBeenCalled();
-            expect(writesOf(channel.storage)).toEqual([]);
+            expect(writes(channel.storage)).toEqual([]);
             expect([...channel.storage.map.entries()]).toEqual(before);
             return outcome;
         } finally {
@@ -1472,7 +1469,7 @@ describe("handleWatchtower", () => {
             try {
                 expect(await channel.dispatch.handleWatchtower(channel.channelId, spendStatusOf(SETTLEMENT))).toEqual(first);
                 expect(sign).not.toHaveBeenCalled();
-                expect(writesOf(channel.storage)).toEqual([]);
+                expect(writes(channel.storage)).toEqual([]);
             } finally {
                 sign.mockRestore();
             }
@@ -1514,7 +1511,7 @@ describe("handleWatchtower", () => {
             signature: hexToBytes(spend.signature.slice(2)),
             claimed: false,
         });
-        expect(writesOf(channel.storage)).toEqual([]);
+        expect(writes(channel.storage)).toEqual([]);
         expect([...channel.storage.map.entries()]).toEqual(before);
     });
 
@@ -1671,7 +1668,7 @@ describe("handleWatchtower", () => {
             channel.storage.ops.length = 0;
             const outcome = await channel.dispatch.handleWatchtower(channel.channelId, spendStatusOf(INBOUND_TLC));
             expect(outcome).toEqual({ kind: "fault", cause: expect.any(TypeError) });
-            expect(writesOf(channel.storage)).toEqual([]);
+            expect(writes(channel.storage)).toEqual([]);
         });
     });
 

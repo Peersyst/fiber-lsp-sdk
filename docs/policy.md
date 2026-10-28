@@ -439,18 +439,29 @@ takes the budget, and once it is closed `intent_charged` refuses it for good, so
 device. A paid pair and a failed pair leave the same exposure, so an offered TLC leaving beside a released
 one is charged rather than read as the released one failing. A preimage in the request would make both exact.
 
-An intent is never deleted. The host closes it when the payment is final, which only stops growth: TLCs already shown
-stay signable until they resolve. Recording an open intent again with the same maximum changes nothing, so a host unsure
-whether its first call landed may repeat it; another maximum is refused. A closed intent opens again with a fresh budget
-only if nothing was ever charged to it, which is fiber's own rule for sending a hash again after a failure. Those two
-refusals are state the user can cause, by paying one invoice twice, so they throw a `DebitIntentError` whose code says
-which (`intent_open`, `intent_charged`), and the facade can tell them from a malformed argument, which stays a
-`TypeError`. They are the host's and never reach the wire, so they are not `PolicyRefusalError`s. A third code,
-`own_invoice`, refuses an intent under the bound hash of one of this device's hold invoices: paying one's own invoice
-would have the rule read one hash as money out and money owed in at once. The reverse, an invoice under the hash of an
-authorised payment, is a host bug, since every preimage is derived anew, and stays a `TypeError`. The host records an
-intent before the operation that causes the TLC, never after: `transfer` records it and then issues `send_payment`. An
-invoice is recorded before the node hears of its hash, and marked released before the preimage leaves the device.
+An intent is never deleted. The facade closes it when the payment is final, its payment step on fiber's `Success`,
+`Failed` or "not found", and `transfer` itself when the node refuses the send ([sdk.md](./sdk.md)); a close only stops
+growth: TLCs already shown stay signable until they resolve. An open intent is never recorded again, whatever its
+maximum: a repeat would reach the node as a second payment under the hash, whose refusal would then close the first
+payment's intent, so whether a first call landed is read back from the node (`get_payment`), not asked again. The
+refusal runs in the balance lane, so of two concurrent records of one intent only one goes through. A closed intent
+opens again with a fresh budget only if nothing was ever charged to it, which is fiber's own rule for sending a hash
+again after a failure. Those two refusals are state the user can cause, by paying one invoice twice, so they throw a
+`DebitIntentError` whose code says which (`intent_open`, `intent_charged`), and the facade can tell them from a malformed
+argument, which stays a `TypeError`. They are the host's and never reach the wire, so they are not `PolicyRefusalError`s.
+A third code, `own_invoice`, refuses an intent under the bound hash of one of this device's hold invoices: paying one's
+own invoice would have the rule read one hash as money out and money owed in at once. A fourth, `hash_twin`, refuses a
+hash whose 20 bound bytes are already another payment's, an intent's or a hold invoice's under another full hash: the
+records are keyed by those bytes, so the two payments would share one record, and the invoice is the payee's doing, which
+the user can cause by paying it. The twin is checked before the record's own rules, so a twin of a hold invoice is
+`hash_twin` and not `own_invoice`. The reverse, an invoice under the hash of an authorised payment, is a host bug, since
+every preimage is derived anew, and stays a `TypeError`. The facade records an intent before the operation that causes
+the TLC, never after: `transfer` watches the hash, records the intent, and only then issues `send_payment`. An invoice is
+recorded before the node hears of its hash, and marked released before the preimage leaves the device.
+
+`readDebitIntent(paymentHashHex)` hands the record back by its whole hash, or `null` when none was recorded under it, a
+twin's included: a twin's record is another payment's, never this one's. It serves the payment step, which closes an
+intent only when one is there.
 
 A **cooperative close** is judged against both views at once: it lists no TLC, so neither view may still list one (fiber
 builds a close only once none is pending), and what its output pays the device may fall short of neither view's
@@ -788,7 +799,10 @@ commitment's decision and its claim, a release refused while an offered TLC is l
 view) and allowed on a channel that no longer lists one, an offered TLC refused beside a released TLC listed only in the
 other view, a charge found in the local view alone, a hash refused as both payment and invoice, an offered TLC refused on a
 channel holding a released one, two channels racing for it, a released preimage dropped and paid, the intent and invoice
-records' own rules, and on a channel driven with the full-hash cases of the vectors: the layout pinned at first sight by the
+records' own rules (an open intent refused when recorded again, with the same maximum or another, writing nothing, and
+one of two concurrent records let through; a closed one nothing was shown or charged under opened again, a charged one
+never; a twin of an intent and of a hold invoice refused as `hash_twin`; `readDebitIntent` reading the record by its
+full hash, a copy, and `null` for a hash never recorded and for a twin), and on a channel driven with the full-hash cases of the vectors: the layout pinned at first sight by the
 opening or by a revocation, a legacy commitment and a legacy revocation then refused by their layout (and the reverse on a
 legacy channel), the revocation sized under the pinned layout signed, a twin offered TLC refused through a real request, the
 whole hashes kept in the view, and a release held back by the invoice's own TLC beside an offered one but not by a twin. A
@@ -904,9 +918,6 @@ checked by breaking the code on purpose:
 | The record guard accepts a reserve map with an extra key           | 1                 |
 | The release's held filter ignores the whole hash                   | 3                 |
 | TLCs are compared without their whole hash                         | 1                 |
-| An open intent is replaced                                         | 1                 |
-| A repeat of an open intent is refused                              | 1                 |
-| An open intent repeated with another maximum is a no-op            | 1                 |
 | A twin hash answers for the recorded one                           | 2                 |
 | A record may sit under another hash's key                          | 2                 |
 | An intent record is read without its version                       | 3                 |
@@ -1079,6 +1090,11 @@ checked by breaking the code on purpose:
 | The reuse log may repeat the first session                         | 1                 |
 | The terms are not checked to be an object                          | 1                 |
 | A null nonce reuse mode is taken as the default                    | 1                 |
+| An open intent with the same maximum is a no-op again              | 1                 |
+| An open intent is reopened                                         | 3                 |
+| `readDebitIntent` skips the hash check                             | 3                 |
+| `readDebitIntent` returns a twin                                   | 1                 |
+| `readDebitIntent` returns nothing                                  | 3                 |
 
 Four mutants fail no test, and cannot. Letting any revocation at or above the remote view's last satisfy its rule is
 equivalent: `REVOKE:local` never passes that last, since the replacement rule holds a revocation at slot `n` to the view's
