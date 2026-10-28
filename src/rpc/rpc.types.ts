@@ -95,6 +95,7 @@ export type NewInvoiceParamsWire = {
     currency: InvoiceCurrency;
     payment_hash: HexWire;
     expiry: UintHexWire;
+    final_expiry_delta: UintHexWire;
     hash_algorithm: TlcHashAlgorithmWire;
 };
 
@@ -294,6 +295,10 @@ export type NewInvoiceParams = {
      * Required: an invoice created without one never expires.
      */
     expirySeconds: bigint;
+    /**
+     * Required: fiber's default, the build's minimum, leaves a held invoice no margin to settle.
+     */
+    finalExpiryDeltaMs: bigint;
     description?: string;
 };
 

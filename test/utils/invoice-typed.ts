@@ -5,7 +5,7 @@ import { toScript } from "./digest-inputs";
 import type { InvoiceAttributeVector, InvoiceCaseVector, InvoiceValuesVector } from "./invoice-vectors";
 import { HASH_ALGORITHM_WIRE } from "./wire-spellings";
 
-function hashAlgorithmOf(wire: string): TlcHashAlgorithm {
+export function hashAlgorithmOf(wire: string): TlcHashAlgorithm {
     const found = Object.entries(HASH_ALGORITHM_WIRE).find(([, spelling]) => spelling === wire);
     if (found === undefined) throw new Error(`the vectors carry an unknown hash algorithm: ${wire}`);
     return found[0] as TlcHashAlgorithm;

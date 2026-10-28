@@ -63,13 +63,15 @@ export type TenantDeviceOptions = {
     storage: InMemorySignerStorage;
 };
 
-export function tenantNode(channelIndexes: readonly number[] = [CHANNEL_INDEX]): InMemoryTenantNode {
+// `now`: the flow's clock, shared with the device.
+export function tenantNode(channelIndexes: readonly number[] = [CHANNEL_INDEX], now?: () => number): InMemoryTenantNode {
     const masterSeed = hexToBytes(vectors.device.master_seed);
     return new InMemoryTenantNode({
         channel: CHANNEL,
         lspPubkey: LSP_PUBKEY,
         deviceKeys: channelIndexes.map((index) => deriveChannelKeys(deriveChannelSeed(masterSeed, index))),
         peerKeys: signingPeerKeys(vectors),
+        now,
     });
 }
 

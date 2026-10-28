@@ -1,6 +1,14 @@
 import { COMPRESSED_POINT_LENGTH, DEP_TYPES, HASH256_LENGTH, MAX_TIMER_DELAY_MS, SCRIPT_HASH_TYPES, UINT32_MAX } from "../common.constants";
 import type { CellDep, OutPoint, Script, ScriptTemplate } from "../common.types";
-import { isCompressedPoint, isDecimalShannons, isHexBytes, isNonEmptyString, isPlainObject, isUnsignedInteger } from "./validate.utils";
+import {
+    isCompressedPoint,
+    isDecimalShannons,
+    isHexBytes,
+    isNonEmptyString,
+    isPlainObject,
+    isPositiveDecimalShannons,
+    isUnsignedInteger,
+} from "./validate.utils";
 
 /**
  * Asserts that a value is a byte array, of any length.
@@ -67,8 +75,29 @@ export function assertPositiveInteger(name: string, value: unknown, max: number)
  * @param max Highest accepted value.
  */
 export function assertUnsignedBigInt(name: string, value: bigint, max: bigint): void {
-    if (typeof value !== "bigint" || value < 0n || value > max) {
-        throw new RangeError(`${name} must be a bigint between 0 and ${max}, got ${value}`);
+    assertBigIntInRange(name, value, 0n, max);
+}
+
+/**
+ * Asserts that a value is a bigint within `[1, max]`.
+ * @param name Name for the error message.
+ * @param value Value to check.
+ * @param max Highest accepted value.
+ */
+export function assertPositiveBigInt(name: string, value: bigint, max: bigint): void {
+    assertBigIntInRange(name, value, 1n, max);
+}
+
+/**
+ * Asserts that a value is a bigint within `[min, max]`.
+ * @param name Name for the error message.
+ * @param value Value to check.
+ * @param min Lowest accepted value.
+ * @param max Highest accepted value.
+ */
+function assertBigIntInRange(name: string, value: bigint, min: bigint, max: bigint): void {
+    if (typeof value !== "bigint" || value < min || value > max) {
+        throw new RangeError(`${name} must be a bigint between ${min} and ${max}, got ${value}`);
     }
 }
 
@@ -125,6 +154,16 @@ export function assertDecimalShannons(name: string, value: string): void {
     if (!isDecimalShannons(value)) {
         throw new TypeError(`${name} must be an amount in decimal shannons`);
     }
+}
+
+/**
+ * Asserts that a value is an amount in decimal shannons above zero.
+ * @param name Name for the error message.
+ * @param value Value to check.
+ */
+export function assertPositiveDecimalShannons(name: string, value: string): void {
+    assertDecimalShannons(name, value);
+    if (!isPositiveDecimalShannons(value)) throw new RangeError(`${name} must be greater than 0, got 0`);
 }
 
 /**

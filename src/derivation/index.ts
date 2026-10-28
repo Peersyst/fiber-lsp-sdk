@@ -5,6 +5,7 @@ export {
     MAX_ACCOUNT_INDEX,
     MAX_CHANNEL_INDEX,
     MAX_COMMITMENT_NUMBER,
+    MAX_INVOICE_INDEX,
     NONCE_CONTEXTS,
     SECRET_KEY_LENGTH,
 } from "./derivation.constants";
@@ -18,6 +19,6 @@ export {
     getCommitmentSecret,
     pubkeyOf,
 } from "./fiber-scheme";
-export { deriveChannelSeed, deriveNonceSeed, deriveWalletIdentityKey } from "./device-scheme";
+export { deriveChannelSeed, deriveHoldInvoicePreimage, deriveNonceSeed, deriveWalletIdentityKey } from "./device-scheme";
 export { deriveMasterSeed } from "./master-seed";
 export { blake2bHashWithSalt } from "./utils";

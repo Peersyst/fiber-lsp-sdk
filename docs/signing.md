@@ -92,7 +92,8 @@ to 0, from 2^64 up to `u64::MAX`. Each expiry less the result saturates at 0, an
 epoch's length, fiber's `MILLI_SECONDS_PER_EPOCH`, is set by the node's build, 4 hours in release and 2 seconds in debug
 (`fiber-lib/src/fiber/config.rs:44-50`), so the device cannot deduce it: it comes in as the dispatch's
 `millisecondsPerEpoch`, a positive integer up to `Number.MAX_SAFE_INTEGER`, from the facade's network
-([sdk.md](./sdk.md)).
+([sdk.md](./sdk.md)). Both functions are exported through the module's barrel: the facade builds the margin a held
+payment's release must clear on `tlcExpiryDelay` ([sdk.md](./sdk.md), "The invoice step").
 
 ## Key orders
 
@@ -262,6 +263,21 @@ tenant's token back to the device.
 The private field is ES2022 syntax the build emits as is; under React Native, Metro's Babel preset transpiles it, as it
 does the bundle's other ES2022 syntax.
 
+## The hold invoice preimages
+
+`HoldInvoicePreimages` is the custodian of the preimages of the device's hold invoices, so that, as with the dispatch and
+the identity, no part of the SDK outside `signer` keeps the master seed. It copies the seed at construction, checked to
+be 32 bytes, into a private field, so the host may change or discard its own buffer, and gives out three things:
+
+- **`preimage(k)`**, the preimage of the invoice of index `k`, `deriveHoldInvoicePreimage` ([derivation.md](./derivation.md)),
+  derived on every call and handed out as a fresh copy.
+- **`paymentHash(k)`**, its payment hash: the preimage under `hashAlgorithm`, CKB's blake2b-256, also a fresh copy.
+- **`hashAlgorithm`**, `ckb-hash`, the algorithm `paymentHash` hashes with, which the facade states to the node and to the
+  policy's record.
+
+An index outside `[0, MAX_INVOICE_INDEX]` is the derivation's `RangeError`. The facade builds one at construction, and its
+invoice creation and its invoice step are its only readers ([sdk.md](./sdk.md), "Receiving a payment").
+
 ## What the engine signs
 
 The message is always an opaque 32-byte digest, handed to the session raw: BIP-327 applies its own tagged challenge hash,
@@ -368,9 +384,9 @@ Those pins, like the vectors, are the idempotent re-delivery contract, not snaps
 ## The node double and the flows
 
 `InMemoryTenantNode` (`test/utils/tenant-node.ts`) is the node end of the tenant RPC. It answers the injected `fetch`
-for the seven methods the facade calls, `open_tenant_channel` and `submit_signed_funding_tx` (below), `list_channels`,
-`get_channel_signing_status`, `submit_channel_signature`, `get_watchtower_signing_status` and
-`submit_watchtower_signature`, in fiber's shapes, and holds what fiber holds: the
+for the ten methods the facade calls, `open_tenant_channel` and `submit_signed_funding_tx` (below), `list_channels`,
+`get_channel_signing_status`, `submit_channel_signature`, `get_watchtower_signing_status`,
+`submit_watchtower_signature`, `new_invoice`, `get_invoice` and `settle_invoice`, in fiber's shapes, and holds what fiber holds: the
 counters L and R (`CommitmentNumbers`, both 0 before the open), the sites that issue a request off them, the points and
 nonces the device published, and the peer's musig2 half. It issues one request at a time and queues the movements that
 arrive while one is pending, as fiber buffers them. A submission first meets the conversions of fiber's RPC layer, ahead
@@ -385,7 +401,7 @@ whose funding key its open's material carries. The channel opens through the RPC
 moves through methods of the double (send, receive, fulfil, shutdown, force close): the client methods for those come
 with the facade. Beside them, it can tamper with its next request, go past one as if the device had answered it, keep a
 submission in the network until the next one, or drop the answer to a method's next call after handling it. Its
-opening and its watchtower halves are below.
+opening and its watchtower halves are below; its invoice half is with the flows that drive it ([sdk.md](./sdk.md)).
 
 The flows, `test/tests/sdk/signing-step.flow.spec.ts`, run the poller's signing step over the double with the real
 dispatch, policy and rpc client and a mock timer, on the harness both flow specs share (`test/utils/tenant-flow.ts`: the
@@ -556,6 +572,7 @@ flows that run the facade's opening over it are [sdk.md](./sdk.md)'s.
 | `src/signer/musig2-engine.ts`             | The public keys, points and nonces, the nonce sum, the partial signature, the peer's half verified, the aggregate             |
 | `src/signer/signer-material.ts`           | The opening block and the next material                                                                                       |
 | `src/signer/signing-deadline.ts`          | `tlcExpiryDelay` and `pendingTlcSignatureDeadline`: fiber's deadline for a pending request, its f64 arithmetic and casts      |
+| `src/signer/hold-invoice-preimages.ts`    | `HoldInvoicePreimages`: the seed's copy, each invoice's preimage and payment hash, the algorithm                              |
 | `src/signer/tenant-identity.ts`           | The RootSigner: its public key, the tenant id, the registry payload, its digest and the registration signature                |
 | `src/signer/onchain-signature.ts`         | `signOnchain`: the watchtower's recoverable signature under the key its purpose names                                         |
 | `src/signer/signer.constants.ts`          | The key order per transition, fiber's two tenant domains                                                                      |
@@ -761,3 +778,21 @@ metrics):
 | No TLC gives a zero deadline                            | 1                 |
 | The network's epoch length is ignored                   | 1                 |
 | The saturation starts one ulp late                      | 1                 |
+
+`test/tests/signer/hold-invoice-preimages.spec.ts` pins the custodian of the hold invoice preimages against the device
+scheme's pinned preimage and a literal payment hash at index 0 and at the last index, requires a fresh copy from every call,
+refuses each malformed index and master seed, changes the host's seed array after construction to no effect, and states
+ckb-hash as `hashAlgorithm` (`test/tests/signer`, still 100% on all four metrics):
+
+| Mutation                                                    | Tests that failed |
+| ----------------------------------------------------------- | ----------------- |
+| The preimage ignores the index                              | 8                 |
+| The payment hash is of the next index's preimage            | 5                 |
+| A preimage is handed out by reference, cached per index     | 3                 |
+| The preimages' seed is not checked at construction          | 3                 |
+| The payment hash is salted with the master seed             | 2                 |
+| The payment hash is the preimage itself                     | 2                 |
+| The payment hash is the preimage under sha256               | 2                 |
+| A payment hash is handed out by reference, cached per index | 1                 |
+| The preimages state sha256 as their algorithm               | 1                 |
+| The preimages' seed is held by reference                    | 1                 |

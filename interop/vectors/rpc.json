@@ -2040,6 +2040,7 @@
             "payment_hash": "0925435785680234bf8c01f1d0a8f876ca2a013665dedc5867a2a5a58ae974c0",
             "hash_algorithm": "ckb_hash",
             "expiry": "3600",
+            "final_expiry_delta": "86400000",
             "description": "device invoice"
           },
           "json": {
@@ -2050,7 +2051,7 @@
             "payment_hash": "0x0925435785680234bf8c01f1d0a8f876ca2a013665dedc5867a2a5a58ae974c0",
             "expiry": "0xe10",
             "fallback_address": null,
-            "final_expiry_delta": null,
+            "final_expiry_delta": "0x5265c00",
             "udt_type_script": null,
             "hash_algorithm": "ckb_hash",
             "allow_mpp": null,
@@ -2065,6 +2066,7 @@
             "payment_hash": "c54333bb9073f668208a4665c7f4c21021fdb049cd62e5609afa6da1d678db34",
             "hash_algorithm": "sha256",
             "expiry": "86400",
+            "final_expiry_delta": "86400000",
             "description": null
           },
           "json": {
@@ -2075,7 +2077,7 @@
             "payment_hash": "0xc54333bb9073f668208a4665c7f4c21021fdb049cd62e5609afa6da1d678db34",
             "expiry": "0x15180",
             "fallback_address": null,
-            "final_expiry_delta": null,
+            "final_expiry_delta": "0x5265c00",
             "udt_type_script": null,
             "hash_algorithm": "sha256",
             "allow_mpp": null,
@@ -2090,6 +2092,7 @@
             "payment_hash": "0afdebd4f2b0e145d0c2f4eba084f9898f2b58165f04543acc909a90b75d57a4",
             "hash_algorithm": "ckb_hash",
             "expiry": "18446744073709551615",
+            "final_expiry_delta": "86400000",
             "description": ""
           },
           "json": {
@@ -2100,7 +2103,7 @@
             "payment_hash": "0x0afdebd4f2b0e145d0c2f4eba084f9898f2b58165f04543acc909a90b75d57a4",
             "expiry": "0xffffffffffffffff",
             "fallback_address": null,
-            "final_expiry_delta": null,
+            "final_expiry_delta": "0x5265c00",
             "udt_type_script": null,
             "hash_algorithm": "ckb_hash",
             "allow_mpp": null,

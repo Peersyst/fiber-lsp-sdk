@@ -16,7 +16,6 @@ export const CHANNEL_RECORD_KEY_PREFIX = `${STORAGE_KEY_NAMESPACE}:channel:`;
  * Channel id to channel index, many to one: fiber renames a channel when the open handshake fixes its id.
  */
 export const CHANNEL_ALIAS_KEY_PREFIX = `${STORAGE_KEY_NAMESPACE}:alias:`;
-export const HOLD_INVOICE_PREIMAGE_KEY_PREFIX = `${STORAGE_KEY_NAMESPACE}:preimage:`;
 
 export const DEBIT_INTENT_KEY_PREFIX = `${STORAGE_KEY_NAMESPACE}:intent:`;
 
@@ -31,7 +30,7 @@ export const POLICY_VIEWS = ["remote", "local"] as const;
 
 export const DEBIT_INTENT_ERROR_CODES = ["intent_open", "intent_charged", "own_invoice"] as const;
 
-export const HOLD_INVOICE_ERROR_CODES = ["offered_in_flight", "algorithm_mismatch"] as const;
+export const HOLD_INVOICE_ERROR_CODES = ["offered_in_flight", "algorithm_mismatch", "not_held", "expiry_too_close"] as const;
 
 /**
  * Pinned to the first value stated; the terms are the host's, and the other pins are fixed at registration.

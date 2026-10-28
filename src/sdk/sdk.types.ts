@@ -15,13 +15,14 @@ import type {
     FiberRpcClient,
     GetTenantRegistryNonceResult,
     IFetchLike,
+    NewInvoiceParams,
     RegisterTenantParams,
     RpcChannelStateName,
     RpcInvoiceStatus,
     RpcPaymentStatus,
     TenantChannelOpeningContext,
 } from "../rpc";
-import type { SignerDispatch, SignerRefusal, TenantIdentity } from "../signer";
+import type { HoldInvoicePreimages, SignerDispatch, SignerRefusal, TenantIdentity } from "../signer";
 import type { ActivityTracker } from "./activity";
 import type { IndexAllocator } from "./allocator";
 import type { PendingOpeningStore } from "./pending-opening";
@@ -135,6 +136,10 @@ type SdkEventPayloads = {
     PAYMENT_FAILED: { paymentHashHex: string; reason: string };
     PAYMENT_PENDING: { paymentHashHex: string };
     PAYMENT_RECEIVED: { paymentHashHex: string };
+    /**
+     * Ended unpaid, its preimage never released: fiber expired or cancelled it, or it is past its expiry with no TLC of it left.
+     */
+    PAYMENT_EXPIRED: { paymentHashHex: string };
     SIGNING: SigningEventPayload;
     WATCHTOWER_SIGNING: WatchtowerSigningEventPayload;
     ERROR: { error: SdkError };
@@ -250,6 +255,33 @@ export type SdkOpeningPins = {
     fundingCapacityShannons: string;
 };
 
+export type SdkInvoiceOptions = {
+    /**
+     * At most 639 bytes of well-formed UTF-8, fiber's bound.
+     */
+    description?: string;
+    /**
+     * Whole seconds; defaults to one hour.
+     */
+    expirySeconds?: number;
+};
+
+export type SdkInvoice = {
+    /**
+     * The node's string, checked: the one to show the payer.
+     */
+    invoice: string;
+    /**
+     * `0x`-prefixed lowercase hex, as the events carry it.
+     */
+    paymentHashHex: string;
+};
+
+/**
+ * What the device sent `new_invoice`, and the LSP's key, which fiber writes as a tenant's trampoline hint.
+ */
+export type SdkInvoiceRequest = NewInvoiceParams & { lspPubkey: Uint8Array };
+
 export type SdkTenantChallenge = GetTenantRegistryNonceResult;
 
 export type SdkTenantRegistration = RegisterTenantParams & { tenantId: string };
@@ -280,6 +312,7 @@ export type SdkContext = {
     now: () => number;
     store: SignerStore;
     identity: TenantIdentity;
+    preimages: HoldInvoicePreimages;
     rpc: FiberRpcClient;
     policy: PolicyEngine;
     dispatch: SignerDispatch;

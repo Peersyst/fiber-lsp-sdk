@@ -8,6 +8,8 @@ import {
     HASH256_LENGTH,
     MILLISECONDS_PER_SECOND,
     PARTIAL_SIGNATURE_LENGTH,
+    PAYMENT_HASH_LENGTH,
+    PREIMAGE_LENGTH,
     PUBLIC_NONCE_LENGTH,
     RECOVERABLE_ECDSA_SIGNATURE_LENGTH,
     SHANNONS_PER_CKB,
@@ -36,6 +38,8 @@ import {
 } from "../../src/digest";
 import { buildRevocationContent } from "../../src/digest/revocation";
 import { buildClosingTx } from "../../src/digest/shutdown-tx";
+import type { Invoice, InvoiceAttribute, InvoiceCurrency, UnsignedInvoice } from "../../src/invoice";
+import { INVOICE_CURRENCIES, encodeInvoice, findInvoiceAttribute } from "../../src/invoice";
 import type { PolicyView, SignSlot, WatchtowerKeyPurpose } from "../../src/policy";
 import { reservedCkbShannons } from "../../src/policy";
 import type { ChannelSigningTransition } from "../../src/protocol";
@@ -54,28 +58,34 @@ import type {
     FetchResponseLike,
     IFetchLike,
     ListChannelsParamsWire,
+    NewInvoiceParamsWire,
     NextChannelSignerMaterialWire,
     OpenTenantChannelParamsWire,
     OpenTenantChannelResultWire,
     RpcChannelIdParamsWire,
     RpcChannelStateWire,
     RpcChannelWire,
+    RpcInvoiceStatus,
+    RpcPaymentHashParamsWire,
     RpcSubmissionResult,
+    SettleInvoiceParamsWire,
     SubmitChannelSignatureParamsWire,
     SubmitSignedFundingTxParamsWire,
     SubmitWatchtowerSignatureParamsWire,
     TenantChannelOpeningContextWire,
 } from "../../src/rpc";
 import { RPC_CALL_FAILED_CODE } from "../../src/rpc";
-import type { TlcHashAlgorithmWire, WireField } from "../../src/wire";
+import type { WireField } from "../../src/wire";
 import {
     WireError,
     decodeAnyHexBytes,
     decodeBareHexBytes,
     decodeBoolean,
     decodeCellDep,
+    decodeEnum,
     decodeHexBytes,
     decodeScript,
+    decodeString,
     decodeTransaction,
     decodeUintHex,
     encodeAnyHexBytes,
@@ -91,8 +101,12 @@ import {
 } from "../../src/wire";
 import type { SentCall } from "../mocks/rpc";
 import { toLockLayout, toOutPoint, toScript } from "./digest-inputs";
+import { invoiceJson } from "./invoice-json";
+import { signInvoice } from "./invoice-signing";
+import { hashAlgorithmOf } from "./invoice-typed";
 import { signPeerHalf } from "./peer-musig";
-import { signingCommitmentLock } from "./signing-channel";
+import { hashPreimage } from "./preimage-hash";
+import { SIGNING_MILLISECONDS_PER_EPOCH, signingCommitmentLock } from "./signing-channel";
 import type { SigningVectors } from "./signing-vectors";
 import type { WatchtowerCell, WatchtowerParty, WatchtowerSpendContext, WatchtowerTlc } from "./tenant-watchtower";
 import {
@@ -103,14 +117,14 @@ import {
     verifyWatchtowerSignature,
     watchtowerRequestId,
 } from "./tenant-watchtower";
-import { HASH_ALGORITHM_WIRE } from "./wire-spellings";
+import { HASH_ALGORITHM_WIRE, hashAlgorithmWire } from "./wire-spellings";
 
 // jsonrpsee's refusals, before any fiber handler.
 const METHOD_NOT_FOUND_CODE = -32601;
 const INVALID_PARAMS_CODE = -32602;
 
 // The members fiber reads as fixed-length `SliceHex`.
-const FIXED_LENGTH_MEMBERS = ["channel_id", "request_id", "partial_signature"];
+const FIXED_LENGTH_MEMBERS = ["channel_id", "request_id", "partial_signature", "payment_hash", "payment_preimage"];
 
 const CURVE_ORDER = secp256k1.Point.Fn.ORDER;
 
@@ -142,6 +156,30 @@ const ADVANCING_TRANSITIONS: readonly NodeTransition[] = [
     "CompleteReceivedRevokeAndAck",
 ];
 
+// The vectors' chain is testnet's, and the tenant's config restricts its invoices to it (`rpc/invoice.rs:120-121`).
+const NODE_CURRENCY: InvoiceCurrency = "Fibt";
+
+// The tenant's own node key, which the LSP generated and keeps (`rpc/invoice.rs:107-118`): the payee of the tenant's invoices.
+const TENANT_SECRET_KEY = ckbBlake2b(utf8ToBytes("tenant node tenant key"));
+
+// Fiber's `MIN_TLC_EXPIRY_DELTA`, two thirds of the one-epoch default delay (`fiber/config.rs:39`, `:54-55`).
+const MIN_TLC_EXPIRY_DELTA_MS = (BigInt(SIGNING_MILLISECONDS_PER_EPOCH) * 2n) / 3n;
+
+// Fiber's own values, not read from `src`, so a wrong bound there cannot pass against the double: `MAX_PAYMENT_TLC_EXPIRY_LIMIT`
+// (`fiber/config.rs:58`), `DEFAULT_FINAL_TLC_EXPIRY_DELTA` (`fiber-types/src/invoice.rs:160`), a release build's
+// `CHECK_CHANNELS_INTERVAL` (`fiber/network.rs:254`) and `MAX_DESCRIPTION_LENGTH` (`fiber-types/src/invoice.rs:150`).
+const MAX_PAYMENT_TLC_EXPIRY_LIMIT_MS = 14n * 24n * 60n * 60n * 1000n;
+
+const DEFAULT_FINAL_TLC_EXPIRY_DELTA_MS = 24n * 60n * 60n * 1000n;
+
+const CHECK_CHANNELS_INTERVAL_MS = 60_000n;
+
+const MAX_DESCRIPTION_LENGTH = 639;
+
+// `trampoline_route_hint` sets `TRAMPOLINE_ROUTING_OPTIONAL`, bit 5, in a fresh one-byte vector (`invoice/invoice_impl.rs:103-106`,
+// `fiber-types/src/protocol.rs:245`, `:271-277`).
+const TRAMPOLINE_FEATURE_BITS = Uint8Array.of(0x20);
+
 // The initiator's commitment_signed, the other side's revoke_and_ack, then the reverse.
 const ROUNDS = {
     tenant: ["SendCommitmentSigned", "CompleteReceivedRevokeAndAck", "CompleteReceivedCommitment", "SendRevokeAndAck"],
@@ -165,6 +203,42 @@ type NodeTlc = {
     expiryMs: bigint;
     // Fiber's `created_at` (`channel.rs:9046`, `:9075`): the counters when the TLC was added.
     createdAt: { local: number; remote: number };
+    // Received, committed in both commitments and checked against its invoice, which holds it.
+    held: boolean;
+};
+
+// A row of the tenant's invoice store, under the hash of the invoice the node built.
+type NodeInvoice = {
+    invoice: Invoice;
+    // What `new_invoice` answered.
+    address: string;
+    // `Expired` is an `Open` one past its expiry, never stored (`rpc/invoice.rs:440-446`), and a tenant has no `cancel_invoice`
+    // (`rpc/tenant.rs:22-44`).
+    status: "Open" | "Received" | "Paid";
+    // What `settle_invoice` stored.
+    preimage: Uint8Array | null;
+};
+
+type NodeInvoiceStatus = Exclude<RpcInvoiceStatus, "Cancelled">;
+
+// Fiber's `NewInvoiceParams` (`fiber-json-types/src/invoice.rs:121-157`), the members the SDK never sends included.
+type NodeNewInvoiceParamsWire = NewInvoiceParamsWire &
+    Record<"payment_preimage" | "fallback_address" | "udt_type_script" | "allow_mpp" | "allow_trampoline_routing", unknown>;
+
+// An absent option `null`.
+type InvoiceRequest = {
+    amountShannons: bigint;
+    description: string | null;
+    currency: InvoiceCurrency;
+    preimage: Uint8Array | null;
+    paymentHash: Uint8Array | null;
+    expirySeconds: bigint | null;
+    fallbackAddress: string | null;
+    finalExpiryDeltaMs: bigint | null;
+    udtScript: Script | null;
+    hashAlgorithm: TlcHashAlgorithm | null;
+    allowMpp: boolean | null;
+    allowTrampolineRouting: boolean | null;
 };
 
 // Each side's liquid amount, TLCs aside.
@@ -286,6 +360,26 @@ export type TenantNodeChannel = {
 
 export type TenantNodePayment = { paymentHash: string; amountShannons: string; hashAlgorithm: TlcHashAlgorithm; expiryMs: string };
 
+// Without an expiry the TLC pays an invoice of the node's, and expires at the node's clock plus the invoice's final expiry delta:
+// the least fiber accepts once it is committed (`channel.rs:1724-1726`).
+export type TenantNodeReceivedPayment = Omit<TenantNodePayment, "expiryMs"> & { expiryMs?: string };
+
+// How the next `new_invoice` departs from fiber's build, every queued one applying; the row stores what it answered.
+export type TenantNodeInvoiceTamper =
+    | { kind: "paymentHash"; paymentHash: string }
+    | { kind: "amount"; amountShannons: string }
+    // Another clock than the one the node and the device share.
+    | { kind: "timestamp"; timestampMs: bigint }
+    | { kind: "noHint" }
+    | { kind: "hint"; nodeId: string }
+    // Before the payee, which fiber's builder writes last.
+    | { kind: "extraAttribute"; attribute: InvoiceAttribute }
+    | { kind: "feature"; bits: string }
+    // Signs with another key; the payee attribute stays the tenant's.
+    | { kind: "signer"; secretKey: string }
+    // The same invoice uppercase, which BIP-173 and fiber read: the SDK's decoder accepts no spelling but the one fiber writes.
+    | { kind: "uppercase" };
+
 export type TenantNodeTamper =
     // Aggregates the device's nonce of another slot.
     | { kind: "aggNonce" }
@@ -325,7 +419,7 @@ export type TenantNodeForceClose = {
     nodeLock: Script;
     // The chain's median time, which tells what has expired; the tip is past every delay of the lock.
     medianTimeMs: string;
-    // What the node's watchtower holds through `CreatePreimage`, lowercase hex.
+    // What the node's watchtower holds through `CreatePreimage`, lowercase hex, besides those `settle_invoice` hands it.
     preimages: string[];
     // How many commitments before the view's last one the broadcast one is. Fiber's watchtower settles one it holds the snapshot
     // of (`watchtower/actor.rs:571-579`): the last local one, the last remote one and, until the peer revokes it, the remote one
@@ -369,6 +463,8 @@ export type TenantNodeOptions = {
     // the keys whose funding key its open's material carries.
     deviceKeys: FiberChannelKeys[];
     peerKeys: FiberChannelKeys;
+    // Milliseconds since the epoch, the device's clock in a flow; defaults to `Date.now`.
+    now?: () => number;
 };
 
 export function tenantNodeChannelOf(vectors: SigningVectors): TenantNodeChannel {
@@ -495,6 +591,13 @@ export class InMemoryTenantNode {
 
     private readonly onchainLog: TenantNodeOnchainTx[] = [];
 
+    private readonly now: () => number;
+
+    // The tenant's invoice store, by payment hash in bare hex.
+    private readonly invoices = new Map<string, NodeInvoice>();
+
+    private readonly invoiceTampers: TenantNodeInvoiceTamper[] = [];
+
     constructor(options: TenantNodeOptions) {
         this.terms = options.channel;
         this.channel = options.channel;
@@ -503,6 +606,7 @@ export class InMemoryTenantNode {
         this.peerKeys = options.peerKeys;
         this.localShannons = options.channel.localShannons;
         this.remoteShannons = options.channel.remoteShannons;
+        this.now = options.now ?? Date.now;
         this.fetch = async (_url: string, init: FetchInit): Promise<FetchResponseLike> => {
             const request = JSON.parse(init.body) as { id: number; method: string; params: unknown[] };
             const params = request.params[0];
@@ -608,24 +712,40 @@ export class InMemoryTenantNode {
         this.round("tenant");
     }
 
-    receivePayment(payment: TenantNodePayment): void {
-        const tlc = this.addTlc("received", payment);
+    // A TLC under an invoice's hash is checked against it once the peer's round has committed it.
+    receivePayment(payment: TenantNodeReceivedPayment): void {
+        const entry = this.invoices.get(payment.paymentHash);
+        const expiryMs = payment.expiryMs ?? this.leastExpiryOf(payment.paymentHash);
+        const tlc = this.addTlc("received", { ...payment, expiryMs });
         this.remoteShannons -= tlc.amountShannons;
-        this.round("peer");
+        this.round("peer", entry === undefined ? undefined : () => this.holdReceived(tlc, entry));
     }
 
-    // The side the TLC pays fulfils it: the peer an offered one, the tenant's node a received one.
+    // A received TLC an invoice holds asks for the preimage `settle_invoice` stored, as fiber's fulfil of a hold invoice's
+    // (`settle_tlc_set_command.rs:303-313`); any other is fulfilled as is.
     fulfil(paymentHash: string): void {
         const tlc = this.tlcs.find((candidate) => bytesToHex(candidate.paymentHash) === paymentHash);
         if (tlc === undefined) throw new Error(`no TLC under ${paymentHash} is in flight`);
-        this.tlcs = this.tlcs.filter((candidate) => candidate !== tlc);
-        if (tlc.direction === "offered") {
-            this.remoteShannons += tlc.amountShannons;
-            this.round("peer");
+        const entry = tlc.direction === "received" ? this.invoices.get(paymentHash) : undefined;
+        if (entry === undefined) {
+            this.removeTlc(tlc, true);
         } else {
-            this.localShannons += tlc.amountShannons;
-            this.round("tenant");
+            this.fulfilHeld(tlc, entry);
         }
+    }
+
+    // Fiber's expiry maintenance (`channel.rs:3474-3507`): a committed received TLC expiring before the delay's two thirds and
+    // a check interval from now is failed back through the tenant's round; its invoice stays `Received` (`network.rs:4432-4437`).
+    failHeldTlc(paymentHash: string): void {
+        const tlc = this.tlcs.find((candidate) => candidate.held && bytesToHex(candidate.paymentHash) === paymentHash);
+        if (tlc === undefined) throw new Error(`no TLC under ${paymentHash} is held`);
+        const reach = BigInt(this.now()) + fiberTlcExpiryDelayMs(this.channel.commitmentDelayEpoch) + CHECK_CHANNELS_INTERVAL_MS;
+        if (tlc.expiryMs >= reach) throw new Error(`fiber's maintenance fails only a TLC expiring before ${reach}, not at ${tlc.expiryMs}`);
+        this.removeTlc(tlc, false);
+    }
+
+    tamperInvoice(tamper: TenantNodeInvoiceTamper): void {
+        this.invoiceTampers.push(tamper);
     }
 
     shutdown(): void {
@@ -657,7 +777,8 @@ export class InMemoryTenantNode {
             settlementCellDeps: options.settlementCellDeps,
             nodeLock: options.nodeLock,
             medianTimeMs: BigInt(options.medianTimeMs),
-            preimages: options.preimages.map(hexToBytes),
+            // `settle_invoice` hands its preimage to the watchtower too (`fiber/network.rs:4858-4865`).
+            preimages: [...options.preimages.map(hexToBytes), ...[...this.invoices.values()].flatMap(({ preimage }) => preimage ?? [])],
             tlcs: commitment.tlcs,
             live: { outPoint: { txHash, index: 0 }, output, body: commitment.body, first: true },
         };
@@ -769,6 +890,12 @@ export class InMemoryTenantNode {
             case "submit_watchtower_signature":
                 for (const parked of this.parked.submit_watchtower_signature.splice(0)) this.watchtowerSubmit(parked);
                 return this.watchtowerSubmit(params);
+            case "new_invoice":
+                return this.newInvoice(params);
+            case "get_invoice":
+                return this.getInvoice(params);
+            case "settle_invoice":
+                return this.settleInvoice(params);
             default:
                 return { error: { code: METHOD_NOT_FOUND_CODE, message: "Method not found" } };
         }
@@ -1181,16 +1308,214 @@ export class InMemoryTenantNode {
             paymentHash: hexToBytes(payment.paymentHash),
             expiryMs: BigInt(payment.expiryMs),
             createdAt: { local: this.local, remote: this.remote },
+            held: false,
         };
         this.nextTlcIds = { ...this.nextTlcIds, [direction]: tlc.id + 1 };
         this.tlcs = [...this.tlcs, tlc];
         return tlc;
     }
 
-    private round(initiator: keyof typeof ROUNDS): void {
+    // What the node does once the round's last request is applied, after it, or before that last request with `beforeLast`.
+    private round(initiator: keyof typeof ROUNDS, after?: () => void, beforeLast = false): void {
         const state = this.state();
-        this.queue.push(...ROUNDS[initiator].map((transition): Step => ({ kind: "request", transition, state })));
+        const requests = ROUNDS[initiator].map((transition): Step => ({ kind: "request", transition, state }));
+        const at = beforeLast ? requests.length - 1 : requests.length;
+        const events: Step[] = after === undefined ? [] : [{ kind: "event", run: after }];
+        this.queue.push(...requests.slice(0, at), ...events, ...requests.slice(at));
         this.drain();
+    }
+
+    // The side the TLC pays removes it, the peer an offered one and the tenant's node a received one: a fulfil pays its payee, a
+    // fail returns it to its payer. `applied` runs before the round's last request: a received TLC's, the node's revoke_and_ack.
+    private removeTlc(tlc: NodeTlc, fulfilled: boolean, applied?: () => void): void {
+        this.tlcs = this.tlcs.filter((candidate) => candidate !== tlc);
+        if ((tlc.direction === "received") === fulfilled) {
+            this.localShannons += tlc.amountShannons;
+        } else {
+            this.remoteShannons += tlc.amountShannons;
+        }
+        this.round(tlc.direction === "offered" ? "peer" : "tenant", applied, true);
+    }
+
+    private leastExpiryOf(paymentHash: string): string {
+        const entry = this.invoices.get(paymentHash);
+        if (entry === undefined) throw new Error(`no invoice of the node is under ${paymentHash}: the payment states its expiry`);
+        return (BigInt(this.now()) + finalExpiryDeltaOf(entry.invoice)).toString();
+    }
+
+    // `apply_add_tlc_operation_with_peeled_onion_packet`'s checks of a final TLC against its invoice, in order (`channel.rs:1708-1727`,
+    // `:1771-1774`): one that fails any is failed back (`:1282-1321`), one that passes is held and its invoice `Received`
+    // (`settle_tlc_set_command.rs:217-232`, `:345-351`).
+    private holdReceived(tlc: NodeTlc, entry: NodeInvoice): void {
+        if (!this.tlcs.includes(tlc)) return;
+        const { invoice } = entry;
+        const refused =
+            this.invoiceStatusOf(entry) !== "Open" ||
+            tlc.hashAlgorithm !== hashAlgorithmOfInvoice(invoice) ||
+            tlc.expiryMs < BigInt(this.now()) + finalExpiryDeltaOf(invoice) ||
+            tlc.amountShannons < BigInt(invoice.amountShannons ?? "0");
+        if (refused) {
+            this.removeTlc(tlc, false);
+            return;
+        }
+        tlc.held = true;
+        entry.status = "Received";
+    }
+
+    // `Paid` once the fulfil is applied: on the peer's commitment_signed, the node asks for its revoke_and_ack, which returns at
+    // once, then applies the settled removals (`channel.rs:2409`, `:2553-2555`, `:1250-1271`, `:1956-1962`, `:6146-6163`).
+    private fulfilHeld(tlc: NodeTlc, entry: NodeInvoice): void {
+        if (entry.preimage === null) {
+            throw new Error(`the node holds no preimage of the invoice under ${bytesToHex(tlc.paymentHash)}: settle_invoice stores it`);
+        }
+        this.removeTlc(tlc, true, () => {
+            entry.status = "Paid";
+        });
+    }
+
+    // `is_expired` (`fiber-types/src/invoice.rs:866-878`): never without an expiry.
+    private invoiceStatusOf(entry: NodeInvoice): NodeInvoiceStatus {
+        const expiry = findInvoiceAttribute(entry.invoice, "expiryTime");
+        const expired = expiry !== undefined && entry.invoice.timestampMs + expiry.seconds * MILLISECONDS_PER_SECOND < BigInt(this.now());
+        return entry.status === "Open" && expired ? "Expired" : entry.status;
+    }
+
+    // `new_invoice` on a tenant's path (`rpc/invoice.rs:184-197`, `:298-413`), its checks in order, then the LSP's registration
+    // (`lsp/invoice.rs:160-238`), which refuses an invoice without expiry (`:193-195`) once its row is stored.
+    private newInvoice(params: unknown): RpcAnswer {
+        const request = readParams<NodeNewInvoiceParamsWire, InvoiceRequest>(params, readInvoiceRequest);
+        if (request instanceof WireError) return invalidParams(params, request);
+        if (request.allowMpp === true) return failed("hosted tenant invoices do not support MPP");
+        if (request.currency !== NODE_CURRENCY) return failed(`Currency must be ${NODE_CURRENCY} with the chain network`);
+        const { paymentHash } = request;
+        if (paymentHash === null) {
+            if (request.preimage === null) return failed("hosted invoices require payment_hash or payment_preimage from the client");
+            throw new Error("the double serves no invoice the node holds the preimage of");
+        }
+        if (request.allowTrampolineRouting === true) throw new Error("the double serves no allow_trampoline_routing");
+        const finalExpiryDeltaMs = request.finalExpiryDeltaMs ?? MIN_TLC_EXPIRY_DELTA_MS;
+        if (finalExpiryDeltaMs < MIN_TLC_EXPIRY_DELTA_MS) {
+            return failed(`final_expiry_delta must be greater than or equal to ${MIN_TLC_EXPIRY_DELTA_MS}`);
+        }
+        if (finalExpiryDeltaMs > MAX_PAYMENT_TLC_EXPIRY_LIMIT_MS) {
+            return failed(`final_expiry_delta must be less than or equal to ${MAX_PAYMENT_TLC_EXPIRY_LIMIT_MS}`);
+        }
+        // `InvoiceBuilder::build`'s checks (`invoice/invoice_impl.rs:148-182`, `:193-233`).
+        if (request.preimage !== null) return failed("Both payment_hash and payment_preimage are set");
+        const descriptionLength = utf8ToBytes(request.description ?? "").length;
+        if (descriptionLength > MAX_DESCRIPTION_LENGTH) {
+            return failed(`Description with length of ${descriptionLength} is too long, max length is ${MAX_DESCRIPTION_LENGTH}`);
+        }
+        const { invoice, address } = this.buildInvoice(request, paymentHash, finalExpiryDeltaMs);
+        const key = bytesToHex(invoice.paymentHash);
+        if (this.invoices.has(key)) return failed("invoice already exists");
+        this.invoices.set(key, { invoice, address, status: "Open", preimage: null });
+        if (request.expirySeconds === null) return failed("hosted invoice must have a finite expiry");
+        return { result: { invoice_address: address, invoice: invoiceJson(invoice) } };
+    }
+
+    // In the builder's order (`rpc/invoice.rs:332-399`): description, expiry, fallback address, the feature and the hint of the
+    // tenant's path, the final expiry delta, the UDT script, the hash algorithm, then the tenant's key as payee.
+    private buildInvoice(
+        request: InvoiceRequest,
+        paymentHash: Uint8Array,
+        finalExpiryDeltaMs: bigint,
+    ): { invoice: Invoice; address: string } {
+        const attributes: InvoiceAttribute[] = [];
+        if (request.description !== null) attributes.push({ type: "description", text: request.description });
+        if (request.expirySeconds !== null) attributes.push({ type: "expiryTime", seconds: request.expirySeconds });
+        if (request.fallbackAddress !== null) attributes.push({ type: "fallbackAddr", address: request.fallbackAddress });
+        attributes.push({ type: "feature", bits: TRAMPOLINE_FEATURE_BITS }, { type: "trampolineRouteHint", nodeId: this.lspPubkey });
+        attributes.push({ type: "finalHtlcMinimumExpiryDelta", milliseconds: finalExpiryDeltaMs });
+        if (request.udtScript !== null) attributes.push({ type: "udtScript", script: request.udtScript });
+        if (request.hashAlgorithm !== null) attributes.push({ type: "hashAlgorithm", algorithm: request.hashAlgorithm });
+        attributes.push({ type: "payeePublicKey", publicKey: pubkeyOf(TENANT_SECRET_KEY) });
+        const unsigned: UnsignedInvoice = {
+            currency: request.currency,
+            amountShannons: request.amountShannons.toString(),
+            timestampMs: BigInt(this.now()),
+            paymentHash,
+            attributes,
+        };
+        let signer = TENANT_SECRET_KEY;
+        let uppercase = false;
+        for (const tamper of this.invoiceTampers.splice(0)) {
+            switch (tamper.kind) {
+                case "paymentHash":
+                    unsigned.paymentHash = hexToBytes(tamper.paymentHash);
+                    break;
+                case "amount":
+                    unsigned.amountShannons = tamper.amountShannons;
+                    break;
+                case "timestamp":
+                    unsigned.timestampMs = tamper.timestampMs;
+                    break;
+                case "noHint":
+                    unsigned.attributes = unsigned.attributes.filter((attribute) => attribute.type !== "trampolineRouteHint");
+                    break;
+                case "hint":
+                    unsigned.attributes = unsigned.attributes.map((attribute) =>
+                        attribute.type === "trampolineRouteHint" ? { ...attribute, nodeId: hexToBytes(tamper.nodeId) } : attribute,
+                    );
+                    break;
+                case "extraAttribute":
+                    unsigned.attributes.splice(-1, 0, tamper.attribute);
+                    break;
+                case "feature":
+                    unsigned.attributes = unsigned.attributes.map((attribute) =>
+                        attribute.type === "feature" ? { ...attribute, bits: hexToBytes(tamper.bits) } : attribute,
+                    );
+                    break;
+                case "signer":
+                    signer = hexToBytes(tamper.secretKey);
+                    break;
+                case "uppercase":
+                    uppercase = true;
+            }
+        }
+        const invoice = signInvoice(unsigned, signer);
+        const address = encodeInvoice(invoice);
+        return { invoice, address: uppercase ? address.toUpperCase() : address };
+    }
+
+    // `get_invoice` (`rpc/invoice.rs:434-457`).
+    private getInvoice(params: unknown): RpcAnswer {
+        const paymentHash = readParams<RpcPaymentHashParamsWire, Uint8Array>(params, (at) =>
+            decodeHexBytes(at("payment_hash"), PAYMENT_HASH_LENGTH),
+        );
+        if (paymentHash instanceof WireError) return invalidParams(params, paymentHash);
+        const entry = this.invoices.get(bytesToHex(paymentHash));
+        if (entry === undefined) return failed("invoice not found");
+        return { result: { invoice_address: entry.address, invoice: invoiceJson(entry.invoice), status: this.invoiceStatusOf(entry) } };
+    }
+
+    // `settle_invoice` (`fiber/network.rs:4821-4871`): its checks in order, then the preimage stored, which the watchtower gets too,
+    // and the held TLC fulfilled with it. Once its TLC is gone, a repeat finds nothing to fulfil.
+    private settleInvoice(params: unknown): RpcAnswer {
+        const request = readParams<SettleInvoiceParamsWire, { paymentHash: Uint8Array; preimage: Uint8Array }>(params, (at) => ({
+            paymentHash: decodeHexBytes(at("payment_hash"), PAYMENT_HASH_LENGTH),
+            preimage: decodeHexBytes(at("payment_preimage"), PREIMAGE_LENGTH),
+        }));
+        if (request instanceof WireError) return invalidParams(params, request);
+        const key = bytesToHex(request.paymentHash);
+        const entry = this.invoices.get(key);
+        if (entry === undefined) return failed("Invoice not found");
+        const hash = hashPreimage(hashAlgorithmOfInvoice(entry.invoice), request.preimage);
+        if (!equalBytes(hash, request.paymentHash)) return failed("Hash mismatch");
+        switch (this.invoiceStatusOf(entry)) {
+            case "Open":
+                return failed("Invoice is still open");
+            case "Expired":
+                return failed("Invoice is already expired");
+            case "Paid":
+                return failed("Invoice is already paid");
+            case "Received":
+                break;
+        }
+        entry.preimage = request.preimage;
+        const held = this.tlcs.find((tlc) => tlc.held && bytesToHex(tlc.paymentHash) === key);
+        if (held !== undefined) this.fulfilHeld(held, entry);
+        return { result: {} };
     }
 
     private state(): CommitmentState {
@@ -1695,10 +2020,25 @@ function keyPurposeWire(purpose: WatchtowerKeyPurpose): OnchainKeyPurposeWire {
     return { type: "Tlc", commitment_number: encodeUintHexNumber("commitmentNumber", purpose.commitmentNumber, MAX_COMMITMENT_NUMBER) };
 }
 
-function hashAlgorithmWire(algorithm: TlcHashAlgorithm): TlcHashAlgorithmWire {
-    const spelling = HASH_ALGORITHM_WIRE[algorithm];
-    if (spelling === undefined) throw new Error(`no wire spelling for ${algorithm}`);
-    return spelling;
+// `final_tlc_minimum_expiry_delta_or_default` (`fiber-types/src/invoice.rs:799-803`).
+function finalExpiryDeltaOf(invoice: Invoice): bigint {
+    return findInvoiceAttribute(invoice, "finalHtlcMinimumExpiryDelta")?.milliseconds ?? DEFAULT_FINAL_TLC_EXPIRY_DELTA_MS;
+}
+
+// Fiber's `tlc_expiry_delay` (`channel.rs:5894-5899`), spelled here rather than read from `src`: two thirds of the delay in
+// f64, the epoch's number, index and length in its low 24, next 16 and next 16 bits.
+function fiberTlcExpiryDelayMs(delayEpoch: bigint): bigint {
+    const number = Number(delayEpoch & 0xffffffn);
+    const fractionLength = Number((delayEpoch >> 40n) & 0xffffn);
+    // CKB's `from_full_value` reads a zero length as the fraction 0/1.
+    const index = fractionLength === 0 ? 0 : Number((delayEpoch >> 24n) & 0xffffn);
+    const length = fractionLength === 0 ? 1 : fractionLength;
+    return BigInt(Math.trunc(((number + index / length) * SIGNING_MILLISECONDS_PER_EPOCH * 2) / 3));
+}
+
+// Fiber's `HashAlgorithm` defaults to ckb-hash (`fiber-types/src/invoice.rs:341-347`).
+function hashAlgorithmOfInvoice(invoice: Invoice): TlcHashAlgorithm {
+    return findInvoiceAttribute(invoice, "hashAlgorithm")?.algorithm ?? "ckb-hash";
 }
 
 function slotKey(slot: NodeSlot): string {
@@ -1787,6 +2127,25 @@ function readOpenMaterial(field: WireField): ChannelOpenSignerMaterial {
         nextCommitmentNonce: readNonce(at("next_commitment_nonce")),
         revocationNonce: readNonce(at("revocation_nonce")),
         channelAnnouncementNonce: readOption(at("channel_announcement_nonce"), readNonce),
+    };
+}
+
+function readInvoiceRequest(at: (name: keyof NodeNewInvoiceParamsWire & string) => WireField): InvoiceRequest {
+    const readHash = (field: WireField): Uint8Array => decodeHexBytes(field, PAYMENT_HASH_LENGTH);
+    const readUint64 = (field: WireField): bigint => decodeUintHex(field, UINT64_MAX);
+    return {
+        amountShannons: decodeUintHex(at("amount"), UINT128_MAX),
+        description: readOption(at("description"), decodeString),
+        currency: decodeEnum(at("currency"), INVOICE_CURRENCIES),
+        preimage: readOption(at("payment_preimage"), readHash),
+        paymentHash: readOption(at("payment_hash"), readHash),
+        expirySeconds: readOption(at("expiry"), readUint64),
+        fallbackAddress: readOption(at("fallback_address"), decodeString),
+        finalExpiryDeltaMs: readOption(at("final_expiry_delta"), readUint64),
+        udtScript: readOption(at("udt_type_script"), decodeScript),
+        hashAlgorithm: readOption(at("hash_algorithm"), (field) => hashAlgorithmOf(decodeEnum(field, Object.values(HASH_ALGORITHM_WIRE)))),
+        allowMpp: readOption(at("allow_mpp"), decodeBoolean),
+        allowTrampolineRouting: readOption(at("allow_trampoline_routing"), decodeBoolean),
     };
 }
 

@@ -367,7 +367,8 @@ Two kinds of records sit beside the channel's, device-wide and keyed by the same
 device chooses which channel a payment leaves through:
 
 - a **debit intent**: the most the user approved for a payment, amount and fee budget together, and whether it is still open;
-- a **hold invoice**: its amount, and whether the device has released its preimage.
+- a **hold invoice**: its amount, its hash algorithm, the index its preimage derives from, and whether the device has
+  released the preimage ([The hold invoice's release](#the-hold-invoices-release)).
 
 The records are keyed by the 20 bound bytes under both layouts, so the sums below add up across channels whatever
 layout each is on: a legacy channel and a full-hash channel drawing on one intent draw on one budget. Which TLCs count as
@@ -420,7 +421,7 @@ step 3, unless an offered TLC leaving in the same message can account for the cr
 of the same amount failing together leave the exposure where both being paid would, and the node sets the split and the
 fee of the outgoing payments, so it can match the amounts. There the device loses the held amount, bounded by that
 offered intent, and the offered hash is burnt. The engine keeps a channel from ever reaching that state:
-`markHoldInvoiceReleased` refuses with a `HoldInvoiceError` (`offered_in_flight`) while any channel that lists a TLC of
+the release ([below](#the-hold-invoices-release)) refuses with a `HoldInvoiceError` (`offered_in_flight`) while any channel that lists a TLC of
 the invoice also lists an offered TLC, in either view (a channel that no longer lists one cannot take a new one beside
 an offered TLC once the preimage is released, so it does not hold the release back), and a commitment after which a
 channel would list an offered TLC beside a received TLC of a released invoice, in either view, is refused, unless the
@@ -469,6 +470,60 @@ since a claim may only write its own channel's record. That list is how a claim 
 budget or crediting one invoice, and a channel too many on it costs a read. The engine decides each commitment once before
 writing anything and again inside the record's critical section, so a refused request leaves the device-wide records
 untouched too, and the balance lane keeps two channels from drawing on one budget at once.
+
+## The hold invoice's release
+
+A hold invoice's record is all the device keeps of it ([persistence.md](./persistence.md)): the full payment hash, the
+amount in decimal shannons, above zero since an invoice of nothing would be released before any channel held a shannon of
+it, the hash algorithm the payment is locked with, and the invoice index `k` its preimage derives from
+([derivation.md](./derivation.md)). The preimage itself is never stored. `recordHoldInvoice(paymentHashHex,
+amountShannons, hashAlgorithm, invoiceIndex)` writes it in the balance lane before the node hears of the hash, each
+argument refused by name first (the hash 32 bytes of lowercase hex, the amount, the algorithm one of the two, the index an
+integer from 0 to `MAX_INVOICE_INDEX`). Recording it again with the same four writes nothing; another amount, algorithm or
+index under the same hash and a hash that shares its bound 20 bytes with another invoice are `TypeError`s, as the hash of
+an authorised payment is (above): the host's bug, since each invoice derives its preimage from an index of its own.
+
+`markHoldInvoiceReleased(paymentHashHex, { now, releaseMarginMs })` marks the preimage released, from when on every
+commitment must pay for it (step 3 of the balance rule), and it is the one gate between a held payment and the preimage
+leaving the device: the facade marks before it settles ([sdk.md](./sdk.md), "The invoice step"). The hash is checked and
+the two timing fields are checked to be functions, each read once, so the function checked is the function called. Then,
+inside the balance lane:
+
+1. The record is read by the whole hash; none, or a twin's under the bound bytes, is a `TypeError`. A record already
+   released is answered at once, nothing judged and the clock not read: released once, released for good, since the
+   commitments signed since rely on it.
+2. The record of every channel the invoice lists is read; a listed channel with no record throws.
+3. The clock is read once, after the records and before the judgment, so no wait for the lane or the storage ages the
+   reading; one that is not a whole number of milliseconds up to `Number.MAX_SAFE_INTEGER` is a `RangeError`.
+4. The judgment, `judgeHoldInvoiceRelease`, reads the TLCs of the invoice each view of each channel lists in its last
+   commitment, under the bound hash and, under the full-hash layout, the whole hash, so a twin is nobody's. Channel by
+   channel, in the record's order: `algorithm_mismatch` for a TLC of the invoice under another algorithm, then
+   `offered_in_flight` for a channel that lists a TLC of the invoice beside an offered TLC in either view (why each, in
+   [The balance rule](#the-balance-rule)). Then over all the channels together:
+   - `not_held`: the channels hold less than the invoice's amount, each channel counted at its view holding less and the
+     channels summed. At least the amount, not exactly it: fiber accepts a TLC of at least the amount, so an overpay is
+     held, and what it pays past the amount counts as exposure under the balance rule.
+   - `expiry_too_close`: a TLC of the invoice, in either view of any channel, expires at or before
+     `now + releaseMarginMs(delay)`, its expiry being its whole seconds times 1000 and the delay the channel's pinned
+     `commitmentDelayEpoch`. A channel that lists a TLC of the invoice but pins no delay is a broken record, since a
+     signed commitment pins it, and throws a `TypeError`; one that lists none asks no margin. The margin must be a bigint
+     within a u64.
+5. Only then is the record marked released.
+
+The four codes are `HoldInvoiceError`s, refusals the caller waits out or reports, in that order: the algorithm, the offered
+TLC, the amount, the expiry. Each channel counts at its weaker view for the reason the balance rule counts every other
+channel at its worst: the node aggregates both partial signatures of every channel, so it may broadcast either
+commitment of each, and the sum of the weaker views is what it holds whichever it broadcasts. The expiry is held to a
+margin because the preimage, once out, is worth something only if the fulfil it starts is signed before fiber fails the
+TLC on its own (`channel.rs:3474-3507`); the margin is the facade's to compute, from fiber's arithmetic and the poller's
+pace ([sdk.md](./sdk.md)), and comes in as a function, since `policy` does not import `signer`. The release judges the
+latest commitment of each view, as the balance rule does, and rests on the same premise
+([What this layer deliberately does not do](#what-this-layer-deliberately-does-not-do)).
+
+Two reads serve the facade's invoice step. `readHoldInvoice(paymentHashHex)` hands the record back by its whole hash, a
+`TypeError` when none was recorded under it, a twin's included. `listsHoldInvoiceTlc(paymentHashHex)` tells whether the last commitment of either view
+of any channel the invoice lists still shows a TLC of it; it reads outside the balance lane, since its answer is a
+snapshot either way, and a channel shows a TLC of the invoice only once it is filed on the record.
 
 ## Revocation evidence
 
@@ -663,6 +718,7 @@ the difference to the fee. It can never redirect it: every output but the remain
 | `src/policy/watchtower-spend.ts`         | The watchtower's rules, pure: the structure, the source, the key, the remainder, the destination, the repeat and the claim                                                                                                         |
 | `src/policy/channel-opening.ts`          | What a channel opens with: the funded amount and close script checked, the registration's pins, and the reserve over either side's close script                                                                                    |
 | `src/policy/channel-pins.ts`             | Check 5's pins, pure: what each operation and the host's terms state, in the pins' forms, and the first conflict                                                                                                                   |
+| `src/policy/hold-invoice-release.ts`     | The hold invoice's release, pure: the invoice's TLCs a view lists, the algorithm, the offered TLC, the amount held and the expiry against the margin                                                                               |
 | `src/policy/capacity-bounds.ts`          | Check 5's bounds, pure: the commitment fee and what a commitment pays out                                                                                                                                                          |
 | `src/policy/balance-rule.ts`             | Check 6 itself, pure: the opening, the three steps over two snapshots, and the close with its fee bound                                                                                                                            |
 | `src/policy/policy.constants.ts`         | The keyspace prefixes and the balance lane, the pins by who fixes them, the reuse modes and the lanes, the record versions, the watchtower's two bounds                                                                            |
@@ -794,11 +850,11 @@ checked by breaking the code on purpose:
 | Growth of a mixed channel reads offered TLCs alone                 | 1                 |
 | Growth of a mixed channel reads released held TLCs alone           | 1                 |
 | The mix guard counts unreleased held TLCs                          | 34                |
-| The release ignores offered TLCs in flight                         | 2                 |
-| The release ignores whether the channel still lists the invoice    | 1                 |
+| The release ignores offered TLCs in flight                         | 7                 |
+| The release ignores whether the channel still lists the invoice    | 4                 |
 | A payment may take the hash of an own invoice                      | 1                 |
 | An invoice may take the hash of an authorised payment              | 1                 |
-| The release reads the remote view alone                            | 1                 |
+| The release reads the remote view alone                            | 2                 |
 | A charge is looked for in the remote view alone                    | 1                 |
 | The context reads the judged view's TLCs alone                     | 1                 |
 | A mix before is read without the other view                        | 1                 |
@@ -846,7 +902,7 @@ checked by breaking the code on purpose:
 | The algorithm guard reads a twin as the invoice's                  | 1                 |
 | The mix guard reads a received twin as a released one              | 1                 |
 | The record guard accepts a reserve map with an extra key           | 1                 |
-| The release's held filter ignores the whole hash                   | 1                 |
+| The release's held filter ignores the whole hash                   | 3                 |
 | TLCs are compared without their whole hash                         | 1                 |
 | An open intent is replaced                                         | 1                 |
 | A repeat of an open intent is refused                              | 1                 |
@@ -860,7 +916,7 @@ checked by breaking the code on purpose:
 | A view TLC is read without its algorithm                           | 2                 |
 | An invoice record is read without its algorithm                    | 1                 |
 | An invoice may be recorded again with another algorithm            | 1                 |
-| The release ignores the algorithm of a held TLC                    | 1                 |
+| The release ignores the algorithm of a held TLC                    | 3                 |
 | A released invoice takes a TLC under another algorithm             | 2                 |
 | The algorithm guard ignores the release                            | 2                 |
 | The already-signed path keeps running                              | 2                 |
@@ -1274,3 +1330,81 @@ side's close script, and the `ChannelRegistrationError` each contradicted regist
 | The reserve's layout is not checked                             | 2                 |
 | A name at another index reports the index it is at              | 1                 |
 | A name at another index throws a plain TypeError                | 1                 |
+
+`test/tests/policy/hold-invoice-release.spec.ts` pins the judgment over records written by hand: the invoice's TLCs
+listed in a view's order and nothing under another hash, one binding the whole hash listed and its twin left out; the
+amount held in both views passing, one shannon above it too and one short refused, an invoice no channel lists a TLC of
+refused, the channels summed and the TLCs of one view summed, two channels holding it in crossed views refused, a twin
+not counted, another algorithm refused, an offered TLC refused beside a TLC of the invoice and allowed on a channel that
+lists none; the expiry refused exactly at the margin past now, each channel's margin from its own pinned delay, a channel
+listing a TLC of the invoice with no delay pinned thrown as a host error and one listing none asked no margin, a margin
+outside a u64 refused, its top refusing every TLC and zero taking an unexpired one; and the refusals in order, the
+algorithm before the offered TLC, the offered TLC before the amount, a later channel's offered TLC before an earlier
+one's short amount, the amount before the expiry, and no margin read before the amount is held. The engine's spec drives
+them through the store: the record under the bound 20 bytes with the index at either end of its range, a repeat writing
+nothing, another amount, algorithm or index refused, a twin and an authorised payment's hash refused, one refusal per
+argument, the zero amount among them; the release marked once and a repeat judging nothing and writing nothing, an
+invoice no channel showed and each view alone refused, the exact amount released and one shannon more refused, the
+channels summed, the expiry refused at the margin and released a millisecond before it, the margin asked of the pinned
+delay, an unrecorded invoice refused, one refusal per argument and per timing field, five clock readings that are no
+whole milliseconds refused and a throwing clock passed through, all writing nothing, the clock read once after the
+records and before the write, each timing field read once, and a clock at zero taken; `readHoldInvoice` by the whole
+hash, refusing an unrecorded or malformed one; and `listsHoldInvoiceTlc` answering for each view and each channel until
+both views of every channel dropped the TLC. `utils/validate.utils.spec.ts` holds the stored record to the same: the
+index at either end of its range, and a zero amount and an index fractional, negative, past the bound or in a string
+refused.
+
+The hold invoice's index and its release, `recordHoldInvoice` with the index, its amount above zero and its conflict, the
+stored record's guard, `markHoldInvoiceReleased` (each timing field read once, the clock read once inside the balance lock
+after the records it judges) over `judgeHoldInvoiceRelease` (`not_held` at each channel's view holding less, summed,
+against the exact amount; `expiry_too_close` at its boundary; a channel without TLCs of the invoice skipped; the pinned
+delay required), and the queries `readHoldInvoice` and `listsHoldInvoiceTlc`, were broken the same way (`test/tests/policy`, still 100% on all four
+metrics). The first table's six rows on the release and on recording an invoice again carry this sweep's counts:
+
+| Mutation                                                         | Tests that failed |
+| ---------------------------------------------------------------- | ----------------- |
+| The invoice index is not recorded                                | 65                |
+| The exact amount is refused as not held                          | 36                |
+| The expiry is read in seconds against a deadline in milliseconds | 34                |
+| The amount held is not checked                                   | 15                |
+| A TLC expiring a millisecond past the margin is refused          | 12                |
+| The deadline is now, without the margin                          | 12                |
+| The invoice's TLCs are listed without the bound hash             | 10                |
+| Each channel counts at the view holding more                     | 8                 |
+| The deadline is the margin, without now                          | 7                 |
+| A TLC expiring exactly at the margin is released                 | 6                 |
+| The invoice is marked released before it is judged               | 6                 |
+| An amount one shannon short is held                              | 5                 |
+| Each channel counts at its remote view                           | 5                 |
+| The channels' amounts are not summed, the largest one counts     | 5                 |
+| The invoice index is not checked                                 | 5                 |
+| The invoice record guard ignores the invoice index               | 5                 |
+| The release clock is not checked                                 | 5                 |
+| Each channel counts at its local view                            | 4                 |
+| A listed channel with no record is skipped                       | 3                 |
+| The listing query's hash is not checked                          | 3                 |
+| The margin is asked of a zero delay                              | 3                 |
+| The margin is not checked to be a u64                            | 3                 |
+| The read's hash is not checked                                   | 3                 |
+| Only the first TLC of a channel is held to the expiry            | 2                 |
+| The clock is not checked to be a function                        | 2                 |
+| The clock is read before the balance lock                        | 2                 |
+| The expiry is judged before the amount                           | 2                 |
+| The listing query reads the remote view alone                    | 2                 |
+| The margin is not checked to be a function                       | 2                 |
+| The timing is not checked to be an object                        | 2                 |
+| A channel listing a TLC with no delay pinned is not refused      | 1                 |
+| A channel without TLCs of the invoice is held to the expiry too  | 1                 |
+| A released invoice is judged again                               | 1                 |
+| A twin's record answers for the hash                             | 1                 |
+| A view's TLCs are not summed, the first one counts               | 1                 |
+| A zero-amount hold invoice is recorded                           | 1                 |
+| An invoice may be recorded again with another index              | 1                 |
+| The clock is read before the records it judges                   | 1                 |
+| The clock is read from the timing again inside the lock          | 1                 |
+| The invoice record guard takes a fractional invoice index        | 1                 |
+| The invoice record guard takes a zero amount                     | 1                 |
+| The listing query answers yes for a listed channel               | 1                 |
+| The listing query reads the first channel alone                  | 1                 |
+| The margin is read from the timing again for the judgment        | 1                 |
+| The release is judged at a clock of zero                         | 1                 |

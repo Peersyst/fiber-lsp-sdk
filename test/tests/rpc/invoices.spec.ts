@@ -5,6 +5,7 @@ import {
     FiberRpcClient,
     RPC_INVOICE_STATUSES,
     RpcError,
+    assertRpcInvoiceDescription,
     RpcResponseError,
     decodeNewInvoiceResult,
     decodeRpcInvoice,
@@ -36,6 +37,7 @@ const NEW_INVOICE: NewInvoiceParams = {
     paymentHash: hexToBytes(PAYMENT_HASH),
     hashAlgorithm: "ckb-hash",
     expirySeconds: 3600n,
+    finalExpiryDeltaMs: 86400000n,
     description: "coffee",
 };
 
@@ -63,13 +65,27 @@ describe("new_invoice", () => {
                 currency: "Fibt",
                 payment_hash: `0x${PAYMENT_HASH}`,
                 expiry: "0xe10",
+                final_expiry_delta: "0x5265c00",
                 hash_algorithm: "ckb_hash",
             });
-            expect(Object.keys(wire)).toEqual(["amount", "description", "currency", "payment_hash", "expiry", "hash_algorithm"]);
+            expect(Object.keys(wire)).toEqual([
+                "amount",
+                "description",
+                "currency",
+                "payment_hash",
+                "expiry",
+                "final_expiry_delta",
+                "hash_algorithm",
+            ]);
         });
 
         it.each(create.params.map((entry) => [entry.name, entry] as const))("writes the %s case as fiber's serde does", (_, entry) => {
             expect(encodeNewInvoiceParams(toNewInvoiceParams(entry.values))).toEqual(withoutNulls(entry.json));
+        });
+
+        it("writes fiber's 14 days, its upper bound, and a single millisecond", () => {
+            expect(encodeNewInvoiceParams({ ...NEW_INVOICE, finalExpiryDeltaMs: 1209600000n }).final_expiry_delta).toBe("0x48190800");
+            expect(encodeNewInvoiceParams({ ...NEW_INVOICE, finalExpiryDeltaMs: 1n }).final_expiry_delta).toBe("0x1");
         });
 
         it("sends no description member without one, rather than a null", () => {
@@ -80,6 +96,7 @@ describe("new_invoice", () => {
                 "currency",
                 "payment_hash",
                 "expiry",
+                "final_expiry_delta",
                 "hash_algorithm",
             ]);
             expect(Object.keys(encodeNewInvoiceParams({ ...NEW_INVOICE, description: undefined }))).not.toContain("description");
@@ -87,6 +104,14 @@ describe("new_invoice", () => {
 
         it("sends an empty description as one, which is not the same invoice as none", () => {
             expect(encodeNewInvoiceParams({ ...NEW_INVOICE, description: "" }).description).toBe("");
+        });
+
+        it.each([
+            ["639 ASCII characters", "a".repeat(639)],
+            ["213 three-byte characters", "咖".repeat(213)],
+            ["159 four-byte characters and three ASCII ones", `${"\u{1f980}".repeat(159)}abc`],
+        ])("sends a description of %s, fiber's 639 bytes of UTF-8", (_, description) => {
+            expect(encodeNewInvoiceParams({ ...NEW_INVOICE, description }).description).toBe(description);
         });
 
         it("names the hash algorithm as fiber spells it", () => {
@@ -161,8 +186,54 @@ describe("new_invoice", () => {
                 { expirySeconds: undefined },
                 new RangeError("expirySeconds must be a bigint between 0 and 18446744073709551615, got undefined"),
             ],
+            [
+                "a final expiry delta as a number",
+                { finalExpiryDeltaMs: 86400000 },
+                new RangeError("finalExpiryDeltaMs must be a bigint between 1 and 1209600000, got 86400000"),
+            ],
+            [
+                "a negative final expiry delta",
+                { finalExpiryDeltaMs: -1n },
+                new RangeError("finalExpiryDeltaMs must be a bigint between 1 and 1209600000, got -1"),
+            ],
+            [
+                "a zero final expiry delta",
+                { finalExpiryDeltaMs: 0n },
+                new RangeError("finalExpiryDeltaMs must be a bigint between 1 and 1209600000, got 0"),
+            ],
+            [
+                "a zero final expiry delta as a number, as not a bigint",
+                { finalExpiryDeltaMs: 0 },
+                new RangeError("finalExpiryDeltaMs must be a bigint between 1 and 1209600000, got 0"),
+            ],
+            [
+                "a final expiry delta one millisecond past fiber's 14 days",
+                { finalExpiryDeltaMs: 1209600001n },
+                new RangeError("finalExpiryDeltaMs must be a bigint between 1 and 1209600000, got 1209600001"),
+            ],
+            [
+                "a missing final expiry delta",
+                { finalExpiryDeltaMs: undefined },
+                new RangeError("finalExpiryDeltaMs must be a bigint between 1 and 1209600000, got undefined"),
+            ],
             ["a null description", { description: null }, new TypeError("description must be a string")],
             ["a description that is not a string", { description: 5 }, new TypeError("description must be a string")],
+            [
+                "a description of 640 ASCII characters, one byte past fiber's limit",
+                { description: "a".repeat(640) },
+                new RangeError("description must be at most 639 bytes of UTF-8, got 640"),
+            ],
+            [
+                "a description of 320 two-byte characters, 640 bytes",
+                { description: "é".repeat(320) },
+                new RangeError("description must be at most 639 bytes of UTF-8, got 640"),
+            ],
+            [
+                "a description of 160 four-byte characters, 640 bytes in 320 UTF-16 units",
+                { description: "\u{1f980}".repeat(160) },
+                new RangeError("description must be at most 639 bytes of UTF-8, got 640"),
+            ],
+            ["a description with a lone surrogate", { description: "a\ud83eb" }, new TypeError("description must be well-formed Unicode")],
         ])("refuses %s", (_, change, expected) => {
             expect(() => encodeNewInvoiceParams({ ...NEW_INVOICE, ...change } as NewInvoiceParams)).toThrow(expected);
         });
@@ -170,6 +241,34 @@ describe("new_invoice", () => {
         it("has no way to send a preimage: a member of that name is not written", () => {
             const smuggled = { ...NEW_INVOICE, paymentPreimage: hexToBytes(PREIMAGE), payment_preimage: `0x${PREIMAGE}` };
             expect(JSON.stringify(encodeNewInvoiceParams(smuggled))).not.toContain(PREIMAGE);
+        });
+    });
+
+    describe("assertRpcInvoiceDescription", () => {
+        it("lets a string of fiber's 639 bytes of UTF-8 through", () => {
+            expect(() => assertRpcInvoiceDescription("note", `${"é".repeat(319)}a`)).not.toThrow();
+        });
+
+        it("lets a surrogate pair through, as the one point it encodes", () => {
+            expect(() => assertRpcInvoiceDescription("note", "a\ud83e\udd80b")).not.toThrow();
+        });
+
+        it.each<[string, unknown, Error]>([
+            ["no string", undefined, new TypeError("note must be a string")],
+            ["a number", 5, new TypeError("note must be a string")],
+            ["640 bytes of UTF-8 in 320 characters", "é".repeat(320), new RangeError("note must be at most 639 bytes of UTF-8, got 640")],
+            // serde_json refuses both, where a platform encoder would write U+FFFD in silence.
+            ["a lone high surrogate", "a\ud83eb", new TypeError("note must be well-formed Unicode")],
+            ["a lone low surrogate", "a\udd80b", new TypeError("note must be well-formed Unicode")],
+        ])("refuses %s under the name it is given", (_, value, expected) => {
+            let thrown: unknown;
+            try {
+                assertRpcInvoiceDescription("note", value);
+            } catch (error) {
+                thrown = error;
+            }
+            expect(thrown).toEqual(expected);
+            expect(thrown).toBeInstanceOf(expected.constructor);
         });
     });
 

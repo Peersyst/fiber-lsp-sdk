@@ -12,13 +12,15 @@ import type { CellDep, Script, Transaction } from "../common";
 import { MASTER_SEED_LENGTH } from "../derivation";
 import { PolicyEngine, SignerStore } from "../policy";
 import { FiberRpcClient } from "../rpc";
-import { SignerDispatch, TenantIdentity } from "../signer";
+import { HoldInvoicePreimages, SignerDispatch, TenantIdentity } from "../signer";
 import { ActivityTracker } from "./activity";
 import { IndexAllocator } from "./allocator";
 import { readSdkChannelEvidence } from "./channel-evidence";
 import { listSdkChannels } from "./channel-listing";
 import { openSdkChannel, prepareSdkChannelOpen, submitSdkFundingTx } from "./channel-opening";
 import { buildChannelStep } from "./channel-step";
+import { createSdkInvoice } from "./invoice-creation";
+import { buildInvoiceStep } from "./invoice-step";
 import { PendingOpeningStore } from "./pending-opening";
 import { ActivityPoller } from "./poller";
 import { DEFAULT_POLL_INTERVAL_MS, POLL_STEP_TIMEOUT_MS } from "./sdk.constants";
@@ -31,6 +33,8 @@ import type {
     SdkContext,
     SdkEvent,
     SdkEventListener,
+    SdkInvoice,
+    SdkInvoiceOptions,
     SdkSignFundingInputs,
     SdkTenantChallenge,
     SdkTenantRegistration,
@@ -73,10 +77,21 @@ export class FiberLspSdk {
         const rpc = new FiberRpcClient({ url: options.rpcUrl, token: options.biscuitToken, fetch: options.fetch });
         const activity = new ActivityTracker(store);
         const openings = new PendingOpeningStore(store);
+        const preimages = new HoldInvoicePreimages(masterSeed);
         const steps = [
             buildChannelStep({ rpc, activity, openings, emit }),
             buildChannelSigningStep({ rpc, store, dispatch, emit }),
             buildWatchtowerSigningStep({ rpc, store, policy, dispatch, emit }),
+            buildInvoiceStep({
+                rpc,
+                policy,
+                preimages,
+                activity,
+                millisecondsPerEpoch: network.millisecondsPerEpoch,
+                now,
+                emit,
+                pollNow: () => this.context.poller.pollNow(),
+            }),
         ];
         this.context = {
             network,
@@ -84,6 +99,7 @@ export class FiberLspSdk {
             now,
             store,
             identity: new TenantIdentity(masterSeed),
+            preimages,
             rpc,
             policy,
             dispatch,
@@ -187,6 +203,16 @@ export class FiberLspSdk {
      */
     listChannels(): Promise<SdkChannelInfo[]> {
         return listSdkChannels(this.context.rpc, this.context.store);
+    }
+
+    /**
+     * Creates a hold invoice only this device can settle, checking the node's string against the request.
+     * @param amountShannons What the payer pays, in decimal shannons.
+     * @param options The description, and the expiry in whole seconds, one hour by default.
+     * @returns The invoice string and its payment hash, which the payment events name.
+     */
+    createInvoice(amountShannons: string, options?: SdkInvoiceOptions): Promise<SdkInvoice> {
+        return createSdkInvoice(this.context, amountShannons, options);
     }
 
     /**

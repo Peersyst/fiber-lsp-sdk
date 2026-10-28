@@ -1,5 +1,5 @@
 import type { SdkEvent } from "../../../../src/sdk";
-import { SdkError, answerEachChannel, deliverStepEvent, misansweredStatusRefusal, reportStepFailure } from "../../../../src/sdk";
+import { SdkError, answerEachPolled, deliverStepEvent, misansweredStatusRefusal, reportStepFailure } from "../../../../src/sdk";
 import type { StepRun } from "../../../utils/step-run";
 import { live, pollFailedEvent, summarized } from "../../../utils/step-run";
 
@@ -61,24 +61,29 @@ describe("misansweredStatusRefusal", () => {
     });
 });
 
-describe("answerEachChannel", () => {
-    it("answers each channel in the order given", async () => {
+describe("answerEachPolled", () => {
+    function idOf(channelId: string): string {
+        return channelId;
+    }
+
+    it("answers each item in the order given", async () => {
         const answered: string[] = [];
-        await answerEachChannel(live(), jest.fn(), "signing", [OTHER_ID, CHANNEL_ID], async (channelId) => {
+        await answerEachPolled(live(), jest.fn(), "signing", [OTHER_ID, CHANNEL_ID], idOf, async (channelId) => {
             answered.push(channelId);
         });
         expect(answered).toEqual([OTHER_ID, CHANNEL_ID]);
     });
 
-    it("reports a channel's failure under the poll's name, then answers the next one", async () => {
+    it("reports an item's failure under the poll's name, then answers the next one", async () => {
         const events: SdkEvent[] = [];
         const answered: string[] = [];
         const cause = new TypeError("storage is full");
-        await answerEachChannel(
+        await answerEachPolled(
             live(),
             (event) => events.push(event),
             "watchtower signing",
             [OTHER_ID, CHANNEL_ID],
+            idOf,
             async (channelId) => {
                 if (channelId === OTHER_ID) throw cause;
                 answered.push(channelId);
@@ -88,11 +93,37 @@ describe("answerEachChannel", () => {
         expect(summarized(events)).toEqual([pollFailedEvent(`the watchtower signing poll of ${OTHER_ID} failed: storage is full`, cause)]);
     });
 
-    it("answers no further channel once the run is abandoned, and reports no failure", async () => {
+    it("names a failure by the id it reads from the item, asking it only of the item that failed", async () => {
+        const events: SdkEvent[] = [];
+        const named: string[] = [];
+        const items = [
+            { paymentHash: "ab".repeat(32), fails: false },
+            { paymentHash: "cd".repeat(32), fails: true },
+        ];
+        await answerEachPolled(
+            live(),
+            (event) => events.push(event),
+            "invoice",
+            items,
+            (item) => {
+                named.push(item.paymentHash);
+                return `0x${item.paymentHash}`;
+            },
+            async (item) => {
+                if (item.fails) throw new TypeError("storage is full");
+            },
+        );
+        expect(named).toEqual(["cd".repeat(32)]);
+        expect(summarized(events)).toEqual([
+            pollFailedEvent(`the invoice poll of 0x${"cd".repeat(32)} failed: storage is full`, expect.any(TypeError)),
+        ]);
+    });
+
+    it("answers no further item once the run is abandoned, and reports no failure", async () => {
         const run = live();
         const emit = jest.fn();
         const answered: string[] = [];
-        await answerEachChannel(run, emit, "signing", [OTHER_ID, CHANNEL_ID], async (channelId) => {
+        await answerEachPolled(run, emit, "signing", [OTHER_ID, CHANNEL_ID], idOf, async (channelId) => {
             answered.push(channelId);
             run.abandoned = true;
             throw new TypeError("storage is full");
@@ -103,7 +134,7 @@ describe("answerEachChannel", () => {
 
     it("answers nothing for a run abandoned before it starts", async () => {
         const answer = jest.fn();
-        await answerEachChannel(abandoned(), jest.fn(), "signing", [CHANNEL_ID], answer);
+        await answerEachPolled(abandoned(), jest.fn(), "signing", [CHANNEL_ID], idOf, answer);
         expect(answer).not.toHaveBeenCalled();
     });
 });

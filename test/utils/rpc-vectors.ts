@@ -95,6 +95,7 @@ export type NewInvoiceParamsVector = {
     payment_hash: string;
     hash_algorithm: string;
     expiry: string;
+    final_expiry_delta: string;
     description: string | null;
 };
 
@@ -517,7 +518,14 @@ const METHOD_PARSERS: {
             const record = asRecord(value, path);
             return {
                 description: asNullable(record.description, `${path}.description`, asString),
-                ...asStringFields(record, path, ["amount", "currency", "payment_hash", "hash_algorithm", "expiry"] as const),
+                ...asStringFields(record, path, [
+                    "amount",
+                    "currency",
+                    "payment_hash",
+                    "hash_algorithm",
+                    "expiry",
+                    "final_expiry_delta",
+                ] as const),
             };
         },
         result: asInvoiceResult,

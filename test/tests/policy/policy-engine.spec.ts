@@ -18,6 +18,7 @@ import type {
     ChannelPolicyRecord,
     DebitIntentRecord,
     HoldInvoicePolicyRecord,
+    HoldInvoiceReleaseTiming,
     NonceCounter,
     PolicyChannelTerms,
     PolicyEngineOptions,
@@ -104,6 +105,9 @@ const RECEIVED_AMOUNT = "2250000000";
 const OFFERED_TLC_ID = 7;
 const OTHER_OFFERED_TLC_ID = 5;
 const RECEIVED_TLC_ID = 2;
+const INVOICE_INDEX = 1761475200000;
+// Ten minutes of margin, well before the received TLC's expiry at 1750000000000 ms.
+const RELEASE_TIMING: HoldInvoiceReleaseTiming = { now: () => 1749990000000, releaseMarginMs: () => 600000n };
 
 const REGISTERED_PINS: ChannelPins = {
     fundedShannons: FUNDED,
@@ -280,6 +284,22 @@ async function openChannel(engine: PolicyEngine, channel: Channel = { keys: KEYS
             channel,
         ),
     );
+}
+
+// The received TLC in both views: the peer's commitment at 11, the device's own at 12.
+async function holdReceived(engine: PolicyEngine, channel: Channel = { keys: KEYS, channelId: CHANNEL_ID }): Promise<void> {
+    for (const [forRemote, commitmentNumber] of [
+        [true, 11],
+        [false, 12],
+    ] as const) {
+        await engine.checkAndClaim(
+            channel.keys,
+            customCommitmentRequest(
+                { forRemote, commitmentNumber, settlementLocalShannons: OPENING_SETTLEMENT, tlcIds: [RECEIVED_TLC_ID] },
+                channel,
+            ),
+        );
+    }
 }
 
 async function recordThreeTlcIntents(engine: PolicyEngine): Promise<void> {
@@ -1477,7 +1497,7 @@ describe("debit intents", () => {
 
     it("refuses an intent under the hash of one of this device's hold invoices", async () => {
         const { engine, store } = newEngine();
-        await engine.recordHoldInvoice(RECEIVED_HASH, RECEIVED_AMOUNT, "sha256");
+        await engine.recordHoldInvoice(RECEIVED_HASH, RECEIVED_AMOUNT, "sha256", INVOICE_INDEX);
         const error = await engine.recordDebitIntent(RECEIVED_HASH, RECEIVED_AMOUNT).catch((cause: unknown) => cause);
         expect(error).toBeInstanceOf(DebitIntentError);
         expect(error).toMatchObject({ code: "own_invoice", message: `${RECEIVED_HASH} is the hash of a hold invoice of this device` });
@@ -1532,22 +1552,29 @@ describe("debit intents", () => {
 describe("hold invoices", () => {
     it("records an unreleased invoice under the bound 20 bytes of its hash", async () => {
         const { engine, store, storage } = newEngine();
-        await engine.recordHoldInvoice(RECEIVED_HASH, RECEIVED_AMOUNT, "sha256");
+        await engine.recordHoldInvoice(RECEIVED_HASH, RECEIVED_AMOUNT, "sha256", INVOICE_INDEX);
         await expect(store.getHoldInvoiceRecord(RECEIVED_HASH.slice(0, 40))).resolves.toEqual<HoldInvoicePolicyRecord>({
             version: 1,
             paymentHash: RECEIVED_HASH,
             amountShannons: RECEIVED_AMOUNT,
             hashAlgorithm: "sha256",
+            invoiceIndex: INVOICE_INDEX,
             released: false,
             channelIndexes: [],
         });
         expect([...storage.map.keys()]).toEqual([`fiber-lsp-sdk:invoice:${RECEIVED_HASH.slice(0, 40)}`]);
     });
 
+    it.each([0, Number.MAX_SAFE_INTEGER])("records the invoice index %p, at either end of its range", async (invoiceIndex) => {
+        const { engine } = newEngine();
+        await engine.recordHoldInvoice(RECEIVED_HASH, RECEIVED_AMOUNT, "sha256", invoiceIndex);
+        await expect(engine.readHoldInvoice(RECEIVED_HASH)).resolves.toMatchObject({ invoiceIndex });
+    });
+
     it("refuses an invoice under the hash of a payment this device authorised", async () => {
         const { engine, store } = newEngine();
         await engine.recordDebitIntent(OFFERED_HASH, OFFERED_AMOUNT);
-        await expect(engine.recordHoldInvoice(OFFERED_HASH, OFFERED_AMOUNT, "ckb-hash")).rejects.toThrow(
+        await expect(engine.recordHoldInvoice(OFFERED_HASH, OFFERED_AMOUNT, "ckb-hash", INVOICE_INDEX)).rejects.toThrow(
             new TypeError(`${OFFERED_HASH} is the hash of a payment this device has authorised`),
         );
         await expect(store.getHoldInvoiceRecord(OFFERED_HASH.slice(0, 40))).resolves.toBeNull();
@@ -1555,67 +1582,512 @@ describe("hold invoices", () => {
 
     it("writes nothing when the same invoice is recorded again", async () => {
         const { engine, storage } = newEngine();
-        await engine.recordHoldInvoice(RECEIVED_HASH, RECEIVED_AMOUNT, "sha256");
+        await engine.recordHoldInvoice(RECEIVED_HASH, RECEIVED_AMOUNT, "sha256", INVOICE_INDEX);
         storage.ops.length = 0;
-        await engine.recordHoldInvoice(RECEIVED_HASH, RECEIVED_AMOUNT, "sha256");
+        await engine.recordHoldInvoice(RECEIVED_HASH, RECEIVED_AMOUNT, "sha256", INVOICE_INDEX);
         expect(storage.ops.filter((operation) => operation.startsWith("set"))).toEqual([]);
     });
 
-    it("refuses the same hash with another algorithm", async () => {
-        const { engine } = newEngine();
-        await engine.recordHoldInvoice(RECEIVED_HASH, RECEIVED_AMOUNT, "sha256");
-        await expect(engine.recordHoldInvoice(RECEIVED_HASH, RECEIVED_AMOUNT, "ckb-hash")).rejects.toThrow(
-            new TypeError(`a hold invoice for ${RECEIVED_HASH} is already recorded with another amount or algorithm`),
-        );
-    });
-
-    it("rejects an algorithm fiber does not define", async () => {
+    it.each([
+        ["amount", "1", "sha256", INVOICE_INDEX],
+        ["algorithm", RECEIVED_AMOUNT, "ckb-hash", INVOICE_INDEX],
+        ["invoice index", RECEIVED_AMOUNT, "sha256", INVOICE_INDEX + 1],
+    ] as const)("refuses the same hash with another %s, writing nothing", async (_, amount, algorithm, invoiceIndex) => {
         const { engine, storage } = newEngine();
-        await expect(engine.recordHoldInvoice(RECEIVED_HASH, RECEIVED_AMOUNT, "ckb_hash" as never)).rejects.toThrow(TypeError);
-        expect(storage.map.size).toBe(0);
-    });
-
-    it("refuses the same hash with another amount", async () => {
-        const { engine } = newEngine();
-        await engine.recordHoldInvoice(RECEIVED_HASH, RECEIVED_AMOUNT, "sha256");
-        await expect(engine.recordHoldInvoice(RECEIVED_HASH, "1", "sha256")).rejects.toThrow(
-            new TypeError(`a hold invoice for ${RECEIVED_HASH} is already recorded with another amount or algorithm`),
+        await engine.recordHoldInvoice(RECEIVED_HASH, RECEIVED_AMOUNT, "sha256", INVOICE_INDEX);
+        const stored = new Map(storage.map);
+        await expect(engine.recordHoldInvoice(RECEIVED_HASH, amount, algorithm, invoiceIndex)).rejects.toThrow(
+            new TypeError(`a hold invoice for ${RECEIVED_HASH} is already recorded with another amount, algorithm or invoice index`),
         );
+        expect(storage.map).toEqual(stored);
     });
 
     it("refuses a hash that shares its bound 20 bytes with a recorded one", async () => {
         const { engine } = newEngine();
         const twin = RECEIVED_HASH.slice(0, 40) + "00".repeat(12);
-        await engine.recordHoldInvoice(RECEIVED_HASH, RECEIVED_AMOUNT, "sha256");
-        await expect(engine.recordHoldInvoice(twin, RECEIVED_AMOUNT, "ckb-hash")).rejects.toThrow(TypeError);
-        await expect(engine.markHoldInvoiceReleased(twin)).rejects.toThrow(TypeError);
-    });
-
-    it("marks an invoice released, and marking it again writes nothing", async () => {
-        const { engine, store, storage } = newEngine();
-        await engine.recordHoldInvoice(RECEIVED_HASH, RECEIVED_AMOUNT, "sha256");
-        await engine.markHoldInvoiceReleased(RECEIVED_HASH);
-        await expect(store.getHoldInvoiceRecord(RECEIVED_HASH.slice(0, 40))).resolves.toMatchObject({ released: true });
-        storage.ops.length = 0;
-        await engine.markHoldInvoiceReleased(RECEIVED_HASH);
-        expect(storage.ops.filter((operation) => operation.startsWith("set"))).toEqual([]);
-    });
-
-    it("refuses to release an invoice that was never recorded", async () => {
-        const { engine } = newEngine();
-        await expect(engine.markHoldInvoiceReleased(RECEIVED_HASH)).rejects.toThrow(
-            new TypeError(`no hold invoice was recorded for ${RECEIVED_HASH}`),
-        );
+        const error = new TypeError(`${twin} shares its bound 20 bytes with a recorded payment, ${RECEIVED_HASH}`);
+        await engine.recordHoldInvoice(RECEIVED_HASH, RECEIVED_AMOUNT, "sha256", INVOICE_INDEX);
+        await expect(engine.recordHoldInvoice(twin, RECEIVED_AMOUNT, "ckb-hash", INVOICE_INDEX)).rejects.toThrow(error);
+        await expect(engine.markHoldInvoiceReleased(twin, RELEASE_TIMING)).rejects.toThrow(error);
+        await expect(engine.readHoldInvoice(twin)).rejects.toThrow(error);
+        await expect(engine.listsHoldInvoiceTlc(twin)).rejects.toThrow(error);
     });
 
     it.each([
-        ["a hash of 31 bytes", RECEIVED_HASH.slice(2), RECEIVED_AMOUNT],
-        ["an amount in hex", RECEIVED_HASH, "0x10"],
-    ])("rejects %s", async (_, hash, amount) => {
+        [
+            "no hash",
+            [undefined, RECEIVED_AMOUNT, "sha256", INVOICE_INDEX],
+            new TypeError("paymentHashHex must be 32 bytes of lowercase hex"),
+        ],
+        [
+            "a hash of 31 bytes",
+            [RECEIVED_HASH.slice(2), RECEIVED_AMOUNT, "sha256", INVOICE_INDEX],
+            new TypeError("paymentHashHex must be 32 bytes of lowercase hex"),
+        ],
+        [
+            "an uppercase hash",
+            [RECEIVED_HASH.toUpperCase(), RECEIVED_AMOUNT, "sha256", INVOICE_INDEX],
+            new TypeError("paymentHashHex must be 32 bytes of lowercase hex"),
+        ],
+        [
+            "no amount",
+            [RECEIVED_HASH, undefined, "sha256", INVOICE_INDEX],
+            new TypeError("amountShannons must be an amount in decimal shannons"),
+        ],
+        [
+            "an amount in hex",
+            [RECEIVED_HASH, "0x10", "sha256", INVOICE_INDEX],
+            new TypeError("amountShannons must be an amount in decimal shannons"),
+        ],
+        [
+            "a negative amount",
+            [RECEIVED_HASH, "-1", "sha256", INVOICE_INDEX],
+            new TypeError("amountShannons must be an amount in decimal shannons"),
+        ],
+        ["a zero amount", [RECEIVED_HASH, "0", "sha256", INVOICE_INDEX], new RangeError("amountShannons must be greater than 0, got 0")],
+        [
+            "no algorithm",
+            [RECEIVED_HASH, RECEIVED_AMOUNT, undefined, INVOICE_INDEX],
+            new TypeError("hashAlgorithm must be one of ckb-hash, sha256"),
+        ],
+        [
+            "an algorithm fiber does not define",
+            [RECEIVED_HASH, RECEIVED_AMOUNT, "ckb_hash", INVOICE_INDEX],
+            new TypeError("hashAlgorithm must be one of ckb-hash, sha256"),
+        ],
+        [
+            "no invoice index",
+            [RECEIVED_HASH, RECEIVED_AMOUNT, "sha256", undefined],
+            new RangeError("invoiceIndex must be an integer between 0 and 9007199254740991, got undefined"),
+        ],
+        [
+            "a fractional invoice index",
+            [RECEIVED_HASH, RECEIVED_AMOUNT, "sha256", 1.5],
+            new RangeError("invoiceIndex must be an integer between 0 and 9007199254740991, got 1.5"),
+        ],
+        [
+            "a negative invoice index",
+            [RECEIVED_HASH, RECEIVED_AMOUNT, "sha256", -1],
+            new RangeError("invoiceIndex must be an integer between 0 and 9007199254740991, got -1"),
+        ],
+        [
+            "an invoice index past the highest a preimage derives from",
+            [RECEIVED_HASH, RECEIVED_AMOUNT, "sha256", 2 ** 53],
+            new RangeError("invoiceIndex must be an integer between 0 and 9007199254740991, got 9007199254740992"),
+        ],
+        [
+            "an invoice index in a string",
+            [RECEIVED_HASH, RECEIVED_AMOUNT, "sha256", "1761475200000"],
+            new RangeError("invoiceIndex must be an integer between 0 and 9007199254740991, got 1761475200000"),
+        ],
+    ])("rejects %s, touching nothing", async (_, args, error) => {
         const { engine, storage } = newEngine();
-        await expect(engine.recordHoldInvoice(hash, amount, "ckb-hash")).rejects.toThrow(TypeError);
-        await expect(engine.markHoldInvoiceReleased(hash.slice(2))).rejects.toThrow(TypeError);
-        expect(storage.map.size).toBe(0);
+        await expect(engine.recordHoldInvoice(...(args as Parameters<PolicyEngine["recordHoldInvoice"]>))).rejects.toThrow(error);
+        expect(storage.ops).toEqual([]);
+    });
+
+    describe("the release", () => {
+        it("marks an invoice its channel holds released, and marking it again reads no condition and writes nothing", async () => {
+            const { engine, store, storage } = await openedEngine();
+            await engine.recordHoldInvoice(RECEIVED_HASH, RECEIVED_AMOUNT, "sha256", INVOICE_INDEX);
+            await holdReceived(engine);
+            await engine.markHoldInvoiceReleased(RECEIVED_HASH, RELEASE_TIMING);
+            await expect(store.getHoldInvoiceRecord(RECEIVED_HASH.slice(0, 40))).resolves.toMatchObject({ released: true });
+            storage.ops.length = 0;
+            // Past the TLC's expiry: a released invoice is not judged again.
+            const now = jest.fn(() => 1750000000000);
+            const releaseMarginMs = jest.fn(() => 600000n);
+            await engine.markHoldInvoiceReleased(RECEIVED_HASH, { now, releaseMarginMs });
+            expect(storage.ops).toEqual([`get fiber-lsp-sdk:invoice:${RECEIVED_HASH.slice(0, 40)}`]);
+            expect(now).not.toHaveBeenCalled();
+            expect(releaseMarginMs).not.toHaveBeenCalled();
+        });
+
+        it("refuses an invoice no channel has shown yet, writing nothing", async () => {
+            const { engine, store, storage } = await openedEngine();
+            await engine.recordHoldInvoice(RECEIVED_HASH, RECEIVED_AMOUNT, "sha256", INVOICE_INDEX);
+            const stored = new Map(storage.map);
+            const error = await engine.markHoldInvoiceReleased(RECEIVED_HASH, RELEASE_TIMING).catch((cause: unknown) => cause);
+            expect(error).toBeInstanceOf(HoldInvoiceError);
+            expect(error).toMatchObject({
+                code: "not_held",
+                message: `the channels hold 0 shannons under ${RECEIVED_HASH}, each at its view holding less, short of the invoice's ${RECEIVED_AMOUNT}`,
+            });
+            expect(storage.map).toEqual(stored);
+            await expect(store.getHoldInvoiceRecord(RECEIVED_HASH.slice(0, 40))).resolves.toMatchObject({ released: false });
+        });
+
+        it.each([true, false])("refuses an invoice one view holds alone (for remote: %s)", async (forRemote) => {
+            const { engine, store } = await openedEngine();
+            await engine.recordHoldInvoice(RECEIVED_HASH, RECEIVED_AMOUNT, "sha256", INVOICE_INDEX);
+            await engine.checkAndClaim(
+                KEYS,
+                customCommitmentRequest({
+                    forRemote,
+                    commitmentNumber: 11,
+                    settlementLocalShannons: OPENING_SETTLEMENT,
+                    tlcIds: [RECEIVED_TLC_ID],
+                }),
+            );
+            await expect(engine.markHoldInvoiceReleased(RECEIVED_HASH, RELEASE_TIMING)).rejects.toMatchObject({ code: "not_held" });
+            await expect(store.getHoldInvoiceRecord(RECEIVED_HASH.slice(0, 40))).resolves.toMatchObject({ released: false });
+        });
+
+        it.each([
+            ["one shannon less than", "2249999999"],
+            ["exactly", RECEIVED_AMOUNT],
+        ])("releases an invoice of %s what its channel holds", async (_, amount) => {
+            const { engine, store } = await openedEngine();
+            await engine.recordHoldInvoice(RECEIVED_HASH, amount, "sha256", INVOICE_INDEX);
+            await holdReceived(engine);
+            await engine.markHoldInvoiceReleased(RECEIVED_HASH, RELEASE_TIMING);
+            await expect(store.getHoldInvoiceRecord(RECEIVED_HASH.slice(0, 40))).resolves.toMatchObject({ released: true });
+        });
+
+        it("refuses an invoice one shannon above what its channel holds", async () => {
+            const { engine } = await openedEngine();
+            await engine.recordHoldInvoice(RECEIVED_HASH, "2250000001", "sha256", INVOICE_INDEX);
+            await holdReceived(engine);
+            await expect(engine.markHoldInvoiceReleased(RECEIVED_HASH, RELEASE_TIMING)).rejects.toMatchObject({
+                code: "not_held",
+                message: `the channels hold ${RECEIVED_AMOUNT} shannons under ${RECEIVED_HASH}, each at its view holding less, short of the invoice's 2250000001`,
+            });
+        });
+
+        it("sums the channels the invoice lists", async () => {
+            const { engine, store } = await openedEngine();
+            await addOtherChannel(engine);
+            await engine.recordHoldInvoice(RECEIVED_HASH, "4500000000", "sha256", INVOICE_INDEX);
+            await holdReceived(engine);
+            await expect(engine.markHoldInvoiceReleased(RECEIVED_HASH, RELEASE_TIMING)).rejects.toMatchObject({ code: "not_held" });
+            await holdReceived(engine, OTHER_CHANNEL);
+            await engine.markHoldInvoiceReleased(RECEIVED_HASH, RELEASE_TIMING);
+            await expect(store.getHoldInvoiceRecord(RECEIVED_HASH.slice(0, 40))).resolves.toMatchObject({
+                released: true,
+                channelIndexes: [CHANNEL_INDEX, OTHER_CHANNEL_INDEX],
+            });
+        });
+
+        it("refuses a TLC expiring exactly at the margin past now, and releases one millisecond earlier", async () => {
+            const { engine, store } = await openedEngine();
+            await engine.recordHoldInvoice(RECEIVED_HASH, RECEIVED_AMOUNT, "sha256", INVOICE_INDEX);
+            await holdReceived(engine);
+            const error = await engine
+                .markHoldInvoiceReleased(RECEIVED_HASH, { now: () => 1749999400000, releaseMarginMs: () => 600000n })
+                .catch((cause: unknown) => cause);
+            expect(error).toBeInstanceOf(HoldInvoiceError);
+            expect(error).toMatchObject({
+                code: "expiry_too_close",
+                message: `channel index ${CHANNEL_INDEX} holds a TLC under ${RECEIVED_HASH} expiring at 1750000000000, not after 1750000000000`,
+            });
+            await expect(store.getHoldInvoiceRecord(RECEIVED_HASH.slice(0, 40))).resolves.toMatchObject({ released: false });
+            await engine.markHoldInvoiceReleased(RECEIVED_HASH, { now: () => 1749999399999, releaseMarginMs: () => 600000n });
+            await expect(store.getHoldInvoiceRecord(RECEIVED_HASH.slice(0, 40))).resolves.toMatchObject({ released: true });
+        });
+
+        it("asks the margin of the delay the channel pinned", async () => {
+            const { engine } = await openedEngine();
+            await engine.recordHoldInvoice(RECEIVED_HASH, RECEIVED_AMOUNT, "sha256", INVOICE_INDEX);
+            await holdReceived(engine);
+            const releaseMarginMs = jest.fn(() => 600000n);
+            await engine.markHoldInvoiceReleased(RECEIVED_HASH, { now: () => 1749990000000, releaseMarginMs });
+            expect(releaseMarginMs.mock.calls).toEqual([[1099511627777n]]);
+        });
+
+        it("refuses to release an invoice that was never recorded", async () => {
+            const { engine } = newEngine();
+            await expect(engine.markHoldInvoiceReleased(RECEIVED_HASH, RELEASE_TIMING)).rejects.toThrow(
+                new TypeError(`no hold invoice was recorded for ${RECEIVED_HASH}`),
+            );
+        });
+
+        it.each<[string, unknown, unknown, Error]>([
+            ["no hash", undefined, RELEASE_TIMING, new TypeError("paymentHashHex must be 32 bytes of lowercase hex")],
+            [
+                "a hash of 31 bytes",
+                RECEIVED_HASH.slice(2),
+                RELEASE_TIMING,
+                new TypeError("paymentHashHex must be 32 bytes of lowercase hex"),
+            ],
+            [
+                "an uppercase hash",
+                RECEIVED_HASH.toUpperCase(),
+                RELEASE_TIMING,
+                new TypeError("paymentHashHex must be 32 bytes of lowercase hex"),
+            ],
+            ["no timing", RECEIVED_HASH, undefined, new TypeError("timing must be an object")],
+            ["a timing that is no object", RECEIVED_HASH, 1749990000000, new TypeError("timing must be an object")],
+            ["no clock", RECEIVED_HASH, { releaseMarginMs: () => 600000n }, new TypeError("timing.now must be a function")],
+            [
+                "a clock that is a reading, not a function",
+                RECEIVED_HASH,
+                { now: 1749990000000, releaseMarginMs: () => 600000n },
+                new TypeError("timing.now must be a function"),
+            ],
+            ["no margin", RECEIVED_HASH, { now: () => 1749990000000 }, new TypeError("timing.releaseMarginMs must be a function")],
+            [
+                "a margin that is no function",
+                RECEIVED_HASH,
+                { now: () => 1749990000000, releaseMarginMs: 600000n },
+                new TypeError("timing.releaseMarginMs must be a function"),
+            ],
+        ])("rejects %s before touching the storage", async (_, hash, timing, error) => {
+            const { engine, storage } = await openedEngine();
+            await engine.recordHoldInvoice(RECEIVED_HASH, RECEIVED_AMOUNT, "sha256", INVOICE_INDEX);
+            await holdReceived(engine);
+            storage.ops.length = 0;
+            await expect(engine.markHoldInvoiceReleased(hash as string, timing as HoldInvoiceReleaseTiming)).rejects.toThrow(error);
+            expect(storage.ops).toEqual([]);
+        });
+
+        it.each([
+            ["no reading", undefined, "undefined"],
+            ["a fractional reading", 1749990000000.5, "1749990000000.5"],
+            ["a negative reading", -1, "-1"],
+            ["a reading past the safe integers", 2 ** 53, "9007199254740992"],
+            ["a reading in a string", "1749990000000", "1749990000000"],
+        ])("rejects a clock giving %s, writing nothing", async (_, reading, shown) => {
+            const { engine, store, storage } = await openedEngine();
+            await engine.recordHoldInvoice(RECEIVED_HASH, RECEIVED_AMOUNT, "sha256", INVOICE_INDEX);
+            await holdReceived(engine);
+            storage.ops.length = 0;
+            const timing = { now: () => reading, releaseMarginMs: () => 600000n } as unknown as HoldInvoiceReleaseTiming;
+            await expect(engine.markHoldInvoiceReleased(RECEIVED_HASH, timing)).rejects.toThrow(
+                new RangeError(`timing.now() must be an integer between 0 and 9007199254740991, got ${shown}`),
+            );
+            expect(storage.ops.filter((operation) => operation.startsWith("set"))).toEqual([]);
+            await expect(store.getHoldInvoiceRecord(RECEIVED_HASH.slice(0, 40))).resolves.toMatchObject({ released: false });
+        });
+
+        it("rejects with what a throwing clock throws, writing nothing", async () => {
+            const { engine, store, storage } = await openedEngine();
+            await engine.recordHoldInvoice(RECEIVED_HASH, RECEIVED_AMOUNT, "sha256", INVOICE_INDEX);
+            await holdReceived(engine);
+            storage.ops.length = 0;
+            const failure = new Error("the host's clock failed");
+            const now = (): number => {
+                throw failure;
+            };
+            await expect(engine.markHoldInvoiceReleased(RECEIVED_HASH, { now, releaseMarginMs: () => 600000n })).rejects.toBe(failure);
+            expect(storage.ops.filter((operation) => operation.startsWith("set"))).toEqual([]);
+            await expect(store.getHoldInvoiceRecord(RECEIVED_HASH.slice(0, 40))).resolves.toMatchObject({ released: false });
+        });
+
+        it("reads the clock once, after the records it judges and before it writes", async () => {
+            const { engine, storage } = await openedEngine();
+            await engine.recordHoldInvoice(RECEIVED_HASH, RECEIVED_AMOUNT, "sha256", INVOICE_INDEX);
+            await holdReceived(engine);
+            storage.ops.length = 0;
+            const readAt: number[] = [];
+            const now = jest.fn(() => {
+                readAt.push(storage.ops.length);
+                return 1749990000000;
+            });
+            await engine.markHoldInvoiceReleased(RECEIVED_HASH, { now, releaseMarginMs: () => 600000n });
+            expect(now).toHaveBeenCalledTimes(1);
+            const reads = storage.ops.slice(0, readAt[0]);
+            expect(reads.length).toBeGreaterThan(1);
+            expect(reads.every((operation) => operation.startsWith("get"))).toBe(true);
+            // The update reads the record again before it writes it.
+            expect(storage.ops.slice(readAt[0])).toEqual([
+                `get fiber-lsp-sdk:invoice:${RECEIVED_HASH.slice(0, 40)}`,
+                `set fiber-lsp-sdk:invoice:${RECEIVED_HASH.slice(0, 40)}`,
+            ]);
+        });
+
+        it("reads each timing field once, so the function checked is the function called", async () => {
+            const { engine, store } = await openedEngine();
+            await engine.recordHoldInvoice(RECEIVED_HASH, RECEIVED_AMOUNT, "sha256", INVOICE_INDEX);
+            await holdReceived(engine);
+            const reads = { now: 0, releaseMarginMs: 0 };
+            const timing = {
+                get now(): unknown {
+                    reads.now += 1;
+                    return reads.now === 1 ? (): number => 1749990000000 : 1749990000000;
+                },
+                get releaseMarginMs(): unknown {
+                    reads.releaseMarginMs += 1;
+                    return reads.releaseMarginMs === 1 ? (): bigint => 600000n : 600000n;
+                },
+            } as unknown as HoldInvoiceReleaseTiming;
+            await engine.markHoldInvoiceReleased(RECEIVED_HASH, timing);
+            expect(reads).toEqual({ now: 1, releaseMarginMs: 1 });
+            await expect(store.getHoldInvoiceRecord(RECEIVED_HASH.slice(0, 40))).resolves.toMatchObject({ released: true });
+        });
+
+        it("takes a clock at zero", async () => {
+            const { engine, store } = await openedEngine();
+            await engine.recordHoldInvoice(RECEIVED_HASH, RECEIVED_AMOUNT, "sha256", INVOICE_INDEX);
+            await holdReceived(engine);
+            await engine.markHoldInvoiceReleased(RECEIVED_HASH, { now: () => 0, releaseMarginMs: () => 600000n });
+            await expect(store.getHoldInvoiceRecord(RECEIVED_HASH.slice(0, 40))).resolves.toMatchObject({ released: true });
+        });
+    });
+
+    describe("readHoldInvoice", () => {
+        it("reads the record by its full hash", async () => {
+            const { engine } = await openedEngine();
+            await engine.recordHoldInvoice(RECEIVED_HASH, RECEIVED_AMOUNT, "sha256", INVOICE_INDEX);
+            await holdReceived(engine);
+            await engine.markHoldInvoiceReleased(RECEIVED_HASH, RELEASE_TIMING);
+            await expect(engine.readHoldInvoice(RECEIVED_HASH)).resolves.toEqual<HoldInvoicePolicyRecord>({
+                version: 1,
+                paymentHash: RECEIVED_HASH,
+                amountShannons: RECEIVED_AMOUNT,
+                hashAlgorithm: "sha256",
+                invoiceIndex: INVOICE_INDEX,
+                released: true,
+                channelIndexes: [CHANNEL_INDEX],
+            });
+        });
+
+        it("refuses a hash no invoice was recorded under", async () => {
+            const { engine } = newEngine();
+            await expect(engine.readHoldInvoice(RECEIVED_HASH)).rejects.toThrow(
+                new TypeError(`no hold invoice was recorded for ${RECEIVED_HASH}`),
+            );
+        });
+
+        it.each([
+            ["no hash", undefined],
+            ["a hash of 31 bytes", RECEIVED_HASH.slice(2)],
+            ["an uppercase hash", RECEIVED_HASH.toUpperCase()],
+        ])("rejects %s before touching the storage", async (_, hash) => {
+            const { engine, storage } = newEngine();
+            await engine.recordHoldInvoice(RECEIVED_HASH, RECEIVED_AMOUNT, "sha256", INVOICE_INDEX);
+            storage.ops.length = 0;
+            await expect(engine.readHoldInvoice(hash as string)).rejects.toThrow(
+                new TypeError("paymentHashHex must be 32 bytes of lowercase hex"),
+            );
+            expect(storage.ops).toEqual([]);
+        });
+    });
+
+    describe("listsHoldInvoiceTlc", () => {
+        it("answers no for an invoice no channel has shown", async () => {
+            const { engine } = await openedEngine();
+            await engine.recordHoldInvoice(RECEIVED_HASH, RECEIVED_AMOUNT, "sha256", INVOICE_INDEX);
+            await expect(engine.listsHoldInvoiceTlc(RECEIVED_HASH)).resolves.toBe(false);
+        });
+
+        it.each([true, false])("answers yes while one view lists a TLC of the invoice (for remote: %s)", async (forRemote) => {
+            const { engine } = await openedEngine();
+            await engine.recordHoldInvoice(RECEIVED_HASH, RECEIVED_AMOUNT, "sha256", INVOICE_INDEX);
+            await engine.checkAndClaim(
+                KEYS,
+                customCommitmentRequest({
+                    forRemote,
+                    commitmentNumber: 11,
+                    settlementLocalShannons: OPENING_SETTLEMENT,
+                    tlcIds: [RECEIVED_TLC_ID],
+                }),
+            );
+            await expect(engine.listsHoldInvoiceTlc(RECEIVED_HASH)).resolves.toBe(true);
+        });
+
+        it("answers no once both views of every channel dropped the TLC, and yes while one still lists it", async () => {
+            const { engine } = await openedEngine();
+            await addOtherChannel(engine);
+            await engine.recordHoldInvoice(RECEIVED_HASH, RECEIVED_AMOUNT, "sha256", INVOICE_INDEX);
+            await holdReceived(engine, OTHER_CHANNEL);
+            await holdReceived(engine);
+            await peerRevokes(engine, 11);
+            // The peer's commitment drops the failed TLC first, on slot 13: the device's own took 12.
+            const dropped = customCommitmentRequest({
+                forRemote: true,
+                commitmentNumber: 12,
+                settlementLocalShannons: OPENING_SETTLEMENT,
+                tlcIds: [],
+            });
+            await engine.checkAndClaim(KEYS, signedRequest(dropped.operation, 13));
+            await engine.checkAndClaim(
+                KEYS,
+                customCommitmentRequest({
+                    forRemote: false,
+                    commitmentNumber: 14,
+                    settlementLocalShannons: OPENING_SETTLEMENT,
+                    tlcIds: [],
+                }),
+            );
+            await expect(engine.listsHoldInvoiceTlc(RECEIVED_HASH)).resolves.toBe(true);
+            await peerRevokes(engine, 11, OTHER_CHANNEL);
+            const otherDropped = customCommitmentRequest(
+                { forRemote: true, commitmentNumber: 12, settlementLocalShannons: OPENING_SETTLEMENT, tlcIds: [] },
+                OTHER_CHANNEL,
+            );
+            await engine.checkAndClaim(OTHER_KEYS, signedRequest(otherDropped.operation, 13, OTHER_CHANNEL));
+            await expect(engine.listsHoldInvoiceTlc(RECEIVED_HASH)).resolves.toBe(true);
+            await engine.checkAndClaim(
+                OTHER_KEYS,
+                customCommitmentRequest(
+                    { forRemote: false, commitmentNumber: 14, settlementLocalShannons: OPENING_SETTLEMENT, tlcIds: [] },
+                    OTHER_CHANNEL,
+                ),
+            );
+            await expect(engine.listsHoldInvoiceTlc(RECEIVED_HASH)).resolves.toBe(false);
+        });
+
+        it("answers yes while the second channel the invoice lists still holds its TLC, the first one dropped", async () => {
+            const { engine, store } = await openedEngine();
+            await addOtherChannel(engine);
+            await engine.recordHoldInvoice(RECEIVED_HASH, RECEIVED_AMOUNT, "sha256", INVOICE_INDEX);
+            await holdReceived(engine);
+            await holdReceived(engine, OTHER_CHANNEL);
+            await expect(store.getHoldInvoiceRecord(RECEIVED_HASH.slice(0, 40))).resolves.toMatchObject({
+                channelIndexes: [CHANNEL_INDEX, OTHER_CHANNEL_INDEX],
+            });
+            await peerRevokes(engine, 11);
+            const dropped = customCommitmentRequest({
+                forRemote: true,
+                commitmentNumber: 12,
+                settlementLocalShannons: OPENING_SETTLEMENT,
+                tlcIds: [],
+            });
+            await engine.checkAndClaim(KEYS, signedRequest(dropped.operation, 13));
+            await engine.checkAndClaim(
+                KEYS,
+                customCommitmentRequest({
+                    forRemote: false,
+                    commitmentNumber: 14,
+                    settlementLocalShannons: OPENING_SETTLEMENT,
+                    tlcIds: [],
+                }),
+            );
+            await expect(engine.listsHoldInvoiceTlc(RECEIVED_HASH)).resolves.toBe(true);
+        });
+
+        it("refuses a hash no invoice was recorded under", async () => {
+            const { engine } = newEngine();
+            await expect(engine.listsHoldInvoiceTlc(RECEIVED_HASH)).rejects.toThrow(
+                new TypeError(`no hold invoice was recorded for ${RECEIVED_HASH}`),
+            );
+        });
+
+        it("throws when the invoice lists a channel that holds no record", async () => {
+            const { engine, store } = newEngine();
+            await engine.recordHoldInvoice(RECEIVED_HASH, RECEIVED_AMOUNT, "sha256", INVOICE_INDEX);
+            await store.updateHoldInvoiceRecord(RECEIVED_HASH.slice(0, 40), (current) => ({
+                ...(current as HoldInvoicePolicyRecord),
+                channelIndexes: [OTHER_CHANNEL_INDEX],
+            }));
+            await expect(engine.listsHoldInvoiceTlc(RECEIVED_HASH)).rejects.toThrow(
+                new TypeError(`a payment record lists channel index ${OTHER_CHANNEL_INDEX}, which holds no record`),
+            );
+        });
+
+        it.each([
+            ["no hash", undefined],
+            ["a hash of 31 bytes", RECEIVED_HASH.slice(2)],
+            ["an uppercase hash", RECEIVED_HASH.toUpperCase()],
+        ])("rejects %s before touching the storage", async (_, hash) => {
+            const { engine, storage } = newEngine();
+            await engine.recordHoldInvoice(RECEIVED_HASH, RECEIVED_AMOUNT, "sha256", INVOICE_INDEX);
+            storage.ops.length = 0;
+            await expect(engine.listsHoldInvoiceTlc(hash as string)).rejects.toThrow(
+                new TypeError("paymentHashHex must be 32 bytes of lowercase hex"),
+            );
+            expect(storage.ops).toEqual([]);
+        });
     });
 });
 
@@ -3661,30 +4133,23 @@ describe("checkAndClaim", () => {
         });
 
         describe("a released preimage", () => {
-            // A channel listing the received TLC alone, whose opening the peer has revoked.
+            // The received TLC alone in both views, the opening revoked: the next remote commitment, version 12, takes slot 13.
             async function holding() {
                 const context = await opened();
                 await recordThreeTlcIntents(context.engine);
-                await context.engine.recordHoldInvoice(RECEIVED_HASH, RECEIVED_AMOUNT, "sha256");
-                await context.engine.checkAndClaim(
-                    KEYS,
-                    customCommitmentRequest({
-                        forRemote: true,
-                        commitmentNumber: 11,
-                        settlementLocalShannons: OPENING_SETTLEMENT,
-                        tlcIds: [RECEIVED_TLC_ID],
-                    }),
-                );
+                await context.engine.recordHoldInvoice(RECEIVED_HASH, RECEIVED_AMOUNT, "sha256", INVOICE_INDEX);
+                await holdReceived(context.engine);
                 await peerRevokes(context.engine, 11);
-                await context.engine.markHoldInvoiceReleased(RECEIVED_HASH);
+                await context.engine.markHoldInvoiceReleased(RECEIVED_HASH, RELEASE_TIMING);
                 return context;
             }
 
             // A part that failed on a channel busy with outgoing payments must not hold the release back.
             it("releases while a channel the invoice was shown on no longer lists it, whatever else it lists", async () => {
                 const { engine, store } = await opened();
+                await addOtherChannel(engine);
                 await engine.recordDebitIntent(OFFERED_HASH, OFFERED_AMOUNT);
-                await engine.recordHoldInvoice(RECEIVED_HASH, RECEIVED_AMOUNT, "sha256");
+                await engine.recordHoldInvoice(RECEIVED_HASH, RECEIVED_AMOUNT, "sha256", INVOICE_INDEX);
                 await engine.checkAndClaim(
                     KEYS,
                     customCommitmentRequest({
@@ -3714,10 +4179,11 @@ describe("checkAndClaim", () => {
                         tlcIds: [OFFERED_TLC_ID],
                     }),
                 );
-                await engine.markHoldInvoiceReleased(RECEIVED_HASH);
+                await holdReceived(engine, OTHER_CHANNEL);
+                await engine.markHoldInvoiceReleased(RECEIVED_HASH, RELEASE_TIMING);
                 await expect(store.getHoldInvoiceRecord(RECEIVED_HASH.slice(0, 40))).resolves.toMatchObject({
                     released: true,
-                    channelIndexes: [CHANNEL_INDEX],
+                    channelIndexes: [CHANNEL_INDEX, OTHER_CHANNEL_INDEX],
                 });
                 await peerRevokes(engine, 13);
                 // Safe: a part arriving now is refused beside the offered TLC.
@@ -3739,7 +4205,7 @@ describe("checkAndClaim", () => {
 
             it("refuses the release while a TLC of the invoice is locked with another algorithm", async () => {
                 const { engine, store } = await opened();
-                await engine.recordHoldInvoice(RECEIVED_HASH, RECEIVED_AMOUNT, "ckb-hash");
+                await engine.recordHoldInvoice(RECEIVED_HASH, RECEIVED_AMOUNT, "ckb-hash", INVOICE_INDEX);
                 await engine.checkAndClaim(
                     KEYS,
                     customCommitmentRequest({
@@ -3749,7 +4215,7 @@ describe("checkAndClaim", () => {
                         tlcIds: [RECEIVED_TLC_ID],
                     }),
                 );
-                const error = await engine.markHoldInvoiceReleased(RECEIVED_HASH).catch((cause: unknown) => cause);
+                const error = await engine.markHoldInvoiceReleased(RECEIVED_HASH, RELEASE_TIMING).catch((cause: unknown) => cause);
                 expect(error).toBeInstanceOf(HoldInvoiceError);
                 expect(error).toMatchObject({
                     code: "algorithm_mismatch",
@@ -3761,7 +4227,7 @@ describe("checkAndClaim", () => {
             it("refuses the release while the offered TLC is listed in the local view alone", async () => {
                 const { engine } = await opened();
                 await engine.recordDebitIntent(OFFERED_HASH, OFFERED_AMOUNT);
-                await engine.recordHoldInvoice(RECEIVED_HASH, RECEIVED_AMOUNT, "sha256");
+                await engine.recordHoldInvoice(RECEIVED_HASH, RECEIVED_AMOUNT, "sha256", INVOICE_INDEX);
                 await engine.checkAndClaim(
                     KEYS,
                     customCommitmentRequest({
@@ -3780,18 +4246,30 @@ describe("checkAndClaim", () => {
                         tlcIds: [OFFERED_TLC_ID],
                     }),
                 );
-                await expect(engine.markHoldInvoiceReleased(RECEIVED_HASH)).rejects.toMatchObject({ code: "offered_in_flight" });
+                await expect(engine.markHoldInvoiceReleased(RECEIVED_HASH, RELEASE_TIMING)).rejects.toMatchObject({
+                    code: "offered_in_flight",
+                });
             });
 
             it("refuses an offered TLC in one view while the other lists a released held TLC", async () => {
                 const { engine } = await holding();
+                // The device's own commitment is paid first; the peer's still lists the TLC.
+                await engine.checkAndClaim(
+                    KEYS,
+                    customCommitmentRequest({
+                        forRemote: false,
+                        commitmentNumber: 13,
+                        settlementLocalShannons: "64250000000",
+                        tlcIds: [],
+                    }),
+                );
                 const refusal = await refusalOf(
                     engine.checkAndClaim(
                         KEYS,
                         customCommitmentRequest({
                             forRemote: false,
-                            commitmentNumber: 12,
-                            settlementLocalShannons: "60500000000",
+                            commitmentNumber: 14,
+                            settlementLocalShannons: "62750000000",
                             tlcIds: [OFFERED_TLC_ID],
                         }),
                     ),
@@ -3804,9 +4282,9 @@ describe("checkAndClaim", () => {
             it("refuses to release the preimage while a channel of the invoice lists an offered TLC", async () => {
                 const { engine, store } = await opened();
                 await recordThreeTlcIntents(engine);
-                await engine.recordHoldInvoice(RECEIVED_HASH, RECEIVED_AMOUNT, "sha256");
+                await engine.recordHoldInvoice(RECEIVED_HASH, RECEIVED_AMOUNT, "sha256", INVOICE_INDEX);
                 await engine.checkAndClaim(KEYS, threeTlcRequest());
-                const error = await engine.markHoldInvoiceReleased(RECEIVED_HASH).catch((cause: unknown) => cause);
+                const error = await engine.markHoldInvoiceReleased(RECEIVED_HASH, RELEASE_TIMING).catch((cause: unknown) => cause);
                 expect(error).toBeInstanceOf(HoldInvoiceError);
                 expect(error).toMatchObject({
                     code: "offered_in_flight",
@@ -3817,17 +4295,13 @@ describe("checkAndClaim", () => {
 
             it("refuses an offered TLC on a channel holding a released TLC", async () => {
                 const { engine } = await holding();
-                const refusal = await refusalOf(
-                    engine.checkAndClaim(
-                        KEYS,
-                        customCommitmentRequest({
-                            forRemote: true,
-                            commitmentNumber: 12,
-                            settlementLocalShannons: "60500000000",
-                            tlcIds: [OFFERED_TLC_ID, RECEIVED_TLC_ID],
-                        }),
-                    ),
-                );
+                const { operation } = customCommitmentRequest({
+                    forRemote: true,
+                    commitmentNumber: 12,
+                    settlementLocalShannons: "60500000000",
+                    tlcIds: [OFFERED_TLC_ID, RECEIVED_TLC_ID],
+                });
+                const refusal = await refusalOf(engine.checkAndClaim(KEYS, signedRequest(operation, 13)));
                 expect(refusal.message).toBe(
                     "the remote commitment would show an offered TLC beside a held TLC whose preimage was released",
                 );
@@ -3844,9 +4318,13 @@ describe("checkAndClaim", () => {
                         set: (key: string, value: string) => inner.set(key, value),
                     }),
                 );
-                await engine.recordHoldInvoice(RECEIVED_HASH, RECEIVED_AMOUNT, "sha256");
+                await engine.registerChannel(CHANNEL_ID, CHANNEL_INDEX, FUNDED, CLOSE_SCRIPT);
+                await engine.pinChannelTerms(CHANNEL_ID, TERMS);
+                await openChannel(engine);
+                await engine.recordHoldInvoice(RECEIVED_HASH, RECEIVED_AMOUNT, "sha256", INVOICE_INDEX);
+                await holdReceived(engine);
                 armed = true;
-                await expect(engine.markHoldInvoiceReleased(RECEIVED_HASH)).rejects.toThrow(
+                await expect(engine.markHoldInvoiceReleased(RECEIVED_HASH, RELEASE_TIMING)).rejects.toThrow(
                     new TypeError("a payment record disappeared inside the balance lane"),
                 );
                 expect(invoiceReads).toBe(2);
@@ -3854,12 +4332,12 @@ describe("checkAndClaim", () => {
 
             it("throws when the invoice lists a channel that holds no record", async () => {
                 const { engine, store } = await registered();
-                await engine.recordHoldInvoice(RECEIVED_HASH, RECEIVED_AMOUNT, "sha256");
+                await engine.recordHoldInvoice(RECEIVED_HASH, RECEIVED_AMOUNT, "sha256", INVOICE_INDEX);
                 await store.updateHoldInvoiceRecord(RECEIVED_HASH.slice(0, 40), (current) => ({
                     ...(current as HoldInvoicePolicyRecord),
                     channelIndexes: [OTHER_CHANNEL_INDEX],
                 }));
-                await expect(engine.markHoldInvoiceReleased(RECEIVED_HASH)).rejects.toThrow(
+                await expect(engine.markHoldInvoiceReleased(RECEIVED_HASH, RELEASE_TIMING)).rejects.toThrow(
                     new TypeError(`a payment record lists channel index ${OTHER_CHANNEL_INDEX}, which holds no record`),
                 );
             });
@@ -3873,17 +4351,13 @@ describe("checkAndClaim", () => {
 
             it("refuses a commitment that drops the released TLC as failed", async () => {
                 const { engine } = await holding();
-                const refusal = await refusalOf(
-                    engine.checkAndClaim(
-                        KEYS,
-                        customCommitmentRequest({
-                            forRemote: true,
-                            commitmentNumber: 12,
-                            settlementLocalShannons: OPENING_SETTLEMENT,
-                            tlcIds: [],
-                        }),
-                    ),
-                );
+                const { operation } = customCommitmentRequest({
+                    forRemote: true,
+                    commitmentNumber: 12,
+                    settlementLocalShannons: OPENING_SETTLEMENT,
+                    tlcIds: [],
+                });
+                const refusal = await refusalOf(engine.checkAndClaim(KEYS, signedRequest(operation, 13)));
                 expect(refusal.message).toBe(
                     `the remote commitment lowers the holdings by ${RECEIVED_AMOUNT} shannons, which no offered TLC took`,
                 );
@@ -3893,7 +4367,7 @@ describe("checkAndClaim", () => {
             it("asks a channel for the invoice unless every commitment another channel holds has already paid it", async () => {
                 const { engine } = await opened();
                 await addOtherChannel(engine);
-                await engine.recordHoldInvoice(RECEIVED_HASH, RECEIVED_AMOUNT, "sha256");
+                await engine.recordHoldInvoice(RECEIVED_HASH, RECEIVED_AMOUNT, "sha256", INVOICE_INDEX);
                 const other = { keys: OTHER_KEYS, channelId: OTHER_CHANNEL_ID };
                 const holding = (forRemote: boolean, commitmentNumber: number) => ({
                     forRemote,
@@ -3905,7 +4379,7 @@ describe("checkAndClaim", () => {
                 await engine.checkAndClaim(KEYS, customCommitmentRequest(holding(false, 12)));
                 await engine.checkAndClaim(OTHER_KEYS, customCommitmentRequest(holding(true, 11), other));
                 await engine.checkAndClaim(OTHER_KEYS, customCommitmentRequest(holding(false, 12), other));
-                await engine.markHoldInvoiceReleased(RECEIVED_HASH);
+                await engine.markHoldInvoiceReleased(RECEIVED_HASH, RELEASE_TIMING);
                 await peerRevokes(engine, 11);
                 await peerRevokes(engine, 11, other);
                 // The first channel's remote commitment pays the invoice; its local one does not yet. Slot 13: the device's own took 12.
@@ -3929,15 +4403,13 @@ describe("checkAndClaim", () => {
 
             it("signs one that pays for it, and records the credit", async () => {
                 const { engine, store } = await holding();
-                await engine.checkAndClaim(
-                    KEYS,
-                    customCommitmentRequest({
-                        forRemote: true,
-                        commitmentNumber: 12,
-                        settlementLocalShannons: "64250000000",
-                        tlcIds: [],
-                    }),
-                );
+                const { operation } = customCommitmentRequest({
+                    forRemote: true,
+                    commitmentNumber: 12,
+                    settlementLocalShannons: "64250000000",
+                    tlcIds: [],
+                });
+                await engine.checkAndClaim(KEYS, signedRequest(operation, 13));
                 const record = await store.getChannelRecord(CHANNEL_INDEX);
                 expect(record?.views.remote.creditedShannons).toEqual({ [RECEIVED_HASH.slice(0, 40)]: RECEIVED_AMOUNT });
             });
@@ -3946,30 +4418,24 @@ describe("checkAndClaim", () => {
         it("reads the two views alone on a record that carries an unknown key beside them", async () => {
             const { engine, store } = await opened();
             await engine.recordDebitIntent(OFFERED_HASH, OFFERED_AMOUNT);
-            await engine.recordHoldInvoice(RECEIVED_HASH, RECEIVED_AMOUNT, "sha256");
-            await engine.checkAndClaim(
-                KEYS,
-                customCommitmentRequest({
-                    forRemote: true,
-                    commitmentNumber: 11,
-                    settlementLocalShannons: OPENING_SETTLEMENT,
-                    tlcIds: [RECEIVED_TLC_ID],
-                }),
-            );
+            await engine.recordHoldInvoice(RECEIVED_HASH, RECEIVED_AMOUNT, "sha256", INVOICE_INDEX);
+            await holdReceived(engine);
             const record = await store.getChannelRecord(CHANNEL_INDEX);
             const views = { ...(record as ChannelPolicyRecord).views, futureView: "x" } as unknown as ChannelPolicyRecord["views"];
             await store.setChannelRecord(CHANNEL_INDEX, { ...(record as ChannelPolicyRecord), views });
 
             await peerRevokes(engine, 11);
-            await engine.markHoldInvoiceReleased(RECEIVED_HASH);
+            await engine.markHoldInvoiceReleased(RECEIVED_HASH, RELEASE_TIMING);
             await engine.closeDebitIntent(OFFERED_HASH);
             await engine.recordDebitIntent(OFFERED_HASH, OFFERED_AMOUNT);
-            await expect(
-                engine.checkAndClaim(
-                    KEYS,
-                    customCommitmentRequest({ forRemote: true, commitmentNumber: 12, settlementLocalShannons: "64250000000", tlcIds: [] }),
-                ),
-            ).resolves.toMatchObject({ status: "fresh" });
+            // Slot 13: the device's own commitment took 12.
+            const { operation } = customCommitmentRequest({
+                forRemote: true,
+                commitmentNumber: 12,
+                settlementLocalShannons: "64250000000",
+                tlcIds: [],
+            });
+            await expect(engine.checkAndClaim(KEYS, signedRequest(operation, 13))).resolves.toMatchObject({ status: "fresh" });
         });
 
         it("refuses a cooperative close that pays the device less than a view showed, past its fee", async () => {
@@ -4229,28 +4695,32 @@ describe("checkAndClaim", () => {
         // The twin is not the invoice's, so it holds nothing back; the invoice's own TLC would.
         it("releases a preimage while a channel lists a twin of the invoice beside an offered TLC", async () => {
             const { engine, store } = await openedFullHash();
+            await addOtherChannel(engine);
             await engine.recordDebitIntent(OFFERED_HASH, OFFERED_AMOUNT);
-            await engine.recordHoldInvoice(RECEIVED_HASH, RECEIVED_AMOUNT, "sha256");
+            await engine.recordHoldInvoice(RECEIVED_HASH, RECEIVED_AMOUNT, "sha256", INVOICE_INDEX);
             await engine.checkAndClaim(
                 KEYS,
                 fullHashRequest(11, "60500000000", { [OFFERED_TLC_ID]: OFFERED_HASH, [RECEIVED_TLC_ID]: TWIN_RECEIVED_HASH }),
             );
-            await engine.markHoldInvoiceReleased(RECEIVED_HASH);
+            await holdReceived(engine, OTHER_CHANNEL);
+            await engine.markHoldInvoiceReleased(RECEIVED_HASH, RELEASE_TIMING);
             await expect(store.getHoldInvoiceRecord(RECEIVED_HASH.slice(0, 40))).resolves.toMatchObject({
                 released: true,
-                channelIndexes: [CHANNEL_INDEX],
+                channelIndexes: [CHANNEL_INDEX, OTHER_CHANNEL_INDEX],
             });
         });
 
         it("holds a preimage back while a channel lists the invoice's own TLC, bound whole, beside an offered TLC", async () => {
             const { engine } = await openedFullHash();
             await engine.recordDebitIntent(OFFERED_HASH, OFFERED_AMOUNT);
-            await engine.recordHoldInvoice(RECEIVED_HASH, RECEIVED_AMOUNT, "sha256");
+            await engine.recordHoldInvoice(RECEIVED_HASH, RECEIVED_AMOUNT, "sha256", INVOICE_INDEX);
             await engine.checkAndClaim(
                 KEYS,
                 fullHashRequest(11, "60500000000", { [OFFERED_TLC_ID]: OFFERED_HASH, [RECEIVED_TLC_ID]: RECEIVED_HASH }),
             );
-            await expect(engine.markHoldInvoiceReleased(RECEIVED_HASH)).rejects.toMatchObject({ code: "offered_in_flight" });
+            await expect(engine.markHoldInvoiceReleased(RECEIVED_HASH, RELEASE_TIMING)).rejects.toMatchObject({
+                code: "offered_in_flight",
+            });
         });
     });
 

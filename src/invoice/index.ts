@@ -8,4 +8,4 @@ export {
 } from "./invoice.constants";
 export type { Invoice, InvoiceAttribute, InvoiceAttributeType, InvoiceCurrency, UnsignedInvoice } from "./invoice.types";
 export { InvoiceError } from "./invoice.error";
-export { computeInvoiceDigest, decodeInvoice, encodeInvoice } from "./invoice";
+export { computeInvoiceDigest, decodeInvoice, encodeInvoice, findInvoiceAttribute } from "./invoice";

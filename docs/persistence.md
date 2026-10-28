@@ -7,16 +7,15 @@ What the device persists, and the guarantees `SignerStore` gives the policy engi
 The host injects an `ISignerStorage` (or its async form): a string-keyed, string-valued store the SDK never introspects. All
 keys carry the `fiber-lsp-sdk:` namespace, because the host may back that storage with a store it also uses for its own keys.
 
-| Key                                 | Value                                                                |
-| ----------------------------------- | -------------------------------------------------------------------- |
-| `fiber-lsp-sdk:channel:<index>`     | The channel's policy record, JSON                                    |
-| `fiber-lsp-sdk:alias:<id>`          | The channel index that channel id resolves to, an integer in base 10 |
-| `fiber-lsp-sdk:intent:<boundHash>`  | The debit intent of a payment, JSON                                  |
-| `fiber-lsp-sdk:invoice:<boundHash>` | A hold invoice whose preimage the device holds, JSON                 |
-| `fiber-lsp-sdk:preimage:<hash>`     | The device-held preimage of a hold invoice, 32 bytes hex             |
-| `fiber-lsp-sdk:allocator:<kind>`    | The last channel or invoice index handed out, a JSON integer         |
-| `fiber-lsp-sdk:activity`            | What the facade's poller still asks the node about, JSON             |
-| `fiber-lsp-sdk:opening`             | The channel opening the node may still hold for this tenant, JSON    |
+| Key                                 | Value                                                                            |
+| ----------------------------------- | -------------------------------------------------------------------------------- |
+| `fiber-lsp-sdk:channel:<index>`     | The channel's policy record, JSON                                                |
+| `fiber-lsp-sdk:alias:<id>`          | The channel index that channel id resolves to, an integer in base 10             |
+| `fiber-lsp-sdk:intent:<boundHash>`  | The debit intent of a payment, JSON                                              |
+| `fiber-lsp-sdk:invoice:<boundHash>` | A hold invoice the device issued, with the index its preimage derives from, JSON |
+| `fiber-lsp-sdk:allocator:<kind>`    | The last channel or invoice index handed out, a JSON integer                     |
+| `fiber-lsp-sdk:activity`            | What the facade's poller still asks the node about, JSON                         |
+| `fiber-lsp-sdk:opening`             | The channel opening the node may still hold for this tenant, JSON                |
 
 The prefixes are fixed and disjoint, so a channel id and a payment hash can be the same string without colliding.
 `<boundHash>` is the bound payment hash: the first 20 bytes of the payment hash, all a commitment binds under the
@@ -149,7 +148,9 @@ Two rules keep the sign-once registry trustworthy:
 ## The payment records
 
 A debit intent holds the full payment hash, `maxShannons` (amount plus fee budget), `open`, and `channelIndexes`; a hold
-invoice holds the full payment hash, `amountShannons`, `hashAlgorithm`, `released`, and `channelIndexes`. Both are device-wide because
+invoice holds the full payment hash, `amountShannons` (above zero), `hashAlgorithm`, `invoiceIndex`, `released`, and
+`channelIndexes`. `invoiceIndex` is the index `k` the invoice's preimage derives from ([derivation.md](./derivation.md)):
+the preimage is derived again when it is released, never stored, so no record in the storage holds a secret. Both are device-wide because
 the node, not the device, picks the channel a payment uses, and both carry `version` (`PAYMENT_RECORD_VERSION`), as the
 channel record does. Until the SDK's first release every format changes in place without bumping its version; from then
 on a change is a new version and a migration.
@@ -253,8 +254,11 @@ the view snapshots all start empty, and so do the intents and the invoices. So d
 node still holds for the tenant then refuses the fresh one, asked under another index, until fiber aborts it unfunded
 ([sdk.md](./sdk.md)). So do the commitments a watchtower spend starts
 from: a device whose storage is gone signs none ([policy.md](./policy.md)). Losing the storage is therefore not losing
-funds, with one exception: hold-invoice preimages exist only on the device, so unclaimed held payments need the storage
-intact. They are refundable to the payer otherwise.
+funds, with one exception: a payment held on a hold invoice and not yet settled needs the invoice's index to derive its
+preimage, and the index is in the record. The storage holds no secret, and the index is recoverable in principle: it is
+the device's clock in milliseconds a moment before the node wrote the invoice's timestamp ([sdk.md](./sdk.md)), so the
+timestamp bounds the search. The SDK does not search for it today; a held payment whose index is lost times out and goes
+back to the payer.
 
 **Rebuilding that state is not something the SDK does today.** What a restore would have to rebuild before anything else is
 the alias map: which channel index each of the node's channels belongs to. `ISignerStorage` is `get` and `set` with no

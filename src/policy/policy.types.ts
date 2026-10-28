@@ -278,11 +278,35 @@ export type HoldInvoicePolicyRecord = {
      * A TLC under another algorithm is not this invoice's.
      */
     hashAlgorithm: TlcHashAlgorithm;
+    /**
+     * The index the preimage derives from, so the record is all the device keeps of it.
+     */
+    invoiceIndex: number;
     released: boolean;
     /**
      * Channels that have shown a TLC under the hash, filed before the claim that shows it.
      */
     channelIndexes: number[];
+};
+
+export type HoldInvoiceReleaseTiming = {
+    /**
+     * Milliseconds since the epoch, read at most once inside the balance lock.
+     */
+    now: () => number;
+    /**
+     * The margin a held TLC's expiry must clear, from a channel's pinned delay (its full `EpochNumberWithFraction` value).
+     */
+    releaseMarginMs: (commitmentDelayEpoch: bigint) => bigint;
+};
+
+export type HoldInvoiceReleaseReading = Pick<HoldInvoiceReleaseTiming, "releaseMarginMs"> & {
+    nowMs: number;
+};
+
+export type HoldInvoiceReleaseChannel = {
+    pins: Pick<ChannelPins, "commitmentDelayEpoch">;
+    views: Record<PolicyView, Pick<PolicyViewSnapshot, "tlcs">>;
 };
 
 export type SignerRecordFormat<T> = {

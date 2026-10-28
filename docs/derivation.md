@@ -2,7 +2,7 @@
 
 Everything the device signs with descends from one 32-byte master seed the host injects at construction. Nothing is drawn at
 random and nothing is stored: given the seed, every key of every channel is a pure function of a channel index and a commitment
-number.
+number, and the preimage of every hold invoice the device issues a pure function of an invoice index.
 
 Three things have to hold at once, and each fails in its own way:
 
@@ -183,6 +183,9 @@ user mnemonic                       (the SDK never sees it)
                   ├── walletIdentityKey = ckbBlake2b(masterSeed ‖ "wallet identity")
                   │      └─ the tenant's RootSigner: the key the LSP knows the wallet by
                   │
+                  ├── preimage(k) = ckbBlake2b(masterSeed ‖ "hold invoice {k}")            [k = invoice index]
+                  │      └─ its ckbBlake2b is the payment hash of the device's hold invoice k
+                  │
                   └── channelSeed(i) = ckbBlake2b(masterSeed ‖ "fiber channel {i}")     [i = channel index]
                         │
                         │   ─── from here down it is fiber's scheme, byte for byte ───
@@ -211,6 +214,7 @@ user mnemonic                       (the SDK never sees it)
 | ---------------------------- | ------------------------------------------------------------------------- | ----- |
 | `masterSeed(a)`              | BIP32 private key at `m/1017'/309'/{a}'` over the BIP39 seed              | SDK   |
 | `walletIdentityKey`          | `ckbBlake2b(masterSeed ‖ "wallet identity")`                              | SDK   |
+| `preimage(k)`                | `ckbBlake2b(masterSeed ‖ "hold invoice {k}")`                             | SDK   |
 | `channelSeed(i)`             | `ckbBlake2b(masterSeed ‖ "fiber channel {i}")`                            | SDK   |
 | `seed`                       | `ckbBlake2b(channelSeed)`                                                 | fiber |
 | `commitmentSeed`             | `ckbBlake2b(seed ‖ "commitment seed")`                                    | fiber |
@@ -255,6 +259,17 @@ seed some other way can still do so; what the function buys is that the promise 
 including the step the SDK used to leave undefined. If a host picks its own path and later changes it, the channels derived under
 the old one are gone, and no test in this repo would notice.
 
+### The hold invoice preimage
+
+A payment the device receives is held on a hold invoice, and only the preimage of its payment hash settles it. The preimage
+of the invoice of index `k` is `preimage(k)`, and the payment hash is its `ckbBlake2b`, fiber's `ckb-hash` algorithm.
+`k` is the index the facade allocates for the invoice, the clock in milliseconds ([sdk.md](./sdk.md)), written in base 10
+as a channel index is, so it is bounded the same way: an integer from 0 to `MAX_INVOICE_INDEX`, `Number.MAX_SAFE_INTEGER`,
+past which two indexes would print the same. The label differs from the channel seed's, so a preimage is never the seed of
+the channel of the same index. Derived rather than drawn, the preimage is never stored: the device keeps `k` in the
+invoice's record ([persistence.md](./persistence.md)) and derives the preimage again when it releases it, and
+`HoldInvoicePreimages` is the one holder of the seed that does ([signing.md](./signing.md)).
+
 ### Why the channel seed is derived, not random
 
 fiber generates the channel seed **randomly** on the node. The SDK derives it from the master seed instead. The change is
@@ -284,9 +299,9 @@ must keep working forever.
 | File                                     | Contents                                                                                                                      |
 | ---------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------- |
 | `src/derivation/fiber-scheme.ts`         | The literal port of `crates/fiber-types/src/channel.rs`                                                                       |
-| `src/derivation/device-scheme.ts`        | The SDK-owned derivations: wallet identity key, channel seed, nonce seed                                                      |
+| `src/derivation/device-scheme.ts`        | The SDK-owned derivations: wallet identity key, hold invoice preimage, channel seed, nonce seed                               |
 | `src/derivation/master-seed.ts`          | The step above the tree: BIP39 seed to master seed, the boundary with the host                                                |
-| `src/derivation/derivation.constants.ts` | Lengths, bounds, scheme version, nonce contexts                                                                               |
+| `src/derivation/derivation.constants.ts` | Lengths, bounds (the invoice index's among them), scheme version, nonce contexts                                              |
 | `src/derivation/utils/ckb-hash.utils.ts` | CKB's blake2b-256 and the salted variant                                                                                      |
 | `src/common/utils/assert.utils.ts`       | Input guards for lengths and ranges, shared with the rest of the SDK                                                          |
 | `src/derivation/index.ts`                | The module surface: scheme internals stay unexported, but for `blake2bHashWithSalt`, which `signer` hashes the tenant id with |
@@ -297,7 +312,7 @@ reading the two side by side.
 
 ## What the tests guarantee
 
-173 tests across the 5 suites of `test/tests/derivation/`, in four layers with different jobs. The input guards the module leans
+188 tests across the 5 suites of `test/tests/derivation/`, in four layers with different jobs. The input guards the module leans
 on are generic and live in `common/`, tested alongside them.
 
 **Cross-implementation vectors** (`test/tests/derivation/interop-vectors.spec.ts`) compare every derivation against
@@ -325,7 +340,7 @@ first group is exercised directly against the guards in `test/tests/common/utils
 **Pinned outputs** hardcode results by hand, deliberately redundant with the vectors, because the vectors live in a generated
 file: a change made to the port and to the Rust harness at the same time regenerates them green, and only a hand-written value
 survives that. `device-scheme.spec.ts` pins the scheme v1 outputs, the promise that a channel opened today can be recovered
-tomorrow; `master-seed.spec.ts` pins three master seeds, which is where a changed path level lands; `fiber-scheme.spec.ts` pins
+tomorrow, the hold invoice preimages at index 0 and at `MAX_INVOICE_INDEX` among them; `master-seed.spec.ts` pins three master seeds, which is where a changed path level lands; `fiber-scheme.spec.ts` pins
 the four channel keys, two commitment secrets, a commitment point and a TLC key, which is where "fixing" a domain separator or
 shortening the chain lands. None of them is a snapshot to update when it fails.
 
@@ -343,6 +358,22 @@ assertions are right. For that, silent breakages were introduced deliberately an
 | Any path level left unhardened                     | 4                 |
 
 Every one of them is exactly the kind of change a well-meaning refactor might make.
+
+`deriveHoldInvoicePreimage` and `MAX_INVOICE_INDEX` were broken the same way (`test/tests/derivation`, still 100% on all four
+metrics):
+
+| Mutation                                                      | Tests that failed |
+| ------------------------------------------------------------- | ----------------- |
+| The preimage takes a 31-byte master seed                      | 14                |
+| The invoice index is bounded to the commitment number's 2⁴⁸−1 | 8                 |
+| The invoice index is not checked                              | 6                 |
+| The master seed is not checked before the preimage            | 3                 |
+| The index is left out of the preimage                         | 2                 |
+| The master seed is left out of the preimage                   | 2                 |
+| The preimage is hashed under the channel seed's label         | 2                 |
+| `MAX_INVOICE_INDEX` one below the channel index's bound       | 2                 |
+| The label is hashed before the master seed                    | 1                 |
+| `hold invoice {k}` changed to `hold invoice-{k}`              | 1                 |
 
 ## Design decisions
 
@@ -372,7 +403,8 @@ be fixed before integration against a real node.
    during integration that fiber assumes nothing about how our secret nonce was built.
 3. **Channel index after a restore.** Re-deriving requires knowing which indexes existed. How an index is handed out is
    settled, as the time of the open in seconds so that a wiped storage cannot hand one out twice ([sdk.md](./sdk.md));
-   finding the indexes of a restored device's channels again is not, and depends on this scheme.
+   finding the indexes of a restored device's channels again is not, and depends on this scheme. The same holds for the
+   index of a hold invoice whose payment is still held, which its invoice's timestamp bounds ([persistence.md](./persistence.md)).
 4. **Telling two installations apart.** `walletIdentityKey` is a function of the master seed alone, so a wallet installed on two
    devices presents one identity. If the LSP ever needs per-installation identity (revoking one device, warning about
    a second login), it needs a component that is not derived from the seed, and therefore registered with the LSP rather than

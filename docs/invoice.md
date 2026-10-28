@@ -88,7 +88,8 @@ which it writes as given, as fiber's `Display` does.
 
 What fiber's decoder accepts and writes back unchanged is accepted too, though only fiber's invoice builder would refuse it: a
 zero amount, a multi-path feature without a payment secret, a description longer than the builder's 639 bytes, the
-deprecated `FinalHtlcTimeout`. Those are rules about creating invoices, not about the format.
+deprecated `FinalHtlcTimeout`. Those are rules about creating invoices, not about the format; the description's bound is
+the rpc client's, which never sends one fiber would refuse ([rpc.md](./rpc.md)).
 
 ## Where the SDK parts from fiber
 
@@ -110,18 +111,21 @@ reader's.
 
 ## Where it lives
 
-| File                                  | Contents                                                                                                      |
-| ------------------------------------- | ------------------------------------------------------------------------------------------------------------- |
-| `src/invoice/invoice.ts`              | `decodeInvoice`, `encodeInvoice`, `computeInvoiceDigest`: the human-readable part and the signature           |
-| `src/invoice/invoice-data.ts`         | `RawInvoiceData` and its eleven attributes, written and read strictly                                         |
-| `src/invoice/arithmetic-coder.ts`     | The port of `arcode`                                                                                          |
-| `src/invoice/bech32m.ts`              | The checksum, the charset and the strict five-to-eight regrouping                                             |
-| `src/invoice/utils/molecule.utils.ts` | Molecule's strict readers: table, dynvec, `Bytes`, fixed values, union, `Script`                              |
-| `src/invoice/utils/utf8.utils.ts`     | UTF-8 both ways, as Rust's `String::from_utf8` reads it; the platform's `TextDecoder` is not in every runtime |
-| `src/invoice/invoice.error.ts`        | `InvoiceError`: the path refused and what it had to be, never the value                                       |
-| `src/common/utils/molecule.utils.ts`  | The molecule writers `invoice` shares with `digest`                                                           |
+| File                                  | Contents                                                                                                                                                                                                                           |
+| ------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `src/invoice/invoice.ts`              | `decodeInvoice`, `encodeInvoice`, `computeInvoiceDigest`: the human-readable part and the signature; `findInvoiceAttribute`, an invoice's attribute of a type, the first in string order and the only one the decoder lets through |
+| `src/invoice/invoice-data.ts`         | `RawInvoiceData` and its eleven attributes, written and read strictly                                                                                                                                                              |
+| `src/invoice/arithmetic-coder.ts`     | The port of `arcode`                                                                                                                                                                                                               |
+| `src/invoice/bech32m.ts`              | The checksum, the charset and the strict five-to-eight regrouping                                                                                                                                                                  |
+| `src/invoice/utils/molecule.utils.ts` | Molecule's strict readers: table, dynvec, `Bytes`, fixed values, union, `Script`                                                                                                                                                   |
+| `src/invoice/utils/utf8.utils.ts`     | UTF-8 read as Rust's `String::from_utf8` reads it; the platform's `TextDecoder` is not in every runtime                                                                                                                            |
+| `src/common/utils/utf8.utils.ts`      | `encodeWellFormedUtf8`, UTF-8 written with a lone surrogate refused, which the platform's encoders replace in silence; shared with the rpc client's description guard                                                              |
+| `src/invoice/invoice.error.ts`        | `InvoiceError`: the path refused and what it had to be, never the value                                                                                                                                                            |
+| `src/common/utils/molecule.utils.ts`  | The molecule writers `invoice` shares with `digest`                                                                                                                                                                                |
 
-The barrel lists its exports one by one, as the other ports' do: the three functions, the types, the error and the constants.
+The barrel lists its exports one by one, as the other ports' do: the four functions, the types, the error and the constants.
+`findInvoiceAttribute` is the one attribute lookup, which the decoder reads the payee key with and the facade reads a
+string's attributes with ([sdk.md](./sdk.md)).
 
 ## What the vectors guarantee
 
@@ -182,7 +186,6 @@ Coverage of the module is 100% of statements, functions and lines. The branches 
 | The decompression limit off by one                                     | 6                 |
 | A table field more than the schema's accepted                          | 6                 |
 | Only flag 2 refused, the unsigned flag accepted                        | 5                 |
-| A lone surrogate written                                               | 5                 |
 | The route hint's refusal names the payee key's field                   | 5                 |
 | Surrogates accepted on read                                            | 4                 |
 | The route hint written without its point checked                       | 4                 |
@@ -200,6 +203,7 @@ Coverage of the module is 100% of statements, functions and lines. The branches 
 | A high-S signature accepted                                            | 2                 |
 | A 65-byte payee key accepted                                           | 2                 |
 | A missing amount written as an invoice without one                     | 2                 |
+| A lone surrogate written                                               | 2                 |
 | The encoder scales the upper half on `low >= half`                     | 1                 |
 | A whole group of padding accepted                                      | 1                 |
 | A signature with no stream before it accepted                          | 1                 |
@@ -213,3 +217,14 @@ Coverage of the module is 100% of statements, functions and lines. The branches 
 Two mutants change nothing observable and are left out: counting the end marker in the model after it is coded, since the
 model is never read again, and closing the encoder on `low < quarter` instead of `low <= quarter`, which differs only when
 `low` lands exactly on the quarter.
+
+"A lone surrogate written" breaks `encodeWellFormedUtf8`, which lives in `common` (`src/common/utils/utf8.utils.ts`) because the
+rpc's description guard shares it; the row counts the invoice specs alone, and the writer's own rows are in
+[sdk.md](./sdk.md) with the other helpers of `common`. `findInvoiceAttribute`, the one attribute lookup the decoder and the
+facade share, was broken the same way (`test/tests/invoice`):
+
+| Mutation                                      | Tests that failed |
+| --------------------------------------------- | ----------------- |
+| The attribute lookup finds nothing            | 9                 |
+| The attribute lookup ignores the type         | 8                 |
+| The attribute lookup takes the last of a type | 1                 |

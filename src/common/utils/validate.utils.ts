@@ -74,6 +74,16 @@ export function isDecimalShannons(value: unknown): value is string {
 }
 
 /**
+ * Checks that a value is an amount in decimal shannons above zero.
+ * @param value Value to check.
+ * @returns Whether it is.
+ */
+export function isPositiveDecimalShannons(value: unknown): value is string {
+    // The canonical form leaves "0" the only spelling of zero.
+    return isDecimalShannons(value) && value !== "0";
+}
+
+/**
  * Checks that a value is a compressed secp256k1 point, the only form fiber writes.
  * @param value Value to check.
  * @returns Whether the value is 33 bytes that decode to a point.

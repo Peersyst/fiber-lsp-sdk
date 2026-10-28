@@ -1,6 +1,8 @@
 import { bytesToHex, hexToBytes } from "@noble/hashes/utils.js";
 import { deriveChannelKeys, pubkeyOf } from "../../../src/derivation";
 import { COMMITMENT_LOCK_MAINNET, COMMITMENT_LOCK_TESTNET, FUNDING_LOCK_MAINNET, FUNDING_LOCK_TESTNET } from "../../../src/digest";
+import type { UnsignedInvoice } from "../../../src/invoice";
+import { encodeInvoice } from "../../../src/invoice";
 import { CHANNEL_ALIAS_KEY_PREFIX } from "../../../src/policy";
 import type { Script, Transaction } from "../../../src/common";
 import type { FiberLspSdkOptions, SdkContext, SdkEvent } from "../../../src/sdk";
@@ -10,6 +12,7 @@ import type { SignerRefusal } from "../../../src/signer";
 import { FetchMock, ScriptedNode } from "../../mocks/rpc";
 import { InMemorySignerStorage } from "../../mocks/policy";
 import { flush } from "../../utils/flush";
+import { signInvoice } from "../../utils/invoice-signing";
 import { TimerMock } from "../../mocks/common";
 import { loadInteropVectors } from "../../utils/interop-vectors";
 import { rejection } from "../../utils/rejection";
@@ -569,7 +572,13 @@ describe("FiberLspSdk", () => {
             };
             withRuntime(later, () => h.sdk.connect());
             await flush();
-            expect(delays).toEqual([POLL_STEP_TIMEOUT_MS, POLL_STEP_TIMEOUT_MS, POLL_STEP_TIMEOUT_MS, POLL_INTERVAL_MS]);
+            expect(delays).toEqual([
+                POLL_STEP_TIMEOUT_MS,
+                POLL_STEP_TIMEOUT_MS,
+                POLL_STEP_TIMEOUT_MS,
+                POLL_STEP_TIMEOUT_MS,
+                POLL_INTERVAL_MS,
+            ]);
             withRuntime(later, () => h.sdk.disconnect());
         });
     });
@@ -1290,6 +1299,102 @@ describe("FiberLspSdk", () => {
             ]);
             expect(h.events).toStrictEqual([{ type: "CHANNEL_READY", channelId: OPENING_CHANNEL_ID }]);
             expect(JSON.parse(h.storage.map.get("fiber-lsp-sdk:opening") ?? "null")).toEqual({ version: 1, opening: null });
+        });
+    });
+
+    describe("createInvoice()", () => {
+        // The ckb-hash of the hold invoice preimage at NOW_MS's invoice index, 1_791_367_200_250, of OPENING_SEED.
+        const PAYMENT_HASH = "f4855a4de3b32708585d93e9ad5617eac60965866532d09dbef68c270bac6b5e";
+        // The tenant's key that signs the node's invoices: the invoice vectors' payee.
+        const TENANT_SECRET_KEY = hexToBytes("11".repeat(32));
+        // The node's invoice of 2.5 CKB, as fiber writes a tenant's.
+        const ANSWER_INVOICE: UnsignedInvoice = {
+            currency: "Fibt",
+            amountShannons: "250000000",
+            timestampMs: 1_791_367_200_300n,
+            paymentHash: hexToBytes(PAYMENT_HASH),
+            attributes: [
+                { type: "description", text: "coffee" },
+                { type: "expiryTime", seconds: 600n },
+                { type: "feature", bits: Uint8Array.of(0x20) },
+                { type: "trampolineRouteHint", nodeId: hexToBytes(OPENING_LSP_PUBKEY) },
+                { type: "finalHtlcMinimumExpiryDelta", milliseconds: 86_400_000n },
+                { type: "hashAlgorithm", algorithm: "ckb-hash" },
+                { type: "payeePublicKey", publicKey: hexToBytes("034f355bdcb7cc0af728ef3cceb9615d90684bb5b2ca5f859ab0f0b704075871aa") },
+            ],
+        };
+        const ANSWER_STRING = encodeInvoice(signInvoice(ANSWER_INVOICE, TENANT_SECRET_KEY));
+
+        function invoiceHarness(overrides: Partial<FiberLspSdkOptions> = {}) {
+            const storage = new InMemorySignerStorage();
+            const node = new ScriptedNode();
+            const sdk = new FiberLspSdk(OPENING_SEED, {
+                network: "testnet",
+                storage,
+                rpcUrl: RPC_URL,
+                lspPubkey: hexToBytes(OPENING_LSP_PUBKEY),
+                fetch: node.fetch,
+                timer: new TimerMock(),
+                now: () => NOW_MS,
+                ...overrides,
+            });
+            return { sdk, node, storage };
+        }
+
+        it("creates a hold invoice of the seed's hash under the network's currency, checked, recorded and watched", async () => {
+            const h = invoiceHarness();
+            h.node.result({ invoice_address: ANSWER_STRING });
+            await expect(h.sdk.createInvoice("250000000", { description: "coffee", expirySeconds: 600 })).resolves.toStrictEqual({
+                invoice: ANSWER_STRING,
+                paymentHashHex: `0x${PAYMENT_HASH}`,
+            });
+            expect(h.node.calls()).toEqual([
+                {
+                    method: "new_invoice",
+                    params: {
+                        amount: "0xee6b280",
+                        description: "coffee",
+                        currency: "Fibt",
+                        payment_hash: `0x${PAYMENT_HASH}`,
+                        expiry: "0x258",
+                        final_expiry_delta: "0x5265c00",
+                        hash_algorithm: "ckb_hash",
+                    },
+                },
+            ]);
+            expect(JSON.parse(h.storage.map.get(`fiber-lsp-sdk:invoice:${PAYMENT_HASH.slice(0, 40)}`) ?? "null")).toEqual({
+                version: 1,
+                paymentHash: PAYMENT_HASH,
+                amountShannons: "250000000",
+                hashAlgorithm: "ckb-hash",
+                invoiceIndex: NOW_MS,
+                released: false,
+                channelIndexes: [],
+            });
+            expect(JSON.parse(h.storage.map.get("fiber-lsp-sdk:activity") ?? "null")).toEqual({
+                version: 1,
+                channels: {},
+                payments: {},
+                invoices: { [PAYMENT_HASH]: { status: null } },
+            });
+        });
+
+        it.each([
+            ["another LSP's key than the hint", { lspPubkey: LSP_PUBKEY }, "trampolineRouteHint is not the LSP's key"],
+            ["a development chain's currency", { network: DEV_NETWORK }, "currency is Fibt, not the network's Fibd"],
+        ])("checks the string against the facade's own %s", async (_, overrides, detail) => {
+            const h = invoiceHarness(overrides);
+            h.node.result({ invoice_address: ANSWER_STRING });
+            await expect(h.sdk.createInvoice("250000000", { description: "coffee", expirySeconds: 600 })).rejects.toEqual(
+                new SdkError("invoice_rejected", `the node's invoice is refused: ${detail}`),
+            );
+        });
+
+        it("refuses an amount of zero, reading, writing and sending nothing", async () => {
+            const h = invoiceHarness();
+            await expect(h.sdk.createInvoice("0")).rejects.toEqual(new RangeError("amountShannons must be greater than 0, got 0"));
+            expect(h.storage.ops).toEqual([]);
+            expect(h.node.calls()).toEqual([]);
         });
     });
 

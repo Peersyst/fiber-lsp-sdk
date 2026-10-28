@@ -185,23 +185,32 @@ Four methods carry an invoice from its creation to its settlement. The client ca
 the payment hash and has no member for a preimage, so the node holds the payment it receives until `settle_invoice` hands it
 the preimage, the one call that carries one.
 
-| Method           | Client method   | Sends                                                                                  | Reads                       |
-| ---------------- | --------------- | -------------------------------------------------------------------------------------- | --------------------------- |
-| `new_invoice`    | `newInvoice`    | `amount`, `currency`, `payment_hash`, `expiry`, `hash_algorithm`, `description` if any | `invoice_address`           |
-| `get_invoice`    | `getInvoice`    | `payment_hash`                                                                         | `invoice_address`, `status` |
-| `settle_invoice` | `settleInvoice` | `payment_hash`, `payment_preimage`                                                     | `{}`                        |
-| `cancel_invoice` | `cancelInvoice` | `payment_hash`                                                                         | `invoice_address`, `status` |
+| Method           | Client method   | Sends                                                                                                        | Reads                       |
+| ---------------- | --------------- | ------------------------------------------------------------------------------------------------------------ | --------------------------- |
+| `new_invoice`    | `newInvoice`    | `amount`, `currency`, `payment_hash`, `expiry`, `final_expiry_delta`, `hash_algorithm`, `description` if any | `invoice_address`           |
+| `get_invoice`    | `getInvoice`    | `payment_hash`                                                                                               | `invoice_address`, `status` |
+| `settle_invoice` | `settleInvoice` | `payment_hash`, `payment_preimage`                                                                           | `{}`                        |
+| `cancel_invoice` | `cancelInvoice` | `payment_hash`                                                                                               | `invoice_address`, `status` |
 
 - **`expiry` is required**, a u64 of seconds: fiber has no default, and an invoice created without one never expires.
+- **`final_expiry_delta` is required**, milliseconds above zero and at most 14 days (`RPC_MAX_FINAL_EXPIRY_DELTA_MS`,
+  fiber's `MAX_PAYMENT_TLC_EXPIRY_LIMIT`, `rpc/invoice.rs:374-387`), the least time a TLC paying the invoice must have
+  left. Fiber writes its minimum when it is absent, two thirds of its default commitment delay, which leaves a held
+  payment no margin to settle ([sdk.md](./sdk.md)). The client bounds it below at 1 and not at that minimum, because
+  the minimum is the build's (9,600,000 ms in release, 1,333 ms in debug): the node refuses one below its own.
 - **`hash_algorithm` is always sent**, because the caller computed the hash and has to name how. The SDK's `ckb-hash` is
   written `ckb_hash`, fiber's spelling, through the one map `wire` also reads it with.
 - **`currency` is fiber's name**, `Fibb`, `Fibt` or `Fibd` for mainnet, testnet and any other chain. Fiber refuses one that
   is not the node's. The list is `invoice`'s `INVOICE_CURRENCIES`, shared with the invoice reader, which knows the same three by
   the prefix of the string ([invoice.md](./invoice.md)).
 - **`description` is optional**, and an empty one is sent as it is: fiber stores it as a description, which is not the
-  invoice it builds without one. Fiber refuses more than 639 bytes; the client leaves that bound to the node.
-- **Left to the node on the creation**: `fallback_address`, `final_expiry_delta` (fiber's minimum when absent),
-  `udt_type_script` (CKB invoices only, as the open), `allow_mpp` and `allow_trampoline_routing`. `payment_preimage` is not
+  invoice it builds without one. It is at most 639 bytes of well-formed UTF-8 (`RPC_MAX_INVOICE_DESCRIPTION_BYTES`,
+  fiber's `MAX_DESCRIPTION_LENGTH` held to the string's UTF-8 length, `invoice/invoice_impl.rs:214-219`), checked by the
+  client before anything is sent: more is a `RangeError`, and a lone surrogate a `TypeError`, since serde_json refuses
+  one in a string and the platform's encoders would replace it in silence. The guard, `assertRpcInvoiceDescription`,
+  counts the bytes with the writer the invoice codec uses (`encodeWellFormedUtf8`, [invoice.md](./invoice.md)), and the
+  facade calls it before it allocates an invoice's index ([sdk.md](./sdk.md)).
+- **Left to the node on the creation**: `fallback_address`, `udt_type_script` (CKB invoices only, as the open), `allow_mpp` and `allow_trampoline_routing`. `payment_preimage` is not
   left to the node: the client cannot send it.
 - **Only the encoded invoice is read**, a non-empty string: it is what a payer is given. Fiber also answers the invoice
   parsed, which the client ignores, since what is worth checking is the string itself.
@@ -390,26 +399,26 @@ inputs do, and the host hands it to its CKB signer as it is.
 
 ## Where it lives
 
-| File                                  | Contents                                                                                                                                                                                               |
-| ------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `src/rpc/fiber-rpc-client.ts`         | `FiberRpcClient`: the token and `setToken`, the request, the status, the three errors, the methods                                                                                                     |
-| `src/rpc/channels.ts`                 | The codecs of the four channel methods and the two tenant channel methods, the channel, its state, the listing read for its ids or its states, and the opening context                                 |
-| `src/rpc/invoices.ts`                 | The codecs of the four invoice methods                                                                                                                                                                 |
-| `src/rpc/payments.ts`                 | The codecs of the two payment methods                                                                                                                                                                  |
-| `src/rpc/signing.ts`                  | The codecs of the four signing request methods: the status handed over as a field, the two signatures, the two outcomes                                                                                |
-| `src/rpc/tenants.ts`                  | The codecs of the two registration methods, the tenant's status                                                                                                                                        |
-| `src/rpc/json-rpc.ts`                 | The pure envelope codec: the request text, the response read against its id                                                                                                                            |
-| `src/rpc/rpc.error.ts`                | `RpcTransportError`, `RpcError`, `RpcResponseError`                                                                                                                                                    |
-| `src/rpc/rpc.constants.ts`            | The eighteen methods, the version, the Bearer prefix, fiber's two error codes, the channel states and their flags, the listing's filters, the invoice, payment, submission and tenant runtime statuses |
-| `src/rpc/interfaces/i-fetch.ts`       | `IFetchLike`                                                                                                                                                                                           |
-| `src/rpc/utils/amount.utils.ts`       | Decimal shannons to and from `U128Hex`                                                                                                                                                                 |
-| `src/rpc/utils/payment-hash.utils.ts` | The params of the three methods that take a payment hash and nothing else                                                                                                                              |
-| `src/rpc/utils/channel-id.utils.ts`   | The params of the three methods that take a channel id and nothing else: the abandon and the two signing status getters                                                                                |
-| `src/wire/flags.ts`                   | Fiber's flag sets                                                                                                                                                                                      |
-| `src/wire/transaction.ts`             | CKB's transaction JSON, read and written                                                                                                                                                               |
-| `test/mocks/rpc/fetch.mock.ts`        | `FetchMock`: records every request and its receiver, answers from a script                                                                                                                             |
-| `test/utils/rpc-typed.ts`             | The vectors' values projected into the client's typed params and results                                                                                                                               |
-| `test/utils/rpc-answers.ts`           | The result field and the scripted answers the method specs share                                                                                                                                       |
+| File                                  | Contents                                                                                                                                                                                                                                                      |
+| ------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `src/rpc/fiber-rpc-client.ts`         | `FiberRpcClient`: the token and `setToken`, the request, the status, the three errors, the methods                                                                                                                                                            |
+| `src/rpc/channels.ts`                 | The codecs of the four channel methods and the two tenant channel methods, the channel, its state, the listing read for its ids or its states, and the opening context                                                                                        |
+| `src/rpc/invoices.ts`                 | The codecs of the four invoice methods, and the description's guard                                                                                                                                                                                           |
+| `src/rpc/payments.ts`                 | The codecs of the two payment methods                                                                                                                                                                                                                         |
+| `src/rpc/signing.ts`                  | The codecs of the four signing request methods: the status handed over as a field, the two signatures, the two outcomes                                                                                                                                       |
+| `src/rpc/tenants.ts`                  | The codecs of the two registration methods, the tenant's status                                                                                                                                                                                               |
+| `src/rpc/json-rpc.ts`                 | The pure envelope codec: the request text, the response read against its id                                                                                                                                                                                   |
+| `src/rpc/rpc.error.ts`                | `RpcTransportError`, `RpcError`, `RpcResponseError`                                                                                                                                                                                                           |
+| `src/rpc/rpc.constants.ts`            | The eighteen methods, the version, the Bearer prefix, fiber's two error codes, the channel states and their flags, the listing's filters, the invoice, payment, submission and tenant runtime statuses, the final expiry delta's and the description's bounds |
+| `src/rpc/interfaces/i-fetch.ts`       | `IFetchLike`                                                                                                                                                                                                                                                  |
+| `src/rpc/utils/amount.utils.ts`       | Decimal shannons to and from `U128Hex`                                                                                                                                                                                                                        |
+| `src/rpc/utils/payment-hash.utils.ts` | The params of the three methods that take a payment hash and nothing else                                                                                                                                                                                     |
+| `src/rpc/utils/channel-id.utils.ts`   | The params of the three methods that take a channel id and nothing else: the abandon and the two signing status getters                                                                                                                                       |
+| `src/wire/flags.ts`                   | Fiber's flag sets                                                                                                                                                                                                                                             |
+| `src/wire/transaction.ts`             | CKB's transaction JSON, read and written                                                                                                                                                                                                                      |
+| `test/mocks/rpc/fetch.mock.ts`        | `FetchMock`: records every request and its receiver, answers from a script                                                                                                                                                                                    |
+| `test/utils/rpc-typed.ts`             | The vectors' values projected into the client's typed params and results                                                                                                                                                                                      |
+| `test/utils/rpc-answers.ts`           | The result field and the scripted answers the method specs share                                                                                                                                                                                              |
 
 ## What the tests guarantee
 
@@ -457,6 +466,10 @@ inputs do, and the host hands it to its CKB signer as it is.
   malformed.
 - **The hold invoice by construction**: no input makes `new_invoice` carry a preimage, a description is omitted rather than
   sent as `null` and sent when empty, and no refusal of a preimage carries its bytes.
+- **The creation's bounds**: `final_expiry_delta` written at fiber's 14 days and at one millisecond, and refused at zero,
+  negative, one past 14 days, absent and as a number, with nothing sent; a description of exactly 639 bytes sent in one-, three- and
+  four-byte characters, a surrogate pair taken as the one point it encodes, and 640 bytes, a lone surrogate of either
+  half and anything not a string refused, the guard on its own and through `newInvoice`.
 - **The funding lock's cell deps**: written after the funding lock when given and never otherwise, an empty list as `[]`,
   the highest index an out point can name, and one refusal per field of a list or an entry (not a list, an entry not an
   object, its out point missing, a short hash, an index past a u32, a dep type missing or unknown), with nothing sent.
@@ -538,6 +551,7 @@ Coverage of the module and of `wire` is 100% on all four metrics, and the assert
 | An empty invoice address is read                             | 6                 |
 | An invoice's status is not checked against fiber's           | 6                 |
 | A currency missing from the client's list                    | 6                 |
+| The description is not checked                               | 6                 |
 | A state without flags may carry `state_flags`                | 5                 |
 | The remote balance is read from the local one                | 5                 |
 | The registry nonce is read as bare hex                       | 5                 |
@@ -582,7 +596,6 @@ Coverage of the module and of `wire` is 100% on all four metrics, and the assert
 | `public` is omitted when true                                | 2                 |
 | A transaction's byte lists are written unchecked             | 2                 |
 | A missing description is sent as `null`                      | 2                 |
-| The description is not checked to be a string                | 2                 |
 | `dryRun` is not checked to be a boolean                      | 2                 |
 | A payment's fee is read as a u64                             | 2                 |
 | `cancelInvoice` calls `get_invoice`                          | 2                 |
@@ -670,3 +683,25 @@ still 100% on all four metrics):
 | The opening's params go out unencoded                     | 4                 |
 | The opening's result is handed back undecoded             | 3                 |
 | The opening's result is read as an external funding's     | 3                 |
+
+`final_expiry_delta` in `encodeNewInvoiceParams`, above zero and at most 14 days, and `assertRpcInvoiceDescription`, fiber's
+639 bytes of well-formed UTF-8, were broken the same way (`test/tests/rpc`, still 100% on all four metrics). The description
+left unchecked is a row of the first table, which carries this sweep's count; the guard's own string check is no row, since
+`encodeWellFormedUtf8` makes the same one with the same message:
+
+| Mutation                                                           | Tests that failed |
+| ------------------------------------------------------------------ | ----------------- |
+| The final expiry delta's bound is in seconds                       | 45                |
+| The final expiry delta is not sent                                 | 9                 |
+| The final expiry delta is sent as the invoice's expiry             | 8                 |
+| The final expiry delta's bound is one millisecond short of 14 days | 7                 |
+| A zero final expiry delta is sent                                  | 6                 |
+| The final expiry delta is bounded to a u64                         | 6                 |
+| The final expiry delta's bound is one millisecond past 14 days     | 6                 |
+| A description of exactly 639 bytes is refused                      | 4                 |
+| The description's bound is 640 bytes                               | 4                 |
+| The description's bytes are not checked                            | 4                 |
+| A lone surrogate in the description is written                     | 3                 |
+| The description is measured in UTF-16 units                        | 3                 |
+| The final expiry delta is written after the hash algorithm         | 2                 |
+| A final expiry delta of 1 ms is refused as zero                    | 1                 |

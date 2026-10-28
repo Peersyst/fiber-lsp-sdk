@@ -1,6 +1,6 @@
 import { utf8ToBytes } from "@noble/hashes/utils.js";
 import { assertBytes, assertOneOf, assertUnsignedInteger, ckbBlake2b } from "../common";
-import { MASTER_SEED_LENGTH, MAX_CHANNEL_INDEX, MAX_COMMITMENT_NUMBER, NONCE_CONTEXTS } from "./derivation.constants";
+import { MASTER_SEED_LENGTH, MAX_CHANNEL_INDEX, MAX_COMMITMENT_NUMBER, MAX_INVOICE_INDEX, NONCE_CONTEXTS } from "./derivation.constants";
 import type { FiberChannelKeys, NonceContext } from "./derivation.types";
 import { derivePrivateKey, getCommitmentPoint } from "./fiber-scheme";
 
@@ -24,6 +24,18 @@ export function deriveChannelSeed(masterSeed: Uint8Array, channelIndex: number):
     assertBytes("masterSeed", masterSeed, MASTER_SEED_LENGTH);
     assertUnsignedInteger("channelIndex", channelIndex, MAX_CHANNEL_INDEX);
     return ckbBlake2b(masterSeed, utf8ToBytes(`fiber channel ${channelIndex}`));
+}
+
+/**
+ * Derives the preimage of the device's hold invoice of one index.
+ * @param masterSeed The master seed.
+ * @param invoiceIndex The invoice index.
+ * @returns The 32-byte preimage.
+ */
+export function deriveHoldInvoicePreimage(masterSeed: Uint8Array, invoiceIndex: number): Uint8Array {
+    assertBytes("masterSeed", masterSeed, MASTER_SEED_LENGTH);
+    assertUnsignedInteger("invoiceIndex", invoiceIndex, MAX_INVOICE_INDEX);
+    return ckbBlake2b(masterSeed, utf8ToBytes(`hold invoice ${invoiceIndex}`));
 }
 
 /**
