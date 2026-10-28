@@ -5,7 +5,7 @@ effects, wires every other module behind it, and owns what none of them could: t
 the host listens to, the clock the device's indexes come from, and the list of what the device still has to ask the node
 about. This document covers that core, the tenant's registration and token, the opening of a channel and the events that
 follow it, the listing of the channels, the evidence of a channel, a payment received on a hold invoice, from its
-creation to its settlement, and a payment sent, from the check of its invoice to its outcome.
+creation to its settlement, a payment sent, from the check of its invoice to its outcome, and the cooperative close.
 
 ## The effects it is given
 
@@ -175,19 +175,20 @@ Every failure of the device's own is one `SdkError`, with a `code` a wallet can 
 underneath as its `cause`; a host's programming error, such as an option out of range, is a `TypeError` or a
 `RangeError`:
 
-| Code                 | When                                                                                                      | Cause                                |
-| -------------------- | --------------------------------------------------------------------------------------------------------- | ------------------------------------ |
-| `poll_failed`        | A step of a poll tick, or one channel, invoice or payment of a step, failed                               | What failed                          |
-| `clock_before_floor` | An index was asked of a clock reading before the allocation floor                                         | None                                 |
-| `unknown_channel`    | An operation named a channel this device never registered                                                 | None                                 |
-| `opening_rejected`   | The node's answer to an opening is not what the device asked; the message names the field                 | None                                 |
-| `opening_conflict`   | The node's answer contradicts the device's record: a registration or a pin the policy refuses             | The policy's error                   |
-| `funding_tx_altered` | The signed funding tx is not the one the opening froze, or the channel pins no funding cell to compare to | The pin's conflict, or none          |
-| `invoice_rejected`   | The node's invoice string is not the invoice the device asked for; the message names the field            | The decoder's, or none               |
-| `invoice_unpayable`  | An invoice `transfer` was handed is not one the device pays, or its hash is a twin of another payment's   | The decoder's, the policy's, or none |
-| `payment_in_flight`  | A payment under the hash is not reported yet: being sent, being read, watched, open, or held by the node  | The policy's, the node's, or none    |
-| `payment_charged`    | A payment under the hash was charged a TLC, so it may have been made, and is never sent again             | The policy's error                   |
-| `own_invoice`        | The invoice is one of this device's own hold invoices                                                     | The policy's error                   |
+| Code                 | When                                                                                                                                         | Cause                                |
+| -------------------- | -------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------ |
+| `poll_failed`        | A step of a poll tick, or one channel, invoice or payment of a step, failed                                                                  | What failed                          |
+| `clock_before_floor` | An index was asked of a clock reading before the allocation floor                                                                            | None                                 |
+| `unknown_channel`    | An operation named a channel this device never registered                                                                                    | None                                 |
+| `opening_rejected`   | The node's answer to an opening is not what the device asked; the message names the field                                                    | None                                 |
+| `opening_conflict`   | The node's answer contradicts the device's record: a registration or a pin the policy refuses                                                | The policy's error                   |
+| `funding_tx_altered` | The signed funding tx is not the one the opening froze, or the channel pins no funding cell to compare to                                    | The pin's conflict, or none          |
+| `invoice_rejected`   | The node's invoice string is not the invoice the device asked for; the message names the field                                               | The decoder's, or none               |
+| `invoice_unpayable`  | An invoice `transfer` was handed is not one the device pays, or its hash is a twin of another payment's                                      | The decoder's, the policy's, or none |
+| `payment_in_flight`  | A payment under the hash is not reported yet: being sent, being read, watched, open, or held by the node                                     | The policy's, the node's, or none    |
+| `payment_charged`    | A payment under the hash was charged a TLC, so it may have been made, and is never sent again                                                | The policy's error                   |
+| `own_invoice`        | The invoice is one of this device's own hold invoices                                                                                        | The policy's error                   |
+| `close_fee_too_high` | The device's fee on a close, at the host's rate or the pinned commitment fee rate, is more than the 1 CKB the policy lets a close's fee take | None                                 |
 
 A message says what failed and then the cause's own words. The codes grow with the operations; a wrong argument is a
 `TypeError` or a `RangeError` naming the field, as everywhere in the SDK, since it is the host's programming error and
@@ -196,13 +197,16 @@ not a condition of the device's. The amount of an opening is the policy's to bou
 `RangeError` too, before anything is written.
 
 What is not a condition of the device's comes through as its own error, unwrapped: the node's answers, through the rpc
-client's three errors ([rpc.md](./rpc.md)), on an opening, a submission, a listing, an invoice's creation and a payment's
-send, but for the node's answers that a session under the hash already exists (`payment_in_flight`, the `RpcError` its
+client's three errors ([rpc.md](./rpc.md)), on an opening, a submission, a listing, an invoice's creation, a payment's
+send and a close, but for the node's answers that a session under the hash already exists (`payment_in_flight`, the
+`RpcError` its
 cause); the
 policy's own refusal of an invoice record it cannot take; the host's own effects, a storage
 that throws or a record or alias it holds that the store refuses to read, wherever one is read, `channelEvidence`
 included; on an opening, whatever the host's signer throws; and on a submission, a signed tx that does not read as a
-transaction, a `TypeError` naming `signedTx`. An opening the device refuses drops its pending opening first, and when that
+transaction, a `TypeError` naming `signedTx`; and on a close, a record without the pins its fee is checked against, a
+`TypeError` naming the pin ([Closing a channel](#closing-a-channel)). An opening the device refuses drops its pending
+opening first, and when that
 drop fails the refusal keeps its code and its cause, its message ending with "the pending opening could not be dropped"
 and the drop's own words ([Opening a channel](#opening-a-channel)).
 
@@ -258,7 +262,8 @@ at the deadline or on a `stop()`: a step reads it before every `emit` and every 
 run acts on nothing. `stop()` cancels the armed tick and abandons the step in flight, whose tick ends at once, runs no
 further step and arms nothing; a `start()` right after begins a fresh tick rather than wait on the stopped one. An extra
 tick can be asked for at once, which the invoice step does after a `settle_invoice` rather than wait out the interval,
-and `transfer` does once the node took its `send_payment`; asked during a tick, it queues exactly one more, and a host cancel that throws does not stop it. A timer
+`transfer` does once the node took its `send_payment`, and `closeChannel` once it took its `shutdown_channel`; asked
+during a tick, it queues exactly one more, and a host cancel that throws does not stop it. A timer
 whose cancel does nothing cannot fire a stale tick, since the slot that holds the armed tick ignores a callback armed
 before the last clear. A host timer that throws when arming is reported as a `poll_failed` too, and ends the loop until
 the next `start()`, rather than rejecting a promise nobody awaits. A tick runs five steps, in this order: the channel
@@ -455,8 +460,10 @@ the signing gate holds the channel to is written before the tx leaves the device
 
 1. The pending opening is named with the channel id (below).
 2. `registerChannel`, with the opening's index, the amount and the user's lock as the close script.
-3. `pinChannelTerms`: the fee rate, the peer's reserve, the liquid capacity (the two amounts less both reserves), and the
-   peer's funding key, its TLC base key and the delay, the values the check held ([policy.md](./policy.md)).
+3. `pinChannelTerms`: the fee rate, the peer's reserve, the liquid capacity (the two amounts less both reserves), the
+   peer's close script, a copy of the context's `remoteShutdownScript`, and the peer's funding key, its TLC base key and
+   the delay, the values the check held ([policy.md](./policy.md)). The peer's close script is held to nothing but the
+   reserve it sizes: the pin is what a close is held to later ([Closing a channel](#closing-a-channel)).
 4. `pinFundingCell`: output 0 of the unsigned tx, by CKB's hash of the tx, and its capacity. The hash covers the raw tx
    and not the witnesses, so it is the hash of the tx signed as well.
 5. The channel is watched, so the channel step announces it.
@@ -870,6 +877,124 @@ closes the intent, which only stops growth: the TLCs already shown stay signable
 them is signed. A false `Created` or `Inflight` keeps the intent open, within its budget. The events report what the node
 says, which is no proof: the preimage fiber keeps for a paid payment is not read.
 
+## Closing a channel
+
+`closeChannel(channelId, options?)` asks the node to close a channel cooperatively. The options, `SdkCloseOptions`, are
+`{ feeRate? }`: the device's own fee rate on the close, a `bigint` of shannons per kilobyte, as `commitmentFeeRate` is
+elsewhere, the channel's commitment fee rate when absent. It settles with nothing once the node took the request; the
+signature the close needs is the signing step's, and `CHANNEL_CLOSED`, from the watch the opening set, tells when the
+channel closed. Every close pays the device's side to the user's lock, the close script the registration pinned.
+
+### The order
+
+1. The arguments, before anything is read: the channel id 32 bytes of `0x` lowercase hex, the options an object (not
+   `null`, a list, a string or a bigint), and `feeRate`, read once so the rate checked is the one sent, a `bigint` up to
+   a u64; a `TypeError` for the first two and a `RangeError` for the rate, a number or a string included, each naming the
+   field.
+2. The channel's record, through `readSdkChannelRecord`: `unknown_channel` for one this device never registered.
+3. The fee. Both close scripts are read back from their pins through `common`'s `decodeMoleculeScript`, and the rate is
+   the host's or, without one, the pinned `commitmentFeeRate`, which is fiber's own default (`fiber/channel.rs:2759-2765`).
+   The device's fee is digest's `calculateShutdownTxFee` over them, fiber's: `floor(rate * size / 1000)`, the size that
+   of fiber's mock close over both scripts and the network's `fundingLockCellDepsCount` zeroed cell deps, the count fiber
+   sizes the close with (`fee.rs:65-70`), as it sizes the commitment ([digest.md](./digest.md)). With both scripts pinned
+   it is the fee the close takes, and above `MAX_SHUTDOWN_FEE_SHANNONS`, 1 CKB, it is `close_fee_too_high`: the policy
+   refuses a close whose output falls more than that short of the device's balance ([policy.md](./policy.md)), so fiber
+   would ask for a signature the device never gives, and a close never times out (below). On testnet over two 20-byte
+   locks the close is 528 bytes: 528 shannons at fiber's default of 1000, and 189,393,941 the highest rate let through.
+   A rate below the commitment's is let through, 0 included, for fiber to refuse.
+4. `shutdown_channel` with the channel id, `close_script` the device's pinned close script, and `fee_rate` only when the
+   host gave one; `force` is never sent. Fiber's own default script is the same one, the open's; sent, the request names
+   the script the policy holds the close to.
+5. A tick at once (`pollNow`), once the node took it, whose signing step signs the close when fiber has it ready.
+
+### How the close ends
+
+| Exit                                                                | Error                                                | A tick    |
+| ------------------------------------------------------------------- | ---------------------------------------------------- | --------- |
+| An argument                                                         | `TypeError` or `RangeError`, by its name             | None      |
+| A channel never registered                                          | `unknown_channel`                                    | None      |
+| A record missing a pin the close needs, or one that does not decode | `TypeError`, naming the pin                          | None      |
+| The fee past 1 CKB                                                  | `close_fee_too_high`                                 | None      |
+| A fee no u64 holds                                                  | digest's `RangeError`, naming `fee`                  | None      |
+| A failed read of the storage                                        | Its own, passed through; nothing sent                | None      |
+| A refusal of the node's                                             | The `RpcError`, unwrapped                            | None      |
+| Fiber's lost actor reply                                            | The `RpcError`, unwrapped                            | None      |
+| A transport failure, or an answer the client cannot read            | `RpcTransportError` or `RpcResponseError`, unwrapped | None      |
+| Success                                                             | None                                                 | Asked for |
+
+The pins the close needs are the peer's close script, and the commitment fee rate when the host gives no rate. Only a store
+that failed during the opening leaves a registered channel without them, so their absence is a broken store, as in
+`channelEvidence`: `channel <id> pins no remoteCloseScript to check its close against`. A pinned script that does not
+decode is the decoder's refusal, named after its pin. A fee no u64 holds takes a rate near a u64's and a close script far
+longer than a lock's; at a u64's whole rate the two 20-byte locks above still make a fee a u64 holds, which is
+`close_fee_too_high`.
+
+The close writes nothing on any exit: it reads the channel's alias and its record, and the channel's watch is the one the
+opening set, kept until the channel step lists the channel `Closed`. A refusal of the node's ran no close. An unknown
+outcome, fiber's lost actor reply ("Messaging failed because channel is closed") included, may have, and the opening's
+watch reports it: the next tick signs the close if fiber built it, and `CHANNEL_CLOSED` follows. A `closeChannel` on a
+channel whose close is confirmed, no longer watched, meets fiber's not found and announces nothing. No failure asks for a
+tick.
+
+### What fiber does with it
+
+Fiber serves a tenant's `shutdown_channel` as any node's (`rpc/channel.rs:295-305`) and checks nothing of the tenant's
+own: with no script it pays the open's, with no rate it takes the commitment's, and it refuses either beside `force`
+(`:723-729`). Its checks, in order, the network actor's lookup and then `handle_shutdown_command`'s
+(`fiber/channel.rs:2726-2767`), each an `RpcError`:
+
+- **A channel it holds no actor for**: "Channel not found error: `Hash256(0x…)`" (`fiber/network.rs:8076-8093`), which is
+  also what a second `closeChannel` meets once the close is confirmed, since the channel's actor stops.
+- **The peer offline**: "Invalid state: Cannot cooperatively shutdown channel `Hash256(0x…)` while peer is offline", the
+  prefix and the id's form those of fiber's `ProcessingChannelError` (`:5692`).
+- **A channel not `ChannelReady`**: "Invalid state: Trying to send shutdown message while in invalid state …", the state
+  in its debug form; a second `closeChannel` while the first close runs meets it.
+- **An outbound TLC not yet committed**, its add still `LocalAnnounced` before the peer's `revoke_and_ack`: "Invalid
+  state: Unable to process shutdown command, as there are pending outbound tlcs". TLCs already committed, either way, do
+  not stop the close: both sides exchange their shutdowns, and the channel stays `closing` until every TLC settles, the
+  device signing their rounds as usual, and only then asks for the close (`:9143-9215`).
+- **The fee** (`check_shutdown_fee_rate`, `:7542-7596`): a rate below the commitment fee rate, and a fee the device's
+  balance cannot pay. Fiber sets no other bound.
+
+Each side pays its own fee, its rate times the size of the same mock close (`channel.rs:11188-11203`). A fiber node
+answers the other side's shutdown on its own, with the open's script and a rate of 0 (`:11774-11795`), when that
+shutdown's rate is at least the commitment fee rate (`:8753-8757`), so only the side that started the close pays for it:
+a close the device asks for comes out of the device's output alone, and one the peer starts out of the peer's. Below the
+commitment fee rate, which only the peer's shutdown can carry since fiber refuses it from the device's side, the node
+does not answer: the channel stays `closing`, no `SendClosingSigned` comes, and only a force close ends it. When both
+sides send their shutdown at once, neither answers the other's, and each pays its own rate.
+
+A fiber bug can stall a close the device asks for at a rate of its own. On a reconnection while the channel is
+`ShuttingDown` and the peer's shutdown has not arrived, fiber sends the device's shutdown again with the open's script and
+the commitment fee rate, not the rate stored for the close (`channel.rs:10675-10688`). With a host `feeRate` other than
+the commitment's, the two sides then build different closes and the close stalls until a force close; the default rate
+is unaffected.
+
+### The close the peer starts
+
+The peer can start the close too, and fiber's answer to it is automatic when the peer's rate is at least the commitment
+fee rate, the device's share at a rate of 0, so the device sees it only as the `SendClosingSigned` request the signing
+step reads; below that rate the channel stays `closing` until a force close (above). It is signed under the same policy as any close:
+the slot, the pins (the funding output, the peer's funding key and both close scripts), no TLC in either view, and the
+device's output short of its balance by no more than 1 CKB, which at a rate of 0 it is not at all. Refusing it would only
+stall the channel. `CHANNEL_CLOSED` reports it, the channel watched since its opening.
+
+Fiber stores the peer's shutdown as it comes and never holds its script to the open's `remote_shutdown_script`
+(`channel.rs:1932-1936`), so a peer can ask for its share to be paid elsewhere. The close then states another script than
+the pin and the device refuses it, as fiber's own device SDK does (`fiber-lsp-sdk/src/commitment.rs:849-953`):
+`SIGNING` reports it `refused` with `policy_refusal`, naming `remoteCloseScript` and both values, on every tick. A shutdown
+that does not complete never times out in fiber (`channel.rs:6622-6624`): the channel stays `closing`, a `closeChannel`
+meets fiber's invalid state, and only a force close, the node's or the peer's, ends it, which the watchtower step then
+follows ([The watchtower step](#the-watchtower-step)).
+
+### When the host hears of it
+
+The tick `closeChannel` asks for signs the close if fiber built it already, which it does once both shutdowns are
+exchanged and no TLC is left: the channel step reads the channel `closing` and does nothing, and the signing step signs
+and reports `SIGNING`, which carries no `deadlineMs` ([Events](#events)). `CHANNEL_CLOSED` comes from the channel step of
+a later tick, the first that lists the channel `Closed`, and the channel is no longer watched; the watchtower step no
+longer polls a channel fiber lists closed cooperatively.
+
 ## What is published
 
 `src/index.ts` exports the facade, `FiberLspSdk`, with its options, network and event types, `SdkError` with its codes,
@@ -878,7 +1003,9 @@ the event type list, the network names and the default poll interval, the nonce 
 forms (`SdkChannelOpening`, `SdkSignFundingInputs`, and the rpc client's `TenantChannelOpeningContext` the opening hands
 back), the listing's (`SdkChannelInfo`, `SdkChannelState`, `SDK_CHANNEL_STATES`), the evidence
 (`SdkChannelEvidence`), the invoice's (`SdkInvoice`, `SdkInvoiceOptions`, which `createInvoice` takes and returns through
-the class), the payment's (`SdkPayment`, `SdkTransferOptions`, which `transfer` takes and returns), and what `SIGNING` and `WATCHTOWER_SIGNING` name (`SigningEventOutcome`,
+the class), the payment's (`SdkPayment`, `SdkTransferOptions`, which `transfer` takes and returns), the close's
+(`SdkCloseOptions`,
+which `closeChannel` takes), and what `SIGNING` and `WATCHTOWER_SIGNING` name (`SigningEventOutcome`,
 `ChannelSigningTransition`, `WatchtowerKeyPurpose`, `SignerRefusal`); the injection interfaces of the modules behind it,
 `ISignerStorage`, `IAsyncSignerStorage`, `ITimer`, `IFetchLike` and their event and response types; the rpc client's
 three with the `RpcMethod` they name, which a wallet meets as causes; `decodeInvoice` with the invoice types and
@@ -896,6 +1023,8 @@ through the facade alone.
   `PAYMENT_EXPIRED`.
 - **No check of the funding inputs.** The device holds the funding cell to what it asked; what the inputs spend, the
   change and the fee are the host signer's, which can read the chain.
+- **No force close.** `closeChannel` is cooperative and never sends `force`: a force close is the node's or the peer's,
+  and what follows it is the watchtower step's.
 - **No operator call.** The facade signs the registration and takes the token; the two calls that need the operator's
   token are the host's.
 - **No deadline acted on.** `SIGNING`'s `deadlineMs` is reported, and every request is answered when it is seen.
@@ -913,7 +1042,7 @@ through the facade alone.
 
 | File                                     | Contents                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
 | ---------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `src/sdk/fiber-lsp-sdk.ts`               | `FiberLspSdk`: the options checked, the wiring, `connect`, `disconnect`, the events, the registration, the token, the opening's three methods, the listing, the evidence, `createInvoice`, `transfer`                                                                                                                                                                                                                                                                                       |
+| `src/sdk/fiber-lsp-sdk.ts`               | `FiberLspSdk`: the options checked, the wiring, `connect`, `disconnect`, the events, the registration, the token, the opening's three methods, the listing, the evidence, `createInvoice`, `transfer`, `closeChannel`                                                                                                                                                                                                                                                                       |
 | `src/sdk/channel-opening.ts`             | `prepareSdkChannelOpen`, `submitSdkFundingTx` and `openSdkChannel`: the arguments, the request, the resume, the check's verdict, the pins, the refusals and the drop, the submission's checks                                                                                                                                                                                                                                                                                               |
 | `src/sdk/utils/opening-check.utils.ts`   | `checkTenantOpening`: the node's answer held to what was asked, each failure `opening_rejected`                                                                                                                                                                                                                                                                                                                                                                                             |
 | `src/sdk/pending-opening.ts`             | `PendingOpeningStore`: the pending opening's record, read, matched, written, named and dropped; `assertUserLockCellDeps`                                                                                                                                                                                                                                                                                                                                                                    |
@@ -925,11 +1054,12 @@ through the facade alone.
 | `src/sdk/payment-sending.ts`             | `transferSdkPayment`: the arguments, the default fee and the budget, the hashes being sent, the watch, the intent and its refusals, `send_payment` with the hops, each way the send ends, `pollNow`                                                                                                                                                                                                                                                                                         |
 | `src/sdk/utils/payment-check.utils.ts`   | `checkPayableInvoice`: an invoice held to what the device pays, each failure `invoice_unpayable`                                                                                                                                                                                                                                                                                                                                                                                            |
 | `src/sdk/payment-step.ts`                | `buildPaymentStep`: the hashes being sent skipped and the ones read held, each status answered, fiber's not found, the watch checked again, the close before `PAYMENT_SENT` and `PAYMENT_FAILED`, the forget                                                                                                                                                                                                                                                                                |
+| `src/sdk/channel-closing.ts`             | `closeSdkChannel`: the arguments, the record, the device's fee over both pinned close scripts and `close_fee_too_high`, `shutdown_channel` with the device's script, `pollNow` once the node took it                                                                                                                                                                                                                                                                                        |
 | `src/sdk/utils/node-answer.utils.ts`     | Fiber's answers recognized by their code and whole message (`isFiberRefusal`), or around a hash in its `Hash256` form (`isFiberRefusalUnderHash`, `formatFiberHash256`); the refusal of an answer about another hash (`assertSdkAnsweredHash`)                                                                                                                                                                                                                                              |
 | `src/sdk/utils/clock.utils.ts`           | `readSdkClock`: the host's clock read once, without a receiver, and checked                                                                                                                                                                                                                                                                                                                                                                                                                 |
 | `src/sdk/utils/invoice-expiry.utils.ts`  | `computeSdkInvoiceExpiryMs`: when an invoice runs out, as fiber's `is_expired` counts it, which the invoice step and the payment's check share                                                                                                                                                                                                                                                                                                                                              |
 | `src/sdk/channel-evidence.ts`            | `readSdkChannelRecord`, a registered channel's record or `unknown_channel`, which the submission reads too; `readSdkChannelEvidence`: the record projected onto its evidence                                                                                                                                                                                                                                                                                                                |
-| `src/sdk/sdk.types.ts`                   | The options, the network, the events, the error codes, the registration's forms, the opening's and the listing's, the pending opening, the evidence, the invoice's, the payment's and the payable invoice, the activity record, the context with its two sets of hashes                                                                                                                                                                                                                     |
+| `src/sdk/sdk.types.ts`                   | The options, the network, the events, the error codes, the registration's forms, the opening's and the listing's, the pending opening, the evidence, the invoice's, the payment's and the payable invoice, the close's options, the activity record, the context with its two sets of hashes                                                                                                                                                                                                |
 | `src/sdk/sdk.constants.ts`               | The network presets, the poll interval, the allocation floor, the storage keys, the event, error and state lists, the opening's output index and defaults, the watchtower step's skipped flags and unwatched answer, the invoice's expiry, final delta and timestamp tolerance, the release's slack, fiber's already-paid answer; the default fee rate and its denominator, fiber's not found, session-exists and lost-reply answers, the payment's two reasons and the two refusals' words |
 | `src/sdk/sdk.error.ts`                   | `SdkError`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
 | `src/sdk/allocator.ts`                   | `IndexAllocator`: the channel and invoice indexes from the clock, the last one persisted                                                                                                                                                                                                                                                                                                                                                                                                    |
@@ -946,6 +1076,7 @@ through the facade alone.
 | `src/policy/signer-store.ts`             | `getRecord` and `updateRecord`, the store's records of another module's format, used by the allocator, the activity and the pending opening                                                                                                                                                                                                                                                                                                                                                 |
 | `src/common/utils/assert.utils.ts`       | `assertTimerDelayMs`, `assertScriptTemplate`, `assertCompressedPoint`, `assertFunction`, `assertCellDep`, `assertCellDeps` and `assertPositiveDecimalShannons`                                                                                                                                                                                                                                                                                                                              |
 | `src/common/utils/copy.utils.ts`         | The copies of a script, a template, an out point, a cell dep and a transaction, which the network and the opening take                                                                                                                                                                                                                                                                                                                                                                      |
+| `src/common/utils/molecule.utils.ts`     | `decodeMoleculeScript`, a molecule `Script` read back strictly, the exact inverse of `moleculeScript`, which the close reads both pinned close scripts with and the pending opening its stored user lock                                                                                                                                                                                                                                                                                    |
 | `src/common/utils/validate.utils.ts`     | `isCompressedPoint`, shared with the invoice codec; `isPositiveDecimalShannons`, shared with the policy's invoice record                                                                                                                                                                                                                                                                                                                                                                    |
 | `src/common/timer-slot.ts`               | `TimerSlot`: the one armed callback the poller holds                                                                                                                                                                                                                                                                                                                                                                                                                                        |
 | `src/common/listener-set.ts`             | `ListenerSet`: the events' fan-out                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
@@ -1946,3 +2077,128 @@ its flow specs included, still 100% on all four metrics):
 
 "A released invoice is judged again and asks a tick" fails one test of the invoice step and never ends the flows: every
 settlement asks for a tick at once, so the sweep stops it at its timeout; the row counts the step's test alone.
+
+`channel-closing.spec.ts` pins `closeSdkChannel` over a scripted node, an in-memory storage, the real policy, which
+registers the channel and pins its terms as the opening does, and a poller whose `pollNow` is watched: the request with
+the device's pinned script and no rate, the host's rate sent as `fee_rate`, the channel's alias and record read and
+nothing written, and a tick asked once the node took the close, not before. Each argument refused before the store is
+read, nothing sent and no tick asked (the channel id bare, uppercase, a byte short, one byte long, bytes or absent, and
+refused ahead of a bad rate; the options `null`, a list, a string or a bigint; the rate negative, past a u64, a number,
+fractional, a string or `null`); empty options and an undefined rate taken as fiber's default, sending none; a rate of 0
+sent for fiber to refuse; the rate read once. The channel: an unregistered one as `unknown_channel`; one registered
+without its terms, and one without its commitment fee rate when the host gives none, each a `TypeError` naming the pin,
+the latter closed at the host's rate; each pinned script that does not decode refused by the decoder. The fee: the
+highest rate a close's fee lets through sent, the first past it and a u64's whole rate refused as `close_fee_too_high`,
+nothing sent; the pinned rate judged when the host gives none, at both edges; the host's rate judged over the pinned one
+when both are there, a rate of 0 included over a pinned rate that would be refused; the close sized over the network's
+cell deps, one fewer letting the first refused rate through, and over each pinned script, a byte more of args taking the
+last accepted rate out; and a fee no u64 holds as digest's `RangeError`. The node: fiber's three refusals (an outbound TLC,
+a close under way, a channel not found), a transport failure, an answer that is not `null` and fiber's lost actor reply,
+each through unwrapped, the record read, nothing written and no tick asked. The storage: a failed read of the alias or
+of the record passed through as itself, nothing sent, written or asked.
+
+`fiber-lsp-sdk.spec.ts` closes a channel the facade opened, paying the user's lock at fiber's default rate and asking a
+tick, and sizes the fee over the facade's own network: testnet's two cell deps refuse a rate one cell dep lets through.
+`channel-opening.spec.ts` pins the peer's close script among the terms, and refuses as `opening_conflict` a resumed
+opening whose answer states another script for the peer than the one pinned; `utils/opening-check.utils.spec.ts` returns
+the script in the terms, a copy of its own.
+
+`channel-closing.flow.spec.ts` runs the facade over the tenant node double, which serves `shutdown_channel` as fiber does
+for a tenant: the actor's lookup, the state and an outbound add not yet committed, in fiber's order and with its texts, a
+rate below the commitment's, a close script the device's share cannot fill and a fee its balance cannot pay, a force close
+with a script or a rate, both shutdowns exchanged with the peer's automatic answer at a rate of 0, the close asked for
+once no TLC is left, and a channel whose close is confirmed no longer found; and moves the peer's own shutdown
+(`peerShutdown`), with another script or rate when asked. Over it: a close at the commitment fee rate, signed on the tick
+the call asks for, the device's output its balance less 528 shannons and the peer's whole, and `CHANNEL_CLOSED` on the next
+tick, the channel no longer watched; a close at the host's rate; a rate whose fee the policy would not sign refused as
+`close_fee_too_high` with nothing called, then the highest it lets through signed, the device's output what it funded less
+1 CKB; fiber's refusal while the outbound TLC is not committed, through unwrapped, the watch the opening set kept; a close
+accepted once the TLC is committed, the channel `closing` until the payee's fulfil, a second `closeChannel` meanwhile
+meeting fiber's invalid state, the fulfil's rounds signed, then the close signed and announced; a rate below the
+commitment's, fiber's refusal through unwrapped, nothing written and the channel still ready; the close the peer starts,
+the peer paying its fee alone, at the commitment fee rate and at a rate of its own; a peer that changes its close script,
+refused on every tick, the channel left `closing` and `closeChannel` meeting fiber's invalid state, the watch kept; a close
+after the confirmed one meeting fiber's not found, nothing written and no second `CHANNEL_CLOSED`; and a close whose
+answer is lost, nothing written and no tick asked, left to the opening's watch, whose next ticks sign it and announce it.
+Under "the tenant node's shutdown_channel", what the SDK never sends is posted to the double raw (`postShutdown`): a close
+script one byte of args past the cell the device's share fills, the first rate whose fee that share cannot pay and a force
+close with a rate or with a script, each refused with fiber's text and the channel still ready, and a bare force close,
+which the double does not serve since its `forceClose` move stands for it. Under "the tenant node's peerShutdown", the
+double throws on a peer's shutdown it does not model: at a rate whose fee the peer's share cannot pay, below the
+commitment fee rate (fiber's wait, left out), while the device's add is still announced, and on a channel already
+closing.
+
+The cooperative close, `closeSdkChannel` (the arguments checked before the record is read, absent options taken as none,
+the options read once, the two pins the close needs, the fee over both pinned close scripts and the network's funding
+lock cell deps at the host's rate, 0 included, or the pinned commitment fee rate, `close_fee_too_high` at its edge, the
+request with the device's script and the rate only when given, the node's refusal through, and a tick only once the node
+took the close), the peer's close script the opening puts in the terms, `closeChannel` in the facade, and the pending
+opening's user lock read through `decodeMoleculeScript`, were broken the same way (`test/tests/sdk`, its flow spec
+included, still 100% on all four metrics):
+
+| Mutation                                                          | Tests that failed |
+| ----------------------------------------------------------------- | ----------------- |
+| A pending opening's user lock that decodes is refused             | 207               |
+| The terms leave the peer's close script out                       | 105               |
+| The pinned peer's close script is the user's lock                 | 30                |
+| The node is sent the peer's close script                          | 26                |
+| The close script is not sent                                      | 23                |
+| Absent options are refused                                        | 21                |
+| The close sends a rate of 0 when the host gives none              | 15                |
+| The tick is asked before the node is asked                        | 13                |
+| The close's fee rate is never sent                                | 12                |
+| The node's refusal of the close is swallowed                      | 12                |
+| The close's arguments are checked after the record is read        | 10                |
+| The pinned rate is judged over the host's                         | 10                |
+| A failed close asks a tick                                        | 9                 |
+| The close is sized over one cell dep fewer                        | 8                 |
+| A close fee too high is unknown_channel                           | 7                 |
+| The close's fee is not checked                                    | 7                 |
+| The close's refusal names the bound as the fee                    | 7                 |
+| No tick is asked after the close                                  | 6                 |
+| The close's fee rate is not checked                               | 6                 |
+| The close's fee rate may pass a u64                               | 6                 |
+| The peer's close script is decoded from the device's pin          | 5                 |
+| closeChannel drops the options                                    | 5                 |
+| The close's fee bound refuses its own edge                        | 4                 |
+| The close's options are not checked to be an object               | 4                 |
+| The close is sized over the device's script twice                 | 3                 |
+| The close is sized over the peer's script twice                   | 3                 |
+| A missing close pin is not refused                                | 2                 |
+| A pending opening's user lock is not decoded                      | 2                 |
+| A pending opening's user lock that does not decode is read as one | 2                 |
+| The close's default rate is zero                                  | 2                 |
+| A host's rate of 0 is judged as the pinned one                    | 1                 |
+| A missing close pin is named as the peer's script                 | 1                 |
+| The close's channel id is not checked                             | 1                 |
+| The close's options are read again after the check                | 1                 |
+| The close's refusal names the host's rate, not the one judged     | 1                 |
+| The device's pinned script is decoded under the peer's name       | 1                 |
+| The peer's pinned script is decoded under the device's name       | 1                 |
+| The pinned peer's close script is the answer's own                | 1                 |
+| close_fee_too_high is not an error code                           | 1                 |
+
+"The close's channel id is not checked" changes only which refusal comes first, since the record's read checks the id
+too: it fails the spec that gives a bad id beside a bad fee rate and expects the id's refusal.
+
+`test/tests/common/utils/molecule.utils.spec.ts` pins the decoder as the inverse of `moleculeScript`, empty and long args
+and each of the four hash types read back and written again to the same bytes, copies rather than views over the input,
+and the path it is given in its refusals; then one refusal per rule: an input that is not bytes, a size that is not the
+length, a short header, a field count other than 3, a first offset that is not 16, offsets that descend or point past the
+end, a code hash that is not 32 bytes, a hash type that is not one byte or one `moleculeScript` never writes, args whose
+length prefix disagrees with their slot or runs past it, and trailing bytes past the size and inside it.
+
+The close reads both pinned close scripts back through `common`'s `decodeMoleculeScript`
+(`src/common/utils/molecule.utils.ts`), the inverse of `moleculeScript` over the strict molecule reader, swept against
+`test/tests/common` with the file at 100% on all four metrics:
+
+| Mutation                                                  | Tests that failed |
+| --------------------------------------------------------- | ----------------- |
+| The script decoder's default name is another              | 15                |
+| The script decoder's refusal drops its path               | 15                |
+| The script decoder's refusal is a RangeError              | 15                |
+| The script decoder names the hash type in snake case      | 5                 |
+| The script decoder names the args as another field        | 3                 |
+| The script decoder names the code hash in snake case      | 1                 |
+| The script decoder takes any input                        | 1                 |
+| The script decoder's refusal is not named after the input | 1                 |

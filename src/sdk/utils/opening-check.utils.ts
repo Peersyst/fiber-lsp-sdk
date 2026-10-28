@@ -1,6 +1,6 @@
 import { equalBytes } from "@noble/curves/utils.js";
 import type { Script } from "../../common";
-import { UINT64_MAX, isCompressedPoint, moleculeScript } from "../../common";
+import { UINT64_MAX, copyScript, isCompressedPoint, moleculeScript } from "../../common";
 import { COMMITMENT_LOCK_LAYOUTS, fundingLockArgs, tenantChannelId } from "../../digest";
 import { reservedCkbShannons } from "../../policy";
 import type { OpenTenantChannelResult, TenantChannelOpeningContext } from "../../rpc";
@@ -51,6 +51,7 @@ export function checkTenantOpening(request: SdkOpeningRequest, answer: OpenTenan
             commitmentFeeRate: context.commitmentFeeRate,
             remoteReservedCkbShannons: reserves.remote.toString(),
             liquidCapacityShannons: (capacity - reserves.local - reserves.remote).toString(),
+            remoteCloseScript: copyScript(context.remoteShutdownScript),
             remoteFundingPubkey: Uint8Array.from(context.remoteFundingKey),
             remoteTlcBasePubkey: Uint8Array.from(context.remoteSettlementKey),
             commitmentDelayEpoch: context.commitmentDelayEpoch,

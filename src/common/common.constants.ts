@@ -84,6 +84,11 @@ export const SCRIPT_HASH_TYPE_BYTES = { data: 0, type: 1, data1: 2, data2: 4 } a
     number
 >;
 
+/**
+ * A `Script`'s fields as a molecule refusal's path names them.
+ */
+export const SCRIPT_FIELD_NAMES = { codeHash: "codeHash", hashType: "hashType", args: "args" } as const;
+
 export const DEP_TYPES = ["code", "dep_group"] as const;
 
 export const TLC_DIRECTIONS = ["offered", "received"] as const;

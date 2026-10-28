@@ -7,10 +7,12 @@ import {
     decodeListChannelsResult,
     decodeOpenChannelWithExternalFundingResult,
     decodeOpenTenantChannelResult,
+    decodeShutdownChannelResult,
     decodeSubmitSignedFundingTxResult,
     encodeListChannelsParams,
     encodeOpenChannelWithExternalFundingParams,
     encodeOpenTenantChannelParams,
+    encodeShutdownChannelParams,
     encodeSubmitSignedFundingTxParams,
 } from "./channels";
 import type { FetchResponseLike, IFetchLike } from "./interfaces";
@@ -64,6 +66,7 @@ import type {
     RpcSubmissionResult,
     SendPaymentParams,
     SettleInvoiceParams,
+    ShutdownChannelParams,
     SubmitChannelSignatureParams,
     SubmitSignedFundingTxParams,
     SubmitSignedFundingTxResult,
@@ -174,6 +177,14 @@ export class FiberRpcClient {
      */
     async abandonChannel(params: AbandonChannelParams): Promise<void> {
         await this.call("abandon_channel", encodeRpcChannelIdParams(params), decodeAbandonChannelResult);
+    }
+
+    /**
+     * Asks the node to close a channel, cooperatively unless `force` is set.
+     * @param params The channel to close and the close's options.
+     */
+    async shutdownChannel(params: ShutdownChannelParams): Promise<void> {
+        await this.call("shutdown_channel", encodeShutdownChannelParams(params), decodeShutdownChannelResult);
     }
 
     /**

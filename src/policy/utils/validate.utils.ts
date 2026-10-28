@@ -71,6 +71,7 @@ const PIN_FORMS: Record<FirstSightChannelPin | ChannelTermsPin, (value: string) 
     commitmentDelayEpoch: isUint64Decimal,
     commitmentFeeRate: isUint64Decimal,
     remoteReservedCkbShannons: isUint64Decimal,
+    remoteCloseScript: isNonEmptyHexBytes,
     lockLayout: (value) => LOCK_LAYOUTS.includes(value),
 };
 

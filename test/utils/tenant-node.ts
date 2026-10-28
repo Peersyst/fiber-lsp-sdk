@@ -42,7 +42,7 @@ import { buildClosingTx } from "../../src/digest/shutdown-tx";
 import type { Invoice, InvoiceAttribute, InvoiceCurrency, UnsignedInvoice } from "../../src/invoice";
 import { INVOICE_CURRENCIES, InvoiceError, decodeInvoice, encodeInvoice, findInvoiceAttribute } from "../../src/invoice";
 import type { PolicyView, SignSlot, WatchtowerKeyPurpose } from "../../src/policy";
-import { reservedCkbShannons } from "../../src/policy";
+import { RESERVED_SHUTDOWN_FEE_SHANNONS, reservedCkbShannons } from "../../src/policy";
 import type { ChannelSigningTransition } from "../../src/protocol";
 import type {
     ChannelSigningStatusWire,
@@ -64,6 +64,7 @@ import type {
     OpenTenantChannelParamsWire,
     OpenTenantChannelResultWire,
     RpcChannelIdParamsWire,
+    RpcChannelStateName,
     RpcChannelStateWire,
     RpcChannelWire,
     RpcInvoiceStatus,
@@ -73,6 +74,7 @@ import type {
     RpcSubmissionResult,
     SendPaymentParamsWire,
     SettleInvoiceParamsWire,
+    ShutdownChannelParamsWire,
     SubmitChannelSignatureParamsWire,
     SubmitSignedFundingTxParamsWire,
     SubmitWatchtowerSignatureParamsWire,
@@ -230,6 +232,32 @@ const ROUNDS = {
     peer: ["CompleteReceivedCommitment", "SendRevokeAndAck", "SendCommitmentSigned", "CompleteReceivedRevokeAndAck"],
 } as const satisfies Record<string, readonly NodeTransition[]>;
 
+// Both shutdowns exchanged, waiting for the TLCs left (`fiber-types/src/channel.rs:102`).
+const SHUTDOWNS_EXCHANGED = "OUR_SHUTDOWN_SENT|THEIR_SHUTDOWN_SENT|AWAITING_PENDING_TLCS";
+
+// The bitflags type of each `ChannelState` variant (`fiber-types/src/channel.rs:239-265`), `null` for one without flags.
+const STATE_FLAGS_TYPES = {
+    NegotiatingFunding: "NegotiatingFundingFlags",
+    CollaboratingFundingTx: "CollaboratingFundingTxFlags",
+    SigningCommitment: "SigningCommitmentFlags",
+    AwaitingTxSignatures: "AwaitingTxSignaturesFlags",
+    AwaitingChannelReady: "AwaitingChannelReadyFlags",
+    ChannelReady: null,
+    ShuttingDown: "ShuttingDownFlags",
+    Closed: "CloseFlags",
+    Stale: null,
+} as const satisfies Record<RpcChannelStateName, string | null>;
+
+// Composites of the flags declared before them (`fiber-types/src/channel.rs:56-118`): `list_channels` writes them, the debug form never.
+const COMPOSITE_STATE_FLAGS: readonly string[] = [
+    "INIT_SENT",
+    "COLLABORATION_COMPLETED",
+    "COMMITMENT_SIGNED_SENT",
+    "TX_SIGNATURES_SENT",
+    "CHANNEL_READY",
+    "AWAITING_PENDING_TLCS",
+];
+
 type NodeTransition = Exclude<ChannelSigningTransition, "SignChannelAnnouncement">;
 
 type OpeningTransition = "CompleteReceivedCommitment" | "SendCommitmentSigned";
@@ -249,6 +277,9 @@ type NodeTlc = {
     createdAt: { local: number; remote: number };
     // Received, committed in both commitments and checked against its invoice, which holds it.
     held: boolean;
+    // Fiber's `LocalAnnounced` for an offered one, `RemoteAnnounced` for a received one (`fiber-types/src/channel.rs:169-194`):
+    // its add is not yet committed on the tenant's side.
+    announced: boolean;
 };
 
 // A row of the tenant's invoice store, under the hash of the invoice the node built.
@@ -337,6 +368,7 @@ type Step = { kind: "request"; transition: NodeTransition; state: CommitmentStat
 type PendingRequest = {
     requestId: string;
     transition: NodeTransition;
+    state: CommitmentState;
     slot: NodeSlot;
     keyAggregation: [Uint8Array, Uint8Array];
     aggNonce: Uint8Array;
@@ -356,6 +388,12 @@ type BuiltContent = {
     // The cooperative close's, which fiber names the channel's shutdown tx once it lands.
     closingTxHash: Uint8Array | null;
 };
+
+// Fiber's `ShutdownInfo` (`fiber-types/src/channel.rs:1104-1110`): what a side's shutdown states for its share of the close.
+type ShutdownInfo = { closeScript: Script; feeRate: bigint };
+
+// The params of `shutdown_channel` (`fiber-json-types/src/channel.rs:609-623`), an absent option `null`.
+type ShutdownRequest = { channelId: string; closeScript: Script | null; feeRate: bigint | null; force: boolean | null };
 
 type NextMaterial = { point: Uint8Array | null; commitmentNonce: Uint8Array | null; revocationNonce: Uint8Array | null };
 
@@ -520,6 +558,9 @@ export type TenantNodeForceClose = {
     commitmentsBack: number;
 };
 
+// What the peer's shutdown states otherwise than the open's script and the commitment's fee rate.
+export type TenantNodePeerShutdown = { closeScript?: Script; feeRate?: bigint };
+
 // Each holds for every spend built once it is set.
 export type TenantNodeSpendTamper =
     // Pays the node's output to another lock.
@@ -669,6 +710,11 @@ export class InMemoryTenantNode {
 
     private shutdownTxHash: Uint8Array | null = null;
 
+    // Fiber's `local_shutdown_info` and `remote_shutdown_info`, once both shutdowns are exchanged.
+    private shutdownInfo: { local: ShutdownInfo; remote: ShutdownInfo } | null = null;
+
+    private lastClosingTx: Transaction | null = null;
+
     private readonly spendTampers: TenantNodeSpendTamper[] = [];
 
     // Names the node's cell a spend's fee comes from.
@@ -759,6 +805,11 @@ export class InMemoryTenantNode {
         return structuredClone(this.onchainLog);
     }
 
+    // The cooperative close the node asked the device to sign last.
+    get closingTx(): Transaction | null {
+        return structuredClone(this.lastClosingTx);
+    }
+
     openTenantChannel(material: ChannelOpenSignerMaterial, first: OpeningTransition): string {
         const channelId = this.negotiateTenantChannel(material);
         this.completeTxCollaboration(first);
@@ -803,11 +854,8 @@ export class InMemoryTenantNode {
         const { channelId } = this.channel;
         const record = this.recordOf(channelId);
         record.status = "failed";
-        // The id in its display form, the state in its debug form (`fiber/channel.rs:4385-4390`), bitflags naming the flags held whole.
-        const state =
-            this.channelState.state_name === "SigningCommitment"
-                ? "SigningCommitment(SigningCommitmentFlags(THEIR_COMMITMENT_SIGNED_SENT))"
-                : "NegotiatingFunding(NegotiatingFundingFlags(AWAITING_EXTERNAL_FUNDING))";
+        // The id in its display form, the state in its debug form (`fiber/channel.rs:4385-4390`).
+        const state = stateDebugOf(this.channelState);
         record.failureDetail = `[Channel Hash256(${channelId})] External funding transaction submission timed out in state ${state}`;
         if (this.opening?.channelId === channelId) this.opening.terminated = true;
         this.forgetChannel();
@@ -893,15 +941,34 @@ export class InMemoryTenantNode {
         this.invoiceTampers.push(tamper);
     }
 
+    // Both shutdowns exchanged on the channel's terms, each side paying its own fee rate.
     shutdown(): void {
-        if (this.tlcs.length > 0) throw new Error("a channel with TLCs in flight does not shut down");
-        // Both shutdowns exchanged and no TLC left, as fiber asks for the closing signature (`channel.rs:9158-9169`).
-        this.channelState = {
-            state_name: "ShuttingDown",
-            state_flags: "OUR_SHUTDOWN_SENT|THEIR_SHUTDOWN_SENT|AWAITING_PENDING_TLCS|DROPPING_PENDING",
+        const { channel } = this;
+        this.requireShutdownable();
+        this.exchangeShutdowns(
+            { closeScript: channel.localCloseScript, feeRate: channel.localShutdownFeeRate },
+            { closeScript: channel.remoteCloseScript, feeRate: channel.remoteShutdownFeeRate },
+        );
+    }
+
+    // The peer shuts down first: fiber's node stores its shutdown as it comes (`channel.rs:1932-1936`), and answers at once with
+    // the open's script and a fee rate of 0 (`:11774-11795`), paying none of the close.
+    peerShutdown(options: TenantNodePeerShutdown = {}): void {
+        const { channel } = this;
+        const remote = {
+            closeScript: options.closeScript ?? channel.remoteCloseScript,
+            feeRate: options.feeRate ?? channel.commitmentFeeRate,
         };
-        this.queue.push({ kind: "request", transition: "SendClosingSigned", state: this.state() });
-        this.drain();
+        this.requireShutdownable();
+        // `check_shutdown_fee_valid` refuses the message (`channel.rs:1926-1930`).
+        if (this.shutdownFeeRefusal("remote", remote) !== null) {
+            throw new Error("fiber's node refuses a shutdown whose fee the peer's share cannot pay");
+        }
+        // `check_valid_to_auto_accept_shutdown` (`channel.rs:8753-8757`).
+        if (remote.feeRate < channel.commitmentFeeRate) {
+            throw new Error("fiber's node answers no shutdown below the commitment fee rate: the double leaves the wait out");
+        }
+        this.exchangeShutdowns({ closeScript: channel.localCloseScript, feeRate: 0n }, remote);
     }
 
     // The node, or the peer for the remote view, puts the view's commitment on chain; the node's watchtower then spends it.
@@ -987,7 +1054,7 @@ export class InMemoryTenantNode {
         const pending = this.pending;
         if (pending === null) throw new Error("no request is in flight");
         this.pending = null;
-        this.advance(pending.transition);
+        this.advance(pending.transition, pending.state);
         this.drain();
     }
 
@@ -1058,6 +1125,8 @@ export class InMemoryTenantNode {
                 return this.sendPaymentByRpc(params);
             case "get_payment":
                 return this.getPayment(params);
+            case "shutdown_channel":
+                return this.shutdownChannel(params);
             default:
                 return { error: { code: METHOD_NOT_FOUND_CODE, message: "Method not found" } };
         }
@@ -1119,7 +1188,7 @@ export class InMemoryTenantNode {
         }
         if (pending.commitment !== null) this.signedCommitments[pending.commitment.forRemote ? "remote" : "local"].push(pending.commitment);
         this.pending = null;
-        this.advance(pending.transition);
+        this.advance(pending.transition, pending.state);
         this.drain();
         return { result: { type: "Applied" } };
     }
@@ -1180,10 +1249,16 @@ export class InMemoryTenantNode {
     }
 
     // A commitment_signed never moves L.
-    private advance(transition: NodeTransition): void {
+    private advance(transition: NodeTransition, state: CommitmentState): void {
         // `finish_send_revoke_and_ack` (`channel.rs:6313`) and `finish_received_revoke_and_ack` (`:6462`).
         if (transition === "SendRevokeAndAck") this.remote += 1;
         if (transition === "CompleteReceivedRevokeAndAck") this.local += 1;
+        // The peer's revoke_and_ack commits the offered adds its commitment held (`fiber-types/src/channel.rs:835-840`, called at
+        // `channel.rs:6467`); the peer's commitment only moves the received ones past `RemoteAnnounced`, to an `AnnounceWait*`
+        // status, uncommitted yet (`fiber-types/src/channel.rs:811-831`, `channel.rs:2554`).
+        const direction =
+            transition === "CompleteReceivedRevokeAndAck" ? "offered" : transition === "CompleteReceivedCommitment" ? "received" : null;
+        for (const tlc of state.tlcs) if (tlc.direction === direction) tlc.announced = false;
     }
 
     // One request at a time (`fiber-types/src/channel_signer.rs:508-520`).
@@ -1198,7 +1273,7 @@ export class InMemoryTenantNode {
             const skip = this.skips.indexOf(step.transition);
             if (skip >= 0) {
                 this.skips.splice(skip, 1);
-                this.advance(step.transition);
+                this.advance(step.transition, step.state);
                 continue;
             }
             this.pending = this.issue(step.transition, step.state);
@@ -1251,6 +1326,7 @@ export class InMemoryTenantNode {
         return {
             requestId,
             transition,
+            state,
             slot,
             keyAggregation,
             aggNonce: half.aggNonce,
@@ -1411,15 +1487,17 @@ export class InMemoryTenantNode {
         };
     }
 
-    // Fiber's `build_shutdown_tx`: each side's total less its own fee.
+    // Fiber's `build_shutdown_tx` (`channel.rs:11175-11307`): each side's total less its own fee, over both shutdowns' scripts.
     private closingContent(state: CommitmentState, tamper: TenantNodeTamper | null): BuiltContent {
-        const { channel } = this;
-        const localCloseScript = tamper?.kind === "closeScript" ? tamper.script : channel.localCloseScript;
+        const { channel, shutdownInfo } = this;
+        if (shutdownInfo === null) throw new Error("the close is asked for once both shutdowns are exchanged");
+        const { local, remote } = shutdownInfo;
+        const localCloseScript = tamper?.kind === "closeScript" ? tamper.script : local.closeScript;
         const sizing = {
             cellDepsCount: channel.fundingLockCellDepsCount,
             udtTypeScript: null,
             localCloseScript,
-            remoteCloseScript: channel.remoteCloseScript,
+            remoteCloseScript: remote.closeScript,
         };
         const transaction = buildClosingTx(
             this.deviceKeys(),
@@ -1427,16 +1505,15 @@ export class InMemoryTenantNode {
                 fundingOutPoint: channel.fundingOutPoint,
                 remoteFundingPubkey: pubkeyOf(this.peerKeys.fundingKey),
                 localCloseScript,
-                remoteCloseScript: channel.remoteCloseScript,
+                remoteCloseScript: remote.closeScript,
                 localCapacityShannons:
-                    state.localShannons + channel.localReservedCkbShannons - calculateShutdownTxFee(channel.localShutdownFeeRate, sizing),
+                    state.localShannons + channel.localReservedCkbShannons - calculateShutdownTxFee(local.feeRate, sizing),
                 remoteCapacityShannons:
-                    state.remoteShannons +
-                    channel.remoteReservedCkbShannons -
-                    calculateShutdownTxFee(channel.remoteShutdownFeeRate, sizing),
+                    state.remoteShannons + channel.remoteReservedCkbShannons - calculateShutdownTxFee(remote.feeRate, sizing),
             },
             null,
         );
+        this.lastClosingTx = transaction;
         return {
             content: { type: "CooperativeCloseTransaction", transaction: encodeTransaction("transaction", transaction) },
             message: computeTxMessage(transaction),
@@ -1462,6 +1539,8 @@ export class InMemoryTenantNode {
     }
 
     private addTlc(direction: TlcDirection, payment: TenantNodePayment): NodeTlc {
+        // `check_for_tlc_update` (`fiber/channel.rs:8883-8894`).
+        if (this.channelState.state_name === "ShuttingDown") throw new Error("fiber adds no TLC to a channel shutting down");
         const tlc: NodeTlc = {
             id: this.nextTlcIds[direction],
             direction,
@@ -1471,6 +1550,7 @@ export class InMemoryTenantNode {
             expiryMs: BigInt(payment.expiryMs),
             createdAt: { local: this.local, remote: this.remote },
             held: false,
+            announced: true,
         };
         this.nextTlcIds = { ...this.nextTlcIds, [direction]: tlc.id + 1 };
         this.tlcs = [...this.tlcs, tlc];
@@ -1500,6 +1580,7 @@ export class InMemoryTenantNode {
         }
         const received = tlc.direction === "received";
         this.round(received ? "tenant" : "peer", applied, received);
+        if (this.shutdownInfo !== null) this.closeOnceSettled();
     }
 
     private leastExpiryOf(paymentHash: string): string {
@@ -1843,6 +1924,102 @@ export class InMemoryTenantNode {
         return { result: paymentWire(payment) };
     }
 
+    // `shutdown_channel` (`rpc/channel.rs:719-751`, a tenant's as any node's at `:295-305`): the network actor's lookup
+    // (`fiber/network.rs:8076-8093`), then `handle_shutdown_command`'s checks in order (`fiber/channel.rs:2726-2767`) but the
+    // peer's being offline. The peer answers at once (`:11774-11795`).
+    private shutdownChannel(params: unknown): RpcAnswer {
+        const request = readParams<ShutdownChannelParamsWire, ShutdownRequest>(params, (at) => ({
+            channelId: requireHexBytes(at("channel_id"), HASH256_LENGTH),
+            closeScript: readOption(at("close_script"), decodeScript),
+            feeRate: readOption(at("fee_rate"), (field) => decodeUintHex(field, UINT64_MAX)),
+            force: readOption(at("force"), decodeBoolean),
+        }));
+        if (request instanceof WireError) return invalidParams(params, request);
+        if (request.force === true) {
+            if (request.closeScript !== null || request.feeRate !== null) {
+                return failed("close_script and fee_rate should not be set when force is true");
+            }
+            throw new Error("the double serves no force close by shutdown_channel: the forceClose move stands for it");
+        }
+        // The id in `Hash256`'s debug form (`errors.rs:38`).
+        if (!this.hasActor(request.channelId)) return failed(`Channel not found error: Hash256(${request.channelId})`);
+        if (this.channelState.state_name !== "ChannelReady") {
+            return failed(`Invalid state: Trying to send shutdown message while in invalid state ${stateDebugOf(this.channelState)}`);
+        }
+        if (this.tlcs.some((tlc) => tlc.direction === "offered" && tlc.announced)) {
+            return failed("Invalid state: Unable to process shutdown command, as there are pending outbound tlcs");
+        }
+        const { channel } = this;
+        const local = {
+            closeScript: request.closeScript ?? channel.localCloseScript,
+            feeRate: request.feeRate ?? channel.commitmentFeeRate,
+        };
+        // `check_shutdown_fee_rate` (`fiber/channel.rs:7542-7596`), the rate in ckb's `FeeRate` display form.
+        if (local.feeRate < channel.commitmentFeeRate) {
+            return failed(
+                `Invalid parameter: Fee rate ${local.feeRate} shannons/KW is less than commitment fee rate ${channel.commitmentFeeRate}`,
+            );
+        }
+        const refusal = this.shutdownFeeRefusal("local", local);
+        if (refusal !== null) return failed(`Invalid parameter: ${refusal}`);
+        this.exchangeShutdowns(local, { closeScript: channel.remoteCloseScript, feeRate: 0n });
+        return { result: null };
+    }
+
+    // `check_shutdown_fee_rate`'s balance checks on a CKB channel (`fiber/channel.rs:7554-7594`), which `check_shutdown_fee_valid`
+    // makes of the peer's share without its texts (`:8709-8751`): the fee within the side's amount and reserve past its close
+    // script's occupied capacity. Fiber's amounts keep each side's offered TLCs (`:8195-8225`).
+    private shutdownFeeRefusal(side: "local" | "remote", info: ShutdownInfo): string | null {
+        const { channel } = this;
+        const amount =
+            side === "local"
+                ? this.localShannons + this.inFlightShannons("offered") + channel.localReservedCkbShannons
+                : this.remoteShannons + this.inFlightShannons("received") + channel.remoteReservedCkbShannons;
+        const fee = calculateShutdownTxFee(info.feeRate, {
+            cellDepsCount: channel.fundingLockCellDepsCount,
+            udtTypeScript: null,
+            localCloseScript: info.closeScript,
+            // The other side's as the node holds it before its shutdown: the open's.
+            remoteCloseScript: side === "local" ? channel.remoteCloseScript : channel.localCloseScript,
+        });
+        // `occupied_capacity` (`fiber/channel.rs:5866-5890`), the reserve less the shutdown fee it holds.
+        const occupied = reservedCkbShannons(info.closeScript, channel.lockLayout) - RESERVED_SHUTDOWN_FEE_SHANNONS;
+        if (amount < occupied) return `Local shutdown capacity is less than occupied capacity ${occupied}`;
+        const available = amount - occupied;
+        if (fee > available) return `Local balance is not enough to pay the fee, expect fee ${fee} <= available_max_fee ${available}`;
+        return null;
+    }
+
+    // A move's shutdown, which waits for no add in progress: fiber's command refuses only an offered TLC still `LocalAnnounced`
+    // (`fiber/channel.rs:2737-2747`) and the peer's message only a received one still `RemoteAnnounced` (`:1896-1906`); the
+    // double holds either move to both.
+    private requireShutdownable(): void {
+        const name = this.channelState.state_name;
+        if (name !== "ChannelReady") throw new Error(`a channel ${name} does not shut down`);
+        if (this.tlcs.some((tlc) => tlc.announced)) throw new Error("the double shuts down only once no TLC's add is still announced");
+    }
+
+    // Both shutdowns exchanged (`fiber/channel.rs:11762-11803`); the close waits for the TLCs left.
+    private exchangeShutdowns(local: ShutdownInfo, remote: ShutdownInfo): void {
+        this.shutdownInfo = { local, remote };
+        this.channelState = { state_name: "ShuttingDown", state_flags: SHUTDOWNS_EXCHANGED };
+        this.closeOnceSettled();
+    }
+
+    // `maybe_transfer_to_shutdown` (`fiber/channel.rs:9143-9215`): no TLC left, past the request in flight, the pending ones are
+    // dropped and the closing signature asked for.
+    private closeOnceSettled(): void {
+        if (this.tlcs.length > 0) return;
+        const dropping: Step = {
+            kind: "event",
+            run: () => {
+                this.channelState = { state_name: "ShuttingDown", state_flags: `${SHUTDOWNS_EXCHANGED}|DROPPING_PENDING` };
+            },
+        };
+        this.queue.push(dropping, { kind: "request", transition: "SendClosingSigned", state: this.state() });
+        this.drain();
+    }
+
     private state(): CommitmentState {
         return { localShannons: this.localShannons, remoteShannons: this.remoteShannons, tlcs: [...this.tlcs] };
     }
@@ -1853,6 +2030,14 @@ export class InMemoryTenantNode {
 
     private isChannel(channelId: string): boolean {
         return this.material !== null && channelId === this.channel.channelId;
+    }
+
+    // The network actor's channel actors: a close confirmed with nothing left to settle stops its actor
+    // (`fiber/channel.rs:4272-4283`), which leaves them (`fiber/network.rs:8366-8376`).
+    private hasActor(channelId: string): boolean {
+        const flags = this.channelState.state_flags?.split("|") ?? [];
+        const stopped = this.channelState.state_name === "Closed" && !flags.includes("WAITING_ONCHAIN_SETTLEMENT");
+        return this.isChannel(channelId) && !stopped;
     }
 
     private openMaterial(): ChannelOpenSignerMaterial {
@@ -2159,6 +2344,7 @@ export class InMemoryTenantNode {
         this.watchRow = false;
         this.external = null;
         this.shutdownTxHash = null;
+        this.shutdownInfo = null;
         this.watchtowerPending.clear();
         this.watchtowerSigned.clear();
     }
@@ -2340,6 +2526,14 @@ function tamperApplies(tamper: TenantNodeTamper, transition: NodeTransition): bo
         case "closeScript":
             return transition === "SendClosingSigned";
     }
+}
+
+// `ChannelState`'s debug form, its flags as bitflags 2 writes them (`parser.rs:42-77`): the names held, ` | `-joined, `0x0` for none.
+function stateDebugOf(state: RpcChannelStateWire): string {
+    const type = STATE_FLAGS_TYPES[state.state_name];
+    if (type === null) return state.state_name;
+    const names = (state.state_flags ?? "").split("|").filter((name) => name !== "" && !COMPOSITE_STATE_FLAGS.includes(name));
+    return `${state.state_name}(${type}(${names.length === 0 ? "0x0" : names.join(" | ")}))`;
 }
 
 function keyPurposeWire(purpose: WatchtowerKeyPurpose): OnchainKeyPurposeWire {

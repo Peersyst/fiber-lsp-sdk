@@ -1,5 +1,6 @@
 import { concatBytes } from "@noble/hashes/utils.js";
 import {
+    SCRIPT_FIELD_NAMES,
     SCRIPT_HASH_TYPE_BYTES,
     UINT128_LENGTH,
     UINT128_MAX,
@@ -9,7 +10,9 @@ import {
     UINT64_MAX,
 } from "../common.constants";
 import type { Script } from "../common.types";
-import { assertScript, assertUnsignedBigInt, assertUnsignedInteger } from "./assert.utils";
+import { assertAnyBytes, assertScript, assertUnsignedBigInt, assertUnsignedInteger } from "./assert.utils";
+import type { MoleculeFault } from "./molecule-reader.utils";
+import { moleculeFaultReason, readMoleculeScript } from "./molecule-reader.utils";
 
 /**
  * Serializes a molecule `Uint32`, little-endian.
@@ -102,6 +105,26 @@ export function moleculeBytes(data: Uint8Array): Uint8Array {
 export function moleculeScript(script: Script, name = "script"): Uint8Array {
     assertScript(name, script);
     return moleculeTable([script.codeHash, Uint8Array.of(SCRIPT_HASH_TYPE_BYTES[script.hashType]), moleculeBytes(script.args)]);
+}
+
+/**
+ * Ends a read of a script with a refusal that names the broken part.
+ * @param path Path of the broken part.
+ * @param fault What was wrong with it.
+ */
+function refuseScript(path: string, fault: MoleculeFault): never {
+    throw new TypeError(`${path} ${moleculeFaultReason(fault)}`);
+}
+
+/**
+ * Reads a molecule `Script` table, the exact inverse of `moleculeScript`.
+ * @param bytes The Script bytes.
+ * @param name Its path in a refusal.
+ * @returns The script, copied out of the input.
+ */
+export function decodeMoleculeScript(bytes: Uint8Array, name = "script"): Script {
+    assertAnyBytes(name, bytes);
+    return readMoleculeScript(bytes, name, SCRIPT_FIELD_NAMES, refuseScript);
 }
 
 /**

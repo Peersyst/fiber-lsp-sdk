@@ -400,6 +400,11 @@ export type PolicyChannelTerms = {
     commitmentFeeRate: bigint;
     remoteReservedCkbShannons: string;
     liquidCapacityShannons: string;
+    /**
+     * Fiber's `remote_shutdown_script`, which the peer's `Shutdown` may replace: fiber checks the new one's capacity and fee
+     * against the peer's balance, never that it is the open's.
+     */
+    remoteCloseScript: Script;
     remoteFundingPubkey: Uint8Array;
     /**
      * Fiber's `remote_settlement_key`.

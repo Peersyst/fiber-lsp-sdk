@@ -1,5 +1,6 @@
 import type { MoleculeFault, Script } from "../../common";
 import {
+    SCRIPT_FIELD_NAMES,
     moleculeFaultReason,
     readMoleculeBytes,
     readMoleculeDynvec,
@@ -10,8 +11,6 @@ import {
     readMoleculeUnion,
 } from "../../common";
 import { refuseInvoice } from "../invoice.error";
-
-const SCRIPT_FIELD_NAMES = { codeHash: "codeHash", hashType: "hashType", args: "args" };
 
 /**
  * Refuses an invoice's molecule data.

@@ -50,12 +50,11 @@ it.
 - **Ids** are a counter per client, from 1, one per call and never reused, a failed call included. A notification (no
   id) is always refused by fiber, so there is none.
 - **The params are typed per method** by `RpcParamsWireByMethod`, which names all eighteen, so `call` cannot be handed
-  the params of another method. The typed method of each RPC is what a caller uses; `call` is what they share. Of the
-  eight methods of the tenant API, six have their client methods: the four the poller's two steps call
-  (`getChannelSigningStatus`, `submitChannelSignature`, `getWatchtowerSigningStatus`, `submitWatchtowerSignature`) and the
-  two registration methods (`getTenantRegistryNonce`, `registerTenant`); the other two, `open_tenant_channel` and
-  `shutdown_channel`, have their codecs and no client method yet: each lands with the task that calls it, which is the one
-  that observes what it sends, and until then a caller composes `call` with the codec.
+  the params of another method. The typed method of each RPC is what a caller uses; `call` is what they share. Each of the
+  eight methods of the tenant API has its client method: the four the poller's two steps call
+  (`getChannelSigningStatus`, `submitChannelSignature`, `getWatchtowerSigningStatus`, `submitWatchtowerSignature`), the
+  two registration methods (`getTenantRegistryNonce`, `registerTenant`), and the tenant channel's two,
+  `openTenantChannel`, which the facade's opening calls, and `shutdownChannel`, which its close calls ([sdk.md](./sdk.md)).
 
 The answer is read strictly, as `response`:
 
@@ -300,9 +299,11 @@ public signer material at the open, and signs on request afterwards ([Signing re
 | `remoteAmountShannons`                 | `remote_amount`                         | Decimal shannons                        |
 | `local`/`remote` `ReservedCkbShannons` | `local`/`remote` `_reserved_ckb_amount` | Decimal shannons, a u64                 |
 
-- **The shutdown sends the id alone for a cooperative close on the node's defaults**: `close_script` (the node's default
-  funding lock), `fee_rate` (the node's default) and `force` (`false`) are written only when given, never as
-  `null`, and a `force` close ignores the other two for the values fixed at the open. It answers `null`, read as such.
+- **The shutdown sends the id alone for a cooperative close on the node's defaults**, on the client as `shutdownChannel`,
+  which the facade's close calls ([sdk.md](./sdk.md)): `close_script` (by default the shutdown script of the open, the
+  device's for a tenant), `fee_rate` (by default the channel's commitment fee rate, `fiber/channel.rs:2759-2765`) and
+  `force` (`false`) are written only when given, never as `null`. Fiber refuses `force` beside either of the other two
+  (`rpc/channel.rs:723-729`), which the client leaves to it. It answers `null`, read as such.
 
 ## Signing request methods
 
@@ -492,7 +493,9 @@ inputs do, and the host hands it to its CKB signer as it is.
   with its three options) written as fiber's serde wrote it and read back by its deserializers; both opening contexts
   decoded and compared with the vector's values; a literal context read field by field with the amounts and reserves in
   decimal; the largest amounts, reserves, delay and rate; `public` false even when the input says true; each option
-  written on its own and never as `null`; the exact body of a shutdown through `call`; and `openTenantChannel` sending
+  written on its own and never as `null`; the exact body of a shutdown through `call`, and through `shutdownChannel` with
+  every option and with none, resolving with nothing, a result that is not `null` refused by its path and params it
+  cannot write refused before any fetch; and `openTenantChannel` sending
   every params case and reading every result through the client, a bad param refused before any fetch, the node's refusal
   as an `RpcError`, and a result without its opening context named by its path.
 - **The signing request methods against fiber**: every params case of the four (a submit with and without next material,
@@ -723,3 +726,13 @@ left unchecked is a row of the first table, which carries this sweep's count; th
 | The description is measured in UTF-16 units                        | 3                 |
 | The final expiry delta is written after the hash algorithm         | 2                 |
 | A final expiry delta of 1 ms is refused as zero                    | 1                 |
+
+`shutdownChannel`, the client method over the close's codec, was broken the same way (`test/tests/rpc`, still 100% on
+all four metrics):
+
+| Mutation                                               | Tests that failed |
+| ------------------------------------------------------ | ----------------- |
+| The shutdown is sent as abandon_channel                | 3                 |
+| The shutdown's params go out unencoded                 | 3                 |
+| The shutdown's answer is not read                      | 1                 |
+| The shutdown's params are written as a bare channel id | 1                 |

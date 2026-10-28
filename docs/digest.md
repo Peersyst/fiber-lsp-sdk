@@ -112,9 +112,11 @@ plus the UDT's on a UDT channel. No transaction states it, since the digest blan
 `fundingLockCellDepsCount` is 2 on the mainnet and testnet presets, and a dev network declares its own
 ([sdk.md](./sdk.md)), as fiber's own signer reads it from the network (`fiber-lsp-sdk/src/opening.rs:24`).
 
-The two fees are exported on their own, `calculateCommitmentTxFee` (a commitment and a revocation take the same one) and
-`calculateShutdownTxFee` (one side's), because the policy bounds them: the digest binds the signature to whatever fee the
-node's rate produces, and judging how large it may be is the gate's ([policy.md](./policy.md)).
+The two fees are exported on their own. `calculateCommitmentTxFee` (a commitment and a revocation take the same one) is
+the policy's, which bounds it: the digest binds the signature to whatever fee the node's rate produces, and judging how
+large it may be is the gate's ([policy.md](./policy.md)). `calculateShutdownTxFee` (one side's) is the facade's, which
+computes the device's fee before it asks for a close ([sdk.md](./sdk.md)); the policy bounds a close on its payout, not
+on this fee.
 
 ## Two lock layouts
 

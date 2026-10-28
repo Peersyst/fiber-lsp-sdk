@@ -1,5 +1,5 @@
 import { bytesToHex, hexToBytes } from "@noble/hashes/utils.js";
-import type { CellDep, CellOutput, OutPoint } from "../../../src/common";
+import type { CellDep, CellOutput, OutPoint, Script } from "../../../src/common";
 import type { FiberChannelKeys } from "../../../src/derivation";
 import { deriveChannelKeys, pubkeyOf } from "../../../src/derivation";
 import {
@@ -14,6 +14,7 @@ import {
     readClosingTx,
 } from "../../../src/digest";
 import type {
+    ChannelPinConflict,
     ChannelPins,
     ChannelPolicyRecord,
     DebitIntentRecord,
@@ -91,6 +92,11 @@ const TERMS: PolicyChannelTerms = {
     commitmentFeeRate: 1000n,
     remoteReservedCkbShannons: "6300000000",
     liquidCapacityShannons: "80500000000",
+    remoteCloseScript: {
+        codeHash: hexToBytes("014f879c667f549df6067c1797534f2b2de2312feff188d100669d4b8ad6f045"),
+        hashType: "data1",
+        args: hexToBytes("0682a2f376b830a421ddc7d3b8cf4bffb31bfdf2942f46780359b1ef4f107f36"),
+    },
     remoteFundingPubkey: hexToBytes("026372d1f1bf5f44d3bf185fe8f69502f36c9a01760029db0a15f6c7dedb4f5638"),
     remoteTlcBasePubkey: hexToBytes("032559e1b167552782cab5be4294260d51edfc36aef4ca7cc165b3b21b15e98e21"),
     commitmentDelayEpoch: 1099511627777n,
@@ -109,6 +115,9 @@ const INVOICE_INDEX = 1761475200000;
 // Ten minutes of margin, well before the received TLC's expiry at 1750000000000 ms.
 const RELEASE_TIMING: HoldInvoiceReleaseTiming = { now: () => 1749990000000, releaseMarginMs: () => 600000n };
 
+const REMOTE_CLOSE_SCRIPT_PIN =
+    "55000000100000003000000031000000014f879c667f549df6067c1797534f2b2de2312feff188d100669d4b8ad6f04502200000000682a2f376b830a421ddc7d3b8cf4bffb31bfdf2942f46780359b1ef4f107f36";
+
 const REGISTERED_PINS: ChannelPins = {
     fundedShannons: FUNDED,
     localCloseScript:
@@ -123,6 +132,7 @@ const TERMS_PINNED_PINS: ChannelPins = {
     liquidCapacityShannons: "80500000000",
     commitmentFeeRate: "1000",
     remoteReservedCkbShannons: "6300000000",
+    remoteCloseScript: REMOTE_CLOSE_SCRIPT_PIN,
     remoteFundingPubkey: "026372d1f1bf5f44d3bf185fe8f69502f36c9a01760029db0a15f6c7dedb4f5638",
     remoteTlcBasePubkey: "032559e1b167552782cab5be4294260d51edfc36aef4ca7cc165b3b21b15e98e21",
     commitmentDelayEpoch: "1099511627777",
@@ -139,6 +149,7 @@ const OPENED_PINS: ChannelPins = {
     commitmentDelayEpoch: "1099511627777",
     commitmentFeeRate: "1000",
     remoteReservedCkbShannons: "6300000000",
+    remoteCloseScript: REMOTE_CLOSE_SCRIPT_PIN,
     lockLayout: "legacy",
 };
 
@@ -146,8 +157,6 @@ const FUNDING_TX_HASH = "6f4ea49726c322dbedceb12a09d013a0256ea697dc362cc8865f8bb
 const UDT_SCRIPT_PIN =
     "5500000010000000300000003100000091" +
     "2f64f976947ed5467ff5e7ba4c87bd37f240cdbdba0b38da619372056ef82701200000008612706980baca14e3d03ea4d77d185e6f7338cd6e98a0ea0cd17a69918f2578";
-const REMOTE_CLOSE_SCRIPT_PIN =
-    "55000000100000003000000031000000014f879c667f549df6067c1797534f2b2de2312feff188d100669d4b8ad6f04502200000000682a2f376b830a421ddc7d3b8cf4bffb31bfdf2942f46780359b1ef4f107f36";
 
 const OPENING_VIEW = { exposureShannons: FUNDED, tlcs: [], chargedShannons: {}, creditedShannons: {} };
 
@@ -832,7 +841,7 @@ describe("pinChannelTerms", () => {
         return context;
     }
 
-    it("pins the three terms no request vouches for and the opening's three first-sight values, beside the registration's pins", async () => {
+    it("pins the four terms no request vouches for and the opening's three first-sight values, beside the registration's pins", async () => {
         const { engine, store } = await bare();
         await engine.pinChannelTerms(CHANNEL_ID, TERMS);
         expect((await store.getChannelRecord(CHANNEL_INDEX))?.pins).toEqual(TERMS_PINNED_PINS);
@@ -868,9 +877,18 @@ describe("pinChannelTerms", () => {
         storage.ops.length = 0;
         await engine.pinChannelTerms(CHANNEL_ID, { ...TERMS });
         expect(storage.ops.filter((operation) => operation.startsWith("set"))).toEqual([]);
+        await engine.pinChannelTerms(CHANNEL_ID, {
+            ...TERMS,
+            remoteCloseScript: {
+                codeHash: hexToBytes("014f879c667f549df6067c1797534f2b2de2312feff188d100669d4b8ad6f045"),
+                hashType: "data1",
+                args: hexToBytes("0682a2f376b830a421ddc7d3b8cf4bffb31bfdf2942f46780359b1ef4f107f36"),
+            },
+        });
+        expect(storage.ops.filter((operation) => operation.startsWith("set"))).toEqual([]);
     });
 
-    it.each([
+    it.each<[string, Partial<PolicyChannelTerms>, ChannelPinConflict]>([
         ["another fee rate", { commitmentFeeRate: 1001n }, { field: "commitmentFeeRate", pinned: "1000", stated: "1001" }],
         [
             "another peer reserve",
@@ -897,6 +915,45 @@ describe("pinChannelTerms", () => {
             { commitmentDelayEpoch: 1099511627778n },
             { field: "commitmentDelayEpoch", pinned: "1099511627777", stated: "1099511627778" },
         ],
+        [
+            "another peer close script",
+            { remoteCloseScript: CLOSE_SCRIPT },
+            { field: "remoteCloseScript", pinned: REMOTE_CLOSE_SCRIPT_PIN, stated: REGISTERED_PINS.localCloseScript },
+        ],
+        [
+            "a peer close script one args byte shorter",
+            {
+                remoteCloseScript: {
+                    codeHash: hexToBytes("014f879c667f549df6067c1797534f2b2de2312feff188d100669d4b8ad6f045"),
+                    hashType: "data1",
+                    args: hexToBytes("0682a2f376b830a421ddc7d3b8cf4bffb31bfdf2942f46780359b1ef4f107f"),
+                },
+            },
+            {
+                field: "remoteCloseScript",
+                pinned: REMOTE_CLOSE_SCRIPT_PIN,
+                stated:
+                    "54000000100000003000000031000000014f879c667f549df6067c1797534f2b2de2312feff188d100669d4b8ad6f045" +
+                    "021f0000000682a2f376b830a421ddc7d3b8cf4bffb31bfdf2942f46780359b1ef4f107f",
+            },
+        ],
+        [
+            "a peer close script under another hash type",
+            {
+                remoteCloseScript: {
+                    codeHash: hexToBytes("014f879c667f549df6067c1797534f2b2de2312feff188d100669d4b8ad6f045"),
+                    hashType: "data2",
+                    args: hexToBytes("0682a2f376b830a421ddc7d3b8cf4bffb31bfdf2942f46780359b1ef4f107f36"),
+                },
+            },
+            {
+                field: "remoteCloseScript",
+                pinned: REMOTE_CLOSE_SCRIPT_PIN,
+                stated:
+                    "55000000100000003000000031000000014f879c667f549df6067c1797534f2b2de2312feff188d100669d4b8ad6f045" +
+                    "04200000000682a2f376b830a421ddc7d3b8cf4bffb31bfdf2942f46780359b1ef4f107f36",
+            },
+        ],
     ])("throws a ChannelPinError on %s than pinned, naming both values, writing nothing", async (_, override, conflict) => {
         const { engine, storage } = await registeredEngine();
         const stored = new Map(storage.map);
@@ -910,7 +967,7 @@ describe("pinChannelTerms", () => {
         expect(storage.map).toEqual(stored);
     });
 
-    it.each([
+    it.each<[string, PolicyChannelTerms, Error]>([
         ["a terms argument that is no object", null as unknown as PolicyChannelTerms, new TypeError("terms must be an object")],
         [
             "a negative fee rate",
@@ -1022,31 +1079,78 @@ describe("pinChannelTerms", () => {
             { ...TERMS, commitmentDelayEpoch: 18446744073709551616n },
             new RangeError("terms.commitmentDelayEpoch must be a bigint between 0 and 18446744073709551615, got 18446744073709551616"),
         ],
+        [
+            "an absent peer close script",
+            { ...TERMS, remoteCloseScript: undefined as unknown as Script },
+            new TypeError("terms.remoteCloseScript must be an object"),
+        ],
+        [
+            "a peer close script in molecule hex, its pin's form",
+            { ...TERMS, remoteCloseScript: REMOTE_CLOSE_SCRIPT_PIN as unknown as Script },
+            new TypeError("terms.remoteCloseScript must be an object"),
+        ],
+        [
+            "a peer close script with no code hash",
+            { ...TERMS, remoteCloseScript: { hashType: "data1", args: new Uint8Array(32) } as unknown as Script },
+            new TypeError("terms.remoteCloseScript.codeHash must be a Uint8Array"),
+        ],
+        [
+            "a peer close script whose code hash is hex",
+            {
+                ...TERMS,
+                remoteCloseScript: {
+                    codeHash: "014f879c667f549df6067c1797534f2b2de2312feff188d100669d4b8ad6f045",
+                    hashType: "data1",
+                    args: new Uint8Array(32),
+                } as unknown as Script,
+            },
+            new TypeError("terms.remoteCloseScript.codeHash must be a Uint8Array"),
+        ],
+        [
+            "a peer close script whose code hash is 31 bytes",
+            { ...TERMS, remoteCloseScript: { codeHash: new Uint8Array(31), hashType: "data1", args: new Uint8Array(32) } },
+            new TypeError("terms.remoteCloseScript.codeHash must be 32 bytes, got 31"),
+        ],
+        [
+            "a peer close script whose code hash is 33 bytes",
+            { ...TERMS, remoteCloseScript: { codeHash: new Uint8Array(33), hashType: "data1", args: new Uint8Array(32) } },
+            new TypeError("terms.remoteCloseScript.codeHash must be 32 bytes, got 33"),
+        ],
+        [
+            "a peer close script with no hash type",
+            { ...TERMS, remoteCloseScript: { codeHash: new Uint8Array(32), args: new Uint8Array(32) } as unknown as Script },
+            new TypeError("terms.remoteCloseScript.hashType must be one of data, type, data1, data2"),
+        ],
+        [
+            "a peer close script under a hash type CKB does not define",
+            {
+                ...TERMS,
+                remoteCloseScript: { codeHash: new Uint8Array(32), hashType: "data3", args: new Uint8Array(32) } as unknown as Script,
+            },
+            new TypeError("terms.remoteCloseScript.hashType must be one of data, type, data1, data2"),
+        ],
+        [
+            "a peer close script with no args",
+            { ...TERMS, remoteCloseScript: { codeHash: new Uint8Array(32), hashType: "data1" } as unknown as Script },
+            new TypeError("terms.remoteCloseScript.args must be a Uint8Array"),
+        ],
+        [
+            "a peer close script whose args are hex",
+            {
+                ...TERMS,
+                remoteCloseScript: {
+                    codeHash: new Uint8Array(32),
+                    hashType: "data1",
+                    args: "0682a2f376b830a421ddc7d3b8cf4bffb31bfdf2942f46780359b1ef4f107f36",
+                } as unknown as Script,
+            },
+            new TypeError("terms.remoteCloseScript.args must be a Uint8Array"),
+        ],
     ])("rejects %s, writing nothing", async (_, terms, error) => {
         const { engine, storage } = await bare();
         const stored = new Map(storage.map);
         await expect(engine.pinChannelTerms(CHANNEL_ID, terms)).rejects.toThrow(error);
         expect(storage.map).toEqual(stored);
-    });
-
-    // Fiber asks for no message before the open is accepted, so only a close states a first-sight value ahead of the terms.
-    it("throws a ChannelPinError on a peer funding key other than the one a close pinned first, then pins the same one", async () => {
-        const { engine, store, storage } = await bare();
-        await engine.checkAndClaim(KEYS, closingRequest("ckb"));
-        const stored = new Map(storage.map);
-        const error: unknown = await engine
-            .pinChannelTerms(CHANNEL_ID, { ...TERMS, remoteFundingPubkey: OTHER_FUNDING_PUBKEY })
-            .catch((caught: unknown) => caught);
-        expect(error).toBeInstanceOf(ChannelPinError);
-        expect(error).toMatchObject({
-            conflict: { field: "remoteFundingPubkey", pinned: digest.remote.funding_pubkey, stated: bytesToHex(OTHER_FUNDING_PUBKEY) },
-        });
-        expect(storage.map).toEqual(stored);
-        await engine.pinChannelTerms(CHANNEL_ID, TERMS);
-        expect((await store.getChannelRecord(CHANNEL_INDEX))?.pins).toEqual({
-            ...TERMS_PINNED_PINS,
-            fundingOutPoint: `${FUNDING_TX_HASH}:0`,
-        });
     });
 
     // The terms pinned without the first-sight values, as before the host pinned them: the opening's commitment pins those.
@@ -1059,6 +1163,7 @@ describe("pinChannelTerms", () => {
                 liquidCapacityShannons: "80500000000",
                 commitmentFeeRate: "1000",
                 remoteReservedCkbShannons: "6300000000",
+                remoteCloseScript: REMOTE_CLOSE_SCRIPT_PIN,
             };
             return { ...current, pins };
         });
@@ -1177,11 +1282,49 @@ describe("pinChannelTerms", () => {
         expect(refusal.message).toBe(`the request states ${missing}, which the host has not pinned for the channel yet`);
     });
 
-    // It states none of them: its outputs are what both fees left.
-    it("signs a close on a channel whose terms the host has not pinned", async () => {
-        const { engine, store } = await bare();
+    // Fiber never holds the peer's `Shutdown` to the script of the open, so only the host's pin can.
+    it("refuses a close on a channel whose terms the host has not pinned, naming the peer's close script, writing nothing", async () => {
+        const { engine, storage } = await bare();
+        const stored = new Map(storage.map);
+        const refusal = await refusalOf(engine.checkAndClaim(KEYS, closingRequest("ckb")));
+        expect(refusal.code).toBe("policy_refusal");
+        expect(refusal.message).toBe("the request states remoteCloseScript, which the host has not pinned for the channel yet");
+        expect(storage.map).toEqual(stored);
+    });
+
+    async function pinnedButTheCloseScript() {
+        const context = await bare();
+        const record = (await context.store.getChannelRecord(CHANNEL_INDEX)) as ChannelPolicyRecord;
+        const { remoteCloseScript, ...pins } = TERMS_PINNED_PINS;
+        expect(remoteCloseScript).toBe(REMOTE_CLOSE_SCRIPT_PIN);
+        await context.store.setChannelRecord(CHANNEL_INDEX, { ...record, pins });
+        return context;
+    }
+
+    it("refuses a close on a channel whose host pinned every term but the peer's close script, naming it, writing nothing", async () => {
+        const { engine, storage } = await pinnedButTheCloseScript();
+        const stored = new Map(storage.map);
+        const refusal = await refusalOf(engine.checkAndClaim(KEYS, closingRequest("ckb")));
+        expect(refusal.code).toBe("policy_refusal");
+        expect(refusal.message).toBe("the request states remoteCloseScript, which the host has not pinned for the channel yet");
+        expect(storage.map).toEqual(stored);
+    });
+
+    it.each([
+        ["a commitment", () => commitmentRequest("ckb, no tlcs, for remote")],
+        ["a revocation it sends", () => revocationRequest("ckb, send side")],
+        ["a revocation it receives", () => receivedRevocation(5)],
+        ["an announcement", () => announcementRequest("ckb")],
+    ])("signs %s on a channel whose host pinned every term but the peer's close script, which only a close states", async (_, request) => {
+        const { engine, store } = await pinnedButTheCloseScript();
+        await expect(engine.checkAndClaim(KEYS, await holdingReplacement(store, request()))).resolves.toMatchObject({ status: "fresh" });
+    });
+
+    it("signs the close once the host pins the peer's close script beside the other terms", async () => {
+        const { engine, store } = await pinnedButTheCloseScript();
+        await engine.pinChannelTerms(CHANNEL_ID, TERMS);
+        expect((await store.getChannelRecord(CHANNEL_INDEX))?.pins).toEqual(TERMS_PINNED_PINS);
         await expect(engine.checkAndClaim(KEYS, closingRequest("ckb"))).resolves.toMatchObject({ status: "fresh" });
-        expect((await store.getChannelRecord(CHANNEL_INDEX))?.pins.commitmentFeeRate).toBeUndefined();
     });
 
     it("refuses a commitment once the terms are pinned to other values than it states", async () => {
@@ -3518,6 +3661,49 @@ describe("checkAndClaim", () => {
                     "00".repeat(20),
                 REGISTERED_PINS.localCloseScript,
             ],
+            // Fiber lets the peer's `Shutdown` replace the script of the open, and the device's own share still matches.
+            [
+                "a close paying the peer to another script",
+                () =>
+                    signedRequest(
+                        {
+                            kind: "closing_tx",
+                            input: { ...ckbClose(), remoteCloseScript: { ...ckbClose().remoteCloseScript, args: new Uint8Array(32) } },
+                        },
+                        11,
+                    ),
+                "remoteCloseScript",
+                "55000000100000003000000031000000014f879c667f549df6067c1797534f2b2de2312feff188d100669d4b8ad6f045" +
+                    "0220000000" +
+                    "00".repeat(32),
+                REMOTE_CLOSE_SCRIPT_PIN,
+            ],
+            [
+                "a close paying the peer to the device's own script",
+                () => signedRequest({ kind: "closing_tx", input: { ...ckbClose(), remoteCloseScript: CLOSE_SCRIPT } }, 11),
+                "remoteCloseScript",
+                REGISTERED_PINS.localCloseScript,
+                REMOTE_CLOSE_SCRIPT_PIN,
+            ],
+            // The funding output is read before the peer's close script, so it names the conflict.
+            [
+                "a close on another funding output, paying the peer to another script",
+                () =>
+                    signedRequest(
+                        {
+                            kind: "closing_tx",
+                            input: {
+                                ...ckbClose(),
+                                fundingOutPoint: { txHash: hexToBytes(FUNDING_TX_HASH), index: 1 },
+                                remoteCloseScript: CLOSE_SCRIPT,
+                            },
+                        },
+                        11,
+                    ),
+                "fundingOutPoint",
+                `${FUNDING_TX_HASH}:1`,
+                `${FUNDING_TX_HASH}:0`,
+            ],
             // Read by position, the swapped tx gives the device the peer's output, and its digest still matches.
             [
                 "a close whose two outputs the node swapped",
@@ -3640,7 +3826,7 @@ describe("checkAndClaim", () => {
         it.each([
             ["a revocation it sends, whose payout is the peer's", () => signedRequest({ kind: "revocation", input: ckbRevocation() }, 5)],
             ["a revocation it receives, sweeping to its own script", () => receivedRevocation(5)],
-            ["a close to its own script", () => signedRequest({ kind: "closing_tx", input: ckbClose() }, 11)],
+            ["a close to its own script and the peer's pinned one", () => signedRequest({ kind: "closing_tx", input: ckbClose() }, 11)],
             ["an announcement", () => signedRequest({ kind: "channel_announcement", input: ckbAnnouncement() }, 0)],
         ])("signs %s that states every pinned value as pinned", async (_, request) => {
             const { engine, store } = await opened();

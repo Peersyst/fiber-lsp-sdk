@@ -34,6 +34,7 @@ describe("SdkError", () => {
             "payment_in_flight",
             "payment_charged",
             "own_invoice",
+            "close_fee_too_high",
         ]);
     });
 });

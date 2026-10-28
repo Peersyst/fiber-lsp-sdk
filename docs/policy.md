@@ -227,7 +227,7 @@ is answered identically when it comes back.
 
 Every request states values that are constant for the channel's life: the funding output, the peer's funding and TLC base
 keys, the commitment delay and fee rate, both reserves, the asset, the commitment lock's layout, and on a close the
-script the device's side pays to. They all enter the digest, so check 2 binds the signature to them, but nothing in the
+scripts each side is paid to. They all enter the digest, so check 2 binds the signature to them, but nothing in the
 request says they are the channel's: a node could state a longer delay, a higher fee rate or a funding output the user
 never paid into, and sign a digest of it. Check 5 holds each of them to one value per channel, kept in the record's
 `pins` ([persistence.md](./persistence.md)).
@@ -241,11 +241,12 @@ never paid into, and sign a digest of it. Check 5 holds each of them to one valu
 | `liquidCapacityShannons`    | the host's terms                             | a commitment, a revocation, an announcement   |
 | `commitmentFeeRate`         | the host's terms                             | a commitment, a revocation                    |
 | `remoteReservedCkbShannons` | the host's terms                             | a commitment, a revocation                    |
+| `remoteCloseScript`         | the host's terms                             | a close                                       |
 | `fundingOutPoint`           | the host, or the first sight                 | a commitment, a close, an announcement        |
 | `fundingCapacityShannons`   | the host, or the first sight                 | a commitment, a revocation                    |
-| `remoteFundingPubkey`       | the host's terms, or the first sight         | all four                                      |
-| `remoteTlcBasePubkey`       | the host's terms, or the first sight         | a commitment                                  |
-| `commitmentDelayEpoch`      | the host's terms, or the first sight         | a commitment, a revocation                    |
+| `remoteFundingPubkey`       | the host's terms                             | all four                                      |
+| `remoteTlcBasePubkey`       | the host's terms                             | a commitment                                  |
+| `commitmentDelayEpoch`      | the host's terms                             | a commitment, a revocation                    |
 | `lockLayout`                | the first sight                              | a commitment, a revocation                    |
 
 What the device knows before the node states anything is fixed when the channel is registered: the amount the user
@@ -258,18 +259,21 @@ refuses itself, with nothing signed.
 `SignerDispatch.prepareChannelOpen` runs the same check (`assertChannelOpening`) before the open is sent, since a
 channel the node opens and the device then refuses to file is left open and unfiled.
 
-**The terms** are three values a request states but nothing in it vouches for, so a first sight of them would be a value the
-node chose: the commitment fee rate, the peer's reserve and the liquid capacity. `PolicyEngine.pinChannelTerms` takes them
-from the host, which reads them from the node's `opening_context` once the open is accepted and checks them against what the
-device asked; the facade's opening does both ([sdk.md](./sdk.md)). A commitment, a revocation or an announcement on a
-channel whose terms the host has not pinned is refused (`policy_refusal`), naming the first term that is missing; a close
-states none of them and needs none.
+**The terms** are four values a request states but nothing in it vouches for, so a first sight of them would be a value the
+node chose: the commitment fee rate, the peer's reserve, the liquid capacity and the peer's close script (fiber's
+`remote_shutdown_script`, kept as its molecule bytes). `PolicyEngine.pinChannelTerms` takes them from the host, which reads
+them from the node's `opening_context` once the open is accepted and checks them against what the device asked; the
+facade's opening does both ([sdk.md](./sdk.md)). A message never pins a term: one that states a term the host has not
+pinned is refused (`policy_refusal`), naming the first such term, so a commitment, a revocation or an announcement on a
+channel whose terms are unpinned names one of the three numeric terms, and a close, which states the peer's close script
+and none of the others, names that script. A term a message does not state is not asked of it: a channel pinned with every
+term but the peer's close script signs everything but its close.
 
 The same context states three first-sight values, and `pinChannelTerms` pins them beside the terms (`HOST_TERMS_PINS`):
 the peer's funding key, its TLC base key (fiber's `remote_settlement_key`) and the commitment delay, the full
 `EpochNumberWithFraction` value. Pinned by the host, they are the values the opening was checked with rather than the
-first a request states, and a request that states others is refused like any pin conflict. They stay first-sight pins: a
-channel the host pins no terms for takes them from its first signed message, as before. Each key must be a compressed
+first a request states, and a request that states others is refused like any pin conflict. No message pins them first:
+every operation states a term, and a channel the host pins no terms for signs nothing. Each key must be a compressed
 point on the curve and the delay a u64, or the call throws a `TypeError` or a `RangeError` naming the field.
 
 `PolicyEngine.pinFundingCell` takes what the host knows from the funding tx it is to sign, the out point and the
@@ -313,11 +317,17 @@ Five choices sit in that table:
   the commitment lock's mock, so both carry it), never by a close or an announcement, which do not depend on it. A
   message under the other layout is refused as any pin conflict, and it is read right after the asset, so a legacy
   message on a full-hash channel is refused by its layout before its reserve.
-- **A close and a revocation the device receives pay the device's own close script** (fiber's `local_shutdown_script`),
-  so they state that pin. A close is read by output position, in fiber's funding-pubkey order, so a close whose two
-  outputs the node swapped reads with the peer's output as the device's and still hashes to its message: this pin is what
-  refuses it. A revocation the device sends sweeps to the peer's script, which the device has no reason to fix: a wrong
-  one harms the peer only.
+- **A close pays both pinned scripts, and a revocation the device receives the device's own.** Both pay the device's
+  close script (fiber's `local_shutdown_script`), so they state that pin. A close also pays the peer's, held to the term the
+  host pinned: fiber lets the peer's `Shutdown` replace the script of the open, checking the new script's capacity and fee
+  against the peer's balance but never that it is the open's (`channel.rs:1926-1936`), and the
+  close's size, which each side's rate is multiplied by for its fee, counts both scripts, so the peer's script moves the
+  device's fee. Pinned, a peer that changes it is refused, as fiber's own device SDK refuses it
+  (`fiber-lsp-sdk/src/commitment.rs:849-953`), and the fee the facade checks before it asks for a close is the fee the
+  close takes ([sdk.md](./sdk.md)). A close is read by output position, in fiber's funding-pubkey order, so a close whose
+  two outputs the node swapped reads with the peer's output as the device's and still hashes to its message: the device's
+  script is stated before the peer's, so the device's pin is the one that refuses it. A revocation the device sends sweeps
+  to the peer's script, which the device has no reason to fix: a wrong one harms the peer only.
 - **The capacities are pinned as sums.** The liquid capacity, `to_local + to_remote`, is what the funding cell holds
   beyond the reserves and does not move while the channel lives; the funding cell's capacity is that plus both reserves
   (on a UDT channel the liquid amount is the cell's data, and its capacity the reserves alone). The pair is what ties
@@ -333,7 +343,9 @@ The pins fix the cell; check 5 then bounds what a message takes out of it beyond
   the fee rather than the rate because the cell dep count that sizes it is not a channel constant and is not pinned.
 - **The device's fee on a close** is at most 1 CKB, the part of the reserve fiber sets aside for it
   (`DEFAULT_MIN_SHUTDOWN_FEE`). The close's tx states no fee rate, so the bound is read on what it pays the device, and
-  the balance rule applies it (below). Fiber bounds it by the whole balance only. The peer's output is the peer's.
+  the balance rule applies it (below). Fiber bounds it by the whole balance only. The facade runs the same bound before
+  it asks for a close, over the fee the two pinned scripts size ([sdk.md](./sdk.md)). The peer's output is held to its
+  pinned script (above), never to an amount.
 - **What a commitment pays out**, both settlement amounts and every TLC it lists, is at most the liquid capacity. Fiber
   pays out exactly that in every state but one: the device's own commitment while a removal waits on the previous ack
   lists the TLC nowhere and still deducts its amount, so it pays out less.
@@ -697,8 +709,9 @@ the difference to the fee. It can never redirect it: every output but the remain
   one path in the signer dispatch, at one call site that signs exactly the slot the verdict names
   ([signing.md](./signing.md)).
 - **It cannot check a value the first time it sees it.** A pin taken from a request is a value the node chose once: the
-  commitment delay and the peer's keys are held to their first value, not to a right one. The funded amount, the close
-  script, the device's reserve, the asset and, through the host, the funding cell, the terms and the three first-sight
+  commitment delay and the peer's keys are held to their first value, not to a right one. The funded amount, the
+  device's close script, the device's reserve, the asset and, through the host, the funding cell, the terms and the three
+  first-sight
   values the opening context states are the exceptions, being the device's own or checked by the host against the open it
   asked for.
 - **It does not check the funding output's lock.** The funding cell's out point and capacity are pinned, and whether its
@@ -771,8 +784,12 @@ view's version, the pins, the balance rule and the close rule, its channel filed
 refused. The terms: pinned with the three first-sight values, at u64's maximum, repeated with no write under either name,
 each one conflicting with a `ChannelPinError` naming both values, a first-sight value a message pinned first restated with
 no write and contradicted with that error, each malformed argument refused by name, an unregistered channel and an alias
-with no record thrown, every operation but the close refused on a channel whose terms are unpinned, naming the first missing,
-and the close signed there. The evidence: kept, repeated with no write under either name, replaced by another signature
+with no record thrown, every operation refused on a channel whose terms are unpinned, naming the first missing, a close
+naming the peer's close script; a close refused on a channel whose host pinned every term but that one, where every other
+operation signs, and signed once the host pins it; and the peer's close script as a term: pinned and repeated with no
+write, another script, one a byte shorter and one under another hash type each a `ChannelPinError`, and refused absent, in
+its molecule hex, and with each field missing, in hex, of the wrong length or under an unknown hash type. The evidence:
+kept, repeated with no write under either name, replaced by another signature
 of its version, kept in ascending order, the record otherwise untouched, refused for a version whose revocation slot was
 never served, each malformed argument refused, the highest version the chain holds recorded, and an unregistered channel
 and an alias with no record thrown. The pins read back: the registration's, then with the terms, then with what the first
@@ -813,8 +830,11 @@ takes it. Each contradicted registration, the lost race included, throws a `Chan
 registered name and index, and a record or a name the store holds corrupt a plain `TypeError`, writing nothing.
 
 Check 5 is pinned three ways. `test/tests/policy/channel-pins.spec.ts` reads what each operation of the vectors states,
-field for field, under both layouts, a close stating no capacity, reserve or layout, and the host's terms in their pin
-forms; it contrasts the reserve under the layout a statement declares, each conflict naming the computed value, throws on a
+field for field, under both layouts, a close stating both close scripts, the device's first, and no capacity, reserve or
+layout, a close with its outputs swapped naming the device's, and the host's terms in their pin forms, the peer's close
+script, empty args included, in the molecule hex a close states it in; a conflict on the peer's close script, and none while
+it is unpinned; it contrasts the reserve under the layout a statement declares, each conflict naming the computed value,
+throws on a
 reserve stated without its layout, and pins a term only from the host's statement, never from a message's.
 `test/tests/policy/channel-opening.spec.ts` checks both reserves against the ones fiber's own `occupied_capacity` sizes in
 the vectors, over scripts on both sides of the 57-byte and 58-byte edges, refuses a malformed close script or layout by
@@ -822,8 +842,10 @@ name, and puts the funded amount at each edge of what registration accepts, the 
 one shannon past it, the fees sized over the mock transactions fiber's own fees are pinned against, the commitment fee bound
 reached one byte sooner under the full-hash layout, and a close bounded by nothing there. The engine's spec refuses, per
 operation, every pin that operation states, moved by one field (the out point, its hash, the liquid capacity, a reserve, a
-reserve moved between the sides, the peer's keys, the delay, the rate, the asset, the close script, and a close whose two
-outputs the node swapped, read as fiber orders them and matching its message), and checks the refusal writes nothing; it
+reserve moved between the sides, the peer's keys, the delay, the rate, the asset, the device's close script, the peer's
+paid to another script and to the device's, and a close whose two outputs the node swapped, read as fiber orders them and
+matching its message), the funding output named first on a close that also pays the peer elsewhere, and checks the refusal
+writes nothing; it
 signs a sent revocation whatever its payout, pins what a close, a revocation or an announcement states when it comes first,
 refuses an opening that turns the whole funding into the device's reserve, refuses every UDT operation on a channel
 registered as CKB, by its asset even once the capacities are pinned, refuses the opening under either layout with the other
@@ -1041,7 +1063,7 @@ checked by breaking the code on purpose:
 | The evidence's slot is read at the version itself                  | 8                 |
 | The slot bound is one lower                                        | 8                 |
 | The verdict carries the lane                                       | 9                 |
-| An unpinned term is not refused                                    | 6                 |
+| An unpinned term is not refused                                    | 8                 |
 | The evidence is filed for the device's view                        | 6                 |
 | The mode defaults to allow                                         | 6                 |
 | The refuse mode serves a second session                            | 6                 |
@@ -1058,7 +1080,7 @@ checked by breaking the code on purpose:
 | The fee rate term may not be u64's maximum                         | 4                 |
 | The record guard ignores the terms' forms                          | 4                 |
 | The slot is not checked to be an object                            | 4                 |
-| A close states no close script                                     | 3                 |
+| A close states no device close script                              | 4                 |
 | A close states no funding key                                      | 3                 |
 | A commitment's version may equal its view's last                   | 3                 |
 | The commitment hash is not checked                                 | 3                 |
@@ -1424,3 +1446,22 @@ metrics). The first table's six rows on the release and on recording an invoice 
 | The listing query reads the first channel alone                  | 1                 |
 | The margin is read from the timing again for the judgment        | 1                 |
 | The release is judged at a clock of zero                         | 1                 |
+
+The peer's close script, a term the host pins from the opening context (`channelTermsPins`, `CHANNEL_TERMS_PINS`, the
+check in `pinChannelTerms` and its form in the record guard) and a value every close states after the device's
+(`statedChannelPins`), was broken the same way (`test/tests/policy`, still 100% on all four metrics). Two rows of the
+first table count this sweep's specs too: "An unpinned term is not refused", which lets a close through on a channel
+whose terms the host never pinned, and "A close states no device close script", whose specs tell it from a close that
+states no peer's:
+
+| Mutation                                                   | Tests that failed |
+| ---------------------------------------------------------- | ----------------- |
+| The peer's close script term is pinned as its args alone   | 41                |
+| The host's terms pin no peer's close script                | 37                |
+| The peer's close script is not a term                      | 32                |
+| A close states the device's close script as the peer's     | 18                |
+| The peer's close script term is checked under another name | 10                |
+| The peer's close script term is not checked                | 10                |
+| A close states no peer's close script                      | 6                 |
+| The record guard takes any peer's close script             | 4                 |
+| A close states the peer's close script before the device's | 2                 |

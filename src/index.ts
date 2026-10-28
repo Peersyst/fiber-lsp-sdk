@@ -35,6 +35,7 @@ export type {
     SdkChannelInfo,
     SdkChannelOpening,
     SdkChannelState,
+    SdkCloseOptions,
     SdkErrorCode,
     SdkEvent,
     SdkEventListener,

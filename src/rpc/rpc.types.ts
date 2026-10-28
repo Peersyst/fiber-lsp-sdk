@@ -388,7 +388,7 @@ export type ShutdownChannelParams = {
     closeScript?: Script;
     feeRate?: bigint;
     /**
-     * A force close ignores the script and the fee rate for the ones fixed at the open.
+     * Fiber refuses it beside a script or a fee rate.
      */
     force?: boolean;
 };

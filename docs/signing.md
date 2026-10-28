@@ -152,7 +152,8 @@ input to the pins as they stand when it runs, so a value pinned in between that 
 request instead of being signed over ([policy.md](./policy.md)). The channel resolved at step 2, so the read answers no refusal of its own; a record gone
 since is a fault. A commitment or a revocation on a channel whose terms the host has not pinned is `policy_refusal`,
 naming the first missing term, and so is a revocation before any commitment has pinned the lock layout: the revoked
-36-byte args carry none, though the fee is sized over the commitment mock that does. A close needs neither.
+36-byte args carry none, though the fee is sized over the commitment mock that does. A close needs neither here; the
+gate refuses one on a channel whose peer's close script the host has not pinned ([policy.md](./policy.md)).
 
 The checks of this step, each `malformed`:
 
@@ -384,9 +385,10 @@ Those pins, like the vectors, are the idempotent re-delivery contract, not snaps
 ## The node double and the flows
 
 `InMemoryTenantNode` (`test/utils/tenant-node.ts`) is the node end of the tenant RPC. It answers the injected `fetch`
-for the ten methods the facade calls, `open_tenant_channel` and `submit_signed_funding_tx` (below), `list_channels`,
+for the thirteen methods the facade calls, `open_tenant_channel` and `submit_signed_funding_tx` (below), `list_channels`,
 `get_channel_signing_status`, `submit_channel_signature`, `get_watchtower_signing_status`,
-`submit_watchtower_signature`, `new_invoice`, `get_invoice` and `settle_invoice`, in fiber's shapes, and holds what fiber holds: the
+`submit_watchtower_signature`, `new_invoice`, `get_invoice`, `settle_invoice`, `send_payment`, `get_payment` and
+`shutdown_channel`, in fiber's shapes, and holds what fiber holds: the
 counters L and R (`CommitmentNumbers`, both 0 before the open), the sites that issue a request off them, the points and
 nonces the device published, and the peer's musig2 half. It issues one request at a time and queues the movements that
 arrive while one is pending, as fiber buffers them. A submission first meets the conversions of fiber's RPC layer, ahead
@@ -398,8 +400,9 @@ nonces. Then fiber's checks (`channel.rs:2208-2285`): `replay_or_pending`, which
 device keys the test derives from the seed: a shortcut, since a real node holds only the public parts, with the same
 result. The double takes the keys of each channel index a test may open under, and a channel is built with the ones
 whose funding key its open's material carries. The channel opens through the RPC or through a method of the double, and
-moves through methods of the double (send, receive, fulfil, shutdown, force close): the client methods for those come
-with the facade. Beside them, it can tamper with its next request, go past one as if the device had answered it, keep a
+moves through the RPC the facade calls (`send_payment`, `shutdown_channel`) or through methods of the double (send,
+receive, fulfil, a shutdown, the peer's shutdown, a force close). Beside them, it can tamper with its next request, go
+past one as if the device had answered it, keep a
 submission in the network until the next one, or drop the answer to a method's next call after handling it. Its
 opening and its watchtower halves are below; its invoice half is with the flows that drive it ([sdk.md](./sdk.md)).
 
@@ -595,8 +598,9 @@ received one sorted) and a list without the device's key; an aggregate over anot
 nonce; the peer's half absent, over another message, under another aggregate, or of a commitment the node changed after;
 a foreign settlement key and a foreign TLC key; the sent commitment's version one above and one below its slot; each
 revocation one above and one below the number it must revoke; a received revocation paying the peer's script; a type
-script on a commitment cell and on either revocation; each unpinned term on a commitment and a revocation while a close
-still signs; and the unpinned layout. Behind the claim, the gate's refusals surface with their codes: a digest mismatch
+script on a commitment cell and on either revocation; each of the three numeric terms unpinned on a commitment and a
+revocation while a close, which states none of them, still signs; and the unpinned layout. Behind the claim, the gate's
+refusals surface with their codes: a digest mismatch
 per content kind (a snapshot amount, a re-signed commitment tx, a revocation output and its data, a close input's since),
 a slot not above its lane, a conflicting peer key, an offered TLC no intent covers, and a close that pays too little. A
 status delivered twice is answered with the same bytes and no write; the revocation evidence is rewritten after it was

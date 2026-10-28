@@ -121,7 +121,7 @@ reader's.
 | `src/invoice/utils/utf8.utils.ts`     | UTF-8 read as Rust's `String::from_utf8` reads it; the platform's `TextDecoder` is not in every runtime                                                                                                                            |
 | `src/common/utils/utf8.utils.ts`      | `encodeWellFormedUtf8`, UTF-8 written with a lone surrogate refused, which the platform's encoders replace in silence; shared with the rpc client's description guard                                                              |
 | `src/invoice/invoice.error.ts`        | `InvoiceError`: the path refused and what it had to be, never the value                                                                                                                                                            |
-| `src/common/utils/molecule.utils.ts`  | The molecule writers `invoice` shares with `digest`                                                                                                                                                                                |
+| `src/common/utils/molecule.utils.ts`  | The molecule writers `invoice` shares with `digest`; `decodeMoleculeScript`, the facade's reader of a pinned close script and of the pending opening's user lock ([sdk.md](./sdk.md))                                              |
 
 The barrel lists its exports one by one, as the other ports' do: the four functions, the types, the error and the constants.
 `findInvoiceAttribute` is the one attribute lookup, which the decoder reads the payee key with and the facade reads a

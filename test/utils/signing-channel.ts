@@ -94,6 +94,7 @@ export async function openSigningChannel(
         commitmentFeeRate: BigInt(channel.commitment_fee_rate),
         remoteReservedCkbShannons: channel.remote_reserved,
         liquidCapacityShannons: (BigInt(channel.to_local) + BigInt(channel.to_remote)).toString(),
+        remoteCloseScript: toScript(channel.remote_close_script),
         remoteFundingPubkey: hexToBytes(vectors.peer.funding_pubkey),
         remoteTlcBasePubkey: hexToBytes(vectors.peer.tlc_base_pubkey),
         commitmentDelayEpoch: BigInt(channel.delay_epoch),

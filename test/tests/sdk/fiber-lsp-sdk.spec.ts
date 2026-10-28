@@ -6,7 +6,7 @@ import { encodeInvoice } from "../../../src/invoice";
 import { CHANNEL_ALIAS_KEY_PREFIX } from "../../../src/policy";
 import type { Script, Transaction } from "../../../src/common";
 import type { FiberLspSdkOptions, SdkContext, SdkEvent } from "../../../src/sdk";
-import { DEFAULT_POLL_INTERVAL_MS, FiberLspSdk, POLL_STEP_TIMEOUT_MS, SdkError } from "../../../src/sdk";
+import { DEFAULT_POLL_INTERVAL_MS, FiberLspSdk, POLL_STEP_TIMEOUT_MS, SDK_NETWORK_PRESETS, SdkError } from "../../../src/sdk";
 import type { ChannelSigningTransition } from "../../../src/protocol";
 import type { IFetchLike } from "../../../src/rpc";
 import type { SignerRefusal } from "../../../src/signer";
@@ -1573,6 +1573,66 @@ describe("FiberLspSdk", () => {
             expect(calls).toEqual(["send_payment", ...idleTick, ...idleTick, `get_payment 0x${PAYMENT_HASH}`]);
             expect(events).toEqual([{ type: "PAYMENT_SENT", paymentHashHex: `0x${PAYMENT_HASH}` }]);
             sdk.disconnect();
+        });
+    });
+
+    describe("closeChannel()", () => {
+        // With the two scripts of the opening and testnet's two cell deps, the device's fee at this rate is 100000001 shannons,
+        // one past what a close's fee may take; with one cell dep, 92992425.
+        const FEE_RATE = 189_393_942n;
+
+        async function openedHarness(network: FiberLspSdkOptions["network"]) {
+            const storage = new InMemorySignerStorage();
+            const node = new ScriptedNode();
+            const sdk = new FiberLspSdk(OPENING_SEED, {
+                network,
+                storage,
+                rpcUrl: RPC_URL,
+                lspPubkey: hexToBytes(OPENING_LSP_PUBKEY),
+                fetch: node.fetch,
+                timer: new TimerMock(),
+                now: () => NOW_MS,
+            });
+            node.result(OPENING_ANSWER);
+            await sdk.prepareChannelOpen(OPENING_AMOUNT, OPENING_USER_LOCK);
+            return { sdk, node, storage };
+        }
+
+        it("closes a channel the facade opened, paying the user's lock at fiber's default rate, and asks for a tick", async () => {
+            const h = await openedHarness("testnet");
+            const pollNow = jest.spyOn(contextOf(h.sdk).poller, "pollNow");
+            h.node.result(null);
+            await expect(h.sdk.closeChannel(OPENING_CHANNEL_ID)).resolves.toBeUndefined();
+            expect(h.node.calls().slice(1)).toEqual([
+                { method: "shutdown_channel", params: { channel_id: OPENING_CHANNEL_ID, close_script: OPENING_USER_LOCK_WIRE } },
+            ]);
+            expect(pollNow).toHaveBeenCalledTimes(1);
+        });
+
+        it("sizes the device's fee over the facade's network: testnet's two cell deps refuse the rate", async () => {
+            const h = await openedHarness("testnet");
+            const error = await rejection(h.sdk.closeChannel(OPENING_CHANNEL_ID, { feeRate: FEE_RATE }));
+            expect(error).toEqual(
+                new SdkError(
+                    "close_fee_too_high",
+                    "the device refuses the close: at 189393942 shannons per kilobyte its fee is 100000001, more than the 100000000 a close's fee may take",
+                ),
+            );
+            expect(error).toBeInstanceOf(SdkError);
+            expect(error).toMatchObject({ code: "close_fee_too_high" });
+            expect(h.node.calls()).toHaveLength(1);
+        });
+
+        it("sizes the device's fee over the facade's network: one cell dep sends the rate", async () => {
+            const h = await openedHarness({ ...SDK_NETWORK_PRESETS.testnet, fundingLockCellDepsCount: 1 });
+            h.node.result(null);
+            await h.sdk.closeChannel(OPENING_CHANNEL_ID, { feeRate: FEE_RATE });
+            expect(h.node.calls().slice(1)).toEqual([
+                {
+                    method: "shutdown_channel",
+                    params: { channel_id: OPENING_CHANNEL_ID, close_script: OPENING_USER_LOCK_WIRE, fee_rate: "0xb49ec16" },
+                },
+            ]);
         });
     });
 

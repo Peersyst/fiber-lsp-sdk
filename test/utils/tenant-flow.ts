@@ -39,6 +39,7 @@ export const TERMS: PolicyChannelTerms = {
     commitmentFeeRate: CHANNEL.commitmentFeeRate,
     remoteReservedCkbShannons: CHANNEL.remoteReservedCkbShannons.toString(),
     liquidCapacityShannons: (CHANNEL.localShannons + CHANNEL.remoteShannons).toString(),
+    remoteCloseScript: CHANNEL.remoteCloseScript,
     remoteFundingPubkey: hexToBytes(vectors.peer.funding_pubkey),
     remoteTlcBasePubkey: hexToBytes(vectors.peer.tlc_base_pubkey),
     commitmentDelayEpoch: CHANNEL.commitmentDelayEpoch,

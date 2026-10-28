@@ -18,6 +18,9 @@ const REMOTE_FUNDING_PUBKEY = "026372d1f1bf5f44d3bf185fe8f69502f36c9a01760029db0
 const REMOTE_TLC_BASE_PUBKEY = "032559e1b167552782cab5be4294260d51edfc36aef4ca7cc165b3b21b15e98e21";
 const LOCAL_CLOSE_SCRIPT_PIN =
     "4900000010000000300000003100000074d3f63a22681bdb6ff6512866db95264338cfaee12f71e28b9f23c414990c9c0114000000da694932ba803b4c07f6e3a9b6b2ea3f9c6c66c7";
+const REMOTE_CLOSE_SCRIPT_PIN =
+    "55000000100000003000000031000000014f879c667f549df6067c1797534f2b2de2312feff188d100669d4b8ad6f045" +
+    "02200000000682a2f376b830a421ddc7d3b8cf4bffb31bfdf2942f46780359b1ef4f107f36";
 const UDT_SCRIPT_PIN =
     "55000000100000003000000031000000912f64f976947ed5467ff5e7ba4c87bd37f240cdbdba0b38da619372056ef827" +
     "01200000008612706980baca14e3d03ea4d77d185e6f7338cd6e98a0ea0cd17a69918f2578";
@@ -44,6 +47,7 @@ const PINS: ChannelPins = {
     udtTypeScript: null,
     fundingOutPoint: `${FUNDING_TX_HASH}:0`,
     commitmentFeeRate: "1000",
+    remoteCloseScript: REMOTE_CLOSE_SCRIPT_PIN,
 };
 
 describe("fundingCellPins", () => {
@@ -56,12 +60,17 @@ describe("fundingCellPins", () => {
 });
 
 describe("channelTermsPins", () => {
-    it("writes the fee rate and the delay in decimal, the keys in hex, and the amounts as given", () => {
+    it("writes the fee rate and the delay in decimal, the keys in hex, the peer's close script in molecule hex, and the amounts as given", () => {
         expect(
             channelTermsPins({
                 commitmentFeeRate: 18446744073709551615n,
                 remoteReservedCkbShannons: "0",
                 liquidCapacityShannons: "80500000000",
+                remoteCloseScript: {
+                    codeHash: hexToBytes("014f879c667f549df6067c1797534f2b2de2312feff188d100669d4b8ad6f045"),
+                    hashType: "data1",
+                    args: hexToBytes("0682a2f376b830a421ddc7d3b8cf4bffb31bfdf2942f46780359b1ef4f107f36"),
+                },
                 remoteFundingPubkey: hexToBytes(REMOTE_FUNDING_PUBKEY),
                 remoteTlcBasePubkey: hexToBytes(REMOTE_TLC_BASE_PUBKEY),
                 commitmentDelayEpoch: 18446744073709551615n,
@@ -70,25 +79,44 @@ describe("channelTermsPins", () => {
             liquidCapacityShannons: "80500000000",
             commitmentFeeRate: "18446744073709551615",
             remoteReservedCkbShannons: "0",
+            remoteCloseScript: REMOTE_CLOSE_SCRIPT_PIN,
             remoteFundingPubkey: REMOTE_FUNDING_PUBKEY,
             remoteTlcBasePubkey: REMOTE_TLC_BASE_PUBKEY,
             commitmentDelayEpoch: "18446744073709551615",
         });
     });
 
+    it("writes a close script with empty args", () => {
+        expect(
+            channelTermsPins({
+                commitmentFeeRate: 1000n,
+                remoteReservedCkbShannons: "6300000000",
+                liquidCapacityShannons: "80500000000",
+                remoteCloseScript: { codeHash: new Uint8Array(32), hashType: "data", args: new Uint8Array(0) },
+                remoteFundingPubkey: hexToBytes(REMOTE_FUNDING_PUBKEY),
+                remoteTlcBasePubkey: hexToBytes(REMOTE_TLC_BASE_PUBKEY),
+                commitmentDelayEpoch: 1099511627777n,
+            }).remoteCloseScript,
+        ).toBe("3500000010000000300000003100000000000000000000000000000000000000000000000000000000000000000000000000000000");
+    });
+
     // A request that later states the same values meets them equal, and the host's pin stands for its first sight.
-    it("writes every value in the form a commitment states it", () => {
+    it("writes every value in the form a commitment states it, and the peer's close script in the form a close states it", () => {
         const input = toCommitmentTxInput(caseOf(digest.commitment_cases, "ckb, no tlcs, for remote"), digest.remote);
-        const terms = channelTermsPins({
+        const close = toClosingTxInput(caseOf(digest.shutdown_cases, "ckb"), digest.remote);
+        const { remoteCloseScript, ...terms } = channelTermsPins({
             commitmentFeeRate: input.commitmentFeeRate,
             remoteReservedCkbShannons: input.remoteReservedCkbShannons.toString(),
             liquidCapacityShannons: input.liquidCapacityShannons.toString(),
+            remoteCloseScript: close.remoteCloseScript,
             remoteFundingPubkey: input.remoteFundingPubkey,
             remoteTlcBasePubkey: input.remoteTlcBasePubkey,
             commitmentDelayEpoch: input.commitmentDelayEpoch,
         });
         expect(Object.keys(terms)).toHaveLength(6);
         expect(statedChannelPins({ kind: "commitment_tx", input })).toMatchObject(terms);
+        expect(remoteCloseScript).toBe(REMOTE_CLOSE_SCRIPT_PIN);
+        expect(statedChannelPins({ kind: "closing_tx", input: close }).remoteCloseScript).toBe(remoteCloseScript);
     });
 });
 
@@ -142,15 +170,27 @@ describe("statedChannelPins", () => {
     });
 
     // Its outputs are what both fees left, so neither a capacity nor a reserve can be read off them.
-    it("reads what a close states, the script it pays the device to included, and no capacity, reserve or layout", () => {
+    it("reads what a close states, the scripts it pays both sides to included, and no capacity, reserve or layout", () => {
         const input = toClosingTxInput(caseOf(digest.shutdown_cases, "ckb"), digest.remote);
         expect(statedChannelPins({ kind: "closing_tx", input })).toEqual<StatedChannelPins>({
             fundingOutPoint: `${FUNDING_TX_HASH}:0`,
             remoteFundingPubkey: REMOTE_FUNDING_PUBKEY,
             localCloseScript: LOCAL_CLOSE_SCRIPT_PIN,
+            remoteCloseScript: REMOTE_CLOSE_SCRIPT_PIN,
             udtTypeScript: null,
         });
         expect(Object.keys(statedChannelPins({ kind: "closing_tx", input }))[0]).toBe("udtTypeScript");
+    });
+
+    // A swapped close states each script under the other's name.
+    it("states the device's close script before the peer's", () => {
+        const input = toClosingTxInput(caseOf(digest.shutdown_cases, "ckb"), digest.remote);
+        const swapped = { ...input, localCloseScript: input.remoteCloseScript, remoteCloseScript: input.localCloseScript };
+        expect(findChannelPinConflict(PINS, statedChannelPins({ kind: "closing_tx", input: swapped }))).toEqual({
+            field: "localCloseScript",
+            pinned: LOCAL_CLOSE_SCRIPT_PIN,
+            stated: REMOTE_CLOSE_SCRIPT_PIN,
+        });
     });
 
     it("reads what a revocation the device sends states, its layout included, leaving its payout out: it is the peer's script", () => {
@@ -228,6 +268,18 @@ describe("findChannelPinConflict", () => {
         ["another close script", { localCloseScript: "00" }, "localCloseScript", LOCAL_CLOSE_SCRIPT_PIN, "00"],
     ])("finds %s against what registration fixed", (_, stated, field, pinned, value) => {
         expect(findChannelPinConflict(PINS, stated)).toEqual({ field, pinned, stated: value });
+    });
+
+    it("finds another peer close script than the host pinned", () => {
+        expect(findChannelPinConflict(PINS, { remoteCloseScript: LOCAL_CLOSE_SCRIPT_PIN })).toEqual({
+            field: "remoteCloseScript",
+            pinned: REMOTE_CLOSE_SCRIPT_PIN,
+            stated: LOCAL_CLOSE_SCRIPT_PIN,
+        });
+    });
+
+    it("finds no conflict on a peer close script not pinned yet", () => {
+        expect(findChannelPinConflict({ ...PINS, remoteCloseScript: undefined }, { remoteCloseScript: LOCAL_CLOSE_SCRIPT_PIN })).toBeNull();
     });
 
     it("skips a value a statement leaves undefined", () => {
@@ -317,20 +369,36 @@ describe("withChannelPins", () => {
 
     // A message is no evidence of a term: only the host's statement pins one.
     it("never pins a term at first sight", () => {
-        const terms = { liquidCapacityShannons: "80500000000", remoteReservedCkbShannons: "6300000000", commitmentFeeRate: "1000" };
-        const bare: ChannelPins = { ...PINS, commitmentFeeRate: undefined };
+        const terms = {
+            liquidCapacityShannons: "80500000000",
+            remoteReservedCkbShannons: "6300000000",
+            commitmentFeeRate: "1000",
+            remoteCloseScript: REMOTE_CLOSE_SCRIPT_PIN,
+        };
+        const bare: ChannelPins = { ...PINS, commitmentFeeRate: undefined, remoteCloseScript: undefined };
         expect(withChannelPins(bare, terms, FIRST_SIGHT_CHANNEL_PINS)).toBe(bare);
     });
 
     it("pins the terms the host states, and nothing a message would pin at first sight", () => {
-        const bare: ChannelPins = { ...PINS, commitmentFeeRate: undefined };
+        const bare: ChannelPins = { ...PINS, commitmentFeeRate: undefined, remoteCloseScript: undefined };
         expect(
             withChannelPins(
                 bare,
-                { liquidCapacityShannons: "80500000000", commitmentFeeRate: "1001", commitmentDelayEpoch: "1", lockLayout: "legacy" },
+                {
+                    liquidCapacityShannons: "80500000000",
+                    commitmentFeeRate: "1001",
+                    remoteCloseScript: LOCAL_CLOSE_SCRIPT_PIN,
+                    commitmentDelayEpoch: "1",
+                    lockLayout: "legacy",
+                },
                 CHANNEL_TERMS_PINS,
             ),
-        ).toEqual<ChannelPins>({ ...PINS, liquidCapacityShannons: "80500000000", commitmentFeeRate: "1001" });
+        ).toEqual<ChannelPins>({
+            ...PINS,
+            liquidCapacityShannons: "80500000000",
+            commitmentFeeRate: "1001",
+            remoteCloseScript: LOCAL_CLOSE_SCRIPT_PIN,
+        });
     });
 
     it("never rewrites the reserves computed at registration, whatever a statement states", () => {
