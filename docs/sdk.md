@@ -81,17 +81,18 @@ Construction builds, in order, the typed store over the storage, the policy engi
 and the watchtower's approval, the signer dispatch over the seed, the network's commitment lock, funding lock cell deps
 count and epoch length, and the engine ([signing.md](./signing.md)), the rpc client over the url, the token and `fetch`,
 the tenant identity over the seed ([signing.md](./signing.md)), and the pieces this document describes: the allocator,
-the activity tracker and the pending opening's store (`PendingOpeningStore`) over the store, the hold invoices' preimages
-(`HoldInvoicePreimages`, [signing.md](./signing.md)) over the seed, the two in-memory sets of the payments' hashes
-(`sending` and `reading`, [Sending a payment](#sending-a-payment)), and the poller over the timer and its five steps, the
-channel step first, then the signing step, the watchtower step, the invoice step and the payment step. The dispatch and the preimages each
-copy the seed, and the identity keeps only the key it derives from it; the facade holds the seed through nothing else.
+the activity tracker, the device's channels (`DeviceChannelList`) and the pending opening's store
+(`PendingOpeningStore`) over the store, the hold invoices' preimages (`HoldInvoicePreimages`,
+[signing.md](./signing.md)) over the seed, the two in-memory sets of the payments' hashes (`sending` and `reading`,
+[Sending a payment](#sending-a-payment)), and the poller over the timer and its five steps, the channel step first, then
+the signing step, the watchtower step, the invoice step and the payment step. The dispatch and the preimages each copy
+the seed, and the identity keeps only the key it derives from it; the facade holds the seed through nothing else.
 
-Everything built is held in one context the facade's operations share: the network, the LSP's key, the clock, the
-store, the rpc client, the engine, the dispatch, the identity, the preimages (`preimages`), the allocator, the tracker,
-the pending opening's store (`openings`), the poller, the two sets of the payments' hashes (`sending`, `reading`) and the
-facade's own `emit`. The operations are thin entry points over that context, which is what keeps each flow a function of what it
-needs.
+Everything built is held in one context the facade's operations share: the network, the LSP's key, the clock, the store,
+the rpc client, the engine, the dispatch, the identity, the preimages (`preimages`), the allocator, the tracker, the
+device's channels (`channels`), the pending opening's store (`openings`), the poller, the two sets of the payments'
+hashes (`sending`, `reading`) and the facade's own `emit`. The operations are thin entry points over that context, which
+is what keeps each flow a function of what it needs.
 
 ## `connect()` and `disconnect()`
 
@@ -250,6 +251,28 @@ error and throws; watching something again keeps its entry, status included; dro
 watching one id only one is told it did: `transfer` takes it to refuse a hash still watched. A payment's entry is never
 marked, so its status stays `null` until it is dropped.
 
+A second list, under its own key, holds the channels the device opened (`DeviceChannelList`): the opening watches the
+channel in the activity list, then adds it there, both before the tx is handed out, and a resumed opening adds nothing
+twice. That order is what the watchtower step reads a close from: a listed channel the activity list does not watch is
+one the channel step saw `Closed`. The list outlives the activity's entry, since fiber's watchtower may still ask for a
+spend of a channel the device has seen closed, and it drops a channel only once nothing more can be asked of it (the
+watchtower step, below). Its record is read as strictly as the others: a version, a list of ids in fiber's form, none
+twice, or the read throws.
+
+**What wakes the tenant.** The LSP's operator evicts a tenant with `lsp_evict_tenant`, which fiber refuses while the
+tenant's runtime is busy, with a payment in flight, an active TLC or a pending channel operation
+(`lsp/runtime.rs:71-90`, `lsp/service.rs:407-420`). Any channel, invoice or payment call that carries the tenant's token
+brings an evicted tenant back: fiber resolves the tenant's runtime for each (`supervisor.ensure`,
+`lsp/service.rs:432-442`), `list_channels` included. The two signing statuses do not: fiber reads them from the tenant's
+store and its watchtower (`rpc/channel.rs:387-412`, `rpc/watchtower.rs:379-400`). So no step lists the node's channels
+to find what to poll: the signing step reads the channels the activity list watches, the watchtower step the device's
+list, each asking a channel's status alone, and the channel, invoice and payment steps call the node only while
+something is watched. A device with nothing in flight, no opening, no channel open and no invoice nor payment
+unsettled, asks the node for nothing but the watchtower status of each channel it still lists, which wakes no tenant, so
+an eviction lasts until the device has something else to ask; a step that listed the node's channels on every tick
+would bring the tenant back on the next one. An open channel stays watched for its `CHANNEL_CLOSED`, so the channel
+step's one listing per tick keeps the tenant awake while the device holds an open channel.
+
 The poller walks that list. `start()` ticks at once, then arms the next tick for the interval after each tick completes,
 so a slow node never overlaps two ticks while its steps keep their deadline, and never shortens the pause between them.
 A tick runs its steps in order, one at a time, and runs every one of them even when another fails: each failure is
@@ -303,10 +326,10 @@ the step.
 ## The signing step
 
 The node never calls the device: a request for a signature waits on the node until the device reads it. Each tick, the
-signing step asks `list_channels` with no filter, which in fiber is every channel not closed, the ones still opening
-included, and keeps those the policy has registered: the storage cannot list its keys, and a channel the node does not
-list is one it cannot be waiting on a signature for, so hiding one only stalls the node's own channel. For each, in the
-order listed, one at a time:
+signing step reads the activity list and polls the channels it watches, the ones the device opened and has not seen
+closed, in the order it opened them, and keeps those the policy has registered; it never lists the node's channels,
+which would wake an evicted tenant (above). A channel the channel step saw closed asks no signature any more, and one the
+device did not open is one it holds no keys for. For each, one at a time:
 
 1. `get_channel_signing_status`. An answer for another channel than the one asked is refused as `malformed` and never
    reaches the dispatch: a status is signed only under the name it was read for.
@@ -320,13 +343,12 @@ order listed, one at a time:
    nears its expiry, and a request with none stays pending until it is answered.
 
 A channel whose status read or submission fails, or whose dispatch faults (a store failure, a bug), is reported as a
-`poll_failed` naming it, and the step goes on to the next channel. Only a `list_channels` that fails fails the step,
-which the poller reports as any other. The listing is read for its channel ids alone: a field the step does not use,
-such as a state or a flag a newer fiber adds, cannot stop the signing. A request is answered within one interval of
+`poll_failed` naming it, and the step goes on to the next channel. Only an activity list that cannot be read fails the
+step, which the poller reports as any other. A request is answered within one interval of
 being posted, against a deadline, when there is one, of TLC expiries; the step reports it on `SIGNING` and never waits
 on it or hurries for it. A call that
 never answers holds the whole step until its deadline, and the next tick starts from the same channel: the channels
-listed after it wait as long, which with fiber's one channel per tenant is no channel at all.
+after it wait as long, which with fiber's one channel per tenant is no channel at all.
 
 The run's `abandoned` is read before the dispatch, before the submission and before every event: an answer that outlived
 its run acts on nothing, and the next channel is not polled. A signature abandoned before it was submitted is not lost:
@@ -338,20 +360,26 @@ announced as a `warning` again.
 ## The watchtower step
 
 After a force close the node's watchtower spends the commitment cell one unlock at a time, each spend waiting on the
-device's signature ([signing.md](./signing.md)). The step runs after the signing step, in the same tick, and lists the
-channels itself with `include_closed`: a force-closed channel is the one the watchtower spends from, and fiber's default
-listing hides it once closed. The listing is `listChannelStates`, read for the ids and the states alone, any state name or
-flag accepted ([rpc.md](./rpc.md)). It skips only a `Closed` channel flagged `COOPERATIVE`, `ABANDONED` or
-`FUNDING_ABORTED` (`WATCHTOWER_UNWATCHED_CLOSE_FLAGS`): fiber deletes the watch row on a cooperative close and on a failed
-opening, which may hold one since its collaboration. A state or a flag the SDK does not know is polled, since polling
-costs a read and skipping might leave a spend unsigned. For each channel the policy has registered, in the order listed,
-one at a time:
+device's signature ([signing.md](./signing.md)). The step runs after the signing step, in the same tick, and polls the
+device's list of the channels it opened (above), in the order it opened them, the ones it has seen closed included: a
+force-closed channel is the one the watchtower spends from. It never lists the node's channels. Whether a channel is
+open is the activity list's word, read once per tick after the device's list: the opening watches a channel before it
+lists it, so a listed channel the activity list no longer watches is one the channel step saw `Closed`. For each channel
+the policy has registered, one at a time:
 
-1. `get_watchtower_signing_status`. Before `RemoteTxComplete` fiber holds no watch row for the channel, and answers
-   `-32000` with "watched channel not found" (`WATCHTOWER_UNWATCHED_ERROR`, `rpc/watchtower.rs:386-391`); on a channel
-   that is not `Closed` that answer is read as nothing pending, rather than a `poll_failed` on every tick of an opening.
-   On a closed one it is a failure. An answer for another channel than the one asked is refused as `malformed`, with
-   neither request id nor purpose, and never reaches the dispatch.
+1. `get_watchtower_signing_status`. Fiber holds no watch row for a channel before `RemoteTxComplete` creates it, nor
+   after a cooperative close, an abandon or an aborted funding deletes it, and answers `-32000` with "watched channel not
+   found" (`WATCHTOWER_UNWATCHED_ERROR`, `rpc/watchtower.rs:386-391`, `event_handler.rs:41-78`). That answer is nothing
+   pending. On an open channel the row may come yet, so the channel stays listed. On a closed one it never comes back:
+   fiber creates a row at the opening's `RemoteTxComplete`, and again, when missing, on each `TenantChannelOnline` the
+   channel's `ChannelReady` or `ChannelOnline` sends (`fiber/network.rs:9501-9506`, `lsp/service.rs:524-555`,
+   `ensure_hosted_watch_channel` in `lsp/watch.rs:15-71`), and a closed channel emits neither; it removes one only once
+   the channel is closed. So the channel is dropped from the list, unless the run was abandoned, and no tick asks about
+   it again. A force close keeps its row, which fiber never deletes (`ChannelClosed` is notified for a cooperative close
+   alone, `fiber/network.rs:8338-8345`), so a force-closed channel is polled for as long as fiber watches it, as fiber's
+   own watchtower keeps it. Any other answer, another message or another code, is a failure. An answer for another
+   channel than the one asked is refused as `malformed`, with neither request id nor purpose, and never reaches the
+   dispatch.
 2. The dispatch's `handleWatchtower`, which decodes the status, runs the watchtower's rules and the claim, and signs or
    refuses ([signing.md](./signing.md)). Nothing pending is nothing done.
 3. A signature goes back through `submit_watchtower_signature`; `Applied` and `AlreadyApplied` are both success. Then
@@ -359,9 +387,9 @@ one at a time:
    `WATCHTOWER_SIGNING` is emitted. A refusal is emitted at once and nothing is submitted: the spend stays pending, and
    the funds where they are.
 
-A channel whose registration, status read, submission or mark fails, or whose dispatch faults, is reported as a
-`poll_failed` naming it, and the step goes on to the next channel; only a listing that fails, or that the client cannot
-read, fails the step. The run's `abandoned` is read before the dispatch, before the submission and before every event, as
+A channel whose registration, status read, submission, mark or drop fails, or whose dispatch faults, is reported as a
+`poll_failed` naming it, kept in the list, and the step goes on to the next channel; only a list of the device's channels
+or an activity list that cannot be read fails the step. The run's `abandoned` is read before the dispatch, before the submission and before every event, as
 in the signing step, with one exception: the mark after a submission is written even once the run is abandoned, because
 fiber never serves an applied request again, so a mark skipped there would never come. A signature abandoned before its
 submission is not lost: the claim was written, and the next tick answers the same request with the signature recorded.
@@ -466,9 +494,13 @@ the signing gate holds the channel to is written before the tx leaves the device
    reserve it sizes: the pin is what a close is held to later ([Closing a channel](#closing-a-channel)).
 4. `pinFundingCell`: output 0 of the unsigned tx, by CKB's hash of the tx, and its capacity. The hash covers the raw tx
    and not the witnesses, so it is the hash of the tx signed as well.
-5. The channel is watched, so the channel step announces it.
+5. The channel is watched, so the channel step announces it and the signing step serves it.
+6. The channel is added to the device's list, so the watchtower step polls it. After the watch, never before: the
+   watchtower step reads a listed channel the activity list does not watch as one the channel step saw `Closed`, and
+   drops it on fiber's "watched channel not found", which is fiber's answer for any channel before its funding
+   ([The watchtower step](#the-watchtower-step)).
 
-Once registered, the channel is served by the signing step, so its first commitments are signed while the host holds the
+Once watched, the channel is served by the signing step, so its first commitments are signed while the host holds the
 tx. A registration or a pin the policy refuses, a `ChannelRegistrationError` (the id already another index's, the index
 another channel's, a lost race for the name) or a `ChannelPinError`, is `opening_conflict` with the policy's error as its
 cause: the node's answer contradicts what the device recorded. Any other failure, a storage that throws or a record it
@@ -502,17 +534,17 @@ An opening given up for good is not the device's to cancel: fiber aborts one lef
 timeout passes (`external_funding_timeout_seconds`, 300 by default), the channel step announces `CHANNEL_CLOSED` for it
 if it was watched, and the next same call opens afresh under a new index.
 
-| Failure                                               | Error                                                             | The pending opening                               |
-| ----------------------------------------------------- | ----------------------------------------------------------------- | ------------------------------------------------- |
-| An argument, the signer included                      | `TypeError`, or the policy's `RangeError` naming `fundedShannons` | Untouched: nothing written or sent                |
-| The index's allocation                                | `clock_before_floor`                                              | Untouched                                         |
-| `only_pending`, resuming a named one                  | The rpc client's                                                  | Kept                                              |
-| `open_tenant_channel`, its answer unreadable included | The rpc client's                                                  | Kept                                              |
-| The check                                             | `opening_rejected`                                                | Dropped                                           |
-| A registration or pin the policy refuses              | `opening_conflict`                                                | Dropped                                           |
-| The storage                                           | Its own                                                           | Kept as last written                              |
-| The host's signer, in `openChannel`                   | Its own                                                           | Kept, named; the channel registered and watched   |
-| The submission                                        | Below                                                             | Kept, until the channel step sees ready or closed |
+| Failure                                               | Error                                                             | The pending opening                                     |
+| ----------------------------------------------------- | ----------------------------------------------------------------- | ------------------------------------------------------- |
+| An argument, the signer included                      | `TypeError`, or the policy's `RangeError` naming `fundedShannons` | Untouched: nothing written or sent                      |
+| The index's allocation                                | `clock_before_floor`                                              | Untouched                                               |
+| `only_pending`, resuming a named one                  | The rpc client's                                                  | Kept                                                    |
+| `open_tenant_channel`, its answer unreadable included | The rpc client's                                                  | Kept                                                    |
+| The check                                             | `opening_rejected`                                                | Dropped                                                 |
+| A registration or pin the policy refuses              | `opening_conflict`                                                | Dropped                                                 |
+| The storage                                           | Its own                                                           | Kept as last written                                    |
+| The host's signer, in `openChannel`                   | Its own                                                           | Kept, named; the channel registered, watched and listed |
+| The submission                                        | Below                                                             | Kept, until the channel step sees ready or closed       |
 
 A drop that fails leaves the refusal its code and its cause, its message saying the opening could not be dropped and why;
 the next same call drops the leftover again, or finds it aborted.
@@ -992,8 +1024,10 @@ follows ([The watchtower step](#the-watchtower-step)).
 The tick `closeChannel` asks for signs the close if fiber built it already, which it does once both shutdowns are
 exchanged and no TLC is left: the channel step reads the channel `closing` and does nothing, and the signing step signs
 and reports `SIGNING`, which carries no `deadlineMs` ([Events](#events)). `CHANNEL_CLOSED` comes from the channel step of
-a later tick, the first that lists the channel `Closed`, and the channel is no longer watched; the watchtower step no
-longer polls a channel fiber lists closed cooperatively.
+a later tick, the first that lists the channel `Closed`, and the channel is no longer watched. Fiber removes the
+channel's watch row as it handles the close's notification, apart from the channel's state (`event_handler.rs:69-78`),
+so the watchtower step of that tick or of a later one reads fiber's "watched channel not found" for it and drops it from
+the device's channels, after which the device calls the node for nothing about it.
 
 ## What is published
 
@@ -1040,46 +1074,47 @@ through the facade alone.
 
 ## Where it lives
 
-| File                                     | Contents                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
-| ---------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `src/sdk/fiber-lsp-sdk.ts`               | `FiberLspSdk`: the options checked, the wiring, `connect`, `disconnect`, the events, the registration, the token, the opening's three methods, the listing, the evidence, `createInvoice`, `transfer`, `closeChannel`                                                                                                                                                                                                                                                                       |
-| `src/sdk/channel-opening.ts`             | `prepareSdkChannelOpen`, `submitSdkFundingTx` and `openSdkChannel`: the arguments, the request, the resume, the check's verdict, the pins, the refusals and the drop, the submission's checks                                                                                                                                                                                                                                                                                               |
-| `src/sdk/utils/opening-check.utils.ts`   | `checkTenantOpening`: the node's answer held to what was asked, each failure `opening_rejected`                                                                                                                                                                                                                                                                                                                                                                                             |
-| `src/sdk/pending-opening.ts`             | `PendingOpeningStore`: the pending opening's record, read, matched, written, named and dropped; `assertUserLockCellDeps`                                                                                                                                                                                                                                                                                                                                                                    |
-| `src/sdk/channel-step.ts`                | `buildChannelStep`: the watched channels settled from both listings, `CHANNEL_READY`, `CHANNEL_CLOSED`                                                                                                                                                                                                                                                                                                                                                                                      |
-| `src/sdk/channel-listing.ts`             | `listSdkChannels`: the node's channels as a wallet shows them, the five states, `hasRecord`                                                                                                                                                                                                                                                                                                                                                                                                 |
-| `src/sdk/invoice-creation.ts`            | `createSdkInvoice`: the arguments, the index, the record, `new_invoice`, the clock, the check and the watch                                                                                                                                                                                                                                                                                                                                                                                 |
-| `src/sdk/utils/invoice-check.utils.ts`   | `checkTenantInvoice`: the node's string held to what was asked, each failure `invoice_rejected`                                                                                                                                                                                                                                                                                                                                                                                             |
-| `src/sdk/invoice-step.ts`                | `buildInvoiceStep`: each status answered, the index held to the hash, the release and its margin, the settlement, `pollNow`, `PAYMENT_PENDING`, `PAYMENT_RECEIVED`, `PAYMENT_EXPIRED`                                                                                                                                                                                                                                                                                                       |
-| `src/sdk/payment-sending.ts`             | `transferSdkPayment`: the arguments, the default fee and the budget, the hashes being sent, the watch, the intent and its refusals, `send_payment` with the hops, each way the send ends, `pollNow`                                                                                                                                                                                                                                                                                         |
-| `src/sdk/utils/payment-check.utils.ts`   | `checkPayableInvoice`: an invoice held to what the device pays, each failure `invoice_unpayable`                                                                                                                                                                                                                                                                                                                                                                                            |
-| `src/sdk/payment-step.ts`                | `buildPaymentStep`: the hashes being sent skipped and the ones read held, each status answered, fiber's not found, the watch checked again, the close before `PAYMENT_SENT` and `PAYMENT_FAILED`, the forget                                                                                                                                                                                                                                                                                |
-| `src/sdk/channel-closing.ts`             | `closeSdkChannel`: the arguments, the record, the device's fee over both pinned close scripts and `close_fee_too_high`, `shutdown_channel` with the device's script, `pollNow` once the node took it                                                                                                                                                                                                                                                                                        |
-| `src/sdk/utils/node-answer.utils.ts`     | Fiber's answers recognized by their code and whole message (`isFiberRefusal`), or around a hash in its `Hash256` form (`isFiberRefusalUnderHash`, `formatFiberHash256`); the refusal of an answer about another hash (`assertSdkAnsweredHash`)                                                                                                                                                                                                                                              |
-| `src/sdk/utils/clock.utils.ts`           | `readSdkClock`: the host's clock read once, without a receiver, and checked                                                                                                                                                                                                                                                                                                                                                                                                                 |
-| `src/sdk/utils/invoice-expiry.utils.ts`  | `computeSdkInvoiceExpiryMs`: when an invoice runs out, as fiber's `is_expired` counts it, which the invoice step and the payment's check share                                                                                                                                                                                                                                                                                                                                              |
-| `src/sdk/channel-evidence.ts`            | `readSdkChannelRecord`, a registered channel's record or `unknown_channel`, which the submission reads too; `readSdkChannelEvidence`: the record projected onto its evidence                                                                                                                                                                                                                                                                                                                |
-| `src/sdk/sdk.types.ts`                   | The options, the network, the events, the error codes, the registration's forms, the opening's and the listing's, the pending opening, the evidence, the invoice's, the payment's and the payable invoice, the close's options, the activity record, the context with its two sets of hashes                                                                                                                                                                                                |
-| `src/sdk/sdk.constants.ts`               | The network presets, the poll interval, the allocation floor, the storage keys, the event, error and state lists, the opening's output index and defaults, the watchtower step's skipped flags and unwatched answer, the invoice's expiry, final delta and timestamp tolerance, the release's slack, fiber's already-paid answer; the default fee rate and its denominator, fiber's not found, session-exists and lost-reply answers, the payment's two reasons and the two refusals' words |
-| `src/sdk/sdk.error.ts`                   | `SdkError`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
-| `src/sdk/allocator.ts`                   | `IndexAllocator`: the channel and invoice indexes from the clock, the last one persisted                                                                                                                                                                                                                                                                                                                                                                                                    |
-| `src/sdk/activity.ts`                    | `ActivityTracker`: the persisted list of what is watched, `watchIfAbsent`, and the status each event was emitted for                                                                                                                                                                                                                                                                                                                                                                        |
-| `src/sdk/poller.ts`                      | `ActivityPoller`: the tick, its steps and their runs and deadline, the interval, `start`, `stop`                                                                                                                                                                                                                                                                                                                                                                                            |
-| `src/sdk/signing-step.ts`                | `buildChannelSigningStep`: the channels polled, the status read, the dispatch, the submission, `SIGNING`                                                                                                                                                                                                                                                                                                                                                                                    |
-| `src/sdk/watchtower-step.ts`             | `buildWatchtowerSigningStep`: the channels it may still watch, the unwatched answer, the dispatch, the submission, the mark, `WATCHTOWER_SIGNING`                                                                                                                                                                                                                                                                                                                                           |
-| `src/sdk/utils/poll-step.utils.ts`       | What the steps share under their run: each channel, invoice or payment in turn (`answerEachPolled`), the guarded event, the `poll_failed` report, the refusal of another channel's status                                                                                                                                                                                                                                                                                                   |
-| `src/sdk/utils/request-id.utils.ts`      | `encodeSdkRequestId`, a request id as both signing events carry it                                                                                                                                                                                                                                                                                                                                                                                                                          |
-| `src/sdk/utils/runtime-timer.utils.ts`   | The timer over the runtime's `setTimeout` and `clearTimeout`                                                                                                                                                                                                                                                                                                                                                                                                                                |
-| `src/sdk/utils/network.utils.ts`         | The network option resolved to its five values                                                                                                                                                                                                                                                                                                                                                                                                                                              |
-| `src/sdk/utils/activity-record.utils.ts` | The activity record's guard, ids and statuses per kind                                                                                                                                                                                                                                                                                                                                                                                                                                      |
-| `src/sdk/utils/failure.utils.ts`         | An `SdkError`'s message from what failed and its cause; the guarded emit and the `poll_failed` report                                                                                                                                                                                                                                                                                                                                                                                       |
-| `src/policy/signer-store.ts`             | `getRecord` and `updateRecord`, the store's records of another module's format, used by the allocator, the activity and the pending opening                                                                                                                                                                                                                                                                                                                                                 |
-| `src/common/utils/assert.utils.ts`       | `assertTimerDelayMs`, `assertScriptTemplate`, `assertCompressedPoint`, `assertFunction`, `assertCellDep`, `assertCellDeps` and `assertPositiveDecimalShannons`                                                                                                                                                                                                                                                                                                                              |
-| `src/common/utils/copy.utils.ts`         | The copies of a script, a template, an out point, a cell dep and a transaction, which the network and the opening take                                                                                                                                                                                                                                                                                                                                                                      |
-| `src/common/utils/molecule.utils.ts`     | `decodeMoleculeScript`, a molecule `Script` read back strictly, the exact inverse of `moleculeScript`, which the close reads both pinned close scripts with and the pending opening its stored user lock                                                                                                                                                                                                                                                                                    |
-| `src/common/utils/validate.utils.ts`     | `isCompressedPoint`, shared with the invoice codec; `isPositiveDecimalShannons`, shared with the policy's invoice record                                                                                                                                                                                                                                                                                                                                                                    |
-| `src/common/timer-slot.ts`               | `TimerSlot`: the one armed callback the poller holds                                                                                                                                                                                                                                                                                                                                                                                                                                        |
-| `src/common/listener-set.ts`             | `ListenerSet`: the events' fan-out                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
+| File                                     | Contents                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
+| ---------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `src/sdk/fiber-lsp-sdk.ts`               | `FiberLspSdk`: the options checked, the wiring, `connect`, `disconnect`, the events, the registration, the token, the opening's three methods, the listing, the evidence, `createInvoice`, `transfer`, `closeChannel`                                                                                                                                                                                                                                                     |
+| `src/sdk/channel-opening.ts`             | `prepareSdkChannelOpen`, `submitSdkFundingTx` and `openSdkChannel`: the arguments, the request, the resume, the check's verdict, the pins, the refusals and the drop, the submission's checks                                                                                                                                                                                                                                                                             |
+| `src/sdk/utils/opening-check.utils.ts`   | `checkTenantOpening`: the node's answer held to what was asked, each failure `opening_rejected`                                                                                                                                                                                                                                                                                                                                                                           |
+| `src/sdk/pending-opening.ts`             | `PendingOpeningStore`: the pending opening's record, read, matched, written, named and dropped; `assertUserLockCellDeps`                                                                                                                                                                                                                                                                                                                                                  |
+| `src/sdk/channel-step.ts`                | `buildChannelStep`: the watched channels settled from both listings, `CHANNEL_READY`, `CHANNEL_CLOSED`                                                                                                                                                                                                                                                                                                                                                                    |
+| `src/sdk/channel-listing.ts`             | `listSdkChannels`: the node's channels as a wallet shows them, the five states, `hasRecord`                                                                                                                                                                                                                                                                                                                                                                               |
+| `src/sdk/invoice-creation.ts`            | `createSdkInvoice`: the arguments, the index, the record, `new_invoice`, the clock, the check and the watch                                                                                                                                                                                                                                                                                                                                                               |
+| `src/sdk/utils/invoice-check.utils.ts`   | `checkTenantInvoice`: the node's string held to what was asked, each failure `invoice_rejected`                                                                                                                                                                                                                                                                                                                                                                           |
+| `src/sdk/invoice-step.ts`                | `buildInvoiceStep`: each status answered, the index held to the hash, the release and its margin, the settlement, `pollNow`, `PAYMENT_PENDING`, `PAYMENT_RECEIVED`, `PAYMENT_EXPIRED`                                                                                                                                                                                                                                                                                     |
+| `src/sdk/payment-sending.ts`             | `transferSdkPayment`: the arguments, the default fee and the budget, the hashes being sent, the watch, the intent and its refusals, `send_payment` with the hops, each way the send ends, `pollNow`                                                                                                                                                                                                                                                                       |
+| `src/sdk/utils/payment-check.utils.ts`   | `checkPayableInvoice`: an invoice held to what the device pays, each failure `invoice_unpayable`                                                                                                                                                                                                                                                                                                                                                                          |
+| `src/sdk/payment-step.ts`                | `buildPaymentStep`: the hashes being sent skipped and the ones read held, each status answered, fiber's not found, the watch checked again, the close before `PAYMENT_SENT` and `PAYMENT_FAILED`, the forget                                                                                                                                                                                                                                                              |
+| `src/sdk/channel-closing.ts`             | `closeSdkChannel`: the arguments, the record, the device's fee over both pinned close scripts and `close_fee_too_high`, `shutdown_channel` with the device's script, `pollNow` once the node took it                                                                                                                                                                                                                                                                      |
+| `src/sdk/utils/node-answer.utils.ts`     | Fiber's answers recognized by their code and whole message (`isFiberRefusal`), or around a hash in its `Hash256` form (`isFiberRefusalUnderHash`, `formatFiberHash256`); the refusal of an answer about another hash (`assertSdkAnsweredHash`)                                                                                                                                                                                                                            |
+| `src/sdk/utils/clock.utils.ts`           | `readSdkClock`: the host's clock read once, without a receiver, and checked                                                                                                                                                                                                                                                                                                                                                                                               |
+| `src/sdk/utils/invoice-expiry.utils.ts`  | `computeSdkInvoiceExpiryMs`: when an invoice runs out, as fiber's `is_expired` counts it, which the invoice step and the payment's check share                                                                                                                                                                                                                                                                                                                            |
+| `src/sdk/channel-evidence.ts`            | `readSdkChannelRecord`, a registered channel's record or `unknown_channel`, which the submission reads too; `readSdkChannelEvidence`: the record projected onto its evidence                                                                                                                                                                                                                                                                                              |
+| `src/sdk/sdk.types.ts`                   | The options, the network, the events, the error codes, the registration's forms, the opening's and the listing's, the pending opening, the evidence, the invoice's, the payment's and the payable invoice, the close's options, the activity record, the device's channels record, the context with the device's channels and its two sets of hashes                                                                                                                      |
+| `src/sdk/sdk.constants.ts`               | The network presets, the poll interval, the allocation floor, the storage keys, the event, error and state lists, the opening's output index and defaults, the watchtower step's unwatched answer, the invoice's expiry, final delta and timestamp tolerance, the release's slack, fiber's already-paid answer; the default fee rate and its denominator, fiber's not found, session-exists and lost-reply answers, the payment's two reasons and the two refusals' words |
+| `src/sdk/sdk.error.ts`                   | `SdkError`                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
+| `src/sdk/allocator.ts`                   | `IndexAllocator`: the channel and invoice indexes from the clock, the last one persisted                                                                                                                                                                                                                                                                                                                                                                                  |
+| `src/sdk/activity.ts`                    | `ActivityTracker`: the persisted list of what is watched, `watchIfAbsent`, and the status each event was emitted for                                                                                                                                                                                                                                                                                                                                                      |
+| `src/sdk/device-channels.ts`             | `DeviceChannelList`: the persisted list of the channels the device opened, added at the opening, dropped by the watchtower step                                                                                                                                                                                                                                                                                                                                           |
+| `src/sdk/poller.ts`                      | `ActivityPoller`: the tick, its steps and their runs and deadline, the interval, `start`, `stop`                                                                                                                                                                                                                                                                                                                                                                          |
+| `src/sdk/signing-step.ts`                | `buildChannelSigningStep`: the watched channels polled, the status read, the dispatch, the submission, `SIGNING`                                                                                                                                                                                                                                                                                                                                                          |
+| `src/sdk/watchtower-step.ts`             | `buildWatchtowerSigningStep`: the device's channels polled, the unwatched answer and the drop, the dispatch, the submission, the mark, `WATCHTOWER_SIGNING`                                                                                                                                                                                                                                                                                                               |
+| `src/sdk/utils/poll-step.utils.ts`       | What the steps share under their run: each channel, invoice or payment in turn (`answerEachPolled`), the guarded event, the `poll_failed` report, the refusal of another channel's status                                                                                                                                                                                                                                                                                 |
+| `src/sdk/utils/request-id.utils.ts`      | `encodeSdkRequestId`, a request id as both signing events carry it                                                                                                                                                                                                                                                                                                                                                                                                        |
+| `src/sdk/utils/runtime-timer.utils.ts`   | The timer over the runtime's `setTimeout` and `clearTimeout`                                                                                                                                                                                                                                                                                                                                                                                                              |
+| `src/sdk/utils/network.utils.ts`         | The network option resolved to its five values                                                                                                                                                                                                                                                                                                                                                                                                                            |
+| `src/sdk/utils/activity-record.utils.ts` | The activity record's guard, ids and statuses per kind                                                                                                                                                                                                                                                                                                                                                                                                                    |
+| `src/sdk/utils/failure.utils.ts`         | An `SdkError`'s message from what failed and its cause; the guarded emit and the `poll_failed` report                                                                                                                                                                                                                                                                                                                                                                     |
+| `src/policy/signer-store.ts`             | `getRecord` and `updateRecord`, the store's records of another module's format, used by the allocator, the activity and the pending opening                                                                                                                                                                                                                                                                                                                               |
+| `src/common/utils/assert.utils.ts`       | `assertTimerDelayMs`, `assertScriptTemplate`, `assertCompressedPoint`, `assertFunction`, `assertCellDep`, `assertCellDeps` and `assertPositiveDecimalShannons`                                                                                                                                                                                                                                                                                                            |
+| `src/common/utils/copy.utils.ts`         | The copies of a script, a template, an out point, a cell dep and a transaction, which the network and the opening take                                                                                                                                                                                                                                                                                                                                                    |
+| `src/common/utils/molecule.utils.ts`     | `decodeMoleculeScript`, a molecule `Script` read back strictly, the exact inverse of `moleculeScript`, which the close reads both pinned close scripts with and the pending opening its stored user lock                                                                                                                                                                                                                                                                  |
+| `src/common/utils/validate.utils.ts`     | `isCompressedPoint`, shared with the invoice codec; `isPositiveDecimalShannons`, shared with the policy's invoice record                                                                                                                                                                                                                                                                                                                                                  |
+| `src/common/timer-slot.ts`               | `TimerSlot`: the one armed callback the poller holds                                                                                                                                                                                                                                                                                                                                                                                                                      |
+| `src/common/listener-set.ts`             | `ListenerSet`: the events' fan-out                                                                                                                                                                                                                                                                                                                                                                                                                                        |
 
 ## What the tests guarantee
 
@@ -1125,15 +1160,15 @@ in-memory storage and a `fetch` double. Beyond a happy path per feature:
 `signing-step.spec.ts` pins the step with the real dispatch over the signing vectors and a scripted node
 (`test/mocks/rpc/scripted-node.mock.ts`): each of the five signable transitions submitted with the vectors' request id,
 partial signature and next material (absent on the close) and announced as `signed`; the already-signed resubmission of
-the same bytes, writing nothing, with `AlreadyApplied` as success; the channels in listing order and an unregistered one
-skipped without a status read; a channel in a state and one with a flag no release has yet listed beside the registered
-one, whose signature still goes out; the announcement and an unreadable status refused (the latter with `null` request
+the same bytes, writing nothing, with `AlreadyApplied` as success; the channels the activity list watches, in the order
+they were opened, and an unregistered one skipped without a status read; no listing of the node's channels; the
+announcement and an unreadable status refused (the latter with `null` request
 id and transition); a status for another channel refused as `malformed` without reaching the dispatch; a refusal
-repeated on every tick; the second session a `warning` under `allow` and a third refused; nothing pending, nothing
-listed; a status refused by the node, a status read that fails in transport, a submission refused, a submission result
+repeated on every tick; the second session a `warning` under `allow` and a third refused; nothing pending, and no call
+at all while no channel is watched; a status refused by the node, a status read that fails in transport, a submission refused, a submission result
 it cannot read, a dispatch fault and a corrupt alias, each a `poll_failed` naming the channel with the next channel
-still answered; a failed submission sent again with the same bytes on the next tick; a `list_channels` failure failing
-the step; the run abandoned during the status read, the signature, the submission, a refusal, a mismatched answer and a
+still answered; a failed submission sent again with the same bytes on the next tick; an activity list it cannot read
+failing the step with no call; the run abandoned during the status read, the signature, the submission, a refusal, a mismatched answer and a
 failing read, acting on nothing and polling no further channel, with the next tick submitting the same bytes; and an
 emitter that throws leaving the step running. `utils/failure.utils.spec.ts` pins the guarded emit and the `poll_failed`
 report with its cause.
@@ -1141,17 +1176,19 @@ report with its cause.
 `watchtower-step.spec.ts` pins the watchtower step the same way, with the real dispatch and policy over the vectors'
 spends and the scripted node: each spend of the device submitted with the vectors' signature, marked applied before its
 event and announced as `signed`; a spend of an unlock already signed submitted unclaimed, marking nothing; a repeat
-resubmitted with the same bytes, writing nothing, `AlreadyApplied` as success; the channels in listing order, listed with
-`include_closed`, and an unregistered one skipped without a status read. Each of the three skipped flags is skipped, and
-every other state is polled and signed: closed by either commitment, waiting for the settlement, shutting down with the
-commitment broadcast, closed with no flag, with a flag or in a state no release has yet, a skipped flag's name under
-another state, and `Stale`. The unwatched answer is nothing pending on a channel still opening and on a ready one, and a
-`poll_failed` under another message, another code or on a closed channel. A refusal without an approval, by a rule and of
+resubmitted with the same bytes, writing nothing, `AlreadyApplied` as success; the device's channels in the order they
+were opened, open and closed alike, and an unregistered one skipped without a status read, kept in the list; the
+device's list read before the activity list, so a channel watched between the two reads is kept; no listing of the
+node's channels, and no call at all while the device lists no channel. The unwatched answer is nothing pending: an
+open channel is kept, a closed one dropped and never asked about again, kept when the run was abandoned during the read,
+and a drop that fails is a `poll_failed` with the next channel answered; another message, another code or a failed
+request is a `poll_failed`, the channel kept. A refusal without an approval, by a rule and of
 an unreadable status (with neither request id nor purpose), another channel's status refused as `malformed` without
 reaching the dispatch, a refusal repeated on every tick; a status read that fails, a submission refused or unreadable, a
 mark that fails with the signature already out, a dispatch fault and a registration it cannot read, each a `poll_failed`
 naming the channel with the next channel answered, and a failed submission sent again on the next tick with the same
-signature, marked on either answer; a listing that fails or that it cannot read failing the step; and the
+signature, marked on either answer; a list of the device's channels or an activity list it cannot read failing the step
+with no call; and the
 run abandoned during the status read, the signature and the submission, acting on nothing but the mark after a
 submission, emitting no refusal, failure or fault, polling no further channel, and answering the same request on the next
 tick. `utils/poll-step.utils.spec.ts` pins what the steps share, each helper silent once its run is abandoned and
@@ -1254,108 +1291,115 @@ Coverage of the module is 100% on all four metrics, and the assertions were chec
 
 | Mutation                                                                    | Tests that failed |
 | --------------------------------------------------------------------------- | ----------------- |
-| The expiry is read in milliseconds                                          | 49                |
-| The channel ids are read off the full listing                               | 40                |
-| Closed channels are listed too                                              | 34                |
-| The budget leaves out the fee                                               | 30                |
-| The payment is a dry run                                                    | 28                |
-| The payment stays watched at the end                                        | 26                |
+| Every kind shares one field                                                 | 637               |
+| A null status is refused                                                    | 632               |
+| The channel index is the clock in milliseconds                              | 181               |
+| The next material is never sent                                             | 127               |
+| forget() removes nothing                                                    | 125               |
+| The host's fetch is ignored for the runtime's                               | 112               |
+| The expiry is read in milliseconds                                          | 87                |
+| Every signature is announced as a warning                                   | 86                |
+| connect() does not start the poller                                         | 81                |
+| A poll failure is reported under another code                               | 73                |
+| A poll failure carries no cause                                             | 67                |
+| The facade's poller has no signing step                                     | 67                |
+| The presets state one cell dep                                              | 65                |
+| A reused session is announced as signed                                     | 64                |
+| Steps run concurrently, not one at a time                                   | 63                |
+| The dispatch gets another commitment lock than the network's                | 59                |
+| The dispatch gets another cell deps count than the network's                | 59                |
+| The host's timer is ignored for the runtime's                               | 56                |
+| The nonce reuse mode is not passed to the engine                            | 53                |
+| The budget leaves out the fee                                               | 51                |
+| A signed request's id is announced bare                                     | 41                |
+| The payment is a dry run                                                    | 40                |
+| The payment stays watched at the end                                        | 35                |
+| Success is not announced                                                    | 31                |
+| The hash stays held after the call                                          | 30                |
+| No trampoline for another payee                                             | 26                |
+| The last index is handed out again when the clock stands still              | 26                |
+| The last index is ignored                                                   | 26                |
+| A refusal's transition is dropped                                           | 26                |
 | The next tick is armed a millisecond after the tick, not after the interval | 24                |
-| Success is not announced                                                    | 23                |
-| Every kind shares one field                                                 | 22                |
-| A null status is refused                                                    | 22                |
-| No trampoline for another payee                                             | 22                |
-| A signed request's id is announced bare                                     | 20                |
-| Every signature is announced as a warning                                   | 19                |
-| The hash stays held after the call                                          | 19                |
-| The intent stays open at the end                                            | 18                |
-| The next material is never sent                                             | 15                |
-| Steps run concurrently, not one at a time                                   | 14                |
-| A poll failure carries no cause                                             | 12                |
+| The intent stays open at the end                                            | 22                |
+| A refusal's request id is dropped                                           | 21                |
+| A refusal's code is reported as malformed                                   | 20                |
+| A node refusal keeps the intent open                                        | 19                |
+| A node refusal keeps the watch                                              | 18                |
+| A node refusal is swallowed                                                 | 17                |
+| Failed is not announced                                                     | 13                |
+| The intent is recorded before the watch                                     | 13                |
+| No extra tick after a send                                                  | 12                |
+| The clock is not checked                                                    | 12                |
 | The cell deps bound is one lower                                            | 11                |
-| A poll failure is reported under another code                               | 11                |
-| Failed is not announced                                                     | 11                |
-| The channel index is the clock in milliseconds                              | 10                |
+| A step's deadline outlives the step                                         | 11                |
+| An unknown outcome is treated as a refusal                                  | 11                |
 | A development chain's cell deps count is not checked                        | 10                |
-| The channels are answered in reverse order                                  | 10                |
-| The facade's poller has no signing step                                     | 10                |
-| The intent is recorded before the watch                                     | 10                |
-| The last index is handed out again when the clock stands still              | 9                 |
-| The last index is ignored                                                   | 9                 |
-| No extra tick after a send                                                  | 9                 |
+| The channels are answered in reverse order                                  | 9                 |
 | The fee budget is not checked                                               | 9                 |
-| A failing step ends the tick                                                | 8                 |
+| A failing step ends the tick                                                | 9                 |
+| The intent is closed when none exists                                       | 9                 |
+| Not found is a poll failure                                                 | 9                 |
+| An id is not checked before the write                                       | 9                 |
 | The event comes before the close                                            | 8                 |
-| A step's deadline outlives the step                                         | 7                 |
-| A refusal's request id is dropped                                           | 7                 |
-| A refusal's transition is dropped                                           | 7                 |
-| A stop() leaves the interval armed                                          | 6                 |
-| A fractional clock is accepted                                              | 6                 |
-| connect() does not start the poller                                         | 6                 |
-| A decode failure is another code                                            | 6                 |
-| An unknown outcome is treated as a refusal                                  | 6                 |
+| Fiber's failure text is replaced                                            | 8                 |
+| A never-sent payment reads as sent                                          | 8                 |
+| A refused intent keeps the watch                                            | 8                 |
+| An unchanged record is written anyway                                       | 8                 |
+| The token is not passed to the rpc client                                   | 8                 |
+| A channel the policy never registered is polled too                         | 8                 |
+| A stop() leaves the interval armed                                          | 7                 |
+| A decode failure is another code                                            | 7                 |
+| A start() after a stop() waits on the stopped tick                          | 7                 |
+| disconnect() leaves the poller running                                      | 7                 |
 | Another currency is paid                                                    | 6                 |
-| Fiber's failure text is replaced                                            | 6                 |
-| The intent is closed when none exists                                       | 6                 |
 | watchIfAbsent overwrites an entry                                           | 6                 |
+| A step that never settles holds the loop                                    | 6                 |
+| A development chain's cell deps count is the presets'                       | 6                 |
+| An emitter that throws breaks the step                                      | 6                 |
+| A hash being sent is read                                                   | 6                 |
+| Watching again resets the status                                            | 6                 |
 | The interval is armed after a stop()                                        | 5                 |
-| A start() after a stop() waits on the stopped tick                          | 5                 |
-| The host's timer is ignored for the runtime's                               | 5                 |
-| A refusal's code is reported as malformed                                   | 5                 |
-| Not found is a poll failure                                                 | 5                 |
-| watchIfAbsent reports added always                                          | 5                 |
+| Not found for any hash ends the payment                                     | 5                 |
+| The LSP's own invoice goes through trampoline                               | 5                 |
+| watchIfAbsent reports added always                                          | 4                 |
 | A corrupt stored last index is read as valid                                | 4                 |
 | A poll interval of 0 is accepted                                            | 4                 |
-| A step that never settles holds the loop                                    | 4                 |
 | The record's version is not checked                                         | 4                 |
-| A development chain's cell deps count is the presets'                       | 4                 |
-| An emitter that throws breaks the step                                      | 4                 |
-| The nonce reuse mode is not passed to the engine                            | 4                 |
-| A hash being sent is read                                                   | 4                 |
-| A never-sent payment reads as sent                                          | 4                 |
-| A node refusal keeps the intent open                                        | 4                 |
-| A refused intent keeps the watch                                            | 4                 |
 | An abandoned run still forgets                                              | 4                 |
-| Not found for any hash ends the payment                                     | 4                 |
 | The default fee rounds down                                                 | 4                 |
 | The expiry is fiber's strict                                                | 4                 |
-| A host cancel that throws escapes stop() or pollNow()                       | 3                 |
+| The hash is never held as being sent                                        | 4                 |
+| A stop() mid-tick lets the remaining steps run                              | 4                 |
+| A pollNow() during a tick is forgotten                                      | 4                 |
+| Another payment's answer is taken                                           | 4                 |
+| A development chain's code hash is held by reference                        | 4                 |
 | pollNow() ticks when stopped                                                | 3                 |
 | A failed step is reported under another code                                | 3                 |
-| Marking something not watched creates it                                    | 3                 |
-| forget() removes nothing                                                    | 3                 |
-| An unchanged record is written anyway                                       | 3                 |
-| An id is not checked before the write                                       | 3                 |
 | A clock before the floor is accepted                                        | 3                 |
-| disconnect() leaves the poller running                                      | 3                 |
-| The dispatch gets another commitment lock than the network's                | 3                 |
-| The token is not passed to the rpc client                                   | 3                 |
-| The presets state one cell dep                                              | 3                 |
-| The dispatch gets another cell deps count than the network's                | 3                 |
-| A channel the policy never registered is polled too                         | 3                 |
-| A node refusal is swallowed                                                 | 3                 |
-| A node refusal keeps the watch                                              | 3                 |
 | A non-object options is accepted                                            | 3                 |
-| A still-watched hash is sent again                                          | 3                 |
 | A zero amount is paid                                                       | 3                 |
-| The clock is not checked                                                    | 3                 |
-| The hash is never held as being sent                                        | 3                 |
-| A stop() mid-tick lets the remaining steps run                              | 2                 |
-| A pollNow() during a tick is forgotten                                      | 2                 |
+| An entry's id is not checked                                                | 3                 |
+| The submission is not awaited                                               | 3                 |
+| A host cancel that throws breaks the step's settlement                      | 3                 |
+| A null token is sent as `Bearer null`                                       | 3                 |
+| The presets' currencies are swapped                                         | 3                 |
+| A dispatch fault is reported to nobody                                      | 3                 |
+| A fractional clock is accepted                                              | 2                 |
+| A host cancel that throws escapes stop() or pollNow()                       | 2                 |
+| Marking something not watched creates it                                    | 2                 |
+| A still-watched hash is sent again                                          | 2                 |
 | A second start() ticks again                                                | 2                 |
 | A listener that is not a function is accepted                               | 2                 |
-| The host's fetch is ignored for the runtime's                               | 2                 |
 | A stop() does not abandon the run in flight                                 | 2                 |
 | A runtime without clearTimeout is accepted                                  | 2                 |
-| An entry's id is not checked                                                | 2                 |
-| A reused session is announced as signed                                     | 2                 |
-| The submission is not awaited                                               | 2                 |
 | A UDT invoice is paid                                                       | 2                 |
 | A payee-less invoice is paid                                                | 2                 |
 | An abandoned read still finishes                                            | 2                 |
 | An amountless invoice is paid                                               | 2                 |
-| Another payment's answer is taken                                           | 2                 |
-| The LSP's own invoice goes through trampoline                               | 2                 |
+| The LSP key is held by reference                                            | 2                 |
+| The poller reports to nobody                                                | 2                 |
+| intent_charged reads as in flight                                           | 2                 |
 | A stopped tick clears the flag of the fresh one                             | 1                 |
 | A null effect falls back to the runtime's default                           | 1                 |
 | mark() drops an entry's unknown fields                                      | 1                 |
@@ -1364,24 +1408,16 @@ Coverage of the module is 100% on all four metrics, and the assertions were chec
 | A stop() keeps the tick a pollNow() queued                                  | 1                 |
 | pollNow() leaves the interval armed beside the tick it starts               | 1                 |
 | An emitter that throws breaks the loop                                      | 1                 |
-| Watching again resets the status                                            | 1                 |
 | A repeated status is written again                                          | 1                 |
 | A listener that throws breaks delivery                                      | 1                 |
 | An event reaches a listener subscribed while it is raised                   | 1                 |
-| The LSP key is held by reference                                            | 1                 |
-| The poller reports to nobody                                                | 1                 |
 | The clock defaults to a frozen one                                          | 1                 |
 | The rpc client gets another url                                             | 1                 |
 | The master seed is not checked                                              | 1                 |
 | A host timer that throws rejects a promise nobody awaits                    | 1                 |
 | A run past its deadline is not abandoned                                    | 1                 |
-| A host cancel that throws breaks the step's settlement                      | 1                 |
 | A run settling late clears the one in flight, which stop() then misses      | 1                 |
-| A null token is sent as `Bearer null`                                       | 1                 |
-| A development chain's code hash is held by reference                        | 1                 |
-| The presets' currencies are swapped                                         | 1                 |
 | A development chain may state no cell deps                                  | 1                 |
-| A dispatch fault is reported to nobody                                      | 1                 |
 | A status for another channel is not checked                                 | 1                 |
 | A status for another channel is refused and still signed                    | 1                 |
 | An abandoned run still reaches the dispatch                                 | 1                 |
@@ -1390,7 +1426,6 @@ Coverage of the module is 100% on all four metrics, and the assertions were chec
 | A payment in progress is sent again                                         | 1                 |
 | A storage failure of the intent is a refusal                                | 1                 |
 | An abandoned run still closes                                               | 1                 |
-| intent_charged reads as in flight                                           | 1                 |
 | intent_open drops the watch too                                             | 1                 |
 
 The `TimerSlot` the poller holds lives in `common` (`src/common/timer-slot.ts`), at 100% on all four metrics, and was swept
@@ -1456,64 +1491,50 @@ The rows of the facade, the network, the runtime timer, the listener set and the
 signer session and its socket left the facade, with the rows only the session exercised gone; the allocator's and the
 activity's, whose code and specs that change did not touch, keep their counts.
 
-The watchtower step, `buildWatchtowerSigningStep` with `WATCHTOWER_UNWATCHED_CLOSE_FLAGS` and the mark of the spend fiber
-applied, its wiring and the `watchtower` option in the facade, `encodeSdkRequestId`, and the run-guarded helpers both steps
+The watchtower step, `buildWatchtowerSigningStep` with the mark of the spend fiber applied, its wiring and the `watchtower` option in the facade, `encodeSdkRequestId`, and the run-guarded helpers both steps
 share (`utils/poll-step.utils.ts`), were broken the same way (`test/tests/sdk`, its flow spec included, still 100% on all
 four metrics). A helper's row counts the failures of both steps' specs and its own, and stands for the signing step's copy
 it replaced; the four rows on `answerEachPolled` carry the count of the hold invoices'
 sweep below, the invoice step's specs included:
 
-| Mutation                                                             | Tests that failed |
-| -------------------------------------------------------------------- | ----------------- |
-| The request id is written without its prefix                         | 91                |
-| The listing leaves the closed channels out                           | 70                |
-| A channel's failure fails the step                                   | 56                |
-| The signed event is a channel SIGNING event                          | 36                |
-| The signed event carries no purpose                                  | 35                |
-| The spend is not marked applied                                      | 27                |
-| Every closed channel is skipped                                      | 21                |
-| A channel's failure ends the step                                    | 16                |
-| A channel's failure names neither the poll nor the channel           | 15                |
-| A refusal is not announced                                           | 13                |
-| The watchtower step is not wired                                     | 13                |
-| The watchtower step runs first                                       | 13                |
-| A refusal's event names no purpose                                   | 10                |
-| A channel's failure names the signing poll whichever step failed     | 9                 |
-| A listed channel's failure names its listing, not its id             | 9                 |
-| The watchtower step's failures name the signing poll                 | 8                 |
-| A step's event is emitted after abandonment                          | 7                 |
-| The signing step's failures name the watchtower poll                 | 7                 |
-| The spend is marked before the submission                            | 7                 |
-| A channel's failure is reported after abandonment                    | 6                 |
-| Any failed read of an open channel is nothing pending                | 5                 |
-| The channels are answered on after abandonment                       | 5                 |
-| A refusal's event names no request                                   | 4                 |
-| An unwatched channel is polled                                       | 4                 |
-| A failed submission is still announced as signed                     | 3                 |
-| A misanswered status is refused as a policy refusal                  | 3                 |
-| A misanswered status names neither channel                           | 3                 |
-| A signature signed unclaimed is marked too                           | 3                 |
-| An unregistered channel's status is read                             | 3                 |
-| An unwatched channel's status is read on                             | 3                 |
-| Fiber's unwatched answer is a poll failure                           | 3                 |
-| Fiber's unwatched code is nothing pending under any message          | 3                 |
-| The event is emitted before the mark                                 | 3                 |
-| The watchtower approval is not handed to the policy                  | 3                 |
-| A cooperative close is polled                                        | 2                 |
-| A failed mark is swallowed                                           | 2                 |
-| The request id's length is not checked                               | 2                 |
-| A channel is skipped only when all its flags are                     | 1                 |
-| A fault is not reported                                              | 1                 |
-| A refusal's event carries another code                               | 1                 |
-| A signature is submitted after abandonment                           | 1                 |
-| A skipped flag skips a channel in any state                          | 1                 |
-| A status read after abandonment is still signed                      | 1                 |
-| An abandoned channel is polled                                       | 1                 |
-| An aborted funding is polled                                         | 1                 |
-| Another channel's status is handed to the dispatch                   | 1                 |
-| Fiber's unwatched answer is nothing pending for a closed channel too | 1                 |
-| Fiber's unwatched message is nothing pending under any code          | 1                 |
-| The mark is skipped once the run is abandoned                        | 1                 |
+| Mutation                                                         | Tests that failed |
+| ---------------------------------------------------------------- | ----------------- |
+| The request id is written without its prefix                     | 95                |
+| A channel's failure fails the step                               | 79                |
+| A channel's failure names neither the poll nor the channel       | 60                |
+| A channel's failure names the signing poll whichever step failed | 54                |
+| The signed event is a channel SIGNING event                      | 35                |
+| The signed event carries no purpose                              | 33                |
+| The watchtower step runs first                                   | 32                |
+| The spend is not marked applied                                  | 31                |
+| The watchtower step is not wired                                 | 30                |
+| A channel's failure ends the step                                | 18                |
+| A refusal is not announced                                       | 14                |
+| The watchtower step's failures name the signing poll             | 14                |
+| A refusal's event names no purpose                               | 10                |
+| A step's event is emitted after abandonment                      | 10                |
+| The spend is marked before the submission                        | 8                 |
+| The channels are answered on after abandonment                   | 8                 |
+| The signing step's failures name the watchtower poll             | 7                 |
+| A channel's failure is reported after abandonment                | 6                 |
+| A failed submission is still announced as signed                 | 6                 |
+| A refusal's event names no request                               | 4                 |
+| Fiber's unwatched code is nothing pending under any message      | 4                 |
+| A misanswered status is refused as a policy refusal              | 3                 |
+| A misanswered status names neither channel                       | 3                 |
+| A signature signed unclaimed is marked too                       | 3                 |
+| An unregistered channel's status is read                         | 3                 |
+| The event is emitted before the mark                             | 3                 |
+| The watchtower approval is not handed to the policy              | 3                 |
+| A failed mark is swallowed                                       | 2                 |
+| The request id's length is not checked                           | 2                 |
+| Fiber's unwatched message is nothing pending under any code      | 2                 |
+| A fault is not reported                                          | 1                 |
+| A refusal's event carries another code                           | 1                 |
+| A signature is submitted after abandonment                       | 1                 |
+| A status read after abandonment is still signed                  | 1                 |
+| Another channel's status is handed to the dispatch               | 1                 |
+| The mark is skipped once the run is abandoned                    | 1                 |
 
 `fiber-lsp-sdk.spec.ts` pins the tenant's surface as well. The presets take the release epoch of 4 hours and a
 development chain its own, under which the deadline reported changes; the context keeps the store the engine writes and
@@ -1581,16 +1602,19 @@ The tenant's surface (the registration, the token, the evidence, the network's e
 `channel-opening.spec.ts` pins the three operations over a scripted node, an in-memory storage and the real policy and
 dispatch. The preparation: the request with the device's material, the user's lock as both scripts and fiber's default
 delay and fee rate, and an answer at another delay or fee rate refused with nothing registered; the node's id, tx and
-context handed back; the opening recorded under a fresh index before the node is asked, then named, registered, pinned
-and watched before the tx is handed out, and the channel served by the signing step from then on and not before. The
+context handed back; the opening recorded under a fresh index before the node is asked, then named, registered, pinned,
+watched and listed as the device's, in that order, before the tx is handed out, and the channel served by the signing
+step from then on and not before; a watchtower tick started at each of 41 microtask offsets into the pin's last writes
+leaves the channel listed. The
 pending opening: resumed under its index with the identical request after a lost answer, an answer the client cannot
 read and fiber's interruption; kept through fiber's refusals (an opening stopped, a different opening, a channel already
 there, a channel already open); a named one resumed while the node lists it opening, lists nothing pending or another
 channel aborted, and dropped once its own is aborted, opening under a fresh index, dropped even when no fresh index can
 be allocated, and leaving an opening another call wrote; another amount or lock opening under a fresh index without a listing; kept
 when the pending channels cannot be listed; dropped on a failed check, pinning nothing; kept, named, when pinning fails
-short of a conflict, the same call then pinning the rest; and one that failed past its pins dropped once aborted and
-reopened without a conflict. The cell deps sent as fiber writes them and recorded, resumed with the same, and sent from
+short of a conflict, nothing listed until the same call pins the rest and lists the channel once; kept, named and
+watched, when the channel cannot be listed, the same call then listing it once; and one that failed past its pins
+dropped once aborted and reopened without a conflict. The cell deps sent as fiber writes them and recorded, resumed with the same, and sent from
 the one-call opening too; the caller's lock and cell deps copied. Each conflict (other terms, another funding cell, a
 channel registered under another index, a resumed index holding another amount or serving another channel) is
 `opening_conflict` with the policy's refusal as cause; a drop the store refuses keeps `opening_rejected` and
@@ -2202,3 +2226,41 @@ The close reads both pinned close scripts back through `common`'s `decodeMolecul
 | The script decoder names the code hash in snake case      | 1                 |
 | The script decoder takes any input                        | 1                 |
 | The script decoder's refusal is not named after the input | 1                 |
+
+The device's list of its channels, `DeviceChannelList` with its record and its guard, the opening that watches a channel
+and then adds it, the watchtower step that polls the list, and the signing step that polls the activity list's channels,
+both rather than a listing of the node's channels, were broken the same way (`test/tests/sdk`, its flow specs included,
+still 100% on all four metrics). `device-channels.spec.ts` pins the record:
+read empty when never written, in the order added, unknown fields tolerated, and one refusal per field (no version,
+another one or a string, no ids, ids that are not a list, an id that is not a string, without `0x`, uppercase, a byte
+short or long, an id twice, an array, `null`, not JSON); an add appended, once under a race and once on a repeat writing
+nothing, and refused for an id off fiber's form or a corrupt record; a removal keeping the others in order, leaving an
+empty list, writing nothing for an id not listed or a list never written, and refused the same way. The flows add that
+an idle device calls the node for nothing, that a cooperative close leaves the device silent once the watchtower step
+drops the channel, and that a force-closed channel is polled by the watchtower step alone:
+
+| Mutation                                                                          | Tests that failed |
+| --------------------------------------------------------------------------------- | ----------------- |
+| The signing step polls no channel the activity watches                            | 167               |
+| A list never written reads as no list                                             | 66                |
+| The opening never lists the channel as the device's                               | 64                |
+| An open channel with no watch row yet is dropped                                  | 33                |
+| Every listed channel is taken for closed                                          | 33                |
+| The watchtower step polls the activity's channels instead of the device's list    | 30                |
+| Fiber's missing watch row is a failure, not an absence                            | 17                |
+| A new channel replaces the list instead of joining it                             | 14                |
+| A removal drops nothing                                                           | 13                |
+| The signing step polls every channel the device ever opened, closed ones included | 6                 |
+| A record with an id not in fiber's form is read                                   | 5                 |
+| A channel already listed is listed again                                          | 4                 |
+| A closed channel fiber stopped watching is never dropped                          | 4                 |
+| A record of another version is read                                               | 4                 |
+| An id not in fiber's form is added                                                | 4                 |
+| Every listed channel is taken for open                                            | 4                 |
+| A record listing a channel twice is read                                          | 3                 |
+| The opening lists the channel before it watches it                                | 3                 |
+| A removal drops every channel                                                     | 2                 |
+| A drop is written although the run was abandoned                                  | 1                 |
+| A removal of a channel not listed still writes                                    | 1                 |
+| An id not in fiber's form is removed                                              | 1                 |
+| The watchtower step reads the activity before the device's list                   | 1                 |

@@ -25,12 +25,14 @@ import type {
 import type { HoldInvoicePreimages, SignerDispatch, SignerRefusal, TenantIdentity } from "../signer";
 import type { ActivityTracker } from "./activity";
 import type { IndexAllocator } from "./allocator";
+import type { DeviceChannelList } from "./device-channels";
 import type { PendingOpeningStore } from "./pending-opening";
 import type { ActivityPoller } from "./poller";
 import type {
     ACTIVITY_KINDS,
     ACTIVITY_RECORD_VERSION,
     ALLOCATION_KINDS,
+    DEVICE_CHANNELS_RECORD_VERSION,
     PENDING_OPENING_RECORD_VERSION,
     SDK_CHANNEL_STATES,
     SDK_ERROR_CODES,
@@ -205,6 +207,14 @@ export type PendingOpeningRecord = {
     opening: PendingOpening | null;
 };
 
+export type DeviceChannelsRecord = {
+    version: typeof DEVICE_CHANNELS_RECORD_VERSION;
+    /**
+     * In the order they were opened, each once, `0x`-prefixed lowercase as fiber names them.
+     */
+    channelIds: string[];
+};
+
 export type SdkChannelState = (typeof SDK_CHANNEL_STATES)[number];
 
 export type SdkChannelInfo = {
@@ -347,6 +357,7 @@ export type SdkContext = {
     dispatch: SignerDispatch;
     allocator: IndexAllocator;
     activity: ActivityTracker;
+    channels: DeviceChannelList;
     openings: PendingOpeningStore;
     poller: ActivityPoller;
     /**

@@ -86,19 +86,16 @@ const SOURCE_REFUSAL =
     "watchtower source: input 0, spent with a since, must be the cell of the last local or remote commitment signed, or of the " +
     "remote one before it, and the settlement body is none of theirs";
 
-const SIGNED_TICK = [
-    "list_channels",
-    "get_channel_signing_status",
-    "submit_channel_signature",
-    "list_channels",
-    "get_watchtower_signing_status",
-];
-// Force closed, the channel is listed only to the watchtower step, which asks for closed ones.
-const SPENT_TICK = ["list_channels", "list_channels", "get_watchtower_signing_status", "submit_watchtower_signature"];
-const UNSPENT_TICK = ["list_channels", "list_channels", "get_watchtower_signing_status"];
+// The channel step lists while the channel is open; the two signing steps read their status alone.
+const SIGNED_TICK = ["list_channels", "get_channel_signing_status", "submit_channel_signature", "get_watchtower_signing_status"];
+// The first tick past a force close: the channel step sees it closed and forgets it, the signing step polls it no more.
+const CLOSING_TICK = ["list_channels", "get_watchtower_signing_status", "submit_watchtower_signature"];
+// Then only the watchtower step polls it: no call fiber would wake an evicted tenant for.
+const SPENT_TICK = ["get_watchtower_signing_status", "submit_watchtower_signature"];
+const UNSPENT_TICK = ["get_watchtower_signing_status"];
 
 function device(node: InMemoryTenantNode, policy: PolicyEngineOptions, storage: InMemorySignerStorage): TenantDevice {
-    return tenantDevice(node, { policy, watchtower: true, storage });
+    return tenantDevice(node, { policy, watchtower: true, channelStep: true, storage });
 }
 
 function flow(policy: PolicyEngineOptions): TenantFlow {
@@ -193,8 +190,9 @@ async function expectRefused(h: TenantFlow, spend: string, refusal: string): Pro
     const sent = h.node.calls.length;
     h.device.storage.ops.length = 0;
     await tick(h.device, 2);
-    expect(writes(h.device.storage)).toEqual([]);
-    expect(methods(h, sent)).toEqual(ticks(UNSPENT_TICK, 2));
+    // The channel step forgets the closed channel; the refusals write nothing.
+    expect(writes(h.device.storage)).toEqual(["fiber-lsp-sdk:activity"]);
+    expect(methods(h, sent)).toEqual(["list_channels", ...ticks(UNSPENT_TICK, 2)]);
     expect(spends(h)).toEqual([`${spend} unanswered`]);
     const purpose = spend.split(" ")[0];
     expect(watchtowerSignings(h.device)).toEqual([`${purpose} ${refusal}`, `${purpose} ${refusal}`]);
@@ -207,7 +205,7 @@ describe("the watchtower step over the tenant node", () => {
         const h = await inFlight(APPROVED);
         expect(methods(h)).toEqual(ticks(SIGNED_TICK, 10));
         expect(h.node.calls.filter((call) => call.method === "list_channels").map((call) => call.params)).toEqual(
-            ticks([{}, { include_closed: true }], 10),
+            ticks([{ include_closed: true }], 10),
         );
         expect(watchtowerSignings(h.device)).toEqual([]);
         expect(h.node.watchtowerServed).toEqual([]);
@@ -220,7 +218,7 @@ describe("the watchtower step over the tenant node", () => {
             const sent = h.node.calls.length;
             h.node.forceClose("local", FORCE_CLOSE);
             await tick(h.device, 4);
-            expect(methods(h, sent)).toEqual([...ticks(SPENT_TICK, 3), ...UNSPENT_TICK]);
+            expect(methods(h, sent)).toEqual([...CLOSING_TICK, ...ticks(SPENT_TICK, 2), ...UNSPENT_TICK]);
             expect(spends(h)).toEqual([
                 "Tlc@3 outbound TLC by timeout Applied",
                 "Tlc@2 inbound TLC by preimage Applied",
@@ -241,7 +239,7 @@ describe("the watchtower step over the tenant node", () => {
             const sent = h.node.calls.length;
             h.node.forceClose("remote", FORCE_CLOSE);
             await tick(h.device, 4);
-            expect(methods(h, sent)).toEqual([...ticks(SPENT_TICK, 3), ...UNSPENT_TICK]);
+            expect(methods(h, sent)).toEqual([...CLOSING_TICK, ...ticks(SPENT_TICK, 2), ...UNSPENT_TICK]);
             expect(spends(h)).toEqual([
                 "Tlc@2 inbound TLC by preimage Applied",
                 "Tlc@3 outbound TLC by timeout Applied",
@@ -263,7 +261,7 @@ describe("the watchtower step over the tenant node", () => {
             const sent = h.node.calls.length;
             h.node.forceClose("remote", { ...FORCE_CLOSE, fundingCellDeps: OTHER_FUNDING_CELL_DEPS });
             await tick(h.device, 4);
-            expect(methods(h, sent)).toEqual([...ticks(SPENT_TICK, 3), ...UNSPENT_TICK]);
+            expect(methods(h, sent)).toEqual([...CLOSING_TICK, ...ticks(SPENT_TICK, 2), ...UNSPENT_TICK]);
             expect(spends(h)).toEqual([
                 "Tlc@2 inbound TLC by preimage Applied",
                 "Tlc@3 outbound TLC by timeout Applied",
@@ -281,7 +279,7 @@ describe("the watchtower step over the tenant node", () => {
             expect(spends(h)).toEqual(["Tlc@2 inbound TLC by preimage Applied"]);
             h.node.passTime(FORCE_CLOSE.medianTimeMs);
             await tick(h.device, 3);
-            expect(methods(h, sent)).toEqual([...SPENT_TICK, ...UNSPENT_TICK, ...ticks(SPENT_TICK, 2), ...UNSPENT_TICK]);
+            expect(methods(h, sent)).toEqual([...CLOSING_TICK, ...UNSPENT_TICK, ...ticks(SPENT_TICK, 2), ...UNSPENT_TICK]);
             expect(spends(h)).toEqual([
                 "Tlc@2 inbound TLC by preimage Applied",
                 "Tlc@3 outbound TLC by timeout Applied",
@@ -298,7 +296,7 @@ describe("the watchtower step over the tenant node", () => {
             await tick(h.device, 2);
             h.node.passTime(PEER_FIRST_MEDIAN_TIME_MS);
             await tick(h.device, 2);
-            expect(methods(h, sent)).toEqual([...SPENT_TICK, ...UNSPENT_TICK, ...SPENT_TICK, ...UNSPENT_TICK]);
+            expect(methods(h, sent)).toEqual([...CLOSING_TICK, ...UNSPENT_TICK, ...SPENT_TICK, ...UNSPENT_TICK]);
             expect(spends(h)).toEqual(["Tlc@3 outbound TLC by timeout Applied", "Settlement settlement Applied"]);
             expect(chain(h)).toEqual(["node local commitment", "node outbound TLC by timeout", "node settlement"]);
             expect((await recordOf(h.device)).watchtowerSpends).toEqual(appliedSpendsOf(h, "local"));
@@ -312,7 +310,7 @@ describe("the watchtower step over the tenant node", () => {
             await tick(h.device);
             h.node.peerSpend();
             await tick(h.device, 2);
-            expect(methods(h, sent)).toEqual([...ticks(SPENT_TICK, 2), ...UNSPENT_TICK]);
+            expect(methods(h, sent)).toEqual([...CLOSING_TICK, ...SPENT_TICK, ...UNSPENT_TICK]);
             expect(spends(h)).toEqual(["Tlc@3 outbound TLC by timeout Applied", "Settlement settlement as the last party Applied"]);
             expect(chain(h)).toEqual([
                 "node local commitment",
@@ -342,7 +340,7 @@ describe("the watchtower step over the tenant node", () => {
         const sent = h.node.calls.length;
         h.node.forceClose("remote", { ...FORCE_CLOSE, commitmentsBack: 1 });
         await tick(h.device, 3);
-        expect(methods(h, sent)).toEqual([...ticks(SPENT_TICK, 2), ...UNSPENT_TICK]);
+        expect(methods(h, sent)).toEqual([...CLOSING_TICK, ...SPENT_TICK, ...UNSPENT_TICK]);
         expect(spends(h)).toEqual(["Tlc@2 inbound TLC by preimage Applied", "Settlement settlement Applied"]);
         expect(h.node.watchtowerServed.map(({ commitmentNumber }) => commitmentNumber)).toEqual([2, 2]);
         expect(chain(h)).toEqual(["peer remote commitment", "node inbound TLC by preimage", "node settlement"]);
@@ -356,7 +354,7 @@ describe("the watchtower step over the tenant node", () => {
         const sent = h.node.calls.length;
         h.node.forceClose("remote", FORCE_CLOSE);
         await tick(h.device, 2);
-        expect(methods(h, sent)).toEqual([...SPENT_TICK, ...UNSPENT_TICK]);
+        expect(methods(h, sent)).toEqual([...CLOSING_TICK, ...UNSPENT_TICK]);
         expect(spends(h)).toEqual(["Settlement settlement Applied"]);
         expect(chain(h)).toEqual(["peer remote commitment", "node settlement"]);
         expect((await recordOf(h.device)).watchtowerSpends).toEqual(appliedSpendsOf(h, "remote"));
@@ -368,7 +366,7 @@ describe("the watchtower step over the tenant node", () => {
         await negotiateChannel(h);
         await start(h.device);
         await tick(h.device);
-        const opening = ["list_channels", "get_channel_signing_status", "list_channels", "get_watchtower_signing_status"];
+        const opening = ["list_channels", "get_channel_signing_status", "get_watchtower_signing_status"];
         expect(methods(h)).toEqual(ticks(opening, 2));
         expect(h.device.events).toEqual([]);
         h.node.completeTxCollaboration("CompleteReceivedCommitment");
@@ -376,25 +374,26 @@ describe("the watchtower step over the tenant node", () => {
         const sent = h.node.calls.length;
         h.node.forceClose("remote", FORCE_CLOSE);
         await tick(h.device, 2);
-        expect(methods(h, sent)).toEqual([...SPENT_TICK, ...UNSPENT_TICK]);
+        expect(methods(h, sent)).toEqual([...CLOSING_TICK, ...UNSPENT_TICK]);
         expect(spends(h)).toEqual(["Settlement settlement Applied"]);
         expect(watchtowerSignings(h.device)).toEqual(["Settlement signed"]);
         expect((await recordOf(h.device)).watchtowerSpends).toEqual(appliedSpendsOf(h, "remote"));
     });
 
-    it("stops polling the watchtower of a channel closed cooperatively, which the node no longer watches", async () => {
+    // Fiber deletes the watch row of a channel closed cooperatively and never creates one after (`event_handler.rs:68-78`).
+    it("drops a channel closed cooperatively once the node no longer watches it, and then calls the node for nothing", async () => {
         const h = flow(APPROVED);
         await open(h);
         const sent = h.node.calls.length;
         h.node.shutdown();
-        await tick(h.device, 2);
+        await tick(h.device, 3);
         expect(methods(h, sent)).toEqual([
             "list_channels",
             "get_channel_signing_status",
             "submit_channel_signature",
+            "get_watchtower_signing_status",
             "list_channels",
-            "list_channels",
-            "list_channels",
+            "get_watchtower_signing_status",
         ]);
         expect(
             await post(h.node, { jsonrpc: "2.0", id: 6, method: "get_watchtower_signing_status", params: [{ channel_id: CHANNEL_ID }] }),
@@ -403,7 +402,19 @@ describe("the watchtower step over the tenant node", () => {
             id: 6,
             error: { code: -32000, message: "watched channel not found" },
         });
-        expect(watchtowerSignings(h.device)).toEqual([]);
+        expect(await h.device.channels.read()).toEqual([]);
+        expect(h.device.events.map((event) => event.type)).toEqual(["CHANNEL_READY", "SIGNING", "SIGNING", "SIGNING", "CHANNEL_CLOSED"]);
+        const idle = h.node.calls.length;
+        await tick(h.device, 2);
+        expect(methods(h, idle)).toEqual([]);
+    });
+
+    it("calls the node for nothing while it opened no channel: fiber would wake an evicted tenant for a listing", async () => {
+        const h = flow(APPROVED);
+        await start(h.device);
+        await tick(h.device, 3);
+        expect(h.node.calls).toEqual([]);
+        expect(h.device.events).toEqual([]);
     });
 
     it("refuses every spend while the host approved no destination, signing nothing, and the node keeps the first waiting", async () => {
@@ -431,8 +442,9 @@ describe("the watchtower step over the tenant node", () => {
         expect(writes(restarted.storage)).toEqual([`${CHANNEL_RECORD_KEY_PREFIX}${CHANNEL_INDEX}`]);
         await tick(restarted, 3);
         const calls = node.calls;
+        // The crashed device's tick saw the close: the restarted one polls the watchtower alone.
         expect(methods(h, parked + 1)).toEqual([...ticks(SPENT_TICK, 3), ...UNSPENT_TICK]);
-        expect(calls[parked + 4]?.params).toEqual(calls[parked]?.params);
+        expect(calls[parked + 2]?.params).toEqual(calls[parked]?.params);
         expect(spends(h)).toEqual([
             "Tlc@3 outbound TLC by timeout Applied+AlreadyApplied",
             "Tlc@2 inbound TLC by preimage Applied",
@@ -469,7 +481,7 @@ describe("the watchtower step over the tenant node", () => {
             const [first, rebuilt] = h.node.watchtowerServed;
             if (first === undefined || rebuilt === undefined) throw new Error("the node rebuilt no spend");
             expect(rebuilt.requestId < first.requestId).toBe(true);
-            expect(methods(h, sent)).toEqual([...ticks(SPENT_TICK, 2), ...UNSPENT_TICK]);
+            expect(methods(h, sent)).toEqual([...CLOSING_TICK, ...SPENT_TICK, ...UNSPENT_TICK]);
             expect(submissionsOf(h)).toEqual([
                 { channel_id: CHANNEL_ID, request_id: rebuilt.requestId, signature: `0x${rebuilt.signature ?? ""}` },
                 { channel_id: CHANNEL_ID, request_id: first.requestId, signature: `0x${first.signature ?? ""}` },
@@ -490,7 +502,7 @@ describe("the watchtower step over the tenant node", () => {
             const [first, rebuilt] = h.node.watchtowerServed;
             if (first === undefined || rebuilt === undefined) throw new Error("the node rebuilt no spend");
             expect(first.requestId < rebuilt.requestId).toBe(true);
-            expect(methods(h, sent)).toEqual([...ticks(SPENT_TICK, 2), ...UNSPENT_TICK]);
+            expect(methods(h, sent)).toEqual([...CLOSING_TICK, ...SPENT_TICK, ...UNSPENT_TICK]);
             expect(submissionsOf(h)).toEqual([
                 { channel_id: CHANNEL_ID, request_id: first.requestId, signature: `0x${first.signature ?? ""}` },
                 { channel_id: CHANNEL_ID, request_id: rebuilt.requestId, signature: `0x${rebuilt.signature ?? ""}` },

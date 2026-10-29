@@ -8,8 +8,6 @@ export function resultField(value: unknown): WireField {
     return { value, path: RPC_RESULT_PATH };
 }
 
-export const LIST_CHANNELS_CALL: SentCall = { method: "list_channels", params: {} };
-
 export const LIST_CHANNELS_WITH_CLOSED_CALL: SentCall = { method: "list_channels", params: { include_closed: true } };
 
 export function signingStatusCall(channelId: string): SentCall {

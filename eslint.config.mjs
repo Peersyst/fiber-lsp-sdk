@@ -55,7 +55,7 @@ const NODE_BUILTINS = [
     "worker_threads",
 ];
 
-// Every function in src/ carries the same JSDoc.
+// Every function in src/ and e2e/agent/src/ carries the same JSDoc.
 const DOCUMENTED_FUNCTIONS = [
     "VariableDeclarator > ArrowFunctionExpression",
     "MethodDefinition[kind=method]",
@@ -67,14 +67,14 @@ const DOCUMENTED_FUNCTIONS = [
 const ONE_LINE_SUMMARY = "^[A-Z`\\{][^\\n]*\\.$";
 
 export default tseslint.config(
-    { ignores: ["dist", "coverage", "node_modules"] },
+    { ignores: ["**/dist", "coverage", "**/node_modules"] },
     js.configs.recommended,
     ...tseslint.configs.recommended,
     jsdoc.configs["flat/recommended-typescript-error"],
     prettier,
     {
         rules: {
-            // Re-enabled for src below. Test helpers and internal functions carry no JSDoc.
+            // Re-enabled for src and e2e/agent/src below. Test helpers and internal functions carry no JSDoc.
             "jsdoc/require-jsdoc": "off",
             "jsdoc/require-description": "error",
             "jsdoc/require-param": ["error", { checkDestructured: false }],
@@ -93,7 +93,7 @@ export default tseslint.config(
         },
     },
     {
-        files: ["src/**/*.ts"],
+        files: ["src/**/*.ts", "e2e/agent/src/**/*.ts"],
         rules: {
             "jsdoc/require-jsdoc": ["error", { require: { FunctionDeclaration: true }, contexts: DOCUMENTED_FUNCTIONS }],
         },
@@ -113,7 +113,8 @@ export default tseslint.config(
         },
     },
     {
-        files: ["test/**/*.ts"],
+        // e2e/ runs under Node too.
+        files: ["test/**/*.ts", "e2e/**/*.ts"],
         rules: {
             "no-restricted-imports": ["error", { patterns: RELATIVE_IMPORT_PATTERNS }],
         },

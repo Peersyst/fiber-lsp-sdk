@@ -23,7 +23,7 @@ import { checkTenantOpening, describeSdkFailure } from "./utils";
 
 export type SdkChannelOpeningOptions = Pick<
     SdkContext,
-    "network" | "lspPubkey" | "store" | "rpc" | "policy" | "dispatch" | "allocator" | "activity" | "openings"
+    "network" | "lspPubkey" | "store" | "rpc" | "policy" | "dispatch" | "allocator" | "activity" | "channels" | "openings"
 >;
 
 export type SdkFundingSubmissionOptions = Pick<SdkContext, "store" | "rpc" | "policy">;
@@ -219,7 +219,7 @@ async function pinOpening(
     answer: OpenTenantChannelResult,
     pins: SdkOpeningPins,
 ): Promise<void> {
-    const { policy, activity } = options;
+    const { policy, activity, channels } = options;
     const { channelId } = answer;
     try {
         await policy.registerChannel(channelId, opening.channelIndex, opening.fundedShannons, userLock);
@@ -233,7 +233,9 @@ async function pinOpening(
         }
         throw error;
     }
+    // Watched before listed: the watchtower step drops a listed, unwatched channel fiber holds no row for.
     await activity.watch("channel", channelId);
+    await channels.add(channelId);
 }
 
 /**

@@ -1,6 +1,5 @@
 import { COMMITMENT_LOCK_MAINNET, COMMITMENT_LOCK_TESTNET, FUNDING_LOCK_MAINNET, FUNDING_LOCK_TESTNET } from "../digest";
 import { STORAGE_KEY_NAMESPACE } from "../policy";
-import type { RpcChannelStateFlag } from "../rpc";
 import { RPC_CALL_FAILED_CODE, RPC_PAYMENT_STATUSES } from "../rpc";
 import type { SdkNetworkConfig, SdkNetworkName } from "./sdk.types";
 
@@ -63,6 +62,13 @@ export const PENDING_OPENING_RECORD_KEY = `${STORAGE_KEY_NAMESPACE}:opening`;
 export const PENDING_OPENING_RECORD_VERSION = 1;
 
 /**
+ * The channels the device opened, kept past their close while fiber's watchtower may still ask for a spend of them.
+ */
+export const DEVICE_CHANNELS_RECORD_KEY = `${STORAGE_KEY_NAMESPACE}:device-channels`;
+
+export const DEVICE_CHANNELS_RECORD_VERSION = 1;
+
+/**
  * `stale` is fiber's channel restored from an old database, audited with the peer before it resumes.
  */
 export const SDK_CHANNEL_STATES = ["opening", "ready", "closing", "closed", "stale"] as const;
@@ -81,16 +87,9 @@ export const SDK_EVENT_TYPES = [
 ] as const;
 
 /**
- * Fiber deletes the watch row on a cooperative close and on a failed opening, which may hold one since TxComplete: others are polled.
- */
-export const WATCHTOWER_UNWATCHED_CLOSE_FLAGS = [
-    "COOPERATIVE",
-    "ABANDONED",
-    "FUNDING_ABORTED",
-] as const satisfies readonly RpcChannelStateFlag<"Closed">[];
-
-/**
- * Fiber's answer while no watch row exists, which `RemoteTxComplete` creates (`rpc/watchtower.rs:386-391`, `event_handler.rs:41-67`).
+ * Fiber's answer while no watch row exists: `RemoteTxComplete` creates it, a tenant channel's ready or online event restores
+ * it (`lsp/watch.rs:15-71`), neither of which a closed channel emits, and a cooperative close or a failed opening deletes it
+ * (`rpc/watchtower.rs:386-391`, `event_handler.rs:41-78`, `fiber/network.rs:8338-8345`).
  */
 export const WATCHTOWER_UNWATCHED_ERROR = { code: RPC_CALL_FAILED_CODE, message: "watched channel not found" } as const;
 

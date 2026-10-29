@@ -65,14 +65,8 @@ const LISTED: SdkChannelInfo = {
     hasRecord: true,
 };
 
-const SIGNED_TICK = [
-    "list_channels",
-    "list_channels",
-    "get_channel_signing_status",
-    "submit_channel_signature",
-    "list_channels",
-    "get_watchtower_signing_status",
-];
+// The channel step's listing, then each signing step's status of the channel, read alone.
+const SIGNED_TICK = ["list_channels", "get_channel_signing_status", "submit_channel_signature", "get_watchtower_signing_status"];
 
 // The device's round that adds the TLC, then the peer's fulfil, one request answered per tick; the fulfil's commitment_signed is
 // Commitment@3's third session, past fiber's nonce stall through the bypass.
@@ -104,7 +98,7 @@ const FULFIL_SIGNINGS = [
     "SIGNING CompleteReceivedRevokeAndAck warning",
 ];
 
-const IDLE_TICK = ["list_channels", "list_channels", "get_channel_signing_status", "list_channels", "get_watchtower_signing_status"];
+const IDLE_TICK = ["list_channels", "get_channel_signing_status", "get_watchtower_signing_status"];
 
 // Fiber reads its own clock, which may run ahead of the device's.
 type Clock = { deviceMs: number; nodeMs: number };

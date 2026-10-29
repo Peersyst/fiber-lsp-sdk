@@ -1,8 +1,10 @@
 import type { PolicyEngine, SignerStore } from "../policy";
-import type { FiberRpcClient, RpcListedChannelState, RpcSigningStatusResult } from "../rpc";
+import type { FiberRpcClient, RpcSigningStatusResult } from "../rpc";
 import type { SignerDispatch, WatchtowerDispatchOutcome } from "../signer";
+import type { ActivityTracker } from "./activity";
+import type { DeviceChannelList } from "./device-channels";
 import type { PollRun, PollStep } from "./poller";
-import { WATCHTOWER_UNWATCHED_CLOSE_FLAGS, WATCHTOWER_UNWATCHED_ERROR } from "./sdk.constants";
+import { WATCHTOWER_UNWATCHED_ERROR } from "./sdk.constants";
 import type { SdkEvent } from "./sdk.types";
 import {
     answerEachPolled,
@@ -18,6 +20,8 @@ export type WatchtowerSigningStepOptions = {
     store: SignerStore;
     policy: PolicyEngine;
     dispatch: SignerDispatch;
+    activity: ActivityTracker;
+    channels: DeviceChannelList;
     emit: (event: SdkEvent) => void;
 };
 
@@ -26,37 +30,27 @@ type SignedWatchtowerOutcome = Extract<WatchtowerDispatchOutcome, { kind: "signe
 const POLL = "watchtower signing";
 
 /**
- * Tells whether fiber's watchtower no longer watches a channel, or never did.
- * @param channel The channel as the node lists it.
- * @returns Whether the step skips it.
- */
-function isUnwatchedChannel(channel: RpcListedChannelState): boolean {
-    const unwatched: readonly string[] = WATCHTOWER_UNWATCHED_CLOSE_FLAGS;
-    return channel.stateName === "Closed" && channel.stateFlags.some((flag) => unwatched.includes(flag));
-}
-
-/**
- * Reads a channel's watchtower signing status, `null` while an open channel has no watch row yet.
+ * Reads a channel's watchtower signing status, `null` while fiber holds no watch row for it.
  * @param rpc The node's client.
- * @param channel The channel as the node lists it.
+ * @param channelId The channel.
  * @returns The status, or `null`.
  */
-async function readWatchtowerStatus(rpc: FiberRpcClient, channel: RpcListedChannelState): Promise<RpcSigningStatusResult | null> {
+async function readWatchtowerStatus(rpc: FiberRpcClient, channelId: string): Promise<RpcSigningStatusResult | null> {
     try {
-        return await rpc.getWatchtowerSigningStatus({ channelId: channel.channelId });
+        return await rpc.getWatchtowerSigningStatus({ channelId });
     } catch (error) {
-        if (channel.stateName !== "Closed" && isFiberRefusal(error, WATCHTOWER_UNWATCHED_ERROR)) return null;
+        if (isFiberRefusal(error, WATCHTOWER_UNWATCHED_ERROR)) return null;
         throw error;
     }
 }
 
 /**
- * Builds the poll step that answers the watchtower's signing requests of every registered channel it may still watch.
- * @param options The node's client, the store, the policy gate, the dispatch and the emitter.
- * @returns The step; it rejects only when the node's channels cannot be listed.
+ * Builds the poll step that answers the watchtower's signing requests of every channel the device opened, dropping one it is done with.
+ * @param options The node's client, the store, the policy gate, the dispatch, the activity list, the device's channels and the emitter.
+ * @returns The step; it rejects only when the activity list or the device's channels cannot be read.
  */
 export function buildWatchtowerSigningStep(options: WatchtowerSigningStepOptions): PollStep {
-    const { rpc, store, policy, dispatch, emit } = options;
+    const { rpc, store, policy, dispatch, activity, channels, emit } = options;
 
     /**
      * Submits a signature, marks its spend applied, then announces it.
@@ -81,15 +75,19 @@ export function buildWatchtowerSigningStep(options: WatchtowerSigningStepOptions
     };
 
     /**
-     * Answers one channel's watchtower signing status, if it is registered on this device.
+     * Answers one channel's watchtower signing status, if it is registered on this device, or drops a closed one fiber stopped watching.
      * @param run The run.
-     * @param channel The channel, as the node lists it.
+     * @param channelId The channel, as fiber names it.
+     * @param open Whether the device has not seen it closed.
      */
-    const answer = async (run: PollRun, channel: RpcListedChannelState): Promise<void> => {
-        const { channelId } = channel;
+    const answer = async (run: PollRun, channelId: string, open: boolean): Promise<void> => {
         if ((await store.resolveChannelIndex(channelId)) === null) return;
-        const result = await readWatchtowerStatus(rpc, channel);
-        if (result === null) return;
+        const result = await readWatchtowerStatus(rpc, channelId);
+        if (result === null) {
+            // An open channel's row may come yet; a closed one's never comes back once deleted, nor comes at all after.
+            if (!open && !run.abandoned) await channels.remove(channelId);
+            return;
+        }
         if (result.channelId !== channelId) {
             deliverStepEvent(run, emit, {
                 type: "WATCHTOWER_SIGNING",
@@ -120,16 +118,17 @@ export function buildWatchtowerSigningStep(options: WatchtowerSigningStepOptions
     };
 
     return async (run) => {
-        // A force-closed channel is the one the watchtower spends from, and the default listing leaves it out.
-        const channels = await rpc.listChannelStates({ filter: "include_closed" });
-        const watched = channels.filter((channel) => !isUnwatchedChannel(channel));
+        // Never `list_channels`: fiber wakes an evicted tenant for it, and not for a watchtower status (`rpc/watchtower.rs:379-400`).
+        // The list before the activity: an opening is watched before it is listed, so one listed and unwatched was seen closed.
+        const listed = await channels.read();
+        const open = (await activity.read()).channels;
         await answerEachPolled(
             run,
             emit,
             POLL,
-            watched,
-            (channel) => channel.channelId,
-            (channel) => answer(run, channel),
+            listed,
+            (channelId) => channelId,
+            (channelId) => answer(run, channelId, Object.hasOwn(open, channelId)),
         );
     };
 }

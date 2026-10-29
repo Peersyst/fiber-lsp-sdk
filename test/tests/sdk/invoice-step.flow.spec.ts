@@ -60,16 +60,10 @@ const LISTED: SdkChannelInfo = {
     hasRecord: true,
 };
 
-const SIGNED_TICK = [
-    "list_channels",
-    "list_channels",
-    "get_channel_signing_status",
-    "submit_channel_signature",
-    "list_channels",
-    "get_watchtower_signing_status",
-];
+// The channel step's listing, then each signing step's status of the channel, read alone.
+const SIGNED_TICK = ["list_channels", "get_channel_signing_status", "submit_channel_signature", "get_watchtower_signing_status"];
 
-const IDLE_TICK = ["list_channels", "list_channels", "get_channel_signing_status", "list_channels", "get_watchtower_signing_status"];
+const IDLE_TICK = ["list_channels", "get_channel_signing_status", "get_watchtower_signing_status"];
 
 // The peer's round that adds the TLC, then the node's that removes it, one request answered per tick.
 const ADD_ROUND = [
@@ -408,7 +402,8 @@ describe("hold invoices over the tenant node", () => {
         h.clock.nowMs = INVOICE_EXPIRED_MS;
         const from = h.node.calls.length;
         await tick(h, 2);
-        expect(methods(h, from)).toEqual(["list_channels", "list_channels", "get_invoice", "list_channels", "list_channels"]);
+        // With no channel opened, the invoice step's read alone: nothing that wakes the tenant once the invoice is forgotten.
+        expect(methods(h, from)).toEqual(["get_invoice"]);
         expect(eventsOf(h)).toEqual(["PAYMENT_EXPIRED invoice"]);
         expect(await invoiceOf(h)).toMatchObject({ status: "Expired" });
     });
@@ -545,6 +540,6 @@ describe("hold invoices over the tenant node", () => {
         const from = h.node.calls.length;
         await connect(h);
         await tick(h);
-        expect(methods(h, from)).toEqual(["list_channels", "list_channels", "list_channels", "list_channels"]);
+        expect(methods(h, from)).toEqual([]);
     });
 });

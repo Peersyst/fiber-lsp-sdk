@@ -2,7 +2,6 @@ import { assertNonEmptyString } from "../common";
 import { asWireError } from "../wire";
 import {
     decodeAbandonChannelResult,
-    decodeListChannelIdsResult,
     decodeListChannelStatesResult,
     decodeListChannelsResult,
     decodeOpenChannelWithExternalFundingResult,
@@ -194,15 +193,6 @@ export class FiberRpcClient {
      */
     async listChannels(params: ListChannelsParams = {}): Promise<RpcChannel[]> {
         return this.call("list_channels", encodeListChannelsParams(params), decodeListChannelsResult);
-    }
-
-    /**
-     * Lists the node's channel ids, reading no other field.
-     * @param params The filter, if any.
-     * @returns The channel ids.
-     */
-    async listChannelIds(params: ListChannelsParams = {}): Promise<string[]> {
-        return this.call("list_channels", encodeListChannelsParams(params), decodeListChannelIdsResult);
     }
 
     /**

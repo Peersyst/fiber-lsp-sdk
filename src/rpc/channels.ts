@@ -289,15 +289,6 @@ export function decodeListChannelsResult(field: WireField): RpcChannel[] {
 }
 
 /**
- * Reads only the ids of a `list_channels` result: a channel in a form this SDK does not know still yields its id.
- * @param field The result field.
- * @returns The channel ids, in the node's order.
- */
-export function decodeListChannelIdsResult(field: WireField): string[] {
-    return readListedChannels(field).map((channel) => readListedChannelId(readObject<RpcChannelWire>(channel)));
-}
-
-/**
  * Reads only the ids and states of a `list_channels` result, the states as strings fiber may add to.
  * @param field The result field.
  * @returns The channels' ids and states, in the node's order.

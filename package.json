@@ -23,11 +23,11 @@
     "scripts": {
         "build": "tsup",
         "test": "jest",
-        "lint": "eslint src test *.ts *.mjs",
-        "lint:fix": "eslint src test *.ts *.mjs --fix",
+        "lint": "eslint src test e2e *.ts *.mjs",
+        "lint:fix": "eslint src test e2e *.ts *.mjs --fix",
         "check-types": "tsc --noEmit",
-        "format": "prettier --write src test docs .github interop *.md *.json *.ts *.mjs",
-        "format:check": "prettier --check src test docs .github interop *.md *.json *.ts *.mjs"
+        "format": "prettier --write src test e2e docs .github interop *.md *.json *.ts *.mjs",
+        "format:check": "prettier --check src test e2e docs .github interop *.md *.json *.ts *.mjs"
     },
     "dependencies": {
         "@noble/curves": "^2.2.0",

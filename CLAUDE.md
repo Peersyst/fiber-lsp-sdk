@@ -62,6 +62,7 @@ test/
 
 docs/             Long-form docs, indexed by docs/README.md
 interop/          Rust harness + generated cross-implementation vectors
+e2e/agent/        The device of fiber's e2e suites over the built SDK (private package, node:test specs, devnet wrapper)
 ```
 
 Inside a module: `<module>.constants.ts`, `<module>.types.ts`, `utils/`, `interfaces/`, and one file per cohesive unit of
@@ -77,6 +78,7 @@ pnpm check-types   # tsc --noEmit
 pnpm test          # jest
 pnpm build         # tsup -> dist/ (index.js for require, index.mjs for import, one shared index.d.ts)
 pnpm format        # prettier
+pnpm --dir e2e/agent install && pnpm --dir e2e/agent test   # the e2e agent's specs (after pnpm build); docs/e2e-agent.md
 
 # Regenerate the cross-implementation vectors (needs a Rust toolchain; `pnpm test` does not)
 cargo run --release --manifest-path interop/rust/Cargo.toml -- gen-vectors interop/vectors/vectors.json
@@ -154,7 +156,7 @@ Block comments always span multiple lines, never `/** text */` on one line:
  */
 ```
 
-Every function in `src/` carries JSDoc in that shape, exported or not, methods included: a description that fits on one line,
+Every function in `src/` and in `e2e/agent/src/` carries JSDoc in that shape, exported or not, methods included: a description that fits on one line,
 then `@param` per parameter and `@returns`. The description is the whole story: no extra paragraphs — when something more needs
 saying, it belongs in `docs/`, cross-linked, not in the JSDoc. `//` is for a note inside a function body or above a
 module-private constant; a comment on anything exported is a block comment.
@@ -177,8 +179,8 @@ an upstream quirk, the reason a bound exists, an invariant a reader would otherw
   cross-implementation vector into a typed input or a wire object (`test/utils/digest-inputs.ts`, `test/utils/signing-channel.ts`):
   every field comes from the vector, so nothing is defaulted, and a refusal path mutates what it returns rather than omitting
   at construction.
-- `test/` may use `node:*` imports and platform globals (it only ever runs under Node); `src/` may not, and lint enforces both
-  bans there.
+- `test/` and `e2e/` may use `node:*` imports and platform globals (they only ever run under Node); `src/` may not, and lint
+  enforces both bans there.
 - Derivation changes must keep the cross-implementation vectors green (`interop/`, see its README): those vectors are the
   compatibility contract with fiber's Rust implementation, and they are generated, never hand-edited.
 - The SDK-owned derivations are additionally pinned by hardcoded values in `test/tests/derivation/device-scheme.spec.ts`. They are

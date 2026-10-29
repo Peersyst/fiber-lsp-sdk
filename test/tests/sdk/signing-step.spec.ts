@@ -3,12 +3,12 @@ import { CHANNEL_ALIAS_KEY_PREFIX, CHANNEL_RECORD_KEY_PREFIX } from "../../../sr
 import type { ChannelSigningTransition } from "../../../src/protocol";
 import { FiberRpcClient, RpcError, RpcResponseError, RpcTransportError } from "../../../src/rpc";
 import type { SdkEvent } from "../../../src/sdk";
-import { SdkError, buildChannelSigningStep } from "../../../src/sdk";
+import { ActivityTracker, SdkError, buildChannelSigningStep } from "../../../src/sdk";
 import type { SignerDispatch } from "../../../src/signer";
 import { ScriptedNode } from "../../mocks/rpc";
 import { asRecord } from "../../utils/json-shape";
 import { resignPeerHalf } from "../../utils/peer-musig";
-import { LIST_CHANNELS_CALL, signingStatusCall } from "../../utils/rpc-answers";
+import { signingStatusCall } from "../../utils/rpc-answers";
 import type { SigningChannel } from "../../utils/signing-channel";
 import {
     SIGNING_DEADLINE_MS,
@@ -35,6 +35,7 @@ const OTHER_ID = `0x${"2e".repeat(32)}`;
 const OTHER_INDEX = 7;
 const UNREGISTERED_ID = `0x${"5a".repeat(32)}`;
 const URL = "http://127.0.0.1:8227";
+const ACTIVITY_KEY = "fiber-lsp-sdk:activity";
 const IDLE = { type: "NoSignatureRequired" };
 const APPLIED = { type: "Applied" };
 const ALREADY_APPLIED = { type: "AlreadyApplied" };
@@ -49,6 +50,7 @@ const SIGNED: readonly ChannelSigningTransition[] = [
 
 type Harness = {
     channel: SigningChannel;
+    activity: ActivityTracker;
     node: ScriptedNode;
     events: SdkEvent[];
     step: (run: { abandoned: boolean }) => Promise<void>;
@@ -61,18 +63,27 @@ async function harness(
 ): Promise<Harness> {
     const channel = await openSigningChannel(vectors, caseOf(transition), options);
     await channel.store.claimChannelAlias(OTHER_ID, OTHER_INDEX);
+    const activity = new ActivityTracker(channel.store);
+    await activity.watch("channel", CHANNEL_ID);
     const node = new ScriptedNode();
     const events: SdkEvent[] = [];
     const step = buildChannelSigningStep({
         rpc: new FiberRpcClient({ url: URL, fetch: node.fetch }),
         store: channel.store,
+        activity,
         dispatch: channel.dispatch,
         emit: (event) => {
             events.push(event);
             onEmit(event);
         },
     });
-    return { channel, node, events, step };
+    return { channel, activity, node, events, step };
+}
+
+// The channels the device opened and has not seen closed, in the order it opened them.
+async function watching(h: Harness, channelIds: readonly string[]): Promise<void> {
+    await h.activity.forget("channel", CHANNEL_ID);
+    for (const channelId of channelIds) await h.activity.watch("channel", channelId);
 }
 
 function caseOf(transition: ChannelSigningTransition): SigningCaseVector {
@@ -100,12 +111,9 @@ describe("buildChannelSigningStep", () => {
             async (transition) => {
                 const kase = caseOf(transition);
                 const h = await harness(transition);
-                h.node
-                    .result({ channels: [{ channel_id: CHANNEL_ID }] })
-                    .result(statusResult(kase.result.status))
-                    .result(APPLIED);
+                h.node.result(statusResult(kase.result.status)).result(APPLIED);
                 await h.step(live());
-                expect(h.node.calls()).toEqual([LIST_CHANNELS_CALL, signingStatusCall(CHANNEL_ID), signatureSubmissionCall(vectors, kase)]);
+                expect(h.node.calls()).toEqual([signingStatusCall(CHANNEL_ID), signatureSubmissionCall(vectors, kase)]);
                 expect(h.events).toStrictEqual([withSigningDeadline(signedEventOf(vectors, kase))]);
             },
         );
@@ -116,12 +124,9 @@ describe("buildChannelSigningStep", () => {
             async (transition) => {
                 const kase = caseOf(transition);
                 const h = await harness(transition);
-                h.node
-                    .result({ channels: [{ channel_id: CHANNEL_ID }] })
-                    .result(statusResult(kase.result.status))
-                    .result(APPLIED);
+                h.node.result(statusResult(kase.result.status)).result(APPLIED);
                 await h.step(live());
-                expect(h.node.calls()).toEqual([LIST_CHANNELS_CALL, signingStatusCall(CHANNEL_ID), signatureSubmissionCall(vectors, kase)]);
+                expect(h.node.calls()).toEqual([signingStatusCall(CHANNEL_ID), signatureSubmissionCall(vectors, kase)]);
                 expect(h.events).toStrictEqual([signedEventOf(vectors, kase)]);
             },
         );
@@ -139,22 +144,14 @@ describe("buildChannelSigningStep", () => {
         it("resends an already signed request with the same bytes, and takes AlreadyApplied as success", async () => {
             const kase = caseOf("SendCommitmentSigned");
             const h = await harness("SendCommitmentSigned");
-            h.node
-                .result({ channels: [{ channel_id: CHANNEL_ID }] })
-                .result(statusResult(kase.result.status))
-                .result(APPLIED);
+            h.node.result(statusResult(kase.result.status)).result(APPLIED);
             await h.step(live());
             h.channel.storage.ops.length = 0;
-            h.node
-                .result({ channels: [{ channel_id: CHANNEL_ID }] })
-                .result(statusResult(kase.result.status))
-                .result(ALREADY_APPLIED);
+            h.node.result(statusResult(kase.result.status)).result(ALREADY_APPLIED);
             await h.step(live());
             expect(h.node.calls()).toEqual([
-                LIST_CHANNELS_CALL,
                 signingStatusCall(CHANNEL_ID),
                 signatureSubmissionCall(vectors, kase),
-                LIST_CHANNELS_CALL,
                 signingStatusCall(CHANNEL_ID),
                 signatureSubmissionCall(vectors, kase),
             ]);
@@ -165,17 +162,13 @@ describe("buildChannelSigningStep", () => {
             ]);
         });
 
-        it("answers every registered channel the node lists, in its order, and no other", async () => {
+        it("answers every registered channel the device watches, in the order it opened them, and no other", async () => {
             const kase = caseOf("SendRevokeAndAck");
             const h = await harness("SendRevokeAndAck");
-            h.node
-                .result({ channels: [{ channel_id: UNREGISTERED_ID }, { channel_id: OTHER_ID }, { channel_id: CHANNEL_ID }] })
-                .result(statusResult(IDLE, OTHER_ID))
-                .result(statusResult(kase.result.status))
-                .result(APPLIED);
+            await watching(h, [UNREGISTERED_ID, OTHER_ID, CHANNEL_ID]);
+            h.node.result(statusResult(IDLE, OTHER_ID)).result(statusResult(kase.result.status)).result(APPLIED);
             await h.step(live());
             expect(h.node.calls()).toEqual([
-                LIST_CHANNELS_CALL,
                 signingStatusCall(OTHER_ID),
                 signingStatusCall(CHANNEL_ID),
                 signatureSubmissionCall(vectors, kase),
@@ -183,25 +176,12 @@ describe("buildChannelSigningStep", () => {
             expect(h.events).toStrictEqual([signedEventOf(vectors, kase)]);
         });
 
-        it("answers a registered channel listed beside channels in a state or with a flag this SDK does not know", async () => {
-            const kase = caseOf("SendCommitmentSigned");
+        it("reads no listing of the node's channels: the activity list alone says which to poll", async () => {
             const h = await harness("SendCommitmentSigned");
-            const unknownFlag = {
-                channels: [
-                    { channel_id: UNREGISTERED_ID, state: { state_name: "Splicing" } },
-                    { channel_id: OTHER_ID, state: { state_name: "ShuttingDown", state_flags: "OUR_SPLICE_SENT" } },
-                    { channel_id: CHANNEL_ID, state: { state_name: "ChannelReady" } },
-                ],
-            };
-            h.node.result(unknownFlag).result(statusResult(IDLE, OTHER_ID)).result(statusResult(kase.result.status)).result(APPLIED);
+            h.node.result(statusResult(IDLE));
             await h.step(live());
-            expect(h.node.calls()).toEqual([
-                LIST_CHANNELS_CALL,
-                signingStatusCall(OTHER_ID),
-                signingStatusCall(CHANNEL_ID),
-                signatureSubmissionCall(vectors, kase),
-            ]);
-            expect(h.events).toStrictEqual([withSigningDeadline(signedEventOf(vectors, kase))]);
+            expect(h.node.calls()).toEqual([signingStatusCall(CHANNEL_ID)]);
+            expect(h.node.calls().some((call) => call.method === "list_channels")).toBe(false);
         });
     });
 
@@ -209,9 +189,9 @@ describe("buildChannelSigningStep", () => {
         it("emits the refusal with its request id and transition, and submits nothing", async () => {
             const kase = caseOf("SignChannelAnnouncement");
             const h = await harness("SignChannelAnnouncement");
-            h.node.result({ channels: [{ channel_id: CHANNEL_ID }] }).result(statusResult(kase.result.status));
+            h.node.result(statusResult(kase.result.status));
             await h.step(live());
-            expect(h.node.calls()).toEqual([LIST_CHANNELS_CALL, signingStatusCall(CHANNEL_ID)]);
+            expect(h.node.calls()).toEqual([signingStatusCall(CHANNEL_ID)]);
             expect(h.events).toStrictEqual([
                 {
                     type: "SIGNING",
@@ -231,11 +211,9 @@ describe("buildChannelSigningStep", () => {
             const kase = caseOf("SendCommitmentSigned");
             const h = await harness("SendCommitmentSigned");
             h.channel.storage.ops.length = 0;
-            h.node
-                .result({ channels: [{ channel_id: CHANNEL_ID }] })
-                .result(statusResult(withField(kase.result.status, "transition", "SignEverything")));
+            h.node.result(statusResult(withField(kase.result.status, "transition", "SignEverything")));
             await h.step(live());
-            expect(h.node.calls()).toEqual([LIST_CHANNELS_CALL, signingStatusCall(CHANNEL_ID)]);
+            expect(h.node.calls()).toEqual([signingStatusCall(CHANNEL_ID)]);
             expect(writes(h.channel.storage)).toEqual([]);
             expect(h.events).toStrictEqual([
                 {
@@ -258,11 +236,11 @@ describe("buildChannelSigningStep", () => {
             const h = await harness("SendCommitmentSigned");
             const handle = jest.spyOn(h.channel.dispatch, "handle");
             h.channel.storage.ops.length = 0;
-            h.node.result({ channels: [{ channel_id: CHANNEL_ID }] }).result(statusResult(kase.result.status, OTHER_ID));
+            h.node.result(statusResult(kase.result.status, OTHER_ID));
             await h.step(live());
             expect(handle).not.toHaveBeenCalled();
             expect(writes(h.channel.storage)).toEqual([]);
-            expect(h.node.calls()).toEqual([LIST_CHANNELS_CALL, signingStatusCall(CHANNEL_ID)]);
+            expect(h.node.calls()).toEqual([signingStatusCall(CHANNEL_ID)]);
             expect(h.events).toStrictEqual([
                 {
                     type: "SIGNING",
@@ -279,7 +257,7 @@ describe("buildChannelSigningStep", () => {
             const kase = caseOf("SignChannelAnnouncement");
             const h = await harness("SignChannelAnnouncement");
             for (let tick = 0; tick < 2; tick++) {
-                h.node.result({ channels: [{ channel_id: CHANNEL_ID }] }).result(statusResult(kase.result.status));
+                h.node.result(statusResult(kase.result.status));
                 await h.step(live());
             }
             expect(h.events.map((event) => (event.type === "SIGNING" ? event.outcome : event.type))).toEqual(["refused", "refused"]);
@@ -294,10 +272,7 @@ describe("buildChannelSigningStep", () => {
             const h = await harness("SendCommitmentSigned", { nonceReuse });
             await stageSecondSession(vectors, h.channel);
             const first = caseOf("SendCommitmentSigned");
-            h.node
-                .result({ channels: [{ channel_id: CHANNEL_ID }] })
-                .result(statusResult(first.result.status))
-                .result(APPLIED);
+            h.node.result(statusResult(first.result.status)).result(APPLIED);
             await h.step(live());
             return h;
         }
@@ -305,10 +280,7 @@ describe("buildChannelSigningStep", () => {
         it("emits the second session signed under allow as a warning, after submitting it", async () => {
             const h = await servedChannel("allow");
             const second = secondSessionStatus(vectors);
-            h.node
-                .result({ channels: [{ channel_id: CHANNEL_ID }] })
-                .result(statusResult(second.value))
-                .result(APPLIED);
+            h.node.result(statusResult(second.value)).result(APPLIED);
             await h.step(live());
             const sent = h.node.calls().at(-1);
             expect(sent?.method).toBe("submit_channel_signature");
@@ -321,16 +293,13 @@ describe("buildChannelSigningStep", () => {
 
         it("refuses a third session under allow, submitting nothing", async () => {
             const h = await servedChannel("allow");
-            h.node
-                .result({ channels: [{ channel_id: CHANNEL_ID }] })
-                .result(statusResult(secondSessionStatus(vectors).value))
-                .result(APPLIED);
+            h.node.result(statusResult(secondSessionStatus(vectors).value)).result(APPLIED);
             await h.step(live());
             const first = caseOf("SendCommitmentSigned");
             const third = resignPeerHalf(signingStatusField(first), keys, peerFundingKey, 0x72);
-            h.node.result({ channels: [{ channel_id: CHANNEL_ID }] }).result(statusResult(third.value));
+            h.node.result(statusResult(third.value));
             await h.step(live());
-            expect(h.node.calls().slice(-2)).toEqual([LIST_CHANNELS_CALL, signingStatusCall(CHANNEL_ID)]);
+            expect(h.node.calls().slice(-1)).toEqual([signingStatusCall(CHANNEL_ID)]);
             expect(h.events.at(-1)).toStrictEqual({
                 type: "SIGNING",
                 channelId: CHANNEL_ID,
@@ -347,9 +316,9 @@ describe("buildChannelSigningStep", () => {
 
         it("refuses the second session by default", async () => {
             const h = await servedChannel("refuse");
-            h.node.result({ channels: [{ channel_id: CHANNEL_ID }] }).result(statusResult(secondSessionStatus(vectors).value));
+            h.node.result(statusResult(secondSessionStatus(vectors).value));
             await h.step(live());
-            expect(h.node.calls().slice(-2)).toEqual([LIST_CHANNELS_CALL, signingStatusCall(CHANNEL_ID)]);
+            expect(h.node.calls().slice(-1)).toEqual([signingStatusCall(CHANNEL_ID)]);
             expect(h.events.at(-1)).toStrictEqual({
                 type: "SIGNING",
                 channelId: CHANNEL_ID,
@@ -366,10 +335,7 @@ describe("buildChannelSigningStep", () => {
         async function signedOnce(transition: ChannelSigningTransition, deadlineMs: bigint | null): Promise<SdkEvent[]> {
             const h = await harness(transition);
             deadlineOverridden(h.channel.dispatch, deadlineMs);
-            h.node
-                .result({ channels: [{ channel_id: CHANNEL_ID }] })
-                .result(statusResult(caseOf(transition).result.status))
-                .result(APPLIED);
+            h.node.result(statusResult(caseOf(transition).result.status)).result(APPLIED);
             await h.step(live());
             return h.events;
         }
@@ -403,16 +369,10 @@ describe("buildChannelSigningStep", () => {
             async function warned(deadlineMs: bigint | null): Promise<SdkEvent | undefined> {
                 const h = await harness("SendCommitmentSigned", { nonceReuse: "allow" });
                 await stageSecondSession(vectors, h.channel);
-                h.node
-                    .result({ channels: [{ channel_id: CHANNEL_ID }] })
-                    .result(statusResult(caseOf("SendCommitmentSigned").result.status))
-                    .result(APPLIED);
+                h.node.result(statusResult(caseOf("SendCommitmentSigned").result.status)).result(APPLIED);
                 await h.step(live());
                 deadlineOverridden(h.channel.dispatch, deadlineMs);
-                h.node
-                    .result({ channels: [{ channel_id: CHANNEL_ID }] })
-                    .result(statusResult(secondSessionStatus(vectors).value))
-                    .result(APPLIED);
+                h.node.result(statusResult(secondSessionStatus(vectors).value)).result(APPLIED);
                 await h.step(live());
                 return h.events.at(-1);
             }
@@ -448,7 +408,7 @@ describe("buildChannelSigningStep", () => {
             async function refusedOnce(deadlineMs: bigint | null): Promise<SdkEvent[]> {
                 const h = await harness("SignChannelAnnouncement");
                 deadlineOverridden(h.channel.dispatch, deadlineMs);
-                h.node.result({ channels: [{ channel_id: CHANNEL_ID }] }).result(statusResult(kase.result.status));
+                h.node.result(statusResult(kase.result.status));
                 await h.step(live());
                 return h.events;
             }
@@ -469,26 +429,26 @@ describe("buildChannelSigningStep", () => {
         it("submits and emits nothing for a channel with no request", async () => {
             const h = await harness("SendCommitmentSigned");
             h.channel.storage.ops.length = 0;
-            h.node.result({ channels: [{ channel_id: CHANNEL_ID }] }).result(statusResult(IDLE));
+            h.node.result(statusResult(IDLE));
             await h.step(live());
-            expect(h.node.calls()).toEqual([LIST_CHANNELS_CALL, signingStatusCall(CHANNEL_ID)]);
+            expect(h.node.calls()).toEqual([signingStatusCall(CHANNEL_ID)]);
             expect(writes(h.channel.storage)).toEqual([]);
             expect(h.events).toEqual([]);
         });
 
         it("does not even read the status of a channel this device never registered", async () => {
             const h = await harness("SendCommitmentSigned");
-            h.node.result({ channels: [{ channel_id: UNREGISTERED_ID }] });
+            await watching(h, [UNREGISTERED_ID]);
             await h.step(live());
-            expect(h.node.calls()).toEqual([LIST_CHANNELS_CALL]);
+            expect(h.node.calls()).toEqual([]);
             expect(h.events).toEqual([]);
         });
 
-        it("reads nothing more when the node lists no channel", async () => {
+        it("calls the node for nothing while the device watches no channel", async () => {
             const h = await harness("SendCommitmentSigned");
-            h.node.result({ channels: [] });
+            await watching(h, []);
             await h.step(live());
-            expect(h.node.calls()).toEqual([LIST_CHANNELS_CALL]);
+            expect(h.node.calls()).toEqual([]);
             expect(h.events).toEqual([]);
         });
     });
@@ -505,12 +465,11 @@ describe("buildChannelSigningStep", () => {
         ])("reports a status read the node %s as poll_failed, then answers the next channel", async (_, fail, message, cause) => {
             const kase = caseOf("CompleteReceivedCommitment");
             const h = await harness("CompleteReceivedCommitment");
-            h.node.result({ channels: [{ channel_id: OTHER_ID }, { channel_id: CHANNEL_ID }] });
+            await watching(h, [OTHER_ID, CHANNEL_ID]);
             fail(h.node);
             h.node.result(statusResult(kase.result.status)).result(APPLIED);
             await h.step(live());
             expect(h.node.calls()).toEqual([
-                LIST_CHANNELS_CALL,
                 signingStatusCall(OTHER_ID),
                 signingStatusCall(CHANNEL_ID),
                 signatureSubmissionCall(vectors, kase),
@@ -532,12 +491,12 @@ describe("buildChannelSigningStep", () => {
         ])("reports a submission the node %s as poll_failed, then answers the next channel", async (_, fail, message, cause) => {
             const kase = caseOf("SendClosingSigned");
             const h = await harness("SendClosingSigned");
-            h.node.result({ channels: [{ channel_id: CHANNEL_ID }, { channel_id: OTHER_ID }] }).result(statusResult(kase.result.status));
+            await watching(h, [CHANNEL_ID, OTHER_ID]);
+            h.node.result(statusResult(kase.result.status));
             fail(h.node);
             h.node.result(statusResult(IDLE, OTHER_ID));
             await h.step(live());
             expect(h.node.calls()).toEqual([
-                LIST_CHANNELS_CALL,
                 signingStatusCall(CHANNEL_ID),
                 signatureSubmissionCall(vectors, kase),
                 signingStatusCall(OTHER_ID),
@@ -548,21 +507,11 @@ describe("buildChannelSigningStep", () => {
         it("submits the signature again on the tick after a submission that failed", async () => {
             const kase = caseOf("SendClosingSigned");
             const h = await harness("SendClosingSigned");
-            h.node
-                .result({ channels: [{ channel_id: CHANNEL_ID }] })
-                .result(statusResult(kase.result.status))
-                .error(-32000, "node is busy");
+            h.node.result(statusResult(kase.result.status)).error(-32000, "node is busy");
             await h.step(live());
-            h.node
-                .result({ channels: [{ channel_id: CHANNEL_ID }] })
-                .result(statusResult(kase.result.status))
-                .result(APPLIED);
+            h.node.result(statusResult(kase.result.status)).result(APPLIED);
             await h.step(live());
-            expect(h.node.calls().slice(3)).toEqual([
-                LIST_CHANNELS_CALL,
-                signingStatusCall(CHANNEL_ID),
-                signatureSubmissionCall(vectors, kase),
-            ]);
+            expect(h.node.calls().slice(2)).toEqual([signingStatusCall(CHANNEL_ID), signatureSubmissionCall(vectors, kase)]);
             expect(h.events.at(-1)).toStrictEqual(signedEventOf(vectors, kase));
         });
 
@@ -570,12 +519,10 @@ describe("buildChannelSigningStep", () => {
             const kase = caseOf("SendCommitmentSigned");
             const h = await harness("SendCommitmentSigned");
             h.channel.storage.map.set(`${CHANNEL_RECORD_KEY_PREFIX}${h.channel.channelIndex}`, "garbage");
-            h.node
-                .result({ channels: [{ channel_id: CHANNEL_ID }, { channel_id: OTHER_ID }] })
-                .result(statusResult(kase.result.status))
-                .result(statusResult(IDLE, OTHER_ID));
+            await watching(h, [CHANNEL_ID, OTHER_ID]);
+            h.node.result(statusResult(kase.result.status)).result(statusResult(IDLE, OTHER_ID));
             await h.step(live());
-            expect(h.node.calls()).toEqual([LIST_CHANNELS_CALL, signingStatusCall(CHANNEL_ID), signingStatusCall(OTHER_ID)]);
+            expect(h.node.calls()).toEqual([signingStatusCall(CHANNEL_ID), signingStatusCall(OTHER_ID)]);
             expect(summarized(h.events)).toStrictEqual([
                 pollFailedEvent(
                     `the signing poll of ${CHANNEL_ID} failed: stored value at ${CHANNEL_RECORD_KEY_PREFIX}${h.channel.channelIndex} is not valid JSON`,
@@ -588,12 +535,10 @@ describe("buildChannelSigningStep", () => {
             const kase = caseOf("SendCommitmentSigned");
             const h = await harness("SendCommitmentSigned");
             h.channel.storage.map.set(`${CHANNEL_ALIAS_KEY_PREFIX}${OTHER_ID}`, "seven");
-            h.node
-                .result({ channels: [{ channel_id: OTHER_ID }, { channel_id: CHANNEL_ID }] })
-                .result(statusResult(kase.result.status))
-                .result(APPLIED);
+            await watching(h, [OTHER_ID, CHANNEL_ID]);
+            h.node.result(statusResult(kase.result.status)).result(APPLIED);
             await h.step(live());
-            expect(h.node.calls()).toEqual([LIST_CHANNELS_CALL, signingStatusCall(CHANNEL_ID), signatureSubmissionCall(vectors, kase)]);
+            expect(h.node.calls()).toEqual([signingStatusCall(CHANNEL_ID), signatureSubmissionCall(vectors, kase)]);
             expect(summarized(h.events)).toStrictEqual([
                 pollFailedEvent(
                     `the signing poll of ${OTHER_ID} failed: stored value at ${CHANNEL_ALIAS_KEY_PREFIX}${OTHER_ID} is not a channel index`,
@@ -603,11 +548,11 @@ describe("buildChannelSigningStep", () => {
             ]);
         });
 
-        it("rejects when the node's channels cannot be listed, reading nothing more", async () => {
+        it("rejects when the activity list cannot be read, calling the node for nothing", async () => {
             const h = await harness("SendCommitmentSigned");
-            h.node.error(-32000, "node is syncing");
-            await expect(h.step(live())).rejects.toEqual(new RpcError("list_channels", -32000, "node is syncing"));
-            expect(h.node.calls()).toEqual([LIST_CHANNELS_CALL]);
+            h.channel.storage.map.set(ACTIVITY_KEY, "garbage");
+            await expect(h.step(live())).rejects.toEqual(new TypeError(`stored value at ${ACTIVITY_KEY} is not valid JSON`));
+            expect(h.node.calls()).toEqual([]);
             expect(h.events).toEqual([]);
         });
     });
@@ -619,26 +564,16 @@ describe("buildChannelSigningStep", () => {
             const handle = jest.spyOn(h.channel.dispatch, "handle");
             const run = live();
             h.channel.storage.ops.length = 0;
-            h.node
-                .onCall("get_channel_signing_status", () => (run.abandoned = true))
-                .result({ channels: [{ channel_id: CHANNEL_ID }] })
-                .result(statusResult(kase.result.status));
+            h.node.onCall("get_channel_signing_status", () => (run.abandoned = true)).result(statusResult(kase.result.status));
             await h.step(run);
             expect(handle).not.toHaveBeenCalled();
             expect(writes(h.channel.storage)).toEqual([]);
-            expect(h.node.calls()).toEqual([LIST_CHANNELS_CALL, signingStatusCall(CHANNEL_ID)]);
+            expect(h.node.calls()).toEqual([signingStatusCall(CHANNEL_ID)]);
             expect(h.events).toEqual([]);
 
-            h.node
-                .result({ channels: [{ channel_id: CHANNEL_ID }] })
-                .result(statusResult(kase.result.status))
-                .result(APPLIED);
+            h.node.result(statusResult(kase.result.status)).result(APPLIED);
             await h.step(live());
-            expect(h.node.calls().slice(2)).toEqual([
-                LIST_CHANNELS_CALL,
-                signingStatusCall(CHANNEL_ID),
-                signatureSubmissionCall(vectors, kase),
-            ]);
+            expect(h.node.calls().slice(1)).toEqual([signingStatusCall(CHANNEL_ID), signatureSubmissionCall(vectors, kase)]);
             expect(h.events).toStrictEqual([withSigningDeadline(signedEventOf(vectors, kase))]);
         });
 
@@ -647,22 +582,15 @@ describe("buildChannelSigningStep", () => {
             const h = await harness("CompleteReceivedRevokeAndAck");
             const run = live();
             abandonAfterHandle(h.channel.dispatch, run);
-            h.node.result({ channels: [{ channel_id: CHANNEL_ID }] }).result(statusResult(kase.result.status));
+            h.node.result(statusResult(kase.result.status));
             await h.step(run);
-            expect(h.node.calls()).toEqual([LIST_CHANNELS_CALL, signingStatusCall(CHANNEL_ID)]);
+            expect(h.node.calls()).toEqual([signingStatusCall(CHANNEL_ID)]);
             expect(h.events).toEqual([]);
 
             h.channel.storage.ops.length = 0;
-            h.node
-                .result({ channels: [{ channel_id: CHANNEL_ID }] })
-                .result(statusResult(kase.result.status))
-                .result(APPLIED);
+            h.node.result(statusResult(kase.result.status)).result(APPLIED);
             await h.step(live());
-            expect(h.node.calls().slice(2)).toEqual([
-                LIST_CHANNELS_CALL,
-                signingStatusCall(CHANNEL_ID),
-                signatureSubmissionCall(vectors, kase),
-            ]);
+            expect(h.node.calls().slice(1)).toEqual([signingStatusCall(CHANNEL_ID), signatureSubmissionCall(vectors, kase)]);
             // The sign-once store answers with the bytes it signed, writing nothing.
             expect(writes(h.channel.storage)).toEqual([]);
             expect(h.events).toStrictEqual([signedEventOf(vectors, kase)]);
@@ -674,23 +602,15 @@ describe("buildChannelSigningStep", () => {
             const run = live();
             h.node
                 .onCall("submit_channel_signature", () => (run.abandoned = true))
-                .result({ channels: [{ channel_id: CHANNEL_ID }] })
                 .result(statusResult(kase.result.status))
                 .result(APPLIED);
             await h.step(run);
-            expect(h.node.calls()).toEqual([LIST_CHANNELS_CALL, signingStatusCall(CHANNEL_ID), signatureSubmissionCall(vectors, kase)]);
+            expect(h.node.calls()).toEqual([signingStatusCall(CHANNEL_ID), signatureSubmissionCall(vectors, kase)]);
             expect(h.events).toEqual([]);
 
-            h.node
-                .result({ channels: [{ channel_id: CHANNEL_ID }] })
-                .result(statusResult(kase.result.status))
-                .result(ALREADY_APPLIED);
+            h.node.result(statusResult(kase.result.status)).result(ALREADY_APPLIED);
             await h.step(live());
-            expect(h.node.calls().slice(3)).toEqual([
-                LIST_CHANNELS_CALL,
-                signingStatusCall(CHANNEL_ID),
-                signatureSubmissionCall(vectors, kase),
-            ]);
+            expect(h.node.calls().slice(2)).toEqual([signingStatusCall(CHANNEL_ID), signatureSubmissionCall(vectors, kase)]);
             expect(h.events).toStrictEqual([signedEventOf(vectors, kase)]);
         });
 
@@ -699,7 +619,7 @@ describe("buildChannelSigningStep", () => {
             const h = await harness("SignChannelAnnouncement");
             const run = live();
             abandonAfterHandle(h.channel.dispatch, run);
-            h.node.result({ channels: [{ channel_id: CHANNEL_ID }] }).result(statusResult(kase.result.status));
+            h.node.result(statusResult(kase.result.status));
             await h.step(run);
             expect(h.events).toEqual([]);
         });
@@ -708,10 +628,7 @@ describe("buildChannelSigningStep", () => {
             const kase = caseOf("SendCommitmentSigned");
             const h = await harness("SendCommitmentSigned");
             const run = live();
-            h.node
-                .onCall("get_channel_signing_status", () => (run.abandoned = true))
-                .result({ channels: [{ channel_id: CHANNEL_ID }] })
-                .result(statusResult(kase.result.status, OTHER_ID));
+            h.node.onCall("get_channel_signing_status", () => (run.abandoned = true)).result(statusResult(kase.result.status, OTHER_ID));
             await h.step(run);
             expect(h.events).toEqual([]);
         });
@@ -719,10 +636,7 @@ describe("buildChannelSigningStep", () => {
         it("emits no error once abandoned during a read that fails", async () => {
             const h = await harness("SendCommitmentSigned");
             const run = live();
-            h.node
-                .onCall("get_channel_signing_status", () => (run.abandoned = true))
-                .result({ channels: [{ channel_id: CHANNEL_ID }] })
-                .error(-32000, "channel not found");
+            h.node.onCall("get_channel_signing_status", () => (run.abandoned = true)).error(-32000, "channel not found");
             await h.step(run);
             expect(h.events).toEqual([]);
         });
@@ -730,12 +644,10 @@ describe("buildChannelSigningStep", () => {
         it("polls no further channel once abandoned", async () => {
             const h = await harness("SendCommitmentSigned");
             const run = live();
-            h.node
-                .onCall("get_channel_signing_status", () => (run.abandoned = true))
-                .result({ channels: [{ channel_id: OTHER_ID }, { channel_id: CHANNEL_ID }] })
-                .result(statusResult(IDLE, OTHER_ID));
+            await watching(h, [OTHER_ID, CHANNEL_ID]);
+            h.node.onCall("get_channel_signing_status", () => (run.abandoned = true)).result(statusResult(IDLE, OTHER_ID));
             await h.step(run);
-            expect(h.node.calls()).toEqual([LIST_CHANNELS_CALL, signingStatusCall(OTHER_ID)]);
+            expect(h.node.calls()).toEqual([signingStatusCall(OTHER_ID)]);
         });
     });
 
@@ -744,14 +656,10 @@ describe("buildChannelSigningStep", () => {
         const h = await harness("SendCommitmentSigned", {}, () => {
             throw new Error("the host's listener failed");
         });
-        h.node
-            .result({ channels: [{ channel_id: OTHER_ID }, { channel_id: CHANNEL_ID }] })
-            .error(-32000, "channel not found")
-            .result(statusResult(kase.result.status))
-            .result(APPLIED);
+        await watching(h, [OTHER_ID, CHANNEL_ID]);
+        h.node.error(-32000, "channel not found").result(statusResult(kase.result.status)).result(APPLIED);
         await expect(h.step(live())).resolves.toBeUndefined();
         expect(h.node.calls()).toEqual([
-            LIST_CHANNELS_CALL,
             signingStatusCall(OTHER_ID),
             signingStatusCall(CHANNEL_ID),
             signatureSubmissionCall(vectors, kase),

@@ -5,6 +5,7 @@ export * from "./channel-evidence";
 export * from "./channel-listing";
 export * from "./channel-opening";
 export * from "./channel-step";
+export * from "./device-channels";
 export * from "./fiber-lsp-sdk";
 export * from "./invoice-creation";
 export * from "./invoice-step";

@@ -114,7 +114,6 @@ the rest even when they are malformed.
 | `submit_signed_funding_tx`           | `submitSignedFundingTx`          | `channel_id`, `signed_funding_tx`                                                                                        | `channel_id`, `funding_tx_hash`     |
 | `abandon_channel`                    | `abandonChannel`                 | `channel_id`                                                                                                             | `null`                              |
 | `list_channels`                      | `listChannels`                   | nothing, or one of `include_closed` and `only_pending`                                                                   | per channel, the fields below       |
-| `list_channels`                      | `listChannelIds`                 | the same as `listChannels`                                                                                               | each channel's `channel_id` alone   |
 | `list_channels`                      | `listChannelStates`              | the same as `listChannels`                                                                                               | each channel's id and state alone   |
 
 - **The open blocks** until the peer has accepted and the funding transaction is built, and answers with the channel's
@@ -138,14 +137,13 @@ the rest even when they are malformed.
   them; `only_pending` shows the openings, failed ones included, as synthetic entries fiber builds from its open records: a
   failed opening always reads `Closed` with `FUNDING_ABORTED`, an abandon included, told apart only by `failure_detail`. The
   `pubkey` filter is never sent.
-- **The listing can be read for its ids alone**: `listChannelIds` reads `channels[].channel_id`, strict in it (an
-  array of objects, each id 32 bytes of `0x` lowercase hex) and blind to every other field, so a state or a flag a newer
-  fiber adds cannot stop a caller that needs only the ids, which is the signing step ([sdk.md](./sdk.md)).
-- **Or for its ids and states, read tolerantly**: `listChannelStates` reads the id as strictly, and the state as fiber's
-  strings, `{ channelId, stateName, stateFlags }`: `state` an object, `state_name` a string, and `state_flags` a string
-  split on `|`, `""` and an absent member both read as none. A name or a flag the client does not know reads as it is,
-  where `listChannels` refuses it, so the watchtower step, which must keep polling a channel whatever state a newer fiber
-  gives it, is the one that calls it ([sdk.md](./sdk.md)). Every other field is ignored.
+- **The listing can be read for its ids and states alone, tolerantly**: `listChannelStates` reads `channels[].channel_id`
+  strictly (an array of objects, each id 32 bytes of `0x` lowercase hex), and the state as fiber's strings,
+  `{ channelId, stateName, stateFlags }`: `state` an object, `state_name` a string, and `state_flags` a string split on
+  `|`, `""` and an absent member both read as none. A name or a flag the client does not know reads as it is, where
+  `listChannels` refuses it, so the channel step, which must keep reading a watched channel whatever state a newer fiber
+  gives it, is the one that calls it ([sdk.md](./sdk.md)). Every other field is ignored. The signing and watchtower steps
+  never list: a tenant's `list_channels` wakes it when the LSP evicted it.
 
 A channel is read as:
 
@@ -409,7 +407,7 @@ inputs do, and the host hands it to its CKB signer as it is.
 | File                                  | Contents                                                                                                                                                                                                                                                                                  |
 | ------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `src/rpc/fiber-rpc-client.ts`         | `FiberRpcClient`: the token and `setToken`, the request, the status, the three errors, the methods                                                                                                                                                                                        |
-| `src/rpc/channels.ts`                 | The codecs of the four channel methods and the two tenant channel methods, the channel, its state, the listing read for its ids or its states, and the opening context                                                                                                                    |
+| `src/rpc/channels.ts`                 | The codecs of the four channel methods and the two tenant channel methods, the channel, its state, the listing read for its ids and states, and the opening context                                                                                                                       |
 | `src/rpc/invoices.ts`                 | The codecs of the four invoice methods, and the description's guard                                                                                                                                                                                                                       |
 | `src/rpc/payments.ts`                 | The codecs of the two payment methods                                                                                                                                                                                                                                                     |
 | `src/rpc/signing.ts`                  | The codecs of the four signing request methods: the status handed over as a field, the two signatures, the two outcomes                                                                                                                                                                   |
@@ -526,14 +524,13 @@ Coverage of the module and of `wire` is 100% on all four metrics, and the assert
 
 | Mutation                                                     | Tests that failed |
 | ------------------------------------------------------------ | ----------------- |
+| Ids start at 0                                               | 102               |
 | The envelope's version is not checked                        | 54                |
 | A response with both or neither of result and error is read  | 51                |
-| The ids reader takes the channels from another field         | 32                |
+| The params are sent as the object, not as a positional array | 38                |
 | A payment's `created_at` is bounded to a u32                 | 28                |
-| Ids start at 0                                               | 23                |
 | The partial signature is checked at 64 bytes                 | 21                |
 | `created_at` is bounded to a u32                             | 19                |
-| The ids reader takes ids of 33 bytes                         | 19                |
 | A payment hash is written without its `0x`                   | 15                |
 | `encodeMapped` does not check the spelling                   | 15                |
 | The fee bound is written in decimal                          | 13                |
@@ -548,8 +545,6 @@ Coverage of the module and of `wire` is 100% on all four metrics, and the assert
 | The hash algorithm is written in the SDK's spelling          | 10                |
 | `last_updated_at` is read from `created_at`                  | 10                |
 | A submission outcome is read without checking its tag        | 9                 |
-| The ids reader reads each channel whole                      | 9                 |
-| The ids reader skips the hex check                           | 9                 |
 | The token is not checked at construction                     | 8                 |
 | The registration signature is checked at 65 bytes            | 8                 |
 | The runtime status is read without checking its name         | 8                 |
@@ -574,10 +569,9 @@ Coverage of the module and of `wire` is 100% on all four metrics, and the assert
 | `dry_run` is omitted when false                              | 5                 |
 | An invoice status missing from the client's list             | 5                 |
 | A channel signature is submitted as the watchtower's         | 5                 |
+| The filter writes `false` for the other flag                 | 5                 |
 | The registration is sent under the nonce's method            | 4                 |
-| The params are sent as the object, not as a positional array | 4                 |
 | An untyped output's `type` is omitted, not `null`            | 4                 |
-| The filter writes `false` for the other flag                 | 4                 |
 | The abandon's `null` is not checked                          | 4                 |
 | An absent delay is sent as `null`                            | 4                 |
 | The access token may be empty                                | 4                 |
@@ -618,8 +612,8 @@ Coverage of the module and of `wire` is 100% on all four metrics, and the assert
 | `cancelInvoice` calls `get_invoice`                          | 2                 |
 | `getPayment` calls `send_payment`                            | 2                 |
 | Any submission result is read as Applied                     | 2                 |
-| The ids method ignores the filter                            | 2                 |
 | The hops are not checked as an array                         | 2                 |
+| An unknown filter is written                                 | 2                 |
 | A `null` id is accepted on a result too                      | 1                 |
 | Status 300 is read as success                                | 1                 |
 | Status 199 is read as success                                | 1                 |
@@ -638,14 +632,12 @@ Coverage of the module and of `wire` is 100% on all four metrics, and the assert
 | A `capacity` is read as a u128                               | 1                 |
 | The dep type is not checked before it is written             | 1                 |
 | A header dep of any length is written                        | 1                 |
-| An unknown filter is written                                 | 1                 |
 | An outpoint index past a u32 is written                      | 1                 |
 | Script args are not checked to be bytes                      | 1                 |
 | A flag missing from a state's list                           | 1                 |
 | A missing `failed_error` is read as no error                 | 1                 |
 | `settleInvoice` does not read the answer                     | 1                 |
 | `newInvoice` reads the answer as an invoice with a status    | 1                 |
-| The ids method reads the full listing                        | 1                 |
 | The signing status params are sent unchecked                 | 1                 |
 | The signing status result is not read                        | 1                 |
 | The nonce's answer is handed over unread                     | 1                 |
@@ -662,20 +654,22 @@ four metrics):
 
 | Mutation                                                      | Tests that failed |
 | ------------------------------------------------------------- | ----------------- |
-| Absent flags are refused                                      | 17                |
-| A listed channel id is not checked                            | 14                |
+| The listing reader takes the channels from another field      | 42                |
+| A listed channel id of 33 bytes is read                       | 29                |
+| Absent flags are refused                                      | 19                |
 | The listing is read in reverse                                | 10                |
+| A listed channel id is not checked                            | 9                 |
 | Empty flags read as one empty flag                            | 8                 |
 | The flags are not split                                       | 6                 |
 | The watchtower signature is submitted to the channel's method | 5                 |
 | The watchtower signature is written as a channel signature    | 5                 |
 | The watchtower status is read from the channel's method       | 5                 |
 | The watchtower status is asked with the params unwritten      | 4                 |
+| The states are listed under another method                    | 4                 |
 | An absent state reads as an empty one                         | 3                 |
 | The state name is not checked to be a string                  | 3                 |
-| The states are listed under another method                    | 3                 |
 | The watchtower status is not read                             | 3                 |
-| An entry is not checked to be an object                       | 2                 |
+| An entry is not checked to be an object                       | 3                 |
 | The states are listed without the filter                      | 2                 |
 | Null flags read as none                                       | 1                 |
 | The states are read by the full reader                        | 1                 |

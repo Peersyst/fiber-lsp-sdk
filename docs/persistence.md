@@ -16,6 +16,7 @@ keys carry the `fiber-lsp-sdk:` namespace, because the host may back that storag
 | `fiber-lsp-sdk:allocator:<kind>`    | The last channel or invoice index handed out, a JSON integer                     |
 | `fiber-lsp-sdk:activity`            | What the facade's poller still asks the node about, JSON                         |
 | `fiber-lsp-sdk:opening`             | The channel opening the node may still hold for this tenant, JSON                |
+| `fiber-lsp-sdk:device-channels`     | The channels the device opened that the node may still ask about, JSON           |
 
 The prefixes are fixed and disjoint, so a channel id and a payment hash can be the same string without colliding.
 `<boundHash>` is the bound payment hash: the first 20 bytes of the payment hash, all a commitment binds under the
@@ -23,11 +24,12 @@ The prefixes are fixed and disjoint, so a channel id and a payment hash can be t
 12 find no invoice to pay for ([policy.md](./policy.md)). The record holds the whole hash, which is what a TLC under the
 `fullPaymentHash` layout is held to, and a record whose hash does not start with its key's reads as corruption.
 
-The last three are the facade's ([sdk.md](./sdk.md)): the allocator keeps, per kind, the last index it handed out, the
+The last four are the facade's ([sdk.md](./sdk.md)): the allocator keeps, per kind, the last index it handed out, the
 activity record lists the channels, payments and invoices the poller watches with the last status an event was emitted
-for, and the pending opening is what a retried channel opening resumes. They are kept through the same store, by `getRecord` and `updateRecord` over a format the facade supplies, so they
-get the same parsing, the same corruption rule and the same per-key lanes as the policy's records without the policy
-module knowing what they hold. Those two methods refuse every key outside the namespace and every key the policy keeps
+for, the pending opening is what a retried channel opening resumes, and the device's channels are the ones the
+watchtower step polls. They are kept through the same store, by `getRecord` and `updateRecord` over a format the facade
+supplies, so they get the same parsing, the same corruption rule and the same per-key lanes as the policy's records
+without the policy module knowing what they hold. Those two methods refuse every key outside the namespace and every key the policy keeps
 its own records under, so no format of another module can read or write past the policy's guards.
 
 ## Identity: the index, not the name
@@ -222,6 +224,13 @@ A field off its form reads as corruption, as everywhere else: an index past the 
 decimal shannons, a lock that is not a molecule script, a cell dep off CKB's forms, an id that is not 32 bytes of `0x`
 hex. When the facade writes, names and drops it is [sdk.md](./sdk.md)'s; the record holds at most one opening, so it
 does not grow either.
+
+The device's channels are `{ version, channelIds }`, the ids in the order the channels were opened, each 32 bytes of
+`0x`-prefixed lowercase hex and none twice; a record off that form reads as corruption. The opening adds a channel once
+the activity record watches it, before the tx is handed out, and once however often it is resumed; the watchtower step
+drops a closed one once fiber answers it holds no watch row for it, which fiber never creates again for a closed channel.
+A force-closed channel keeps its row in fiber for good, so it stays listed: the list is bounded by the channels the
+device opened, less those closed cooperatively, abandoned or aborted, about 70 bytes each.
 
 ## Concurrency
 
