@@ -1,0 +1,13 @@
+#!/usr/bin/env bash
+# Usage: linked at <fiber-checkout>/target/debug/fiber-lsp-sdk-agent by install.sh.
+set -euo pipefail
+
+self="$(readlink -f "$0")"
+main="$(dirname "$self")/../dist/src/main.js"
+
+if [[ ! -f "$main" ]]; then
+    echo "fiber-lsp-sdk-agent: $main is missing, build the agent first: pnpm --dir e2e/agent build" >&2
+    exit 1
+fi
+
+exec node "$main" "$@"

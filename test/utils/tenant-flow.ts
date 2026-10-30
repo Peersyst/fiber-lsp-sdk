@@ -5,7 +5,15 @@ import { PolicyEngine, SignerStore } from "../../src/policy";
 import type { FetchInit } from "../../src/rpc";
 import { FiberRpcClient } from "../../src/rpc";
 import type { PollStep, SdkEvent } from "../../src/sdk";
-import { ActivityPoller, buildChannelSigningStep, buildWatchtowerSigningStep } from "../../src/sdk";
+import {
+    ActivityPoller,
+    ActivityTracker,
+    DeviceChannelList,
+    PendingOpeningStore,
+    buildChannelSigningStep,
+    buildChannelStep,
+    buildWatchtowerSigningStep,
+} from "../../src/sdk";
 import { SignerDispatch } from "../../src/signer";
 import { TimerMock } from "../mocks/common";
 import type { InMemorySignerStorage } from "../mocks/policy";
@@ -50,6 +58,8 @@ export type TenantDevice = {
     store: SignerStore;
     policy: PolicyEngine;
     dispatch: SignerDispatch;
+    activity: ActivityTracker;
+    channels: DeviceChannelList;
     poller: ActivityPoller;
     timer: TimerMock;
     events: SdkEvent[];
@@ -61,6 +71,8 @@ export type TenantDeviceOptions = {
     policy: PolicyEngineOptions;
     // The channel signing step polls alone, or the watchtower's after it, as the facade runs both.
     watchtower: boolean;
+    // The channel step first, as the facade runs it: it forgets a channel it sees closed, which the two others then read.
+    channelStep?: boolean;
     storage: InMemorySignerStorage;
 };
 
@@ -94,10 +106,13 @@ export function tenantDevice(node: InMemoryTenantNode, options: TenantDeviceOpti
     };
     const timer = new TimerMock();
     const rpc = new FiberRpcClient({ url: TENANT_NODE_URL, fetch: node.fetch });
-    const steps: PollStep[] = [buildChannelSigningStep({ rpc, store, dispatch, emit })];
-    if (options.watchtower) steps.push(buildWatchtowerSigningStep({ rpc, store, policy, dispatch, emit }));
+    const activity = new ActivityTracker(store);
+    const channels = new DeviceChannelList(store);
+    const steps: PollStep[] = [buildChannelSigningStep({ rpc, store, activity, dispatch, emit })];
+    if (options.channelStep === true) steps.unshift(buildChannelStep({ rpc, activity, openings: new PendingOpeningStore(store), emit }));
+    if (options.watchtower) steps.push(buildWatchtowerSigningStep({ rpc, store, policy, dispatch, activity, channels, emit }));
     const poller = new ActivityPoller({ timer, intervalMs: INTERVAL_MS, stepTimeoutMs: STEP_TIMEOUT_MS, steps, emit });
-    return { storage, store, policy, dispatch, poller, timer, events };
+    return { storage, store, policy, dispatch, activity, channels, poller, timer, events };
 }
 
 export async function openChannel(h: TenantFlow, first: "CompleteReceivedCommitment" | "SendCommitmentSigned"): Promise<void> {
@@ -105,6 +120,7 @@ export async function openChannel(h: TenantFlow, first: "CompleteReceivedCommitm
     const channelId = h.node.openTenantChannel(pending.material, first);
     await h.device.policy.registerChannel(channelId, pending.channelIndex, pending.fundedShannons, pending.localCloseScript);
     await h.device.policy.pinChannelTerms(channelId, TERMS);
+    await watchOpened(h.device, channelId);
 }
 
 // The device registers while the node still collaborates on the funding tx, before fiber watches the channel.
@@ -113,6 +129,13 @@ export async function negotiateChannel(h: TenantFlow): Promise<void> {
     const channelId = h.node.negotiateTenantChannel(pending.material);
     await h.device.policy.registerChannel(channelId, pending.channelIndex, pending.fundedShannons, pending.localCloseScript);
     await h.device.policy.pinChannelTerms(channelId, TERMS);
+    await watchOpened(h.device, channelId);
+}
+
+// As the opening's pins end: watched, then listed as the device's.
+export async function watchOpened(device: Pick<TenantDevice, "activity" | "channels">, channelId: string): Promise<void> {
+    await device.activity.watch("channel", channelId);
+    await device.channels.add(channelId);
 }
 
 export async function start(device: TenantDevice): Promise<void> {

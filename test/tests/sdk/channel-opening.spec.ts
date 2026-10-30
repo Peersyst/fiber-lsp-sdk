@@ -8,11 +8,13 @@ import {
     ActivityTracker,
     DEFAULT_COMMITMENT_DELAY_EPOCH,
     DEFAULT_COMMITMENT_FEE_RATE,
+    DeviceChannelList,
     IndexAllocator,
     PendingOpeningStore,
     SDK_NETWORK_PRESETS,
     SdkError,
     buildChannelSigningStep,
+    buildWatchtowerSigningStep,
     openSdkChannel,
     prepareSdkChannelOpen,
     submitSdkFundingTx,
@@ -23,7 +25,8 @@ import type { SentCall } from "../../mocks/rpc";
 import { ScriptedNode } from "../../mocks/rpc";
 import { asRecord } from "../../utils/json-shape";
 import { rejection } from "../../utils/rejection";
-import { LIST_CHANNELS_CALL, signingStatusCall } from "../../utils/rpc-answers";
+import { signingStatusCall } from "../../utils/rpc-answers";
+import { live } from "../../utils/step-run";
 import { withField } from "../../utils/with-field";
 import { storedAt, writes } from "../../utils/stored-records";
 
@@ -41,6 +44,7 @@ const OTHER_ID = `0x${"2e".repeat(32)}`;
 const ALLOCATOR_KEY = "fiber-lsp-sdk:allocator:channel";
 const OPENING_KEY = "fiber-lsp-sdk:opening";
 const ACTIVITY_KEY = "fiber-lsp-sdk:activity";
+const DEVICE_CHANNELS_KEY = "fiber-lsp-sdk:device-channels";
 const RECORD_KEY = `fiber-lsp-sdk:channel:${INDEX}`;
 
 // The device's keys and material at INDEX of the master seed; the peer's keys and scripts are the signing vectors'.
@@ -274,6 +278,7 @@ function harness(): Harness {
         }),
         allocator: new IndexAllocator(store, () => NOW_MS),
         activity: new ActivityTracker(store),
+        channels: new DeviceChannelList(store),
         openings: new PendingOpeningStore(store),
     };
     return { storage, store, policy, node, options };
@@ -373,7 +378,7 @@ describe("prepareSdkChannelOpen", () => {
         expect(storedAt(h.storage, ALLOCATOR_KEY)).toBe(INDEX);
     });
 
-    it("names the opening, then registers and pins the whole answer and watches the channel, all before handing the tx out", async () => {
+    it("names the opening, then registers and pins the whole answer, watches the channel and lists it, all before handing the tx out", async () => {
         const h = await opened();
         expect(writes(h.storage)).toEqual([
             ALLOCATOR_KEY,
@@ -384,7 +389,9 @@ describe("prepareSdkChannelOpen", () => {
             RECORD_KEY,
             RECORD_KEY,
             ACTIVITY_KEY,
+            DEVICE_CHANNELS_KEY,
         ]);
+        expect(storedAt(h.storage, DEVICE_CHANNELS_KEY)).toEqual({ version: 1, channelIds: [CHANNEL_ID] });
         expect(await h.store.resolveChannelIndex(CHANNEL_ID)).toBe(INDEX);
         expect((await h.store.getChannelRecord(INDEX))?.pins).toStrictEqual(PINS);
         expect(storedAt(h.storage, ACTIVITY_KEY)).toEqual({
@@ -398,19 +405,40 @@ describe("prepareSdkChannelOpen", () => {
 
     it("leaves the channel served by the signing step before its tx is submitted, and not before it is prepared", async () => {
         const tick = async (h: Harness): Promise<void> => {
-            const { rpc, store, dispatch } = h.options;
-            h.node
-                .result({ channels: [{ channel_id: CHANNEL_ID }] })
-                .result({ channel_id: CHANNEL_ID, status: { type: "NoSignatureRequired" } });
-            await buildChannelSigningStep({ rpc, store, dispatch, emit: () => undefined })({ abandoned: false });
+            const { rpc, store, activity, dispatch } = h.options;
+            h.node.result({ channel_id: CHANNEL_ID, status: { type: "NoSignatureRequired" } });
+            await buildChannelSigningStep({ rpc, store, activity, dispatch, emit: () => undefined })({ abandoned: false });
         };
         const fresh = harness();
         await tick(fresh);
-        expect(fresh.node.calls()).toEqual([LIST_CHANNELS_CALL]);
+        expect(fresh.node.calls()).toEqual([]);
         const h = await opened();
         await tick(h);
-        expect(h.node.calls()).toEqual([openCall(), LIST_CHANNELS_CALL, signingStatusCall(CHANNEL_ID)]);
+        expect(h.node.calls()).toEqual([openCall(), signingStatusCall(CHANNEL_ID)]);
     });
+
+    // Fiber holds no watch row before the funding: a watchtower tick that saw the channel listed but unwatched would drop it.
+    it.each(Array.from({ length: 41 }, (_, offset) => offset))(
+        "keeps the channel listed when a watchtower tick starts %i microtasks into the pin's last writes",
+        async (offset) => {
+            const h = harness();
+            const { rpc, store, policy, dispatch, activity, channels } = h.options;
+            const step = buildWatchtowerSigningStep({ rpc, store, policy, dispatch, activity, channels, emit: () => undefined });
+            const pinFundingCell = policy.pinFundingCell.bind(policy);
+            let tick: Promise<void> = Promise.resolve();
+            jest.spyOn(policy, "pinFundingCell").mockImplementationOnce(async (...args) => {
+                await pinFundingCell(...args);
+                tick = (async () => {
+                    for (let microtask = 0; microtask < offset; microtask++) await Promise.resolve();
+                    await step(live());
+                })();
+            });
+            h.node.result(OPEN_ANSWER).error(-32000, "watched channel not found");
+            await prepareSdkChannelOpen(h.options, AMOUNT, USER_LOCK);
+            await tick;
+            expect(storedAt(h.storage, DEVICE_CHANNELS_KEY)).toEqual({ version: 1, channelIds: [CHANNEL_ID] });
+        },
+    );
 
     describe("the pending opening", () => {
         it("resumes after an unknown outcome under the same index, resending the identical request", async () => {
@@ -467,7 +495,7 @@ describe("prepareSdkChannelOpen", () => {
             await expect(prepareSdkChannelOpen(h.options, AMOUNT, USER_LOCK)).resolves.toStrictEqual(OPENING);
             expect(h.node.calls()).toEqual([openCall(), ONLY_PENDING_CALL, openCall()]);
             expect(h.storage.map.get(RECORD_KEY)).toBe(record);
-            expect(writes(h.storage)).toHaveLength(8);
+            expect(writes(h.storage)).toHaveLength(9);
         });
 
         it("drops one whose channel the node aborted, and opens under a fresh index", async () => {
@@ -573,6 +601,8 @@ describe("prepareSdkChannelOpen", () => {
             h.node.result(OPEN_ANSWER);
             expect(await rejection(prepareSdkChannelOpen(h.options, AMOUNT, USER_LOCK))).toEqual(new Error("storage offline"));
             expect(storedAt(h.storage, OPENING_KEY)).toEqual(pendingOf(INDEX, CHANNEL_ID));
+            // Listed only once watched.
+            expect(storedAt(h.storage, DEVICE_CHANNELS_KEY)).toBeUndefined();
             h.node.result({ channels: [{ channel_id: CHANNEL_ID, state: OPENING_STATE }] }).result(OPEN_ANSWER);
             await expect(prepareSdkChannelOpen(h.options, AMOUNT, USER_LOCK)).resolves.toStrictEqual(OPENING);
             expect(h.node.calls()).toEqual([openCall(), ONLY_PENDING_CALL, openCall()]);
@@ -582,6 +612,31 @@ describe("prepareSdkChannelOpen", () => {
                 payments: {},
                 invoices: {},
             });
+            expect(storedAt(h.storage, DEVICE_CHANNELS_KEY)).toEqual({ version: 1, channelIds: [CHANNEL_ID] });
+            expect(writes(h.storage).filter((key) => key === DEVICE_CHANNELS_KEY)).toHaveLength(1);
+        });
+
+        it("keeps it, named and watched, when the channel cannot be listed, and the same call then lists it once", async () => {
+            const h = harness();
+            jest.spyOn(h.options.channels, "add").mockRejectedValueOnce(new Error("storage offline"));
+            h.node.result(OPEN_ANSWER);
+            expect(await rejection(prepareSdkChannelOpen(h.options, AMOUNT, USER_LOCK))).toEqual(new Error("storage offline"));
+            expect(storedAt(h.storage, OPENING_KEY)).toEqual(pendingOf(INDEX, CHANNEL_ID));
+            expect(storedAt(h.storage, ACTIVITY_KEY)).toEqual({
+                version: 1,
+                channels: { [CHANNEL_ID]: { status: null } },
+                payments: {},
+                invoices: {},
+            });
+            expect(storedAt(h.storage, DEVICE_CHANNELS_KEY)).toBeUndefined();
+            h.node.result({ channels: [{ channel_id: CHANNEL_ID, state: OPENING_STATE }] }).result(OPEN_ANSWER);
+            await expect(prepareSdkChannelOpen(h.options, AMOUNT, USER_LOCK)).resolves.toStrictEqual(OPENING);
+            expect(h.node.calls()).toEqual([openCall(), ONLY_PENDING_CALL, openCall()]);
+            expect(storedAt(h.storage, DEVICE_CHANNELS_KEY)).toEqual({ version: 1, channelIds: [CHANNEL_ID] });
+            expect(writes(h.storage).filter((key) => key === DEVICE_CHANNELS_KEY)).toHaveLength(1);
+            // Watched by the first call, and not rewritten by the one that resumed it.
+            expect(writes(h.storage).filter((key) => key === ACTIVITY_KEY)).toHaveLength(1);
+            expect(storedAt(h.storage, OPENING_KEY)).toEqual(pendingOf(INDEX, CHANNEL_ID));
         });
 
         it("drops an opening that failed past its pins once the node aborts it, and opens afresh without a conflict", async () => {
@@ -945,7 +1000,7 @@ describe("submitSdkFundingTx", () => {
         h.node.result(SUBMIT_ANSWER);
         await expect(submitSdkFundingTx(h.options, CHANNEL_ID, SIGNED_TX)).resolves.toBeUndefined();
         expect(h.node.calls().at(-1)).toEqual(SUBMIT_CALL);
-        expect(writes(h.storage)).toHaveLength(8);
+        expect(writes(h.storage)).toHaveLength(9);
     });
 
     it.each<[string, string, unknown]>([

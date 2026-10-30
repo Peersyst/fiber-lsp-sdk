@@ -94,12 +94,12 @@ const LISTED: Omit<SdkChannelInfo, "state"> = {
     hasRecord: true,
 };
 
-// The tick that signs the close: the channel step's listing, the signing step's and the request signed, then the watchtower step's
-// listing, which asks nothing of a channel closed cooperatively.
-const CLOSE_TICK = ["list_channels", "list_channels", "get_channel_signing_status", "submit_channel_signature", "list_channels"];
+// The tick that signs the close: the channel step's listing, the request signed, then the watchtower's status of the channel, which
+// fiber holds no watch row for any more.
+const CLOSE_TICK = ["list_channels", "get_channel_signing_status", "submit_channel_signature", "get_watchtower_signing_status"];
 
-// Each step's listing: the channel step reads the channel closed, which the other two pass over.
-const CLOSED_TICK = ["list_channels", "list_channels", "list_channels"];
+// The channel step reads the channel closed and forgets it; the watchtower step, told it holds no watch row, drops it.
+const CLOSED_TICK = ["list_channels", "get_watchtower_signing_status"];
 
 type ClosingFlow = { node: InMemoryTenantNode; sdk: FiberLspSdk; storage: InMemorySignerStorage; timer: TimerMock; events: SdkEvent[] };
 
@@ -213,6 +213,11 @@ describe("the cooperative close over the tenant node", () => {
         expect(eventsOf(h)).toEqual(["SIGNING SendClosingSigned signed", "CHANNEL_CLOSED opening"]);
         expect(await h.sdk.listChannels()).toEqual([{ ...LISTED, state: "closed" }]);
         expect(await watchedChannels(h)).toEqual([]);
+        // Nothing left to poll: the device calls the node for nothing, so the LSP may evict it.
+        expect(JSON.parse(h.storage.map.get("fiber-lsp-sdk:device-channels") ?? "null")).toEqual({ version: 1, channelIds: [] });
+        const idle = h.node.calls.length;
+        await tick(h, 2);
+        expect(methods(h, idle)).toEqual([]);
     });
 
     it("closes at the fee rate the host gives, which the device's output pays", async () => {

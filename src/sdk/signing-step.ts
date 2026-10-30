@@ -1,6 +1,7 @@
 import type { SignerStore } from "../policy";
 import type { FiberRpcClient } from "../rpc";
 import type { DispatchOutcome, SignerDispatch } from "../signer";
+import type { ActivityTracker } from "./activity";
 import type { PollRun, PollStep } from "./poller";
 import type { SdkEvent } from "./sdk.types";
 import { answerEachPolled, deliverStepEvent, encodeSdkRequestId, misansweredStatusRefusal, reportStepFailure } from "./utils";
@@ -8,6 +9,7 @@ import { answerEachPolled, deliverStepEvent, encodeSdkRequestId, misansweredStat
 export type ChannelSigningStepOptions = {
     rpc: FiberRpcClient;
     store: SignerStore;
+    activity: ActivityTracker;
     dispatch: SignerDispatch;
     emit: (event: SdkEvent) => void;
 };
@@ -26,12 +28,12 @@ function deadlineFieldOf(deadlineMs: bigint | null): { deadlineMs?: number } {
 }
 
 /**
- * Builds the poll step that answers the signing requests of every registered channel the node lists.
- * @param options The node's client, the store, the dispatch and the emitter.
- * @returns The step; it rejects only when the node's channels cannot be listed.
+ * Builds the poll step that answers the signing requests of every channel the device opened and has not seen closed.
+ * @param options The node's client, the store, the activity list, the dispatch and the emitter.
+ * @returns The step; it rejects only when the activity list cannot be read.
  */
 export function buildChannelSigningStep(options: ChannelSigningStepOptions): PollStep {
-    const { rpc, store, dispatch, emit } = options;
+    const { rpc, store, activity, dispatch, emit } = options;
 
     /**
      * Submits a signature, then announces it.
@@ -57,7 +59,7 @@ export function buildChannelSigningStep(options: ChannelSigningStepOptions): Pol
     /**
      * Answers one channel's signing status, if it is registered on this device.
      * @param run The run.
-     * @param channelId The channel, as the node lists it.
+     * @param channelId The channel, as fiber names it.
      */
     const answer = async (run: PollRun, channelId: string): Promise<void> => {
         if ((await store.resolveChannelIndex(channelId)) === null) return;
@@ -93,7 +95,8 @@ export function buildChannelSigningStep(options: ChannelSigningStepOptions): Pol
     };
 
     return async (run) => {
-        const channelIds = await rpc.listChannelIds();
+        // Never `list_channels`: fiber wakes an evicted tenant for it, and not for a signing status (`rpc/channel.rs:387-412`).
+        const channelIds = Object.keys((await activity.read()).channels);
         await answerEachPolled(
             run,
             emit,

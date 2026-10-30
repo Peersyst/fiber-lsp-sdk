@@ -14,6 +14,7 @@ import { PolicyEngine, SignerStore } from "../policy";
 import { FiberRpcClient } from "../rpc";
 import { HoldInvoicePreimages, SignerDispatch, TenantIdentity } from "../signer";
 import { ActivityTracker } from "./activity";
+import { DeviceChannelList } from "./device-channels";
 import { IndexAllocator } from "./allocator";
 import { closeSdkChannel } from "./channel-closing";
 import { readSdkChannelEvidence } from "./channel-evidence";
@@ -82,14 +83,15 @@ export class FiberLspSdk {
         const emit = this.listeners.emit.bind(this.listeners);
         const rpc = new FiberRpcClient({ url: options.rpcUrl, token: options.biscuitToken, fetch: options.fetch });
         const activity = new ActivityTracker(store);
+        const channels = new DeviceChannelList(store);
         const openings = new PendingOpeningStore(store);
         const preimages = new HoldInvoicePreimages(masterSeed);
         const sending = new Set<string>();
         const reading = new Set<string>();
         const steps = [
             buildChannelStep({ rpc, activity, openings, emit }),
-            buildChannelSigningStep({ rpc, store, dispatch, emit }),
-            buildWatchtowerSigningStep({ rpc, store, policy, dispatch, emit }),
+            buildChannelSigningStep({ rpc, store, activity, dispatch, emit }),
+            buildWatchtowerSigningStep({ rpc, store, policy, dispatch, activity, channels, emit }),
             buildInvoiceStep({
                 rpc,
                 policy,
@@ -114,6 +116,7 @@ export class FiberLspSdk {
             dispatch,
             allocator: new IndexAllocator(store, now),
             activity,
+            channels,
             openings,
             poller: new ActivityPoller({ timer, intervalMs: pollIntervalMs, stepTimeoutMs: POLL_STEP_TIMEOUT_MS, steps, emit }),
             sending,

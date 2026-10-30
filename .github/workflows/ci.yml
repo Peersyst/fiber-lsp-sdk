@@ -20,3 +20,6 @@ jobs:
       - run: pnpm check-types
       - run: pnpm test
       - run: pnpm build
+      - run: pnpm --dir e2e/agent install --frozen-lockfile
+      - run: pnpm --dir e2e/agent check-types
+      - run: pnpm --dir e2e/agent test

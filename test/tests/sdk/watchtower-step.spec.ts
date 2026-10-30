@@ -2,10 +2,10 @@ import type { PolicyEngineOptions } from "../../../src/policy";
 import { CHANNEL_ALIAS_KEY_PREFIX, CHANNEL_RECORD_KEY_PREFIX } from "../../../src/policy";
 import { FiberRpcClient, RpcError, RpcResponseError, RpcTransportError } from "../../../src/rpc";
 import type { SdkEvent } from "../../../src/sdk";
-import { SdkError, buildWatchtowerSigningStep } from "../../../src/sdk";
+import { ActivityTracker, DeviceChannelList, SdkError, buildWatchtowerSigningStep } from "../../../src/sdk";
 import type { SentCall } from "../../mocks/rpc";
 import { ScriptedNode } from "../../mocks/rpc";
-import { LIST_CHANNELS_WITH_CLOSED_CALL, watchtowerStatusCall } from "../../utils/rpc-answers";
+import { watchtowerStatusCall } from "../../utils/rpc-answers";
 import type { SigningChannel } from "../../utils/signing-channel";
 import { openWatchtowerChannel } from "../../utils/signing-channel";
 import type { SigningWatchtowerSpendVector } from "../../utils/signing-vectors";
@@ -17,10 +17,9 @@ import {
     watchtowerStatusField,
     watchtowerVariantOf,
 } from "../../utils/signing-vectors";
-import { rejection } from "../../utils/rejection";
 import { abandonAfterHandleWatchtower, live, pollFailedEvent, summarized } from "../../utils/step-run";
 import { withField } from "../../utils/with-field";
-import { writes } from "../../utils/stored-records";
+import { storedAt, writes } from "../../utils/stored-records";
 
 const vectors = loadSigningVectors();
 // Registered on an index with no record: polled, and idle wherever it is listed.
@@ -28,10 +27,9 @@ const OTHER_ID = `0x${"2e".repeat(32)}`;
 const OTHER_INDEX = 7;
 const UNREGISTERED_ID = `0x${"5a".repeat(32)}`;
 const URL = "http://127.0.0.1:8227";
+const ACTIVITY_KEY = "fiber-lsp-sdk:activity";
+const DEVICE_CHANNELS_KEY = "fiber-lsp-sdk:device-channels";
 const IDLE = { type: "NoSignatureRequired" };
-const READY = { state_name: "ChannelReady" };
-// Before `TxComplete`, when fiber has created no watch row yet.
-const COLLABORATING = { state_name: "CollaboratingFundingTx", state_flags: "AWAITING_REMOTE_TX_COLLABORATION_MSG" };
 const UNWATCHED = "watched channel not found";
 const APPLIED = { type: "Applied" };
 const ALREADY_APPLIED = { type: "AlreadyApplied" };
@@ -43,6 +41,8 @@ const OUTBOUND_TLC = watchtowerSpendOf(vectors, "own commitment: outbound TLC by
 
 type Harness = {
     channel: SigningChannel;
+    activity: ActivityTracker;
+    channels: DeviceChannelList;
     node: ScriptedNode;
     events: SdkEvent[];
     step: (run: { abandoned: boolean }) => Promise<void>;
@@ -54,6 +54,10 @@ async function harness(
 ): Promise<Harness> {
     const channel = await openWatchtowerChannel(vectors, options);
     await channel.store.claimChannelAlias(OTHER_ID, OTHER_INDEX);
+    const activity = new ActivityTracker(channel.store);
+    const channels = new DeviceChannelList(channel.store);
+    await activity.watch("channel", channel.channelId);
+    await channels.add(channel.channelId);
     const node = new ScriptedNode();
     const events: SdkEvent[] = [];
     const step = buildWatchtowerSigningStep({
@@ -61,12 +65,25 @@ async function harness(
         store: channel.store,
         policy: channel.policy,
         dispatch: channel.dispatch,
+        activity,
+        channels,
         emit: (event) => {
             events.push(event);
             onEmit(event);
         },
     });
-    return { channel, node, events, step };
+    return { channel, activity, channels, node, events, step };
+}
+
+// The channels the device opened, in that order, each open (watched by the activity) or seen closed.
+async function polling(h: Harness, listed: readonly (readonly [string, boolean])[]): Promise<void> {
+    const id = h.channel.channelId;
+    await h.channels.remove(id);
+    await h.activity.forget("channel", id);
+    for (const [channelId, open] of listed) {
+        if (open) await h.activity.watch("channel", channelId);
+        await h.channels.add(channelId);
+    }
 }
 
 function channelIdOf(h: Harness): string {
@@ -114,12 +131,9 @@ describe("buildWatchtowerSigningStep", () => {
             async (_, spend) => {
                 const h = await harness();
                 const id = channelIdOf(h);
-                h.node
-                    .result({ channels: [{ channel_id: id, state: READY }] })
-                    .result(spendResult(id, spend))
-                    .result(APPLIED);
+                h.node.result(spendResult(id, spend)).result(APPLIED);
                 await h.step(live());
-                expect(h.node.calls()).toEqual([LIST_CHANNELS_WITH_CLOSED_CALL, watchtowerStatusCall(id), submissionCall(id, spend)]);
+                expect(h.node.calls()).toEqual([watchtowerStatusCall(id), submissionCall(id, spend)]);
                 expect(await appliedOf(h)).toEqual([[spend.request_id, true]]);
                 expect(h.events).toStrictEqual([signedEvent(id, spend)]);
             },
@@ -136,7 +150,6 @@ describe("buildWatchtowerSigningStep", () => {
             });
             h.node
                 .onCall("submit_watchtower_signature", () => order.push("submit"))
-                .result({ channels: [{ channel_id: id, state: READY }] })
                 .result(spendResult(id, SETTLEMENT))
                 .result(APPLIED);
             await h.step(live());
@@ -147,21 +160,14 @@ describe("buildWatchtowerSigningStep", () => {
         it("submits a request for the unlock of a spend it signed already, marking nothing, and emits it signed", async () => {
             const h = await harness();
             const id = channelIdOf(h);
-            h.node
-                .result({ channels: [{ channel_id: id, state: READY }] })
-                .result(spendResult(id, SETTLEMENT))
-                .result(APPLIED);
+            h.node.result(spendResult(id, SETTLEMENT)).result(APPLIED);
             await h.step(live());
             const supersededId = `0x${"0d".repeat(32)}`;
             const mark = jest.spyOn(h.channel.policy, "markWatchtowerSpendApplied");
             h.channel.storage.ops.length = 0;
-            h.node
-                .result({ channels: [{ channel_id: id, state: READY }] })
-                .result(statusResult(id, withField(watchtowerStatusField(SETTLEMENT).value, "request_id", supersededId)))
-                .result(APPLIED);
+            h.node.result(statusResult(id, withField(watchtowerStatusField(SETTLEMENT).value, "request_id", supersededId))).result(APPLIED);
             await h.step(live());
-            expect(h.node.calls().slice(3)).toEqual([
-                LIST_CHANNELS_WITH_CLOSED_CALL,
+            expect(h.node.calls().slice(2)).toEqual([
                 watchtowerStatusCall(id),
                 {
                     method: "submit_watchtower_signature",
@@ -177,22 +183,14 @@ describe("buildWatchtowerSigningStep", () => {
         it("resends an already signed spend with the same bytes, writing nothing, and takes AlreadyApplied as success", async () => {
             const h = await harness();
             const id = channelIdOf(h);
-            h.node
-                .result({ channels: [{ channel_id: id, state: READY }] })
-                .result(spendResult(id, SETTLEMENT))
-                .result(APPLIED);
+            h.node.result(spendResult(id, SETTLEMENT)).result(APPLIED);
             await h.step(live());
             h.channel.storage.ops.length = 0;
-            h.node
-                .result({ channels: [{ channel_id: id, state: READY }] })
-                .result(spendResult(id, SETTLEMENT))
-                .result(ALREADY_APPLIED);
+            h.node.result(spendResult(id, SETTLEMENT)).result(ALREADY_APPLIED);
             await h.step(live());
             expect(h.node.calls()).toEqual([
-                LIST_CHANNELS_WITH_CLOSED_CALL,
                 watchtowerStatusCall(id),
                 submissionCall(id, SETTLEMENT),
-                LIST_CHANNELS_WITH_CLOSED_CALL,
                 watchtowerStatusCall(id),
                 submissionCall(id, SETTLEMENT),
             ]);
@@ -200,27 +198,17 @@ describe("buildWatchtowerSigningStep", () => {
             expect(h.events).toStrictEqual([signedEvent(id, SETTLEMENT), signedEvent(id, SETTLEMENT)]);
         });
 
-        it("answers every registered channel the node lists, in its order, and no other", async () => {
+        it("answers every registered channel the device lists, in the order it opened them, and no other", async () => {
             const h = await harness();
             const id = channelIdOf(h);
-            h.node
-                .result({
-                    channels: [
-                        { channel_id: UNREGISTERED_ID, state: READY },
-                        { channel_id: OTHER_ID, state: READY },
-                        { channel_id: id, state: READY },
-                    ],
-                })
-                .result(statusResult(OTHER_ID, IDLE))
-                .result(spendResult(id, INBOUND_TLC))
-                .result(APPLIED);
-            await h.step(live());
-            expect(h.node.calls()).toEqual([
-                LIST_CHANNELS_WITH_CLOSED_CALL,
-                watchtowerStatusCall(OTHER_ID),
-                watchtowerStatusCall(id),
-                submissionCall(id, INBOUND_TLC),
+            await polling(h, [
+                [UNREGISTERED_ID, true],
+                [OTHER_ID, true],
+                [id, true],
             ]);
+            h.node.result(statusResult(OTHER_ID, IDLE)).result(spendResult(id, INBOUND_TLC)).result(APPLIED);
+            await h.step(live());
+            expect(h.node.calls()).toEqual([watchtowerStatusCall(OTHER_ID), watchtowerStatusCall(id), submissionCall(id, INBOUND_TLC)]);
             expect(h.events).toStrictEqual([signedEvent(id, INBOUND_TLC)]);
         });
     });
@@ -230,9 +218,9 @@ describe("buildWatchtowerSigningStep", () => {
             const h = await harness({});
             const id = channelIdOf(h);
             h.channel.storage.ops.length = 0;
-            h.node.result({ channels: [{ channel_id: id, state: READY }] }).result(spendResult(id, OUTBOUND_TLC));
+            h.node.result(spendResult(id, OUTBOUND_TLC));
             await h.step(live());
-            expect(h.node.calls()).toEqual([LIST_CHANNELS_WITH_CLOSED_CALL, watchtowerStatusCall(id)]);
+            expect(h.node.calls()).toEqual([watchtowerStatusCall(id)]);
             expect(writes(h.channel.storage)).toEqual([]);
             expect(h.events).toStrictEqual([
                 {
@@ -253,9 +241,9 @@ describe("buildWatchtowerSigningStep", () => {
             const variant = watchtowerVariantOf(vectors, "foreign destination");
             const h = await harness();
             const id = channelIdOf(h);
-            h.node.result({ channels: [{ channel_id: id, state: READY }] }).result(statusResult(id, watchtowerStatusField(variant).value));
+            h.node.result(statusResult(id, watchtowerStatusField(variant).value));
             await h.step(live());
-            expect(h.node.calls()).toEqual([LIST_CHANNELS_WITH_CLOSED_CALL, watchtowerStatusCall(id)]);
+            expect(h.node.calls()).toEqual([watchtowerStatusCall(id)]);
             expect(h.events).toStrictEqual([
                 {
                     type: "WATCHTOWER_SIGNING",
@@ -276,9 +264,9 @@ describe("buildWatchtowerSigningStep", () => {
             const id = channelIdOf(h);
             h.channel.storage.ops.length = 0;
             const status = withField(watchtowerStatusField(SETTLEMENT).value, "request_id", "0x00");
-            h.node.result({ channels: [{ channel_id: id, state: READY }] }).result(statusResult(id, status));
+            h.node.result(statusResult(id, status));
             await h.step(live());
-            expect(h.node.calls()).toEqual([LIST_CHANNELS_WITH_CLOSED_CALL, watchtowerStatusCall(id)]);
+            expect(h.node.calls()).toEqual([watchtowerStatusCall(id)]);
             expect(writes(h.channel.storage)).toEqual([]);
             expect(h.events).toStrictEqual([
                 {
@@ -300,11 +288,11 @@ describe("buildWatchtowerSigningStep", () => {
             const id = channelIdOf(h);
             const handle = jest.spyOn(h.channel.dispatch, "handleWatchtower");
             h.channel.storage.ops.length = 0;
-            h.node.result({ channels: [{ channel_id: id, state: READY }] }).result(spendResult(OTHER_ID, SETTLEMENT));
+            h.node.result(spendResult(OTHER_ID, SETTLEMENT));
             await h.step(live());
             expect(handle).not.toHaveBeenCalled();
             expect(writes(h.channel.storage)).toEqual([]);
-            expect(h.node.calls()).toEqual([LIST_CHANNELS_WITH_CLOSED_CALL, watchtowerStatusCall(id)]);
+            expect(h.node.calls()).toEqual([watchtowerStatusCall(id)]);
             expect(h.events).toStrictEqual([
                 {
                     type: "WATCHTOWER_SIGNING",
@@ -324,7 +312,7 @@ describe("buildWatchtowerSigningStep", () => {
             const h = await harness({});
             const id = channelIdOf(h);
             for (let tick = 0; tick < 2; tick++) {
-                h.node.result({ channels: [{ channel_id: id, state: READY }] }).result(spendResult(id, SETTLEMENT));
+                h.node.result(spendResult(id, SETTLEMENT));
                 await h.step(live());
             }
             expect(h.events.map((event) => (event.type === "WATCHTOWER_SIGNING" ? event.outcome : event.type))).toEqual([
@@ -335,101 +323,148 @@ describe("buildWatchtowerSigningStep", () => {
     });
 
     describe("the channels it polls", () => {
-        it.each(["COOPERATIVE", "ABANDONED", "FUNDING_ABORTED"])(
-            "skips a channel closed %s, which fiber's watchtower no longer watches or never did",
-            async (flag) => {
-                const h = await harness();
-                const id = channelIdOf(h);
-                h.node
-                    .result({
-                        channels: [
-                            { channel_id: id, state: { state_name: "Closed", state_flags: flag } },
-                            { channel_id: OTHER_ID, state: READY },
-                        ],
-                    })
-                    .result(statusResult(OTHER_ID, IDLE));
-                await h.step(live());
-                expect(h.node.calls()).toEqual([LIST_CHANNELS_WITH_CLOSED_CALL, watchtowerStatusCall(OTHER_ID)]);
-                expect(h.events).toEqual([]);
-            },
-        );
-
-        it.each<[string, unknown]>([
-            ["closed by the device's own commitment", { state_name: "Closed", state_flags: "UNCOOPERATIVE_LOCAL" }],
-            ["closed by the peer's commitment", { state_name: "Closed", state_flags: "UNCOOPERATIVE_REMOTE" }],
-            [
-                "closed and waiting for the settlement on chain",
-                { state_name: "Closed", state_flags: "UNCOOPERATIVE_LOCAL|WAITING_ONCHAIN_SETTLEMENT" },
-            ],
-            ["closed with only the settlement pending", { state_name: "Closed", state_flags: "WAITING_ONCHAIN_SETTLEMENT" }],
-            ["shutting down with its commitment broadcast", { state_name: "ShuttingDown", state_flags: "WAITING_COMMITMENT_CONFIRMATION" }],
-            ["closed with no flag", { state_name: "Closed", state_flags: "" }],
-            ["closed with a flag this SDK does not know", { state_name: "Closed", state_flags: "SPLICE_ABORTED" }],
-            [
-                "closed with a known close flag beside an unknown one",
-                { state_name: "Closed", state_flags: "UNCOOPERATIVE_REMOTE|SPLICE_ABORTED" },
-            ],
-            ["in a state this SDK does not know", { state_name: "Splicing" }],
-            ["in another state under a skipped flag's name", { state_name: "ShuttingDown", state_flags: "COOPERATIVE" }],
-            ["stale", { state_name: "Stale" }],
-        ])("polls a channel %s, and signs its spend", async (_, state) => {
+        it.each<[string, boolean]>([
+            ["open", true],
+            ["closed", false],
+        ])("polls a channel the device opened, %s, and signs its spend", async (_, open) => {
             const h = await harness();
             const id = channelIdOf(h);
-            h.node
-                .result({ channels: [{ channel_id: id, state }] })
-                .result(spendResult(id, SETTLEMENT))
-                .result(APPLIED);
+            await polling(h, [[id, open]]);
+            h.node.result(spendResult(id, SETTLEMENT)).result(APPLIED);
             await h.step(live());
-            expect(h.node.calls()).toEqual([LIST_CHANNELS_WITH_CLOSED_CALL, watchtowerStatusCall(id), submissionCall(id, SETTLEMENT)]);
+            expect(h.node.calls()).toEqual([watchtowerStatusCall(id), submissionCall(id, SETTLEMENT)]);
             expect(h.events).toStrictEqual([signedEvent(id, SETTLEMENT)]);
+            expect(await h.channels.read()).toEqual([id]);
         });
 
-        it("rejects a listing with a channel whose state it cannot read, reading nothing more", async () => {
+        it("reads no listing of the node's channels: the device's own list alone says which to poll", async () => {
             const h = await harness();
             const id = channelIdOf(h);
-            h.node.result({ channels: [{ channel_id: OTHER_ID, state: READY }, { channel_id: id }] });
-            const error = await rejection(h.step(live()));
-            expect(error).toBeInstanceOf(RpcResponseError);
-            expect((error as RpcResponseError).message).toBe("list_channels: response.result.channels[1].state must be an object");
-            expect(h.node.calls()).toEqual([LIST_CHANNELS_WITH_CLOSED_CALL]);
+            h.node.result(statusResult(id, IDLE));
+            await h.step(live());
+            expect(h.node.calls()).toEqual([watchtowerStatusCall(id)]);
+        });
+
+        // Fiber deletes the row on a cooperative close, an abandon or an aborted funding, and never creates one after.
+        it("drops a closed channel fiber holds no watch row for, and asks nothing about it again", async () => {
+            const h = await harness();
+            const id = channelIdOf(h);
+            await polling(h, [
+                [id, false],
+                [OTHER_ID, true],
+            ]);
+            h.node.error(-32000, UNWATCHED).result(statusResult(OTHER_ID, IDLE));
+            await h.step(live());
+            expect(await h.channels.read()).toEqual([OTHER_ID]);
+            expect(storedAt(h.channel.storage, DEVICE_CHANNELS_KEY)).toEqual({ version: 1, channelIds: [OTHER_ID] });
+            h.node.result(statusResult(OTHER_ID, IDLE));
+            await h.step(live());
+            expect(h.node.calls()).toEqual([watchtowerStatusCall(id), watchtowerStatusCall(OTHER_ID), watchtowerStatusCall(OTHER_ID)]);
+            expect(h.events).toEqual([]);
+        });
+
+        it.each<[string, (node: ScriptedNode) => void, string, unknown]>([
+            [
+                "another message",
+                (node) => node.error(-32000, "watched channel not found yet"),
+                "watched channel not found yet",
+                expect.any(RpcError),
+            ],
+            ["another code", (node) => node.error(-32603, UNWATCHED), UNWATCHED, expect.any(RpcError)],
+            [
+                "a failed request",
+                (node) => node.reject(new TypeError("fetch failed")),
+                "get_watchtower_signing_status: the request failed",
+                expect.any(RpcTransportError),
+            ],
+        ])("keeps a closed channel whose status read fails with %s, reporting it as poll_failed", async (_, fail, message, cause) => {
+            const h = await harness();
+            const id = channelIdOf(h);
+            await polling(h, [[id, false]]);
+            fail(h.node);
+            await h.step(live());
+            expect(await h.channels.read()).toEqual([id]);
+            expect(summarized(h.events)).toStrictEqual([pollFailedEvent(`the watchtower signing poll of ${id} failed: ${message}`, cause)]);
+        });
+
+        // An opening is watched before it is listed: read in the other order, its pins' last two writes could land between the reads.
+        it("reads the device's list before the activity: a channel listed while unwatched and watched before the activity read is kept", async () => {
+            const h = await harness();
+            const id = channelIdOf(h);
+            await polling(h, [[id, false]]);
+            const read = h.channels.read.bind(h.channels);
+            jest.spyOn(h.channels, "read").mockImplementationOnce(async () => {
+                const listed = await read();
+                await h.activity.watch("channel", id);
+                return listed;
+            });
+            h.node.error(-32000, UNWATCHED);
+            await h.step(live());
+            expect(h.node.calls()).toEqual([watchtowerStatusCall(id)]);
+            expect(await h.channels.read()).toEqual([id]);
+            expect(h.events).toEqual([]);
+        });
+
+        it("keeps a closed channel fiber stopped watching when the run was abandoned during the read", async () => {
+            const h = await harness();
+            const id = channelIdOf(h);
+            await polling(h, [[id, false]]);
+            const run = live();
+            h.node.onCall("get_watchtower_signing_status", () => (run.abandoned = true)).error(-32000, UNWATCHED);
+            await h.step(run);
+            expect(await h.channels.read()).toEqual([id]);
+        });
+
+        it("reports a drop it cannot write as poll_failed, then answers the next channel", async () => {
+            const h = await harness();
+            const id = channelIdOf(h);
+            await polling(h, [
+                [id, false],
+                [OTHER_ID, true],
+            ]);
+            jest.spyOn(h.channels, "remove").mockRejectedValueOnce(new Error("storage offline"));
+            h.node.error(-32000, UNWATCHED).result(statusResult(OTHER_ID, IDLE));
+            await h.step(live());
+            expect(h.node.calls()).toEqual([watchtowerStatusCall(id), watchtowerStatusCall(OTHER_ID)]);
+            expect(summarized(h.events)).toStrictEqual([
+                pollFailedEvent(`the watchtower signing poll of ${id} failed: storage offline`, expect.any(Error)),
+            ]);
+        });
+
+        it.each<[string, string]>([
+            ["the device's channels", DEVICE_CHANNELS_KEY],
+            ["the activity list", ACTIVITY_KEY],
+        ])("rejects when %s cannot be read, calling the node for nothing", async (_, key) => {
+            const h = await harness();
+            h.channel.storage.map.set(key, "garbage");
+            await expect(h.step(live())).rejects.toEqual(new TypeError(`stored value at ${key} is not valid JSON`));
+            expect(h.node.calls()).toEqual([]);
             expect(h.events).toEqual([]);
         });
     });
 
     describe("nothing to answer", () => {
-        it.each<[string, unknown]>([
-            ["still opening", COLLABORATING],
-            ["ready", READY],
-        ])("reads fiber's answer for a channel %s with no watch row yet as nothing pending, then answers the next", async (_, state) => {
+        it("reads fiber's answer for an open channel with no watch row yet as nothing pending, keeps it, then answers the next", async () => {
             const h = await harness();
             const id = channelIdOf(h);
-            h.node
-                .result({
-                    channels: [
-                        { channel_id: id, state },
-                        { channel_id: OTHER_ID, state: READY },
-                    ],
-                })
-                .error(-32000, UNWATCHED)
-                .result(statusResult(OTHER_ID, IDLE));
+            await polling(h, [
+                [id, true],
+                [OTHER_ID, true],
+            ]);
+            h.node.error(-32000, UNWATCHED).result(statusResult(OTHER_ID, IDLE));
             await h.step(live());
-            expect(h.node.calls()).toEqual([LIST_CHANNELS_WITH_CLOSED_CALL, watchtowerStatusCall(id), watchtowerStatusCall(OTHER_ID)]);
+            expect(h.node.calls()).toEqual([watchtowerStatusCall(id), watchtowerStatusCall(OTHER_ID)]);
+            expect(await h.channels.read()).toEqual([id, OTHER_ID]);
             expect(h.events).toEqual([]);
         });
 
-        it.each<[string, unknown, number, string]>([
-            ["another message", READY, -32000, "watched channel not found yet"],
-            ["another code", READY, -32603, UNWATCHED],
-            [
-                "fiber's answer for a channel closed by its commitment",
-                { state_name: "Closed", state_flags: "UNCOOPERATIVE_LOCAL" },
-                -32000,
-                UNWATCHED,
-            ],
-        ])("still reports %s as poll_failed", async (_, state, code, message) => {
+        it.each<[string, number, string]>([
+            ["another message", -32000, "watched channel not found yet"],
+            ["another code", -32603, UNWATCHED],
+        ])("still reports %s for an open channel as poll_failed", async (_, code, message) => {
             const h = await harness();
             const id = channelIdOf(h);
-            h.node.result({ channels: [{ channel_id: id, state }] }).error(code, message);
+            h.node.error(code, message);
             await h.step(live());
             expect(summarized(h.events)).toStrictEqual([
                 pollFailedEvent(`the watchtower signing poll of ${id} failed: ${message}`, expect.any(RpcError)),
@@ -440,26 +475,27 @@ describe("buildWatchtowerSigningStep", () => {
             const h = await harness();
             const id = channelIdOf(h);
             h.channel.storage.ops.length = 0;
-            h.node.result({ channels: [{ channel_id: id, state: READY }] }).result(statusResult(id, IDLE));
+            h.node.result(statusResult(id, IDLE));
             await h.step(live());
-            expect(h.node.calls()).toEqual([LIST_CHANNELS_WITH_CLOSED_CALL, watchtowerStatusCall(id)]);
+            expect(h.node.calls()).toEqual([watchtowerStatusCall(id)]);
             expect(writes(h.channel.storage)).toEqual([]);
             expect(h.events).toEqual([]);
         });
 
-        it("does not even read the status of a channel this device never registered", async () => {
+        it("does not even read the status of a listed channel this device never registered", async () => {
             const h = await harness();
-            h.node.result({ channels: [{ channel_id: UNREGISTERED_ID, state: READY }] });
+            await polling(h, [[UNREGISTERED_ID, false]]);
             await h.step(live());
-            expect(h.node.calls()).toEqual([LIST_CHANNELS_WITH_CLOSED_CALL]);
+            expect(h.node.calls()).toEqual([]);
+            expect(await h.channels.read()).toEqual([UNREGISTERED_ID]);
             expect(h.events).toEqual([]);
         });
 
-        it("reads nothing more when the node lists no channel", async () => {
+        it("calls the node for nothing while the device lists no channel", async () => {
             const h = await harness();
-            h.node.result({ channels: [] });
+            await polling(h, []);
             await h.step(live());
-            expect(h.node.calls()).toEqual([LIST_CHANNELS_WITH_CLOSED_CALL]);
+            expect(h.node.calls()).toEqual([]);
             expect(h.events).toEqual([]);
         });
     });
@@ -476,21 +512,14 @@ describe("buildWatchtowerSigningStep", () => {
         ])("reports a status read the node %s as poll_failed, then answers the next channel", async (_, fail, message, cause) => {
             const h = await harness();
             const id = channelIdOf(h);
-            h.node.result({
-                channels: [
-                    { channel_id: OTHER_ID, state: READY },
-                    { channel_id: id, state: READY },
-                ],
-            });
+            await polling(h, [
+                [OTHER_ID, true],
+                [id, true],
+            ]);
             fail(h.node);
             h.node.result(spendResult(id, SETTLEMENT)).result(APPLIED);
             await h.step(live());
-            expect(h.node.calls()).toEqual([
-                LIST_CHANNELS_WITH_CLOSED_CALL,
-                watchtowerStatusCall(OTHER_ID),
-                watchtowerStatusCall(id),
-                submissionCall(id, SETTLEMENT),
-            ]);
+            expect(h.node.calls()).toEqual([watchtowerStatusCall(OTHER_ID), watchtowerStatusCall(id), submissionCall(id, SETTLEMENT)]);
             expect(summarized(h.events)).toStrictEqual([
                 pollFailedEvent(`the watchtower signing poll of ${OTHER_ID} failed: ${message}`, cause),
                 signedEvent(id, SETTLEMENT),
@@ -508,23 +537,15 @@ describe("buildWatchtowerSigningStep", () => {
         ])("reports a submission the node %s as poll_failed, then answers the next channel", async (_, fail, message, cause) => {
             const h = await harness();
             const id = channelIdOf(h);
-            h.node
-                .result({
-                    channels: [
-                        { channel_id: id, state: READY },
-                        { channel_id: OTHER_ID, state: READY },
-                    ],
-                })
-                .result(spendResult(id, SETTLEMENT));
+            await polling(h, [
+                [id, true],
+                [OTHER_ID, true],
+            ]);
+            h.node.result(spendResult(id, SETTLEMENT));
             fail(h.node);
             h.node.result(statusResult(OTHER_ID, IDLE));
             await h.step(live());
-            expect(h.node.calls()).toEqual([
-                LIST_CHANNELS_WITH_CLOSED_CALL,
-                watchtowerStatusCall(id),
-                submissionCall(id, SETTLEMENT),
-                watchtowerStatusCall(OTHER_ID),
-            ]);
+            expect(h.node.calls()).toEqual([watchtowerStatusCall(id), submissionCall(id, SETTLEMENT), watchtowerStatusCall(OTHER_ID)]);
             expect(summarized(h.events)).toStrictEqual([pollFailedEvent(`the watchtower signing poll of ${id} failed: ${message}`, cause)]);
         });
 
@@ -536,23 +557,13 @@ describe("buildWatchtowerSigningStep", () => {
             async (_, answer) => {
                 const h = await harness();
                 const id = channelIdOf(h);
-                h.node
-                    .result({ channels: [{ channel_id: id, state: READY }] })
-                    .result(spendResult(id, SETTLEMENT))
-                    .error(-32000, "node is busy");
+                h.node.result(spendResult(id, SETTLEMENT)).error(-32000, "node is busy");
                 await h.step(live());
                 expect(await appliedOf(h)).toEqual([[SETTLEMENT.request_id, false]]);
                 h.channel.storage.ops.length = 0;
-                h.node
-                    .result({ channels: [{ channel_id: id, state: READY }] })
-                    .result(spendResult(id, SETTLEMENT))
-                    .result(answer);
+                h.node.result(spendResult(id, SETTLEMENT)).result(answer);
                 await h.step(live());
-                expect(h.node.calls().slice(3)).toEqual([
-                    LIST_CHANNELS_WITH_CLOSED_CALL,
-                    watchtowerStatusCall(id),
-                    submissionCall(id, SETTLEMENT),
-                ]);
+                expect(h.node.calls().slice(2)).toEqual([watchtowerStatusCall(id), submissionCall(id, SETTLEMENT)]);
                 expect(writes(h.channel.storage)).toEqual(markWrite(h));
                 expect(await appliedOf(h)).toEqual([[SETTLEMENT.request_id, true]]);
                 expect(h.events.at(-1)).toStrictEqual(signedEvent(id, SETTLEMENT));
@@ -563,23 +574,13 @@ describe("buildWatchtowerSigningStep", () => {
             const h = await harness();
             const id = channelIdOf(h);
             jest.spyOn(h.channel.policy, "markWatchtowerSpendApplied").mockRejectedValueOnce(new TypeError("storage is full"));
-            h.node
-                .result({
-                    channels: [
-                        { channel_id: id, state: READY },
-                        { channel_id: OTHER_ID, state: READY },
-                    ],
-                })
-                .result(spendResult(id, SETTLEMENT))
-                .result(APPLIED)
-                .result(statusResult(OTHER_ID, IDLE));
-            await h.step(live());
-            expect(h.node.calls()).toEqual([
-                LIST_CHANNELS_WITH_CLOSED_CALL,
-                watchtowerStatusCall(id),
-                submissionCall(id, SETTLEMENT),
-                watchtowerStatusCall(OTHER_ID),
+            await polling(h, [
+                [id, true],
+                [OTHER_ID, true],
             ]);
+            h.node.result(spendResult(id, SETTLEMENT)).result(APPLIED).result(statusResult(OTHER_ID, IDLE));
+            await h.step(live());
+            expect(h.node.calls()).toEqual([watchtowerStatusCall(id), submissionCall(id, SETTLEMENT), watchtowerStatusCall(OTHER_ID)]);
             expect(await appliedOf(h)).toEqual([[SETTLEMENT.request_id, false]]);
             expect(summarized(h.events)).toStrictEqual([
                 pollFailedEvent(`the watchtower signing poll of ${id} failed: storage is full`, expect.any(TypeError)),
@@ -590,17 +591,13 @@ describe("buildWatchtowerSigningStep", () => {
             const h = await harness();
             const id = channelIdOf(h);
             h.channel.storage.map.set(`${CHANNEL_RECORD_KEY_PREFIX}${h.channel.channelIndex}`, "garbage");
-            h.node
-                .result({
-                    channels: [
-                        { channel_id: id, state: READY },
-                        { channel_id: OTHER_ID, state: READY },
-                    ],
-                })
-                .result(spendResult(id, SETTLEMENT))
-                .result(statusResult(OTHER_ID, IDLE));
+            await polling(h, [
+                [id, true],
+                [OTHER_ID, true],
+            ]);
+            h.node.result(spendResult(id, SETTLEMENT)).result(statusResult(OTHER_ID, IDLE));
             await h.step(live());
-            expect(h.node.calls()).toEqual([LIST_CHANNELS_WITH_CLOSED_CALL, watchtowerStatusCall(id), watchtowerStatusCall(OTHER_ID)]);
+            expect(h.node.calls()).toEqual([watchtowerStatusCall(id), watchtowerStatusCall(OTHER_ID)]);
             expect(summarized(h.events)).toStrictEqual([
                 pollFailedEvent(
                     `the watchtower signing poll of ${id} failed: stored value at ${CHANNEL_RECORD_KEY_PREFIX}${h.channel.channelIndex} is not valid JSON`,
@@ -613,17 +610,13 @@ describe("buildWatchtowerSigningStep", () => {
             const h = await harness();
             const id = channelIdOf(h);
             h.channel.storage.map.set(`${CHANNEL_ALIAS_KEY_PREFIX}${OTHER_ID}`, "seven");
-            h.node
-                .result({
-                    channels: [
-                        { channel_id: OTHER_ID, state: READY },
-                        { channel_id: id, state: READY },
-                    ],
-                })
-                .result(spendResult(id, SETTLEMENT))
-                .result(APPLIED);
+            await polling(h, [
+                [OTHER_ID, true],
+                [id, true],
+            ]);
+            h.node.result(spendResult(id, SETTLEMENT)).result(APPLIED);
             await h.step(live());
-            expect(h.node.calls()).toEqual([LIST_CHANNELS_WITH_CLOSED_CALL, watchtowerStatusCall(id), submissionCall(id, SETTLEMENT)]);
+            expect(h.node.calls()).toEqual([watchtowerStatusCall(id), submissionCall(id, SETTLEMENT)]);
             expect(summarized(h.events)).toStrictEqual([
                 pollFailedEvent(
                     `the watchtower signing poll of ${OTHER_ID} failed: stored value at ${CHANNEL_ALIAS_KEY_PREFIX}${OTHER_ID} is not a channel index`,
@@ -631,14 +624,6 @@ describe("buildWatchtowerSigningStep", () => {
                 ),
                 signedEvent(id, SETTLEMENT),
             ]);
-        });
-
-        it("rejects when the node's channels cannot be listed, reading nothing more", async () => {
-            const h = await harness();
-            h.node.error(-32000, "node is syncing");
-            await expect(h.step(live())).rejects.toEqual(new RpcError("list_channels", -32000, "node is syncing"));
-            expect(h.node.calls()).toEqual([LIST_CHANNELS_WITH_CLOSED_CALL]);
-            expect(h.events).toEqual([]);
         });
     });
 
@@ -649,26 +634,16 @@ describe("buildWatchtowerSigningStep", () => {
             const handle = jest.spyOn(h.channel.dispatch, "handleWatchtower");
             const run = live();
             h.channel.storage.ops.length = 0;
-            h.node
-                .onCall("get_watchtower_signing_status", () => (run.abandoned = true))
-                .result({ channels: [{ channel_id: id, state: READY }] })
-                .result(spendResult(id, SETTLEMENT));
+            h.node.onCall("get_watchtower_signing_status", () => (run.abandoned = true)).result(spendResult(id, SETTLEMENT));
             await h.step(run);
             expect(handle).not.toHaveBeenCalled();
             expect(writes(h.channel.storage)).toEqual([]);
-            expect(h.node.calls()).toEqual([LIST_CHANNELS_WITH_CLOSED_CALL, watchtowerStatusCall(id)]);
+            expect(h.node.calls()).toEqual([watchtowerStatusCall(id)]);
             expect(h.events).toEqual([]);
 
-            h.node
-                .result({ channels: [{ channel_id: id, state: READY }] })
-                .result(spendResult(id, SETTLEMENT))
-                .result(APPLIED);
+            h.node.result(spendResult(id, SETTLEMENT)).result(APPLIED);
             await h.step(live());
-            expect(h.node.calls().slice(2)).toEqual([
-                LIST_CHANNELS_WITH_CLOSED_CALL,
-                watchtowerStatusCall(id),
-                submissionCall(id, SETTLEMENT),
-            ]);
+            expect(h.node.calls().slice(1)).toEqual([watchtowerStatusCall(id), submissionCall(id, SETTLEMENT)]);
             expect(h.events).toStrictEqual([signedEvent(id, SETTLEMENT)]);
         });
 
@@ -677,22 +652,15 @@ describe("buildWatchtowerSigningStep", () => {
             const id = channelIdOf(h);
             const run = live();
             abandonAfterHandleWatchtower(h.channel.dispatch, run);
-            h.node.result({ channels: [{ channel_id: id, state: READY }] }).result(spendResult(id, INBOUND_TLC));
+            h.node.result(spendResult(id, INBOUND_TLC));
             await h.step(run);
-            expect(h.node.calls()).toEqual([LIST_CHANNELS_WITH_CLOSED_CALL, watchtowerStatusCall(id)]);
+            expect(h.node.calls()).toEqual([watchtowerStatusCall(id)]);
             expect(h.events).toEqual([]);
 
             h.channel.storage.ops.length = 0;
-            h.node
-                .result({ channels: [{ channel_id: id, state: READY }] })
-                .result(spendResult(id, INBOUND_TLC))
-                .result(APPLIED);
+            h.node.result(spendResult(id, INBOUND_TLC)).result(APPLIED);
             await h.step(live());
-            expect(h.node.calls().slice(2)).toEqual([
-                LIST_CHANNELS_WITH_CLOSED_CALL,
-                watchtowerStatusCall(id),
-                submissionCall(id, INBOUND_TLC),
-            ]);
+            expect(h.node.calls().slice(1)).toEqual([watchtowerStatusCall(id), submissionCall(id, INBOUND_TLC)]);
             // The record answers with the signature it holds: the one write is the mark.
             expect(writes(h.channel.storage)).toEqual(markWrite(h));
             expect(h.events).toStrictEqual([signedEvent(id, INBOUND_TLC)]);
@@ -706,24 +674,16 @@ describe("buildWatchtowerSigningStep", () => {
             const run = live();
             h.node
                 .onCall("submit_watchtower_signature", () => (run.abandoned = true))
-                .result({ channels: [{ channel_id: id, state: READY }] })
                 .result(spendResult(id, SETTLEMENT))
                 .result(APPLIED);
             await h.step(run);
-            expect(h.node.calls()).toEqual([LIST_CHANNELS_WITH_CLOSED_CALL, watchtowerStatusCall(id), submissionCall(id, SETTLEMENT)]);
+            expect(h.node.calls()).toEqual([watchtowerStatusCall(id), submissionCall(id, SETTLEMENT)]);
             expect(await appliedOf(h)).toEqual([[SETTLEMENT.request_id, true]]);
             expect(h.events).toEqual([]);
 
-            h.node
-                .result({ channels: [{ channel_id: id, state: READY }] })
-                .result(spendResult(id, SETTLEMENT))
-                .result(ALREADY_APPLIED);
+            h.node.result(spendResult(id, SETTLEMENT)).result(ALREADY_APPLIED);
             await h.step(live());
-            expect(h.node.calls().slice(3)).toEqual([
-                LIST_CHANNELS_WITH_CLOSED_CALL,
-                watchtowerStatusCall(id),
-                submissionCall(id, SETTLEMENT),
-            ]);
+            expect(h.node.calls().slice(2)).toEqual([watchtowerStatusCall(id), submissionCall(id, SETTLEMENT)]);
             expect(h.events).toStrictEqual([signedEvent(id, SETTLEMENT)]);
         });
 
@@ -732,9 +692,9 @@ describe("buildWatchtowerSigningStep", () => {
             const id = channelIdOf(h);
             const run = live();
             abandonAfterHandleWatchtower(h.channel.dispatch, run);
-            h.node.result({ channels: [{ channel_id: id, state: READY }] }).result(spendResult(id, SETTLEMENT));
+            h.node.result(spendResult(id, SETTLEMENT));
             await h.step(run);
-            expect(h.node.calls()).toEqual([LIST_CHANNELS_WITH_CLOSED_CALL, watchtowerStatusCall(id)]);
+            expect(h.node.calls()).toEqual([watchtowerStatusCall(id)]);
             expect(h.events).toEqual([]);
         });
 
@@ -745,7 +705,6 @@ describe("buildWatchtowerSigningStep", () => {
             jest.spyOn(h.channel.policy, "markWatchtowerSpendApplied").mockRejectedValueOnce(new TypeError("storage is full"));
             h.node
                 .onCall("submit_watchtower_signature", () => (run.abandoned = true))
-                .result({ channels: [{ channel_id: id, state: READY }] })
                 .result(spendResult(id, SETTLEMENT))
                 .result(APPLIED);
             await h.step(run);
@@ -758,31 +717,23 @@ describe("buildWatchtowerSigningStep", () => {
             const run = live();
             h.channel.storage.map.set(`${CHANNEL_RECORD_KEY_PREFIX}${h.channel.channelIndex}`, "garbage");
             abandonAfterHandleWatchtower(h.channel.dispatch, run);
-            h.node.result({ channels: [{ channel_id: id, state: READY }] }).result(spendResult(id, SETTLEMENT));
+            h.node.result(spendResult(id, SETTLEMENT));
             await h.step(run);
             expect(h.events).toEqual([]);
         });
 
         it("emits no refusal of another channel's status once abandoned during its read", async () => {
             const h = await harness();
-            const id = channelIdOf(h);
             const run = live();
-            h.node
-                .onCall("get_watchtower_signing_status", () => (run.abandoned = true))
-                .result({ channels: [{ channel_id: id, state: READY }] })
-                .result(spendResult(OTHER_ID, SETTLEMENT));
+            h.node.onCall("get_watchtower_signing_status", () => (run.abandoned = true)).result(spendResult(OTHER_ID, SETTLEMENT));
             await h.step(run);
             expect(h.events).toEqual([]);
         });
 
         it("emits no error once abandoned during a read that fails", async () => {
             const h = await harness();
-            const id = channelIdOf(h);
             const run = live();
-            h.node
-                .onCall("get_watchtower_signing_status", () => (run.abandoned = true))
-                .result({ channels: [{ channel_id: id, state: READY }] })
-                .error(-32000, "channel not found");
+            h.node.onCall("get_watchtower_signing_status", () => (run.abandoned = true)).error(-32000, "channel not found");
             await h.step(run);
             expect(h.events).toEqual([]);
         });
@@ -791,17 +742,13 @@ describe("buildWatchtowerSigningStep", () => {
             const h = await harness();
             const id = channelIdOf(h);
             const run = live();
-            h.node
-                .onCall("get_watchtower_signing_status", () => (run.abandoned = true))
-                .result({
-                    channels: [
-                        { channel_id: OTHER_ID, state: READY },
-                        { channel_id: id, state: READY },
-                    ],
-                })
-                .result(statusResult(OTHER_ID, IDLE));
+            await polling(h, [
+                [OTHER_ID, true],
+                [id, true],
+            ]);
+            h.node.onCall("get_watchtower_signing_status", () => (run.abandoned = true)).result(statusResult(OTHER_ID, IDLE));
             await h.step(run);
-            expect(h.node.calls()).toEqual([LIST_CHANNELS_WITH_CLOSED_CALL, watchtowerStatusCall(OTHER_ID)]);
+            expect(h.node.calls()).toEqual([watchtowerStatusCall(OTHER_ID)]);
         });
     });
 
@@ -810,23 +757,13 @@ describe("buildWatchtowerSigningStep", () => {
             throw new Error("the host's listener failed");
         });
         const id = channelIdOf(h);
-        h.node
-            .result({
-                channels: [
-                    { channel_id: OTHER_ID, state: READY },
-                    { channel_id: id, state: READY },
-                ],
-            })
-            .error(-32000, "channel not found")
-            .result(spendResult(id, SETTLEMENT))
-            .result(APPLIED);
-        await expect(h.step(live())).resolves.toBeUndefined();
-        expect(h.node.calls()).toEqual([
-            LIST_CHANNELS_WITH_CLOSED_CALL,
-            watchtowerStatusCall(OTHER_ID),
-            watchtowerStatusCall(id),
-            submissionCall(id, SETTLEMENT),
+        await polling(h, [
+            [OTHER_ID, true],
+            [id, true],
         ]);
+        h.node.error(-32000, "channel not found").result(spendResult(id, SETTLEMENT)).result(APPLIED);
+        await expect(h.step(live())).resolves.toBeUndefined();
+        expect(h.node.calls()).toEqual([watchtowerStatusCall(OTHER_ID), watchtowerStatusCall(id), submissionCall(id, SETTLEMENT)]);
         expect(h.events.map((event) => event.type)).toEqual(["ERROR", "WATCHTOWER_SIGNING"]);
         expect(h.events[0]).toMatchObject({ error: expect.any(SdkError) });
     });

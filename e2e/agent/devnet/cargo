@@ -1,0 +1,27 @@
+#!/usr/bin/env bash
+# Usage: first in PATH, it skips the build of the Rust agent and runs the real cargo for anything else.
+set -euo pipefail
+
+if [[ "${1:-}" == "build" ]]; then
+    for arg in "$@"; do
+        case "$arg" in
+            fiber-lsp-sdk-agent | -pfiber-lsp-sdk-agent | --package=fiber-lsp-sdk-agent)
+                echo "cargo shim: skipped the build of the Rust fiber-lsp-sdk-agent" >&2
+                exit 0
+                ;;
+        esac
+    done
+fi
+
+here="$(dirname "$(readlink -f "$0")")"
+IFS=: read -ra dirs <<<"${PATH:-}"
+for dir in "${dirs[@]}"; do
+    [[ -n "$dir" ]] || continue
+    candidate="$dir/cargo"
+    if [[ -x "$candidate" && ! -d "$candidate" && "$(dirname "$(readlink -f "$candidate")")" != "$here" ]]; then
+        exec "$candidate" "$@"
+    fi
+done
+
+echo "cargo shim: no real cargo found in PATH after $here" >&2
+exit 1

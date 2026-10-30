@@ -33,8 +33,8 @@ import type { InMemoryTenantNode, TenantNodePayment } from "../../utils/tenant-n
 import { writes } from "../../utils/stored-records";
 
 const vectors = loadSigningVectors();
-const SIGNED_TICK = ["list_channels", "get_channel_signing_status", "submit_channel_signature"];
-const UNSIGNED_TICK = ["list_channels", "get_channel_signing_status"];
+const SIGNED_TICK = ["get_channel_signing_status", "submit_channel_signature"];
+const UNSIGNED_TICK = ["get_channel_signing_status"];
 
 const RECEIVED: TenantNodePayment = {
     paymentHash: "3f1c9a5e7d2b4068a1e9c3d5f7b2a4c6e8d0f1a3b5c7d9e1f2a4b6c8d0e2f4a6",
@@ -557,7 +557,7 @@ describe("the signing step over the tenant node", () => {
             await tick(restarted);
             const calls = node.calls;
             expect(calls.map((call) => call.method)).toEqual(ticks(SIGNED_TICK, 3));
-            expect(calls[5]?.params).toEqual(calls[2]?.params);
+            expect(calls[3]?.params).toEqual(calls[1]?.params);
             expect(requests(h)).toEqual([
                 "CompleteReceivedCommitment Commitment@1 Applied+AlreadyApplied",
                 "SendCommitmentSigned Commitment@1 Applied",
@@ -580,7 +580,7 @@ describe("the signing step over the tenant node", () => {
             h.node.shutdown();
             await tick(h.device);
             expect(methods(h)).toEqual(ticks(SIGNED_TICK, 3));
-            expect(h.node.calls[8]?.params).not.toHaveProperty("next_material");
+            expect(h.node.calls[5]?.params).not.toHaveProperty("next_material");
             expect(requests(h).slice(2)).toEqual(["SendClosingSigned Commitment@2 Applied"]);
             expect(signings(h).slice(2)).toEqual(["SendClosingSigned Commitment@2 signed"]);
             expect(h.node.counters).toEqual({ local: 2, remote: 2 });

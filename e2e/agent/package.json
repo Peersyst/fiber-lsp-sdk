@@ -1,0 +1,23 @@
+{
+    "name": "@peersyst/fiber-lsp-sdk-e2e-agent",
+    "version": "0.0.0",
+    "private": true,
+    "description": "The device of fiber's hosted-LSP e2e suites, run by the SDK behind the control contract of fiber's own test agent.",
+    "packageManager": "pnpm@10.29.3",
+    "engines": {
+        "node": ">=20.19.0"
+    },
+    "scripts": {
+        "build": "tsc",
+        "check-types": "tsc --noEmit",
+        "test": "tsc && node --test dist/test/*.spec.js"
+    },
+    "dependencies": {
+        "@noble/hashes": "2.2.0",
+        "@peersyst/fiber-lsp-sdk": "link:../.."
+    },
+    "devDependencies": {
+        "@types/node": "20.19.43",
+        "typescript": "5.9.3"
+    }
+}

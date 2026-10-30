@@ -6,7 +6,15 @@ import { encodeInvoice } from "../../../src/invoice";
 import { CHANNEL_ALIAS_KEY_PREFIX } from "../../../src/policy";
 import type { Script, Transaction } from "../../../src/common";
 import type { FiberLspSdkOptions, SdkContext, SdkEvent } from "../../../src/sdk";
-import { DEFAULT_POLL_INTERVAL_MS, FiberLspSdk, POLL_STEP_TIMEOUT_MS, SDK_NETWORK_PRESETS, SdkError } from "../../../src/sdk";
+import {
+    ActivityTracker,
+    DEFAULT_POLL_INTERVAL_MS,
+    DeviceChannelList,
+    FiberLspSdk,
+    POLL_STEP_TIMEOUT_MS,
+    SDK_NETWORK_PRESETS,
+    SdkError,
+} from "../../../src/sdk";
 import type { ChannelSigningTransition } from "../../../src/protocol";
 import type { IFetchLike } from "../../../src/rpc";
 import type { SignerRefusal } from "../../../src/signer";
@@ -17,7 +25,7 @@ import { signInvoice } from "../../utils/invoice-signing";
 import { TimerMock } from "../../mocks/common";
 import { loadInteropVectors } from "../../utils/interop-vectors";
 import { rejection } from "../../utils/rejection";
-import { LIST_CHANNELS_CALL, LIST_CHANNELS_WITH_CLOSED_CALL, signingStatusCall, watchtowerStatusCall } from "../../utils/rpc-answers";
+import { LIST_CHANNELS_WITH_CLOSED_CALL, signingStatusCall, watchtowerStatusCall } from "../../utils/rpc-answers";
 import type { SigningChannel } from "../../utils/signing-channel";
 import {
     SIGNING_DEBUG_DEADLINE_MS,
@@ -179,6 +187,11 @@ async function signingHarness(
     const storage = new InMemorySignerStorage();
     const channel = await openSigningChannel(signing, signingCaseOf(signing, "SendCommitmentSigned"), {}, storage);
     await prepare(channel);
+    // As the opening leaves it, once the channel step saw it ready.
+    const activity = new ActivityTracker(channel.store);
+    await activity.watch("channel", SIGNING_CHANNEL_ID);
+    await new DeviceChannelList(channel.store).add(SIGNING_CHANNEL_ID);
+    await activity.mark("channel", SIGNING_CHANNEL_ID, "ChannelReady");
     const node = new ScriptedNode();
     const events: SdkEvent[] = [];
     const sdk = new FiberLspSdk(hexToBytes(signing.device.master_seed), {
@@ -197,11 +210,9 @@ async function signingHarness(
 }
 
 async function tickOver(h: SigningHarness, status: unknown, submits: boolean, watchtowerStatus: unknown = IDLE): Promise<void> {
-    h.node.result({ channels: [{ channel_id: SIGNING_CHANNEL_ID }] }).result({ channel_id: SIGNING_CHANNEL_ID, status });
+    h.node.result({ channels: [{ channel_id: SIGNING_CHANNEL_ID, state: READY }] }).result({ channel_id: SIGNING_CHANNEL_ID, status });
     if (submits) h.node.result({ type: "Applied" });
-    h.node
-        .result({ channels: [{ channel_id: SIGNING_CHANNEL_ID, state: READY }] })
-        .result({ channel_id: SIGNING_CHANNEL_ID, status: watchtowerStatus });
+    h.node.result({ channel_id: SIGNING_CHANNEL_ID, status: watchtowerStatus });
     h.sdk.connect();
     await flush();
     h.sdk.disconnect();
@@ -591,17 +602,17 @@ describe("FiberLspSdk", () => {
             h.sdk.connect();
             expect(h.timer.delays).toEqual([POLL_STEP_TIMEOUT_MS]);
             await flush();
-            // Each step lists the node's channels.
+            // An idle device calls the node for nothing: fiber would wake an evicted tenant.
             expect(h.polls()).toBe(1);
-            expect(h.fetch.requests).toHaveLength(2);
+            expect(h.fetch.requests).toHaveLength(0);
             h.timer.advance(POLL_INTERVAL_MS);
             await flush();
             expect(h.polls()).toBe(2);
-            expect(h.fetch.requests).toHaveLength(4);
+            expect(h.fetch.requests).toHaveLength(0);
             h.timer.advance(POLL_INTERVAL_MS);
             await flush();
             expect(h.polls()).toBe(3);
-            expect(h.fetch.requests).toHaveLength(6);
+            expect(h.fetch.requests).toHaveLength(0);
         });
 
         it("starts nothing twice when called while polling", async () => {
@@ -681,10 +692,9 @@ describe("FiberLspSdk", () => {
             const h = await signingHarness({ network: "testnet" });
             await tickOver(h, sent.result.status, true);
             expect(h.node.calls()).toEqual([
-                LIST_CHANNELS_CALL,
+                LIST_CHANNELS_WITH_CLOSED_CALL,
                 signingStatusCall(SIGNING_CHANNEL_ID),
                 signatureSubmissionCall(signing, sent),
-                LIST_CHANNELS_WITH_CLOSED_CALL,
                 watchtowerStatusCall(SIGNING_CHANNEL_ID),
             ]);
             expect(h.events).toStrictEqual([withSigningDeadline(signedEventOf(signing, sent))]);
@@ -715,9 +725,8 @@ describe("FiberLspSdk", () => {
             const h = await signingHarness({ network: "mainnet" });
             await tickOver(h, sent.result.status, false);
             expect(h.node.calls()).toEqual([
-                LIST_CHANNELS_CALL,
-                signingStatusCall(SIGNING_CHANNEL_ID),
                 LIST_CHANNELS_WITH_CLOSED_CALL,
+                signingStatusCall(SIGNING_CHANNEL_ID),
                 watchtowerStatusCall(SIGNING_CHANNEL_ID),
             ]);
             // The delay the host pinned at the opening dates the refusal too.
@@ -737,9 +746,8 @@ describe("FiberLspSdk", () => {
             });
             await tickOver(h, sent.result.status, false);
             expect(h.node.calls()).toEqual([
-                LIST_CHANNELS_CALL,
-                signingStatusCall(SIGNING_CHANNEL_ID),
                 LIST_CHANNELS_WITH_CLOSED_CALL,
+                signingStatusCall(SIGNING_CHANNEL_ID),
                 watchtowerStatusCall(SIGNING_CHANNEL_ID),
             ]);
             // The delay the host pinned at the opening dates the refusal too.
@@ -770,7 +778,6 @@ describe("FiberLspSdk", () => {
                 "list_channels",
                 "get_channel_signing_status",
                 "submit_channel_signature",
-                "list_channels",
                 "get_watchtower_signing_status",
             ]);
             expect(h.events).toStrictEqual([
@@ -785,9 +792,8 @@ describe("FiberLspSdk", () => {
             const h = await servedSlot(overrides);
             await tickOver(h, secondSessionStatus(signing).value, false);
             expect(h.node.calls()).toEqual([
-                LIST_CHANNELS_CALL,
-                signingStatusCall(SIGNING_CHANNEL_ID),
                 LIST_CHANNELS_WITH_CLOSED_CALL,
+                signingStatusCall(SIGNING_CHANNEL_ID),
                 watchtowerStatusCall(SIGNING_CHANNEL_ID),
             ]);
             expect(h.events).toStrictEqual([
@@ -807,13 +813,12 @@ describe("FiberLspSdk", () => {
         const spendStatus = watchtowerStatusField(spend).value;
         const purpose = { kind: "settlement" } as const;
 
-        it("runs after the channel signing step, in the same tick, over the channels the node lists", async () => {
+        it("runs after the channel signing step, in the same tick, over the channels the device opened", async () => {
             const h = await signingHarness({ watchtower: APPROVAL });
             await tickOver(h, IDLE, false);
             expect(h.node.calls()).toEqual([
-                LIST_CHANNELS_CALL,
-                signingStatusCall(SIGNING_CHANNEL_ID),
                 LIST_CHANNELS_WITH_CLOSED_CALL,
+                signingStatusCall(SIGNING_CHANNEL_ID),
                 watchtowerStatusCall(SIGNING_CHANNEL_ID),
             ]);
             expect(h.events).toEqual([]);
@@ -827,14 +832,20 @@ describe("FiberLspSdk", () => {
 
         it("runs even when the channel signing step fails", async () => {
             const h = await signingHarness({});
+            // The second read of the activity list in a tick is the signing step's.
+            const read = ActivityTracker.prototype.read;
+            let reads = 0;
+            jest.spyOn(ActivityTracker.prototype, "read").mockImplementation(function (this: ActivityTracker) {
+                reads++;
+                return reads === 2 ? Promise.reject(new Error("storage offline")) : read.call(this);
+            });
             h.node
-                .error(-32000, "node is syncing")
                 .result({ channels: [{ channel_id: SIGNING_CHANNEL_ID, state: READY }] })
                 .result({ channel_id: SIGNING_CHANNEL_ID, status: IDLE });
             h.sdk.connect();
             await flush();
             h.sdk.disconnect();
-            expect(h.node.calls()).toEqual([LIST_CHANNELS_CALL, LIST_CHANNELS_WITH_CLOSED_CALL, watchtowerStatusCall(SIGNING_CHANNEL_ID)]);
+            expect(h.node.calls()).toEqual([LIST_CHANNELS_WITH_CLOSED_CALL, watchtowerStatusCall(SIGNING_CHANNEL_ID)]);
             expect(h.events.map((event) => event.type)).toEqual(["ERROR"]);
         });
 
@@ -1011,7 +1022,10 @@ describe("FiberLspSdk", () => {
     describe("setBiscuitToken()", () => {
         const NEXT_TOKEN = "En0KEwoEMTIzNBgDIgkKBwgKEgMYgAgSJAgAEiDs-next_token=";
 
+        // A watched opening makes the channel step's one call per tick: an idle device makes none.
         async function pollHeaders(h: ReturnType<typeof harness>): Promise<unknown[]> {
+            const watched = { version: 1, channels: { [`0x${"1f".repeat(32)}`]: { status: null } }, payments: {}, invoices: {} };
+            h.storage.map.set("fiber-lsp-sdk:activity", JSON.stringify(watched));
             const from = h.fetch.requests.length;
             h.sdk.connect();
             await flush();
@@ -1021,10 +1035,10 @@ describe("FiberLspSdk", () => {
 
         it("puts the new token on the poller's next calls", async () => {
             const h = harness();
-            expect(await pollHeaders(h)).toEqual(Array(2).fill({ "content-type": "application/json", authorization: `Bearer ${TOKEN}` }));
+            expect(await pollHeaders(h)).toEqual(Array(1).fill({ "content-type": "application/json", authorization: `Bearer ${TOKEN}` }));
             h.sdk.setBiscuitToken(NEXT_TOKEN);
             expect(await pollHeaders(h)).toEqual(
-                Array(2).fill({ "content-type": "application/json", authorization: `Bearer ${NEXT_TOKEN}` }),
+                Array(1).fill({ "content-type": "application/json", authorization: `Bearer ${NEXT_TOKEN}` }),
             );
         });
 
@@ -1032,7 +1046,7 @@ describe("FiberLspSdk", () => {
             const h = harness({ biscuitToken: undefined });
             h.sdk.setBiscuitToken(NEXT_TOKEN);
             expect(await pollHeaders(h)).toEqual(
-                Array(2).fill({ "content-type": "application/json", authorization: `Bearer ${NEXT_TOKEN}` }),
+                Array(1).fill({ "content-type": "application/json", authorization: `Bearer ${NEXT_TOKEN}` }),
             );
         });
 
@@ -1044,7 +1058,7 @@ describe("FiberLspSdk", () => {
         ])("refuses a token %s, keeping the previous one", async (_, token) => {
             const h = harness();
             expect(() => h.sdk.setBiscuitToken(token as string)).toThrow(new TypeError("token must be printable ASCII without spaces"));
-            expect(await pollHeaders(h)).toEqual(Array(2).fill({ "content-type": "application/json", authorization: `Bearer ${TOKEN}` }));
+            expect(await pollHeaders(h)).toEqual(Array(1).fill({ "content-type": "application/json", authorization: `Bearer ${TOKEN}` }));
         });
     });
 
@@ -1285,18 +1299,14 @@ describe("FiberLspSdk", () => {
             await h.sdk.prepareChannelOpen(OPENING_AMOUNT, OPENING_USER_LOCK);
             h.node
                 .result({ channels: [{ channel_id: OPENING_CHANNEL_ID, state: READY }] })
-                .result({ channels: [{ channel_id: OPENING_CHANNEL_ID }] })
                 .result({ channel_id: OPENING_CHANNEL_ID, status: IDLE })
-                .result({ channels: [{ channel_id: OPENING_CHANNEL_ID, state: READY }] })
                 .result({ channel_id: OPENING_CHANNEL_ID, status: IDLE });
             h.sdk.connect();
             await flush();
             h.sdk.disconnect();
             expect(h.node.calls().slice(1)).toEqual([
                 LIST_CHANNELS_WITH_CLOSED_CALL,
-                LIST_CHANNELS_CALL,
                 signingStatusCall(OPENING_CHANNEL_ID),
-                LIST_CHANNELS_WITH_CLOSED_CALL,
                 watchtowerStatusCall(OPENING_CHANNEL_ID),
             ]);
             expect(h.events).toStrictEqual([{ type: "CHANNEL_READY", channelId: OPENING_CHANNEL_ID }]);
@@ -1569,7 +1579,7 @@ describe("FiberLspSdk", () => {
             await sdk.transfer(INVOICE);
             expect(duringSend).toEqual(["send_payment", ...idleTick]);
             await flush();
-            expect(idleTick).toEqual(["list_channels", "list_channels"]);
+            expect(idleTick).toEqual([]);
             expect(calls).toEqual(["send_payment", ...idleTick, ...idleTick, `get_payment 0x${PAYMENT_HASH}`]);
             expect(events).toEqual([{ type: "PAYMENT_SENT", paymentHashHex: `0x${PAYMENT_HASH}` }]);
             sdk.disconnect();
