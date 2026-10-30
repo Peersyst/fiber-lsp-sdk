@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import type { AgentNodeFetch } from "../src/agent.types";
-import { AgentJsonRpc } from "../src/json-rpc";
+import { AgentJsonRpc, jsonRpcCall, readJsonRpcRequest } from "../src/json-rpc";
 
 const URL = "http://127.0.0.1:21714";
 
@@ -57,6 +57,11 @@ describe("AgentJsonRpc", () => {
             const { fetch, requests } = fetchResult({ version: "0.9.0", pubkey: LSP_NODE_ID, addresses: [] });
             assert.equal(await new AgentJsonRpc(URL, fetch).nodeInfo("operator"), LSP_NODE_ID);
             assertSent(requests, "operator", '{"jsonrpc":"2.0","method":"node_info","params":[],"id":1}');
+        });
+
+        it("reads its answer through jsonRpcCall, whose failures name node_info", async () => {
+            const { fetch } = fetchAnswering(500, "denied");
+            await assert.rejects(new AgentJsonRpc(URL, fetch).nodeInfo("operator"), { message: `node_info: HTTP 500 from ${URL}: denied` });
         });
 
         it("refuses a result that is not an object", async () => {
@@ -264,87 +269,128 @@ describe("AgentJsonRpc", () => {
             }
         });
     }
+});
 
-    describe("the envelope", () => {
-        const nodeInfo = (fetch: AgentNodeFetch) => new AgentJsonRpc(URL, fetch).nodeInfo("operator");
+describe("jsonRpcCall", () => {
+    const call = (fetch: AgentNodeFetch): Promise<unknown> => jsonRpcCall(URL, fetch, "some_method", [], "t");
 
-        it("throws a JSON-RPC error with the node's message", async () => {
-            const { fetch } = fetchAnswering(200, '{"jsonrpc":"2.0","error":{"code":-32602,"message":"Invalid tenant"},"id":1}');
-            await assert.rejects(nodeInfo(fetch), { message: "Invalid tenant" });
+    it("sends the params as given under the token and returns the result untouched", async () => {
+        const { fetch, requests } = fetchResult([1, "two", { three: null }]);
+        assert.deepEqual(await jsonRpcCall(URL, fetch, "some_method", [7, "x"], "the-token"), [1, "two", { three: null }]);
+        assertSent(requests, "the-token", '{"jsonrpc":"2.0","method":"some_method","params":[7,"x"],"id":1}');
+    });
+
+    it("throws a JSON-RPC error with the node's message", async () => {
+        const { fetch } = fetchAnswering(200, '{"jsonrpc":"2.0","error":{"code":-32602,"message":"Invalid tenant"},"id":1}');
+        await assert.rejects(call(fetch), { message: "Invalid tenant" });
+    });
+
+    it("throws a JSON-RPC error without a message as unknown", async () => {
+        for (const error of ['{"code":-1}', '{"code":-1,"message":7}', "null", '"boom"']) {
+            const { fetch } = fetchAnswering(200, `{"jsonrpc":"2.0","error":${error},"id":1}`);
+            await assert.rejects(call(fetch), { message: "unknown JSON-RPC error" });
+        }
+    });
+
+    it("prefers the error over a result beside it", async () => {
+        const { fetch } = fetchAnswering(200, `{"jsonrpc":"2.0","result":{"pubkey":"${LSP_NODE_ID}"},"error":{"message":"both"},"id":1}`);
+        await assert.rejects(call(fetch), { message: "both" });
+    });
+
+    it("reads any 2xx status", async () => {
+        for (const status of [200, 204, 299]) {
+            const { fetch } = fetchAnswering(status, `{"jsonrpc":"2.0","result":{"pubkey":"${LSP_NODE_ID}"},"id":1}`);
+            assert.deepEqual(await call(fetch), { pubkey: LSP_NODE_ID });
+        }
+    });
+
+    it("throws a status outside 2xx with its body", async () => {
+        for (const status of [199, 300, 401, 500]) {
+            const { fetch } = fetchAnswering(status, "denied");
+            await assert.rejects(call(fetch), { message: `some_method: HTTP ${status} from ${URL}: denied` });
+        }
+    });
+
+    it("throws a body that is not JSON", async () => {
+        const { fetch } = fetchAnswering(200, "<html>");
+        await assert.rejects(call(fetch), { message: `some_method: the answer from ${URL} is not JSON` });
+    });
+
+    it("throws a JSON body that is not an object", async () => {
+        for (const body of ["[]", "null", '"x"']) {
+            const { fetch } = fetchAnswering(200, body);
+            await assert.rejects(call(fetch), { message: `some_method: the answer from ${URL} is not a JSON object` });
+        }
+    });
+
+    it("throws an envelope with neither result nor error", async () => {
+        const { fetch } = fetchAnswering(200, '{"jsonrpc":"2.0","id":1}');
+        await assert.rejects(call(fetch), { message: `some_method: the answer from ${URL} has neither result nor error` });
+    });
+
+    it("bounds every call at 10 seconds", async (t) => {
+        const timeout = t.mock.method(AbortSignal, "timeout");
+        const { fetch, requests } = fetchResult({ version: "0.9.0", pubkey: LSP_NODE_ID, addresses: [] });
+        await call(fetch);
+        assert.deepEqual(
+            timeout.mock.calls.map((entry) => entry.arguments),
+            [[10_000]],
+        );
+        assert.equal(requests[0]?.init.signal, timeout.mock.calls[0]?.result);
+    });
+
+    it("throws when no answer arrives", async () => {
+        const fetch: AgentNodeFetch = async () => {
+            throw new TypeError("fetch failed");
+        };
+        await assert.rejects(call(fetch), { message: `some_method: no answer from ${URL}: fetch failed` });
+    });
+
+    it("throws when the body cannot be read", async () => {
+        const fetch: AgentNodeFetch = async () => ({
+            status: 200,
+            text: async () => {
+                throw new Error("socket hang up");
+            },
         });
+        await assert.rejects(call(fetch), { message: `some_method: no answer from ${URL}: socket hang up` });
+    });
+});
 
-        it("throws a JSON-RPC error without a message as unknown", async () => {
-            for (const error of ['{"code":-1}', '{"code":-1,"message":7}', "null", '"boom"']) {
-                const { fetch } = fetchAnswering(200, `{"jsonrpc":"2.0","error":${error},"id":1}`);
-                await assert.rejects(nodeInfo(fetch), { message: "unknown JSON-RPC error" });
-            }
-        });
+describe("readJsonRpcRequest", () => {
+    it("reads the method and the params of a request", () => {
+        assert.deepEqual(
+            readJsonRpcRequest('{"jsonrpc":"2.0","id":1,"method":"submit_channel_signature","params":[{"channel_id":"0x01"}]}'),
+            {
+                method: "submit_channel_signature",
+                params: [{ channel_id: "0x01" }],
+            },
+        );
+    });
 
-        it("prefers the error over a result beside it", async () => {
-            const { fetch } = fetchAnswering(
-                200,
-                `{"jsonrpc":"2.0","result":{"pubkey":"${LSP_NODE_ID}"},"error":{"message":"both"},"id":1}`,
-            );
-            await assert.rejects(nodeInfo(fetch), { message: "both" });
-        });
+    it("reads no params from a request that carries none", () => {
+        assert.deepEqual(readJsonRpcRequest('{"jsonrpc":"2.0","id":1,"method":"node_info"}'), { method: "node_info", params: undefined });
+    });
 
-        it("reads any 2xx status", async () => {
-            for (const status of [200, 204, 299]) {
-                const { fetch } = fetchAnswering(status, `{"jsonrpc":"2.0","result":{"pubkey":"${LSP_NODE_ID}"},"id":1}`);
-                assert.equal(await nodeInfo(fetch), LSP_NODE_ID);
-            }
-        });
+    it("reads no method from a body that is not JSON", () => {
+        assert.deepEqual(readJsonRpcRequest('{"method":'), { method: null, params: undefined });
+    });
 
-        it("throws a status outside 2xx with its body", async () => {
-            for (const status of [199, 300, 401, 500]) {
-                const { fetch } = fetchAnswering(status, "denied");
-                await assert.rejects(nodeInfo(fetch), { message: `node_info: HTTP ${status} from ${URL}: denied` });
-            }
+    for (const [name, body] of [
+        ["null", "null"],
+        ["a string", '"node_info"'],
+        ["a number", "1"],
+    ] as const) {
+        it(`reads no method from a body that is ${name}`, () => {
+            assert.deepEqual(readJsonRpcRequest(body), { method: null, params: undefined });
         });
+    }
 
-        it("throws a body that is not JSON", async () => {
-            const { fetch } = fetchAnswering(200, "<html>");
-            await assert.rejects(nodeInfo(fetch), { message: `node_info: the answer from ${URL} is not JSON` });
-        });
+    it("reads no method from a request without one, keeping its params", () => {
+        assert.deepEqual(readJsonRpcRequest('{"jsonrpc":"2.0","id":1,"params":[]}'), { method: null, params: [] });
+    });
 
-        it("throws a JSON body that is not an object", async () => {
-            for (const body of ["[]", "null", '"x"']) {
-                const { fetch } = fetchAnswering(200, body);
-                await assert.rejects(nodeInfo(fetch), { message: `node_info: the answer from ${URL} is not a JSON object` });
-            }
-        });
-
-        it("throws an envelope with neither result nor error", async () => {
-            const { fetch } = fetchAnswering(200, '{"jsonrpc":"2.0","id":1}');
-            await assert.rejects(nodeInfo(fetch), { message: `node_info: the answer from ${URL} has neither result nor error` });
-        });
-
-        it("bounds every call at 10 seconds", async (t) => {
-            const timeout = t.mock.method(AbortSignal, "timeout");
-            const { fetch, requests } = fetchResult({ version: "0.9.0", pubkey: LSP_NODE_ID, addresses: [] });
-            await nodeInfo(fetch);
-            assert.deepEqual(
-                timeout.mock.calls.map((call) => call.arguments),
-                [[10_000]],
-            );
-            assert.equal(requests[0]?.init.signal, timeout.mock.calls[0]?.result);
-        });
-
-        it("throws when no answer arrives", async () => {
-            const fetch: AgentNodeFetch = async () => {
-                throw new TypeError("fetch failed");
-            };
-            await assert.rejects(nodeInfo(fetch), { message: `node_info: no answer from ${URL}: fetch failed` });
-        });
-
-        it("throws when the body cannot be read", async () => {
-            const fetch: AgentNodeFetch = async () => ({
-                status: 200,
-                text: async () => {
-                    throw new Error("socket hang up");
-                },
-            });
-            await assert.rejects(nodeInfo(fetch), { message: `node_info: no answer from ${URL}: socket hang up` });
-        });
+    it("reads no method from a request whose method is not a string, keeping its params", () => {
+        assert.deepEqual(readJsonRpcRequest('{"jsonrpc":"2.0","id":1,"method":7,"params":[1]}'), { method: null, params: [1] });
     });
 });

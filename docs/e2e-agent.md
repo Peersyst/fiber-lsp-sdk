@@ -84,8 +84,50 @@ position, kept here rather than bent to the contract.
 | Never lists channels: under it, the force close of `-evict` after `lsp_evict_tenant` runs against a cold tenant                                                                                                                                                                                                                                                                                                                                                                                                                                                                    | While the agent's channel is open, the SDK's channel step lists the tenant's channels every tick to see it close, and fiber's `list_channels` reactivates the tenant (`supervisor.ensure`), so the tenant is running again within a tick of the eviction; the suite asserts only the eviction's response                                                                                                                                                                         |
 | A control body over 1 MiB drops the connection unanswered and ends the control task; a closed control queue is a 503                                                                                                                                                                                                                                                                                                                                                                                                                                                               | A body over 1 MiB is a 400 and the port serves on; there is no queue to close. The `error` messages are this agent's and the SDK's own wording                                                                                                                                                                                                                                                                                                                                   |
 
+## Scenarios
+
+Fiber's suites drive the device through its control contract alone: they open, authorize and restart it. `e2e/agent/scenarios/`
+holds six scenarios of the SDK's own that the contract cannot express, `node:test` specs that build the facade in process
+over the same devnet under `nonceReuse: "allow"`, as the agent runs, each with a tenant and a channel of its own, and
+inject faults through the `fetch` it is given:
+
+| Scenario           | What it asserts                                                                                                                                                                                                                    |
+| ------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `late-signer`      | A device disconnected while node 1 pays its invoice: the node holds the request and the payment stays `Inflight`; once it connects, the request is signed with its deadline reported and still ahead, and the invoice is paid      |
+| `restart-pending`  | The first submission of the payment's first signature lost before it reaches the node: a new facade over the same store serves the same request with the same bytes, with no third session                                         |
+| `non-hosted-payer` | Node 3 pays the SDK's invoice through node 1 and the LSP, routed by the invoice's trampoline hint                                                                                                                                  |
+| `two-tenants`      | Two devices paid at once: each signs and polls only its own channel, and one tenant's token reading the other's channel is refused (`channel ... not found`)                                                                       |
+| `altered-opening`  | Three alterations of `open_tenant_channel`'s answer (the LSP's close script grown past the reserve the node states, the funding output's capacity, the fee rate), each refused as `opening_rejected` with nothing signed or funded |
+| `outbound-payment` | A payment sent by the device stalls: its fulfil asks a third session on `Commitment@3`, which `nonceReuse: "allow"` refuses, so the payment stays in flight                                                                        |
+
+The outbound scenario asserts the stall on purpose. Under `allow` a slot serves two sessions and never a third, and the
+peer's fulfil of a payment the device sent asks for a third on the commitment slot the device's own round left at the local
+number. On the devnet node 1's invoice is paid, the LSP holds the preimage, and the tenant's payment stays `Inflight` with
+its TLC on the channel. The scenario turns green on a completed payment only once fiber's nonces are strict and `allow` is
+gone. Each channel otherwise takes a single received payment, since a second one after a fulfilled one stalls the same
+way ([policy.md](./policy.md), "The known cost").
+
+Fiber keeps an opening the device refused until its external funding times out (five minutes by default), and refuses
+another opening of the same tenant meanwhile ("tenant already has a different channel opening"). So each alteration runs
+on a device of its own, and the clean opening that ends the scenario waits for the first one's abort.
+
+The scenarios read the devnet's URLs, keys and operator token from fiber's `tests/bruno/environments/test.bru` and its
+contracts from `tests/deploy/contracts`, both under `FIBER_CHECKOUT`. Fiber's devnet starts its LSP only under one of
+its LSP suites' names, and its agent runs beside the scenarios with a tenant of its own:
+
+```bash
+# in <fiber-checkout>, with the wrapper installed as above
+PATH="<sdk-checkout>/e2e/agent/devnet:$PATH" REMOVE_OLD_STATE=y ./tests/nodes/start.sh e2e/lsp-remote-signer
+
+# in <sdk-checkout>, once tests/nodes/wait.sh returns
+# one scenario: pnpm --dir e2e/agent build && FIBER_CHECKOUT=<fiber-checkout> node --test e2e/agent/dist/scenarios/<name>.scenario.js
+FIBER_CHECKOUT=<fiber-checkout> pnpm --dir e2e/agent scenarios
+```
+
+They run in series on one devnet, in about seven minutes, five of them the refused opening's abort.
+
 ## Tests
 
 `pnpm --dir e2e/agent test` compiles the agent and its specs and runs them with `node --test`: the config, the store, the
 JSON-RPC calls, the contract's readers and the status, and the process over a fake node, including a real opening the
-SDK accepts. The suites themselves need fiber's devnet and run outside CI.
+SDK accepts. The suites and the scenarios need fiber's devnet and run outside CI, which only typechecks the scenarios.

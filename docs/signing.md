@@ -412,9 +412,9 @@ device wired with one step or both, as the facade wires them, the open, the tick
 Under `nonceReuse: "allow"` the sequences run as below, each request named by its transition and fiber's nonce slot, and
 answered `signed`, or `warning` as a second session on its slot:
 
-- **The open**: `CompleteReceivedCommitment` at `Commitment@1` signed, then `SendCommitmentSigned` at `Commitment@1`
-  warning. Fiber may issue them in either order, and the flows run both. Under `refuse` the second is refused as
-  `policy_refusal`, on every tick.
+- **The open**: `CompleteReceivedCommitment` and `SendCommitmentSigned`, both at `Commitment@1`: the first of the two
+  is signed and the second is a warning. Fiber may issue them in either order, and the flows run both; fiber's devnet
+  issues `SendCommitmentSigned` first. Under `refuse` the second is refused as `policy_refusal`, on every tick.
 - **A payment received**, the peer's round: `CompleteReceivedCommitment` at `Commitment@2` signed, `SendRevokeAndAck` at
   `Revocation@2` signed, `SendCommitmentSigned` at `Commitment@2` warning, `CompleteReceivedRevokeAndAck` at
   `Revocation@2` warning. Then the tenant's round to fulfil it: `SendCommitmentSigned` at `Commitment@3` signed,
@@ -468,7 +468,9 @@ and keeps the evidence, and the peer's next commitment is signed after it.
 The opening's sequence is asserted by fiber's own test (`fiber-lib/src/fiber/tests/external_signer_restart.rs:685-740`).
 The payments' are derived from fiber's counter rules, since no fiber test fixes them: R moves by one when the device's
 `revoke_and_ack` is sent (`channel.rs:6313`), L when the peer's is received (`channel.rs:6462`), and a `commitment_signed`
-moves neither, which is where the shared slots come from.
+moves neither, which is where the shared slots come from. Fiber's devnet runs them in this order, with these outcomes
+([e2e-agent.md](./e2e-agent.md), "Scenarios"): a payment received and its fulfil, and a payment sent up to the third session
+refused on its fulfil.
 
 The controls each end refused, on two ticks, with no submission and the record unchanged:
 
