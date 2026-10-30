@@ -1,6 +1,7 @@
 import { bytesToHex, hexToBytes } from "@noble/hashes/utils.js";
 import type { SdkTenantChallenge, SdkTenantRegistration } from "@peersyst/fiber-lsp-sdk";
 import type { AgentNodeFetch } from "./agent.types";
+import { messageOf } from "./agent.utils";
 
 export type AgentTenantRegistration = Pick<SdkTenantRegistration, "rootSignerPubkey" | "nonce" | "signature">;
 
@@ -67,6 +68,72 @@ function assertLength(name: string, bytes: Uint8Array, length: number): void {
     if (!(bytes instanceof Uint8Array) || bytes.length !== length) throw new TypeError(`${name} must be ${length} bytes`);
 }
 
+/**
+ * Reads the JSON-RPC method a request body calls and the params it passes.
+ * @param body The request body.
+ * @returns The method, `null` when the body names none, and the params, `undefined` when it carries none.
+ */
+export function readJsonRpcRequest(body: string): { method: string | null; params: unknown } {
+    let request: unknown;
+    try {
+        request = JSON.parse(body);
+    } catch {
+        return { method: null, params: undefined };
+    }
+    if (typeof request !== "object" || request === null) return { method: null, params: undefined };
+    const method = "method" in request && typeof request.method === "string" ? request.method : null;
+    return { method, params: "params" in request ? request.params : undefined };
+}
+
+/**
+ * Sends one call and reads its result, turning a transport failure, a non-2xx answer or a JSON-RPC error into a throw.
+ * @param url The node's JSON-RPC endpoint.
+ * @param fetch How the request is sent.
+ * @param method The method.
+ * @param params Its positional params.
+ * @param token The Bearer token the call carries.
+ * @returns The result.
+ */
+export async function jsonRpcCall(
+    url: string,
+    fetch: AgentNodeFetch,
+    method: string,
+    params: readonly unknown[],
+    token: string,
+): Promise<unknown> {
+    let response: Awaited<ReturnType<AgentNodeFetch>>;
+    let text: string;
+    try {
+        response = await fetch(url, {
+            method: "POST",
+            headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
+            body: JSON.stringify({ jsonrpc: "2.0", method, params, id: 1 }),
+            signal: AbortSignal.timeout(AGENT_RPC_TIMEOUT_MS),
+        });
+        text = await response.text();
+    } catch (error) {
+        throw new Error(`${method}: no answer from ${url}: ${messageOf(error)}`);
+    }
+    if (response.status < 200 || response.status > 299) throw new Error(`${method}: HTTP ${response.status} from ${url}: ${text}`);
+    let envelope: unknown;
+    try {
+        envelope = JSON.parse(text);
+    } catch {
+        throw new Error(`${method}: the answer from ${url} is not JSON`);
+    }
+    if (typeof envelope !== "object" || envelope === null || Array.isArray(envelope)) {
+        throw new Error(`${method}: the answer from ${url} is not a JSON object`);
+    }
+    const body = envelope as Record<string, unknown>;
+    if (Object.hasOwn(body, "error")) {
+        const error = body.error;
+        const message = typeof error === "object" && error !== null && "message" in error ? error.message : undefined;
+        throw new Error(typeof message === "string" ? message : "unknown JSON-RPC error");
+    }
+    if (!Object.hasOwn(body, "result")) throw new Error(`${method}: the answer from ${url} has neither result nor error`);
+    return body.result;
+}
+
 export class AgentJsonRpc {
     /**
      * Binds the client to a node.
@@ -77,47 +144,6 @@ export class AgentJsonRpc {
         private readonly url: string,
         private readonly fetch: AgentNodeFetch,
     ) {}
-
-    /**
-     * Sends one call and reads its result, turning a transport failure, a non-2xx answer or a JSON-RPC error into a throw.
-     * @param method The method.
-     * @param params Its positional params: one object, or none.
-     * @param token The Bearer token the call carries.
-     * @returns The result.
-     */
-    private async call(method: string, params: readonly Record<string, string>[], token: string): Promise<unknown> {
-        let response: Awaited<ReturnType<AgentNodeFetch>>;
-        let text: string;
-        try {
-            response = await this.fetch(this.url, {
-                method: "POST",
-                headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
-                body: JSON.stringify({ jsonrpc: "2.0", method, params, id: 1 }),
-                signal: AbortSignal.timeout(AGENT_RPC_TIMEOUT_MS),
-            });
-            text = await response.text();
-        } catch (error) {
-            throw new Error(`${method}: no answer from ${this.url}: ${error instanceof Error ? error.message : String(error)}`);
-        }
-        if (response.status < 200 || response.status > 299) throw new Error(`${method}: HTTP ${response.status} from ${this.url}: ${text}`);
-        let envelope: unknown;
-        try {
-            envelope = JSON.parse(text);
-        } catch {
-            throw new Error(`${method}: the answer from ${this.url} is not JSON`);
-        }
-        if (typeof envelope !== "object" || envelope === null || Array.isArray(envelope)) {
-            throw new Error(`${method}: the answer from ${this.url} is not a JSON object`);
-        }
-        const body = envelope as Record<string, unknown>;
-        if (Object.hasOwn(body, "error")) {
-            const error = body.error;
-            const message = typeof error === "object" && error !== null && "message" in error ? error.message : undefined;
-            throw new Error(typeof message === "string" ? message : "unknown JSON-RPC error");
-        }
-        if (!Object.hasOwn(body, "result")) throw new Error(`${method}: the answer from ${this.url} has neither result nor error`);
-        return body.result;
-    }
 
     /**
      * Reads the node's identity key, which is the LSP's.
@@ -178,6 +204,17 @@ export class AgentJsonRpc {
         if (typeof result.access_token !== "string" || result.access_token === "")
             throw malformedResult(method, "access_token", "a non-empty string");
         return { tenantId: tenant.tenant_id, accessToken: result.access_token };
+    }
+
+    /**
+     * Sends one call to the bound node.
+     * @param method The method.
+     * @param params Its positional params.
+     * @param token The Bearer token the call carries.
+     * @returns The result.
+     */
+    private call(method: string, params: readonly unknown[], token: string): Promise<unknown> {
+        return jsonRpcCall(this.url, this.fetch, method, params, token);
     }
 
     /**

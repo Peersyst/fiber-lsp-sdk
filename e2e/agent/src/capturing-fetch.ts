@@ -1,22 +1,6 @@
 import type { FetchInit, FetchResponseLike, IFetchLike } from "@peersyst/fiber-lsp-sdk";
-
-const CAPTURED_METHOD = "open_tenant_channel";
-
-/**
- * Reads the JSON-RPC method a request body calls.
- * @param body The request body.
- * @returns The method, or `null` when the body names none.
- */
-function requestMethod(body: string): string | null {
-    let request: unknown;
-    try {
-        request = JSON.parse(body);
-    } catch {
-        return null;
-    }
-    if (typeof request !== "object" || request === null || !("method" in request)) return null;
-    return typeof request.method === "string" ? request.method : null;
-}
+import { OPEN_TENANT_CHANNEL_METHOD } from "./agent.constants";
+import { readJsonRpcRequest } from "./json-rpc";
 
 /**
  * Reads the result object of a JSON-RPC answer.
@@ -65,7 +49,7 @@ export class OpenResultCapture {
     private async send(url: string, init: FetchInit): Promise<FetchResponseLike> {
         const send = this.inner;
         const response = await send(url, init);
-        if (requestMethod(init.body) !== CAPTURED_METHOD) return response;
+        if (readJsonRpcRequest(init.body).method !== OPEN_TENANT_CHANNEL_METHOD) return response;
         let text: string;
         try {
             text = await response.text();

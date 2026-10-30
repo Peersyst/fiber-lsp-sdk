@@ -8,4 +8,6 @@ export const SCRIPT_HASH_TYPES: readonly ScriptHashType[] = ["data", "type", "da
 // Script fields are kept as the driver wrote them, so either case passes.
 export const SCRIPT_CODE_HASH_PATTERN = /^0x[0-9a-fA-F]{64}$/;
 
-export const SCRIPT_ARGS_PATTERN = /^0x(?:[0-9a-fA-F]{2})*$/;
+export const HEX_BYTES_PATTERN = /^0x(?:[0-9a-fA-F]{2})*$/;
+
+export const OPEN_TENANT_CHANNEL_METHOD = "open_tenant_channel";

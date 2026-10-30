@@ -50,7 +50,7 @@ fiber's watchtower pays the LSP node's own lock, so approving it is trusting the
 exposes. A test double of the tenant's node runs fiber's tenant opening, its sequences of signing requests, its
 watchtower's spends, its hold invoices, its payments sent and its cooperative closes through that poller, and shows that under Fiber's current nonces a channel still stalls at the settlement of a payment
 it sends and at its second payment received, even with `nonceReuse: "allow"` ([policy.md](./docs/policy.md), "The known
-cost").
+cost"); fiber's devnet shows the first ([e2e-agent.md](./docs/e2e-agent.md), "Scenarios").
 
 ## Repository layout
 
@@ -61,7 +61,7 @@ test/mocks/     Doubles of the injected effects, one folder per module
 test/utils/     Shared test helpers
 docs/           Long-form documentation, indexed by docs/README.md
 interop/        Rust harness and the generated cross-implementation vectors
-e2e/agent/      The device of fiber's e2e suites, run by the SDK (private, never published)
+e2e/agent/      The device of fiber's e2e suites, run by the SDK, and its own scenarios there (private, never published)
 ```
 
 ## Documentation
@@ -90,7 +90,7 @@ Full index in [docs/README.md](./docs/README.md). The load-bearing ones:
 - [Cross-implementation harness](./interop/README.md): how the vectors are generated and re-validated against a new fiber
   release.
 - [The device agent for fiber's e2e suites](./docs/e2e-agent.md): the SDK behind the control contract of fiber's own test
-  agent, how it runs against fiber's devnet, and where it parts from fiber's agent.
+  agent, how it runs against fiber's devnet, where it parts from fiber's agent, and the SDK's own scenarios there.
 
 ## Development
 

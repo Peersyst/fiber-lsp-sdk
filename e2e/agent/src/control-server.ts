@@ -4,6 +4,7 @@ import type { IncomingMessage, Server, ServerResponse } from "node:http";
 import type { AddressInfo } from "node:net";
 import { AgentRequestError } from "./agent.error";
 import type { AgentControlAddr } from "./agent.types";
+import { messageOf } from "./agent.utils";
 import type { AgentLogger } from "./agent-log";
 
 export type ControlHandlers = {
@@ -74,7 +75,7 @@ async function serveStatus(response: ServerResponse, statusFile: string): Promis
     try {
         body = await readFile(statusFile);
     } catch (error) {
-        sendJson(response, 503, { error: `status unavailable: ${error instanceof Error ? error.message : String(error)}` });
+        sendJson(response, 503, { error: `status unavailable: ${messageOf(error)}` });
         return;
     }
     send(response, 200, body);
@@ -102,14 +103,14 @@ async function serveCommand(
     try {
         parsed = JSON.parse(body.text);
     } catch (error) {
-        sendJson(response, 400, { error: `malformed JSON: ${error instanceof Error ? error.message : String(error)}` });
+        sendJson(response, 400, { error: `malformed JSON: ${messageOf(error)}` });
         return;
     }
     try {
         sendJson(response, 200, { result: await handler(parsed) });
     } catch (error) {
         if (!(error instanceof AgentRequestError)) log("control_request_failed", { route: `${request.method} ${request.url}`, error });
-        sendJson(response, 400, { error: error instanceof Error ? error.message : String(error) });
+        sendJson(response, 400, { error: messageOf(error) });
     }
 }
 
