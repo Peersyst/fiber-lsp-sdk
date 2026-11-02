@@ -1,8 +1,8 @@
 import type { ChannelSigningTransition } from "../protocol";
 
 /**
- * Funding-cell spends sort the keys (`fiber-lib/src/fiber/channel.rs:11029-11042`); a revocation keeps the role order of the
- * lock it revokes (`:11120-11129`). Any other order aggregates a key nothing is locked under.
+ * Funding-cell spends sort the keys (`fiber-lib/src/fiber/channel.rs:11196-11209`); a revocation keeps the role order of the
+ * lock it revokes (`:11287-11296`). Any other order aggregates a key nothing is locked under.
  */
 export const SIGNING_KEY_ORDERS = {
     SendCommitmentSigned: "ascending",
@@ -16,7 +16,7 @@ export const SIGNING_KEY_ORDERS = {
 /**
  * Fiber's `TENANT_REGISTRY_PROTOCOL` (`fiber-types/src/hosted_lsp.rs:11`), the prefix of the registration payload.
  */
-export const TENANT_REGISTRY_PROTOCOL = "fiber-hosted-lsp-tenant-registry/v1";
+export const TENANT_REGISTRY_PROTOCOL = "fiber-hosted-lsp-tenant-registry/v2";
 
 /**
  * Fiber's `TENANT_ID_DOMAIN` (`fiber-types/src/hosted_lsp.rs:14`), the salt of the tenant id's hash.

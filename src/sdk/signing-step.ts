@@ -95,7 +95,7 @@ export function buildChannelSigningStep(options: ChannelSigningStepOptions): Pol
     };
 
     return async (run) => {
-        // Never `list_channels`: fiber wakes an evicted tenant for it, and not for a signing status (`rpc/channel.rs:387-412`).
+        // Never `list_channels`: fiber wakes an evicted tenant for it, and not for a signing status (`rpc/channel.rs:358-383`).
         const channelIds = Object.keys((await activity.read()).channels);
         await answerEachPolled(
             run,

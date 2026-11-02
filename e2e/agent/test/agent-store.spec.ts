@@ -10,9 +10,10 @@ const CHANNEL = "0x1111111111111111111111111111111111111111111111111111111111111
 
 const PAYMENT_HASH = "0x09dfb3a3e2e8e0e8a0a3d2e3b1d4c3b2a1f0e9d8c7b6a5f4e3d2c1b0a9f89138";
 
+const OUTGOING_HASH = "0x7777777777777777777777777777777777777777777777777777777777777777";
+
 const STATE: AgentState = {
     tenantToken: "tenant-token",
-    lspPubkey: "02b7ca5d4b3a7e8e5e47d16d9b0d4a8e3f1c2b3a4d5e6f708192a3b4c5d6e7f809",
     channels: {
         [CHANNEL]: {
             localScript: {
@@ -34,6 +35,22 @@ const STATE: AgentState = {
             preimage: "0x2222222222222222222222222222222222222222222222222222222222222222",
             paymentHash: PAYMENT_HASH,
             hashAlgorithm: "sha256",
+            amountShannons: "100000",
+            expiresAtMs: "1800003600000",
+            minTlcExpiryDeltaMs: "60000",
+            maxTlcExpiryMs: "1800608400000",
+        },
+    },
+    payments: {
+        [OUTGOING_HASH]: {
+            type: "Payment",
+            channelId: CHANNEL,
+            paymentHash: OUTGOING_HASH,
+            hashAlgorithm: "ckb_hash",
+            amountShannons: "100500",
+            expiresAtMs: "1800003600000",
+            minTlcExpiryDeltaMs: "60000",
+            maxTlcExpiryMs: "1800608400000",
         },
     },
     closes: {
@@ -182,9 +199,9 @@ describe("writeAgentState and readAgentState", () => {
     it("read an empty state when the file does not exist", () => {
         assert.deepEqual(readAgentState(join(freshDir(), "absent")), {
             tenantToken: null,
-            lspPubkey: null,
             channels: {},
             invoices: {},
+            payments: {},
             closes: {},
             watchtower: null,
         });
@@ -200,7 +217,7 @@ describe("writeAgentState and readAgentState", () => {
 
     it("round-trip the state of an agent not registered yet", () => {
         const dir = freshDir();
-        const empty: AgentState = { tenantToken: null, lspPubkey: null, channels: {}, invoices: {}, closes: {}, watchtower: null };
+        const empty: AgentState = { tenantToken: null, channels: {}, invoices: {}, payments: {}, closes: {}, watchtower: null };
         writeAgentState(dir, empty);
         assert.deepEqual(readAgentState(dir), empty);
     });
@@ -230,7 +247,11 @@ describe("readAgentState refuses a malformed agent.json", () => {
         assertRefused((state) => (state.version = 1), "state.version is not a known field");
     });
 
-    for (const field of ["tenantToken", "lspPubkey", "channels", "invoices", "closes", "watchtower"]) {
+    it("refuses the lspPubkey an earlier agent kept, now read from --lsp-node-id", () => {
+        assertRefused((state) => (state.lspPubkey = null), "state.lspPubkey is not a known field");
+    });
+
+    for (const field of ["tenantToken", "channels", "invoices", "payments", "closes", "watchtower"]) {
         it(`refuses ${field} absent`, () => assertRefused((state) => delete state[field], `state.${field} is missing`));
     }
 
@@ -239,19 +260,6 @@ describe("readAgentState refuses a malformed agent.json", () => {
             assertRefused((state) => (state.tenantToken = ""), "state.tenantToken must be a non-empty string or null"));
         it("refuses a number", () =>
             assertRefused((state) => (state.tenantToken = 1), "state.tenantToken must be a non-empty string or null"));
-    });
-
-    describe("state.lspPubkey", () => {
-        const problem = "must be 33 bytes of lowercase hex without 0x, or null";
-        for (const [name, value] of [
-            ["with 0x", `0x${"02".repeat(33)}`],
-            ["uppercase", "0".repeat(64) + "AB"],
-            ["of 32 bytes", "02".repeat(32)],
-            ["of 34 bytes", "02".repeat(34)],
-            ["a number", 2],
-        ] as const) {
-            it(`refuses it ${name}`, () => assertRefused((state) => (state.lspPubkey = value), `state.lspPubkey ${problem}`));
-        }
     });
 
     describe("state.channels", () => {
@@ -304,9 +312,69 @@ describe("readAgentState refuses a malformed agent.json", () => {
                 (state) => (at(state, "invoices", PAYMENT_HASH).paymentHash = CHANNEL),
                 `${invoice}.paymentHash must be the key it is filed under`,
             ));
+        for (const field of ["amountShannons", "expiresAtMs", "minTlcExpiryDeltaMs", "maxTlcExpiryMs"]) {
+            it(`refuses ${field} absent`, () =>
+                assertRefused((state) => delete at(state, "invoices", PAYMENT_HASH)[field], `${invoice}.${field} is missing`));
+            for (const [name, value] of [
+                ["with a leading zero", "0100"],
+                ["in hex", "0x64"],
+                ["negative", "-1"],
+                ["empty", ""],
+                ["a number", 100],
+            ] as const) {
+                it(`refuses ${field} ${name}`, () =>
+                    assertRefused(
+                        (state) => (at(state, "invoices", PAYMENT_HASH)[field] = value),
+                        `${invoice}.${field} must be a decimal integer string`,
+                    ));
+            }
+        }
     });
     for (const field of ["channelId", "preimage", "paymentHash"]) {
         hash256Refusals(["invoices", PAYMENT_HASH], field, `state.invoices["${PAYMENT_HASH}"].${field}`);
+    }
+
+    describe("state.payments", () => {
+        const payment = `state.payments["${OUTGOING_HASH}"]`;
+        it("refuses an array", () => assertRefused((state) => (state.payments = []), "state.payments must be an object"));
+        it("refuses an entry that is not an object", () =>
+            assertRefused((state) => (at(state, "payments")[OUTGOING_HASH] = null), `${payment} must be an object`));
+        it("refuses an unknown field", () =>
+            assertRefused((state) => (at(state, "payments", OUTGOING_HASH).inbound = false), `${payment}.inbound is not a known field`));
+        it("refuses another type", () =>
+            assertRefused((state) => (at(state, "payments", OUTGOING_HASH).type = "Invoice"), `${payment}.type must be one of "Payment"`));
+        it("refuses a hashAlgorithm fiber does not name", () =>
+            assertRefused(
+                (state) => (at(state, "payments", OUTGOING_HASH).hashAlgorithm = "blake2b"),
+                `${payment}.hashAlgorithm must be one of "ckb_hash", "sha256"`,
+            ));
+        it("refuses a payment filed under another payment hash", () =>
+            assertRefused(
+                (state) => (at(state, "payments", OUTGOING_HASH).paymentHash = PAYMENT_HASH),
+                `${payment}.paymentHash must be the key it is filed under`,
+            ));
+        for (const field of ["type", "hashAlgorithm", "amountShannons", "expiresAtMs", "minTlcExpiryDeltaMs", "maxTlcExpiryMs"]) {
+            it(`refuses ${field} absent`, () =>
+                assertRefused((state) => delete at(state, "payments", OUTGOING_HASH)[field], `${payment}.${field} is missing`));
+        }
+        for (const field of ["amountShannons", "expiresAtMs", "minTlcExpiryDeltaMs", "maxTlcExpiryMs"]) {
+            for (const [name, value] of [
+                ["with a leading zero", "0100"],
+                ["in hex", "0x64"],
+                ["negative", "-1"],
+                ["empty", ""],
+                ["a number", 100],
+            ] as const) {
+                it(`refuses ${field} ${name}`, () =>
+                    assertRefused(
+                        (state) => (at(state, "payments", OUTGOING_HASH)[field] = value),
+                        `${payment}.${field} must be a decimal integer string`,
+                    ));
+            }
+        }
+    });
+    for (const field of ["channelId", "paymentHash"]) {
+        hash256Refusals(["payments", OUTGOING_HASH], field, `state.payments["${OUTGOING_HASH}"].${field}`);
     }
 
     describe("state.closes", () => {

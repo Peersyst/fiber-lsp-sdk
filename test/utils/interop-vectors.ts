@@ -25,7 +25,7 @@ export const TENANT_REGISTRY_FIELDS = [
     "lsp_node_secret",
     "lsp_node_id",
     "root_signer_pubkey",
-    "nonce",
+    "request_id",
     "payload",
     "digest",
     "signature",
@@ -38,7 +38,7 @@ export type CommitmentVector = Record<(typeof COMMITMENT_FIELDS)[number], string
 
 export type MusigVector = Record<(typeof MUSIG_FIELDS)[number], string>;
 
-export type TenantRegistryVector = Record<(typeof TENANT_REGISTRY_FIELDS)[number], string>;
+export type TenantRegistryVector = Record<(typeof TENANT_REGISTRY_FIELDS)[number], string> & { signed_at: number };
 
 export type HashVector = { label: string; chunks: string[]; digest: string };
 
@@ -484,7 +484,10 @@ export function parseVectors(value: unknown): Vectors {
         },
         musig: asStringFields(root.musig, "musig", MUSIG_FIELDS),
         digest: asDigestVectors(root.digest),
-        tenant_registry: asStringFields(root.tenant_registry, "tenant_registry", TENANT_REGISTRY_FIELDS),
+        tenant_registry: {
+            ...asStringFields(root.tenant_registry, "tenant_registry", TENANT_REGISTRY_FIELDS),
+            signed_at: asNumber(asRecord(root.tenant_registry, "tenant_registry").signed_at, "tenant_registry.signed_at"),
+        },
         funding_lock: asFundingLockVector(root.funding_lock),
     };
 }

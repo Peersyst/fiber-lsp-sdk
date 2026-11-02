@@ -10,7 +10,9 @@
         "esModuleInterop": true,
         "forceConsistentCasingInFileNames": true,
         "skipLibCheck": true,
-        "noEmit": true
+        "noEmit": true,
+        // A signer spec drives the e2e agent's nonce-cap bypass, whose types import the package by name: here, its sources.
+        "paths": { "@peersyst/fiber-lsp-sdk": ["./src"] }
     },
     "include": ["src", "test"]
 }

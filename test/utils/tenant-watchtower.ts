@@ -32,28 +32,28 @@ import type { FiberChannelKeys } from "../../src/derivation";
 import type { WatchtowerKeyPurpose } from "../../src/policy";
 import { hashPreimage } from "./preimage-hash";
 
-// A literal there (`watchtower/actor.rs:1746`); ckb's fee rate truncates (`ckb-types/src/core/fee_rate.rs:34-37`), as
+// A literal there (`watchtower/actor.rs:1826`); ckb's fee rate truncates (`ckb-types/src/core/fee_rate.rs:34-37`), as
 // `calculateTxFee` does.
 const WATCHTOWER_FEE_RATE = 1000n;
 
 // CKB's `serialized_size_in_block` counts the tx's offset in the block's list too.
 const BLOCK_SIZE_OVERHEAD = 4;
 
-// Fiber's `XUDT_COMPATIBLE_WITNESS` (`fiber/channel.rs:11961`), an empty `WitnessArgs`.
+// Fiber's `XUDT_COMPATIBLE_WITNESS` (`fiber/channel.rs:12133`), an empty `WitnessArgs`.
 const XUDT_COMPATIBLE_WITNESS = moleculeTable([new Uint8Array(0), new Uint8Array(0), new Uint8Array(0)]);
 
 // Fiber's `secp_sighash_placeholder_witness` (`ckb/funding/funding_tx.rs:58-69`): what a secp256k1 input is signed into, the
-// node's own on a spend once the device's signature is in (`watchtower/actor.rs:1672-1674`), each funding input before the host signs.
+// node's own on a spend once the device's signature is in (`watchtower/actor.rs:1752-1754`), each funding input before the host signs.
 export const SECP_PLACEHOLDER_WITNESS = moleculeTable([
     moleculeBytes(new Uint8Array(RECOVERABLE_ECDSA_SIGNATURE_LENGTH)),
     new Uint8Array(0),
     new Uint8Array(0),
 ]);
 
-// One unlock per spend (`watchtower/actor.rs:1699-1704`).
+// One unlock per spend (`watchtower/actor.rs:1779-1784`).
 const SETTLEMENT_UNLOCK_COUNT = 1;
 
-// The node's cell a spend's fee comes from: one always covers a spend here, so the loop of `watchtower/actor.rs:1782-1830`
+// The node's cell a spend's fee comes from: one always covers a spend here, so the loop of `watchtower/actor.rs:1862-1911`
 // adds a single one.
 const SPONSOR_CAPACITY_SHANNONS = 100n * SHANNONS_PER_CKB;
 
@@ -66,7 +66,7 @@ const EPOCH_INDEX_OFFSET = 24n;
 
 const EPOCH_LENGTH_OFFSET = 40n;
 
-// Fiber's `mul` keeps an epoch's length within 1800 blocks (`watchtower/actor.rs:2510-2515`).
+// Fiber's `mul` keeps an epoch's length within 1800 blocks (`watchtower/actor.rs:2598-2603`).
 const MAX_EPOCH_LENGTH = 1800n;
 
 // The record's last 8 bytes: the TLC's absolute timestamp since.
@@ -124,7 +124,7 @@ export function trackWatchtowerTlcs(keys: FiberChannelKeys, input: CommitmentTxI
     });
 }
 
-// The unlock fiber's `build_settlement_tx` picks on a cell for one side (`watchtower/actor.rs:1308-1621`): its first arm on the
+// The unlock fiber's `build_settlement_tx` picks on a cell for one side (`watchtower/actor.rs:1388-1701`): its first arm on the
 // commitment cell, its descendant arm on a remainder, at a tip past every delay of the lock, so the clock and the preimages
 // alone choose.
 export function pickWatchtowerUnlock(
@@ -137,7 +137,7 @@ export function pickWatchtowerUnlock(
     const own = deviceSettlementIndex(party.forRemote);
     const ownBalance = balances[own];
     const delay = readCommitmentLockDelay(cell.output.lock.args);
-    // The commitment cell waits out a fraction of the lock's delay per unlock (`:1523-1600`, `:1706-1721`); a remainder spends
+    // The commitment cell waits out a fraction of the lock's delay per unlock (`:1603-1680`, `:1786-1801`); a remainder spends
     // at once.
     const since = (fraction: bigint | null): bigint => {
         if (!cell.first) return 0n;
@@ -153,7 +153,7 @@ export function pickWatchtowerUnlock(
     for (const [index, entry] of tlcEntries.entries()) {
         const tlc = tlcs.find((candidate) => equalBytes(candidate.record, entry));
         if (tlc === undefined) throw new Error(`TLC ${index} of the body is no TLC of the snapshot`);
-        // The snapshot's expiry on the commitment cell, the record's on a remainder (`:1349-1355`, `:2337-2350`).
+        // The snapshot's expiry on the commitment cell, the record's on a remainder (`:1429-1435`, `:2425-2438`).
         const expiryMs = cell.first ? tlc.expiryMs : (readRecordSince(tlc.record) & MAX_SINCE_PAYLOAD) * MILLISECONDS_PER_SECOND;
         if (tlc.direction === party.offered) {
             if (medianTimeMs > expiryMs) return tlcPick(index, tlc, null, since(2n));
@@ -166,7 +166,7 @@ export function pickWatchtowerUnlock(
     return unresolved === 0 ? settlementPick(party, ownBalance.amountShannons, since(null), false) : null;
 }
 
-// The CKB arm of fiber's `build_settlement_tx` (`watchtower/actor.rs:1653-1840`): the remainder, unless no party is left, then
+// The CKB arm of fiber's `build_settlement_tx` (`watchtower/actor.rs:1733-1921`): the remainder, unless no party is left, then
 // the node's output, paid what the unlock releases and its own cell brings, less the fee.
 export function buildWatchtowerSpend(
     cell: WatchtowerCell,
@@ -218,12 +218,12 @@ export function buildWatchtowerSpend(
     return { transaction, next: pick.lastParty ? null : next };
 }
 
-// Fiber's request id (`watchtower/signer.rs:95`): the CKB blake2b of the molecule `Transaction`, witnesses included.
+// Fiber's request id (`watchtower/signer.rs:102`): the CKB blake2b of the molecule `Transaction`, witnesses included.
 export function watchtowerRequestId(transaction: Transaction): Uint8Array {
     return ckbBlake2b(moleculeTx(transaction));
 }
 
-// Fiber's `verify_onchain_signature` (`watchtower/signer.rs:131-147`): the refusal as it reads, or `null`.
+// Fiber's `verify_onchain_signature` (`watchtower/signer.rs:138-154`): the refusal as it reads, or `null`.
 export function verifyWatchtowerSignature(expected: Uint8Array, message: Uint8Array, signature: Uint8Array): string | null {
     const recovery = signature[RECOVERABLE_ECDSA_SIGNATURE_LENGTH - 1] ?? 0;
     if (recovery > 3) return "invalid recovery id: bad recovery id";
@@ -254,7 +254,7 @@ function tlcPick(index: number, tlc: WatchtowerTlc, preimage: Uint8Array | null,
         amountShannons: tlc.amountShannons,
         purpose: { kind: "tlc", commitmentNumber: tlc.localKeyCommitmentNumber },
         since,
-        // The lock wants an absolute since at the TLC's expiry, which the node's own input carries (`watchtower/actor.rs:1637-1652`).
+        // The lock wants an absolute since at the TLC's expiry, which the node's own input carries (`watchtower/actor.rs:1717-1732`).
         sponsorSince: preimage === null ? readRecordSince(tlc.record) : 0n,
         lastParty: false,
     };
@@ -274,7 +274,7 @@ function settlementPick(party: WatchtowerParty, amountShannons: bigint, since: b
     };
 }
 
-// Fiber's `mul` (`watchtower/actor.rs:2493-2522`): a fraction of a delay, the epoch length normalized to at most 1800.
+// Fiber's `mul` (`watchtower/actor.rs:2581-2610`): a fraction of a delay, the epoch length normalized to at most 1800.
 function mulEpoch(delay: bigint, numerator: bigint, denominator: bigint): bigint {
     const number = delay & EPOCH_NUMBER_MASK;
     const index = (delay >> EPOCH_INDEX_OFFSET) & EPOCH_FRACTION_MASK;

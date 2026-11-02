@@ -3,13 +3,13 @@ import type { ChannelOpenSignerMaterial, NextChannelSignerMaterial } from "../rp
 import { getBasePublicKeys, getChannelCommitmentPoint, getPublicNonce } from "./musig2-engine";
 
 /**
- * Builds the public material `open_tenant_channel` carries.
+ * Builds the public material the tenant's `open_channel_with_external_funding` carries.
  * @param keys The channel's secrets.
  * @returns The material, with no announcement nonce.
  */
 export function buildChannelOpenMaterial(keys: FiberChannelKeys): ChannelOpenSignerMaterial {
     const { fundingPubkey, tlcBasePubkey } = getBasePublicKeys(keys);
-    // Fiber's `channel_open_material` (`fiber-lsp-sdk/src/signer.rs:318-360`, installed by `fiber-lib/src/fiber/channel.rs:5975-6005`);
+    // Fiber's `channel_open_material` (`fiber-lsp-sdk/src/signer.rs:318-360`, installed by `fiber-lib/src/fiber/channel.rs:6093-6123`);
     // a tenant channel is private, and fiber refuses an announcement nonce on one.
     return {
         fundingPubkey,

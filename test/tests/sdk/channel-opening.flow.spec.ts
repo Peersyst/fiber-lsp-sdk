@@ -1,7 +1,7 @@
 import { hexToBytes } from "@noble/hashes/utils.js";
 import type { CellDep, Transaction } from "../../../src/common";
 import { SignerStore } from "../../../src/policy";
-import { RpcError, RpcTransportError } from "../../../src/rpc";
+import { RpcError, RpcResponseError, RpcTransportError } from "../../../src/rpc";
 import { encodeTransaction } from "../../../src/wire";
 import type { PendingOpening, SdkChannelInfo, SdkEvent, SdkSignFundingInputs } from "../../../src/sdk";
 import { FiberLspSdk, PendingOpeningStore, SdkError } from "../../../src/sdk";
@@ -132,7 +132,7 @@ function requests(h: OpeningFlow): string[] {
 }
 
 function openCalls(h: OpeningFlow): unknown[] {
-    return h.node.calls.filter((call) => call.method === "open_tenant_channel").map((call) => call.params);
+    return h.node.calls.filter((call) => call.method === "open_channel_with_external_funding").map((call) => call.params);
 }
 
 async function refusalOf(h: OpeningFlow, method: string, params: unknown): Promise<unknown> {
@@ -251,7 +251,7 @@ describe("the channel opening over the tenant node", () => {
 
     it("resumes after the node's answer is lost, under the same index with the identical request", async () => {
         const h = flow();
-        h.node.dropNextAnswer("open_tenant_channel");
+        h.node.dropNextAnswer("open_channel_with_external_funding");
         expect(await rejection(h.sdk.openChannel(FUNDED, USER_LOCK, signFundingInputs))).toBeInstanceOf(RpcTransportError);
         expect(await pendingOf(h)).toEqual({
             channelIndex: OPENING_INDEX,
@@ -261,8 +261,8 @@ describe("the channel opening over the tenant node", () => {
         });
         expect(await h.sdk.listChannels()).toEqual([{ ...LISTED, state: "opening", hasRecord: false }]);
         expect(await h.sdk.openChannel(FUNDED, USER_LOCK, signFundingInputs)).toBe(OPENING_CHANNEL_ID);
-        const [first, again] = openCalls(h);
-        expect(again).toEqual(first);
+        const [first, resent] = openCalls(h);
+        expect(resent).toEqual(first);
         await connect(h);
         await tick(h, 2);
         expect(eventsOf(h)).toEqual([
@@ -312,9 +312,9 @@ describe("the channel opening over the tenant node", () => {
         h.node.expireOpening();
         expect(await h.sdk.openChannel(FUNDED, USER_LOCK, signFundingInputs)).toBe(REOPENED_CHANNEL_ID);
         expect(h.node.calls.map((call) => call.method)).toEqual([
-            "open_tenant_channel",
+            "open_channel_with_external_funding",
             "list_channels",
-            "open_tenant_channel",
+            "open_channel_with_external_funding",
             "submit_signed_funding_tx",
         ]);
         expect(h.node.calls[1]?.params).toEqual({ only_pending: true });
@@ -354,17 +354,31 @@ describe("the channel opening over the tenant node", () => {
             new SdkError("opening_rejected", `the node's opening is refused: ${refusal}`),
         );
         expect(await pendingOf(h)).toBeNull();
-        expect(h.node.calls.map((call) => call.method)).toEqual(["open_tenant_channel"]);
+        expect(h.node.calls.map((call) => call.method)).toEqual(["open_channel_with_external_funding"]);
         expect(await h.sdk.listChannels()).toEqual([{ ...LISTED, state: "opening", hasRecord: false }]);
-        // The node keeps its opening until it expires, so a fresh index is another opening it refuses.
-        const refused = await rejection(h.sdk.openChannel(FUNDED, USER_LOCK, signFundingInputs));
-        expect(refused).toEqual(new RpcError("open_tenant_channel", -32000, "tenant already has a different channel opening"));
-        // A refusal is no answer to drop the opening on: the same call resends it, and fiber answers it alike.
-        expect(await pendingOf(h)).toEqual({ ...UNNAMED, channelIndex: OPENING_INDEX + 1 });
-        expect(await rejection(h.sdk.openChannel(FUNDED, USER_LOCK, signFundingInputs))).toEqual(refused);
-        const [, resent, again] = openCalls(h);
-        expect(again).toEqual(resent);
-        expect(await pendingOf(h)).toEqual({ ...UNNAMED, channelIndex: OPENING_INDEX + 1 });
+        // The node keeps its opening until it expires; the device's next one is under a fresh index.
+        h.node.expireOpening();
+        expect(await h.sdk.openChannel(FUNDED, USER_LOCK, signFundingInputs)).toBe(REOPENED_CHANNEL_ID);
+        expect(await pendingOf(h)).toEqual({ ...UNNAMED, channelIndex: OPENING_INDEX + 1, channelId: REOPENED_CHANNEL_ID });
+    });
+
+    it("refuses an answer without the opening context as unreadable, keeping the opening until fiber aborts it", async () => {
+        const h = flow();
+        h.node.tamperOpening({ kind: "noContext" });
+        const unreadable = await rejection(h.sdk.openChannel(FUNDED, USER_LOCK, signFundingInputs));
+        expect(unreadable).toBeInstanceOf(RpcResponseError);
+        expect(unreadable).toMatchObject({ method: "open_channel_with_external_funding", path: "response.result.opening_context" });
+        expect(await pendingOf(h)).toEqual(UNNAMED);
+        expect(await h.sdk.listChannels()).toEqual([{ ...LISTED, state: "opening", hasRecord: false }]);
+        // The same call resends the identical request, and the node answers it with the result it froze.
+        expect(await rejection(h.sdk.openChannel(FUNDED, USER_LOCK, signFundingInputs))).toEqual(unreadable);
+        const [first, resent] = openCalls(h);
+        expect(resent).toEqual(first);
+        // Never named, the opening resumes under its index once fiber aborted it: the node opens the same keys afresh.
+        h.node.expireOpening();
+        expect(await h.sdk.openChannel(FUNDED, USER_LOCK, signFundingInputs)).toBe(OPENING_CHANNEL_ID);
+        expect(openCalls(h)).toEqual([first, first, first]);
+        expect(await pendingOf(h)).toEqual({ ...UNNAMED, channelId: OPENING_CHANNEL_ID });
     });
 
     it("refuses a signed tx that is not the one frozen as funding_tx_altered, sending nothing", async () => {
@@ -379,7 +393,7 @@ describe("the channel opening over the tenant node", () => {
                     `${FROZEN_TX_HASH}:0, not 2264eb3d7cce59139151792a0d387eceb69c127532a864f7b24d35b18c8a9865:0`,
             ),
         );
-        expect(h.node.calls.map((call) => call.method)).toEqual(["open_tenant_channel"]);
+        expect(h.node.calls.map((call) => call.method)).toEqual(["open_channel_with_external_funding"]);
         // Sent, the node would refuse it too, and take the frozen one after.
         const wire = { channel_id: OPENING_CHANNEL_ID, signed_funding_tx: encodeTransaction("signedFundingTx", altered) };
         expect(await refusalOf(h, "submit_signed_funding_tx", wire)).toEqual({
@@ -388,7 +402,7 @@ describe("the channel opening over the tenant node", () => {
         });
         await h.sdk.submitFundingTx(OPENING_CHANNEL_ID, signed(prepared.unsignedFundingTx));
         expect(h.node.calls.map((call) => call.method)).toEqual([
-            "open_tenant_channel",
+            "open_channel_with_external_funding",
             "submit_signed_funding_tx",
             "submit_signed_funding_tx",
         ]);
@@ -416,32 +430,52 @@ describe("the channel opening over the tenant node", () => {
 
     it("is refused by the node when the LSP it names is not the node's", async () => {
         const h = flow(hexToBytes(vectors.peer.funding_pubkey));
-        expect(await rejection(h.sdk.openChannel(FUNDED, USER_LOCK, signFundingInputs))).toEqual(
-            new RpcError("open_tenant_channel", -32000, "tenant channel peer must be the LSP public node"),
-        );
+        const refused = await rejection(h.sdk.openChannel(FUNDED, USER_LOCK, signFundingInputs));
+        expect(refused).toBeInstanceOf(RpcError);
+        expect(refused).toMatchObject({
+            method: "open_channel_with_external_funding",
+            code: -32000,
+            message: "tenant channel peer must be the LSP public node",
+        });
         expect(await pendingOf(h)).toEqual(UNNAMED);
         expect(await h.sdk.listChannels()).toEqual([]);
+        // A refusal is no answer to drop the opening on: the same call resends it, and fiber answers it alike.
+        const again = await rejection(h.sdk.openChannel(FUNDED, USER_LOCK, signFundingInputs));
+        expect(again).toBeInstanceOf(RpcError);
+        expect(again).toMatchObject({
+            method: "open_channel_with_external_funding",
+            code: -32000,
+            message: "tenant channel peer must be the LSP public node",
+        });
+        const [first, resent] = openCalls(h);
+        expect(resent).toEqual(first);
+        expect(await pendingOf(h)).toEqual(UNNAMED);
     });
 
-    it("finds the node refusing what the facade never asks: a public channel, no signer, its open channel again", async () => {
+    it("finds the node refusing what the facade never asks: a public channel, no signer, its signer's opening changed or again", async () => {
         const h = flow();
         await connect(h);
         await h.sdk.openChannel(FUNDED, USER_LOCK, signFundingInputs);
         await tick(h, 3);
         const [asked] = openCalls(h);
         const notPrivate = { code: -32000, message: "tenant channel requires public: false" };
-        expect(await refusalOf(h, "open_tenant_channel", { ...asRecord(asked, "params"), public: true })).toEqual(notPrivate);
-        expect(await refusalOf(h, "open_tenant_channel", without(asked, "public"))).toEqual(notPrivate);
-        expect(await refusalOf(h, "open_tenant_channel", without(asked, "external_channel_signer"))).toEqual({
+        expect(await refusalOf(h, "open_channel_with_external_funding", { ...asRecord(asked, "params"), public: true })).toEqual(
+            notPrivate,
+        );
+        expect(await refusalOf(h, "open_channel_with_external_funding", without(asked, "public"))).toEqual(notPrivate);
+        expect(await refusalOf(h, "open_channel_with_external_funding", without(asked, "external_channel_signer"))).toEqual({
             code: -32000,
             message: "tenant channel requires external_channel_signer",
         });
-        expect(await refusalOf(h, "open_tenant_channel", asked)).toEqual({ code: -32000, message: "tenant channel is already open" });
-        // The facade's next opening is under a fresh index, which the node's single slot refuses.
-        expect(await rejection(h.sdk.openChannel(FUNDED, USER_LOCK, signFundingInputs))).toEqual(
-            new RpcError("open_tenant_channel", -32000, "tenant already has a different channel opening"),
-        );
-        expect(await pendingOf(h)).toEqual({ ...UNNAMED, channelIndex: OPENING_INDEX + 1 });
+        // Fiber keys an opening by its signer: the same keys under another amount are a second opening of theirs.
+        expect(await refusalOf(h, "open_channel_with_external_funding", { ...asRecord(asked, "params"), funding_amount: "0x1" })).toEqual({
+            code: -32000,
+            message: "tenant already has a different channel opening for this signer",
+        });
+        expect(await refusalOf(h, "open_channel_with_external_funding", asked)).toEqual({
+            code: -32000,
+            message: "tenant channel is already open",
+        });
     });
 
     it("hands the node the user lock's cell deps, which it adds to the funding tx unless the tx carries them already", async () => {

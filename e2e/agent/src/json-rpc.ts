@@ -1,9 +1,10 @@
-import { bytesToHex, hexToBytes } from "@noble/hashes/utils.js";
-import type { SdkTenantChallenge, SdkTenantRegistration } from "@peersyst/fiber-lsp-sdk";
+import { bytesToHex } from "@noble/hashes/utils.js";
+import type { SdkTenantRegistration } from "@peersyst/fiber-lsp-sdk";
+import { HASH256_HEX_LENGTH, UINT64_MAX } from "./agent.constants";
 import type { AgentNodeFetch } from "./agent.types";
-import { messageOf } from "./agent.utils";
+import { isBareHex, messageOf } from "./agent.utils";
 
-export type AgentTenantRegistration = Pick<SdkTenantRegistration, "rootSignerPubkey" | "nonce" | "signature">;
+export type AgentTenantRegistration = Pick<SdkTenantRegistration, "rootSignerPubkey" | "requestId" | "signedAtMs" | "signature">;
 
 export type AgentRegisteredTenant = { tenantId: string; accessToken: string };
 
@@ -12,19 +13,7 @@ const AGENT_RPC_TIMEOUT_MS = 10_000;
 
 const COMPRESSED_POINT_HEX_LENGTH = 66;
 
-const HASH256_HEX_LENGTH = 64;
-
 const SIGNATURE_LENGTH = 64;
-
-/**
- * Tells whether a value is lowercase hex of an exact number of characters, without `0x`.
- * @param value The value.
- * @param length The number of hex characters.
- * @returns Whether it is.
- */
-function isBareHex(value: unknown, length: number): value is string {
-    return typeof value === "string" && value.length === length && /^[0-9a-f]*$/.test(value);
-}
 
 /**
  * Tells whether a value is 32 bytes of `0x`-prefixed lowercase hex.
@@ -86,7 +75,7 @@ export function readJsonRpcRequest(body: string): { method: string | null; param
 }
 
 /**
- * Sends one call and reads its result, turning a transport failure, a non-2xx answer or a JSON-RPC error into a throw.
+ * Sends one call and reads its result, throwing on any failure.
  * @param url The node's JSON-RPC endpoint.
  * @param fetch How the request is sent.
  * @param method The method.
@@ -138,7 +127,7 @@ export class AgentJsonRpc {
     /**
      * Binds the client to a node.
      * @param url The node's JSON-RPC endpoint.
-     * @param fetch How requests are sent; global `fetch` in the agent.
+     * @param fetch How requests are sent.
      */
     constructor(
         private readonly url: string,
@@ -146,55 +135,25 @@ export class AgentJsonRpc {
     ) {}
 
     /**
-     * Reads the node's identity key, which is the LSP's.
-     * @param operatorToken The operator's token.
-     * @returns The node id, 33 bytes of lowercase hex without `0x`, as fiber writes it.
-     */
-    async nodeInfo(operatorToken: string): Promise<string> {
-        const result = readResultObject("node_info", "the result", await this.call("node_info", [], operatorToken));
-        if (!isBareHex(result.pubkey, COMPRESSED_POINT_HEX_LENGTH))
-            throw malformedResult("node_info", "pubkey", "33 bytes of bare lowercase hex");
-        return result.pubkey;
-    }
-
-    /**
-     * Asks the LSP's registry for a nonce bound to the device's RootSigner.
-     * @param rootSignerPubkeyHex The RootSigner's key, 33 bytes of lowercase hex without `0x`.
-     * @param operatorToken The operator's token.
-     * @returns The challenge, ready for the SDK's `signTenantRegistration`.
-     */
-    async getTenantRegistryNonce(rootSignerPubkeyHex: string, operatorToken: string): Promise<SdkTenantChallenge> {
-        if (!isBareHex(rootSignerPubkeyHex, COMPRESSED_POINT_HEX_LENGTH))
-            throw new TypeError("rootSignerPubkeyHex must be 33 bytes of bare lowercase hex");
-        const method = "lsp_get_tenant_registry_nonce";
-        const result = readResultObject(
-            method,
-            "the result",
-            await this.call(method, [{ root_signer_pubkey: rootSignerPubkeyHex }], operatorToken),
-        );
-        const { lsp_node_id: lspNodeId, root_signer_pubkey: rootSignerPubkey, nonce } = result;
-        if (!isBareHex(lspNodeId, COMPRESSED_POINT_HEX_LENGTH))
-            throw malformedResult(method, "lsp_node_id", "33 bytes of bare lowercase hex");
-        if (!isBareHex(rootSignerPubkey, COMPRESSED_POINT_HEX_LENGTH))
-            throw malformedResult(method, "root_signer_pubkey", "33 bytes of bare lowercase hex");
-        if (!isHash256(nonce)) throw malformedResult(method, "nonce", "32 bytes of 0x-prefixed lowercase hex");
-        return { lspNodeId: hexToBytes(lspNodeId), rootSignerPubkey: hexToBytes(rootSignerPubkey), nonce: hexToBytes(nonce.slice(2)) };
-    }
-
-    /**
-     * Registers the device's RootSigner as a tenant, with the signature the SDK made over the registry nonce.
-     * @param registration The RootSigner's key, the nonce and the signature.
+     * Registers the device's RootSigner as a tenant.
+     * @param registration The SDK's signed registration.
      * @param operatorToken The operator's token.
      * @returns The tenant id and the tenant's access token.
      */
     async registerTenant(registration: AgentTenantRegistration, operatorToken: string): Promise<AgentRegisteredTenant> {
         assertLength("rootSignerPubkey", registration.rootSignerPubkey, COMPRESSED_POINT_HEX_LENGTH / 2);
-        assertLength("nonce", registration.nonce, HASH256_HEX_LENGTH / 2);
+        assertLength("requestId", registration.requestId, HASH256_HEX_LENGTH / 2);
+        const { signedAtMs } = registration;
+        if (typeof signedAtMs !== "bigint" || signedAtMs < 0n || signedAtMs > UINT64_MAX) {
+            throw new RangeError("signedAtMs must be a bigint within u64");
+        }
         assertLength("signature", registration.signature, SIGNATURE_LENGTH);
         const method = "lsp_register_tenant";
+        // In the order and the forms of fiber's `RegisterLspTenantParams`.
         const params = {
             root_signer_pubkey: bytesToHex(registration.rootSignerPubkey),
-            nonce: `0x${bytesToHex(registration.nonce)}`,
+            request_id: `0x${bytesToHex(registration.requestId)}`,
+            signed_at: `0x${signedAtMs.toString(16)}`,
             signature: bytesToHex(registration.signature),
         };
         const result = readResultObject(method, "the result", await this.call(method, [params], operatorToken));

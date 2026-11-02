@@ -1,5 +1,6 @@
 import type { FetchInit, FetchResponseLike, IFetchLike } from "@peersyst/fiber-lsp-sdk";
-import { OPEN_TENANT_CHANNEL_METHOD } from "./agent.constants";
+import { OPEN_CHANNEL_WITH_EXTERNAL_FUNDING_METHOD } from "./agent.constants";
+import { bareLowerHex } from "./agent.utils";
 import { readJsonRpcRequest } from "./json-rpc";
 
 /**
@@ -17,6 +18,22 @@ function resultObject(text: string): Record<string, unknown> | null {
     if (typeof answer !== "object" || answer === null || !("result" in answer)) return null;
     const { result } = answer;
     return typeof result === "object" && result !== null && !Array.isArray(result) ? (result as Record<string, unknown>) : null;
+}
+
+/**
+ * Checks that an opening's captured result is there and names the channel the SDK opened.
+ * @param raw The result taken from the capture.
+ * @param channelId The channel id the SDK returned.
+ * @returns The raw result.
+ */
+export function checkedOpenResult(raw: Record<string, unknown> | null, channelId: string): Record<string, unknown> {
+    const method = OPEN_CHANNEL_WITH_EXTERNAL_FUNDING_METHOD;
+    if (raw === null) throw new Error(`${method}'s result for ${channelId} was not captured`);
+    const rawChannelId = raw.channel_id;
+    if (typeof rawChannelId !== "string" || bareLowerHex(rawChannelId) !== bareLowerHex(channelId)) {
+        throw new Error(`${method}'s result names channel ${String(rawChannelId)}, the SDK opened ${channelId}`);
+    }
+    return raw;
 }
 
 export class OpenResultCapture {
@@ -41,7 +58,7 @@ export class OpenResultCapture {
     }
 
     /**
-     * Sends a request, reading the answer of an opening to keep its result and handing the SDK the same text.
+     * Sends a request, keeping the result of an opening.
      * @param url Where to send it.
      * @param init Method, headers and body.
      * @returns The response, its body readable as before.
@@ -49,7 +66,7 @@ export class OpenResultCapture {
     private async send(url: string, init: FetchInit): Promise<FetchResponseLike> {
         const send = this.inner;
         const response = await send(url, init);
-        if (readJsonRpcRequest(init.body).method !== OPEN_TENANT_CHANNEL_METHOD) return response;
+        if (readJsonRpcRequest(init.body).method !== OPEN_CHANNEL_WITH_EXTERNAL_FUNDING_METHOD) return response;
         let text: string;
         try {
             text = await response.text();

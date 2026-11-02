@@ -1,4 +1,4 @@
-import type { FetchInit, FetchResponseLike, IFetchLike } from "../../../src/rpc";
+import type { FetchInit, FetchResponseLike, IFetchLike, RegisterTenantParams } from "../../../src/rpc";
 import { FiberRpcClient, RPC_UNAUTHORIZED_CODE, RpcError, RpcResponseError, RpcTransportError } from "../../../src/rpc";
 import type { WireField } from "../../../src/wire";
 import { WireError, decodeHexBytes, readObject } from "../../../src/wire";
@@ -7,8 +7,6 @@ import { caseOf } from "../../utils/interop-vectors";
 import { rejection } from "../../utils/rejection";
 import { answering, refusing, sent } from "../../utils/rpc-answers";
 import {
-    toGetTenantRegistryNonceParams,
-    toGetTenantRegistryNonceResult,
     toOpenTenantChannelParams,
     toOpenTenantChannelResult,
     toRegisterTenantParams,
@@ -20,7 +18,7 @@ import {
     toSubmitWatchtowerSignatureParams,
     withoutNulls,
 } from "../../utils/rpc-typed";
-import { loadRpcVectors } from "../../utils/rpc-vectors";
+import { isTenantOpenParams, isTenantOpenResult, loadRpcVectors } from "../../utils/rpc-vectors";
 import { withRuntime } from "../../utils/with-runtime";
 
 const vectors = loadRpcVectors();
@@ -29,10 +27,12 @@ const {
     submit_channel_signature: submit,
     get_watchtower_signing_status: getWatchtowerStatus,
     submit_watchtower_signature: submitWatchtower,
-    lsp_get_tenant_registry_nonce: getNonce,
     lsp_register_tenant: register,
-    open_tenant_channel: openTenant,
+    open_channel_with_external_funding: open,
 } = vectors.methods;
+
+const tenantOpenParams = open.params.flatMap(({ name, values, json }) => (isTenantOpenParams(values) ? [{ name, values, json }] : []));
+const tenantOpenResults = open.results.flatMap(({ name, values, json }) => (isTenantOpenResult(values) ? [{ name, values, json }] : []));
 
 const URL = "http://fiber.example:8227";
 const TOKEN = "En0KEwoEMTIzNBgDIgkKBwgKEgMYgAgSJAgAEiDs-token_example=";
@@ -537,16 +537,6 @@ describe("FiberRpcClient", () => {
     });
 
     describe("the tenant registration methods", () => {
-        it("reads the registry nonce, sending the method and the vector's params", async () => {
-            const params = caseOf(getNonce.params, "root signer pubkey");
-            const entry = caseOf(getNonce.results, "nonce");
-            const mock = answering(entry.json);
-            await expect(clientOf(mock).getTenantRegistryNonce(toGetTenantRegistryNonceParams(params.values))).resolves.toEqual(
-                toGetTenantRegistryNonceResult(entry.values),
-            );
-            expect(sent(mock)).toEqual({ jsonrpc: "2.0", id: 1, method: "lsp_get_tenant_registry_nonce", params: [params.json] });
-        });
-
         it.each(register.results.map((entry) => [entry.name, entry] as const))(
             "registers a tenant, reading the %s result",
             async (_, entry) => {
@@ -568,51 +558,41 @@ describe("FiberRpcClient", () => {
             expect(error).toMatchObject({ method: "lsp_register_tenant", path: "response.result.tenant.runtime_status" });
         });
 
-        it.each<[string, (client: FiberRpcClient) => Promise<unknown>]>([
-            ["getTenantRegistryNonce", (client) => client.getTenantRegistryNonce({ rootSignerPubkey: new Uint8Array(32) })],
-            [
-                "registerTenant",
-                (client) =>
-                    client.registerTenant({
-                        ...toRegisterTenantParams(caseOf(register.params, "signed payload").values),
-                        signature: new Uint8Array(63),
-                    }),
-            ],
-        ])("%s refuses params it cannot write before sending anything", async (_, run) => {
+        it.each<[string, Partial<RegisterTenantParams>, ErrorConstructor]>([
+            ["a signature of 63 bytes", { signature: new Uint8Array(63) }, TypeError],
+            ["a signing time past a u64", { signedAtMs: 2n ** 64n }, RangeError],
+        ])("refuses %s before sending anything", async (_, change, expected) => {
             const mock = new FetchMock();
-            await expect(run(clientOf(mock))).rejects.toThrow(TypeError);
+            const params = toRegisterTenantParams(caseOf(register.params, "signed payload").values);
+            await expect(clientOf(mock).registerTenant({ ...params, ...change })).rejects.toThrow(expected);
             expect(mock.requests).toHaveLength(0);
         });
 
-        it.each<[string, (client: FiberRpcClient) => Promise<unknown>]>([
-            [
-                "lsp_get_tenant_registry_nonce",
-                (client) =>
-                    client.getTenantRegistryNonce(toGetTenantRegistryNonceParams(caseOf(getNonce.params, "root signer pubkey").values)),
-            ],
-            [
-                "lsp_register_tenant",
-                (client) => client.registerTenant(toRegisterTenantParams(caseOf(register.params, "signed payload").values)),
-            ],
-        ])("%s surfaces the node's refusal as an RpcError", async (method, run) => {
-            const error = await rejection(run(clientOf(refusing(-32000, "tenant already registered"))));
+        it("surfaces the node's refusal as an RpcError", async () => {
+            const params = toRegisterTenantParams(caseOf(register.params, "signed payload").values);
+            const error = await rejection(clientOf(refusing(-32000, "registration request already used")).registerTenant(params));
             expect(error).toBeInstanceOf(RpcError);
-            expect(error).toMatchObject({ method, code: -32000, message: "tenant already registered" });
+            expect(error).toMatchObject({ method: "lsp_register_tenant", code: -32000, message: "registration request already used" });
         });
     });
 
     describe("the tenant channel opening", () => {
-        it.each(openTenant.params.map((entry) => [entry.name, entry] as const))(
-            "sends open_tenant_channel with the vector's %s params",
+        it.each(tenantOpenParams.map((entry) => [entry.name, entry] as const))(
+            "sends open_channel_with_external_funding with the vector's %s params",
             async (_, params) => {
-                const mock = answering(caseOf(openTenant.results, "opening context").json);
+                const mock = answering(caseOf(tenantOpenResults, "tenant, opening context").json);
                 await clientOf(mock).openTenantChannel(toOpenTenantChannelParams(params.values));
-                expect(sent(mock)).toEqual({ jsonrpc: "2.0", id: 1, method: "open_tenant_channel", params: [withoutNulls(params.json)] });
+                expect(sent(mock)).toEqual({
+                    jsonrpc: "2.0",
+                    id: 1,
+                    method: "open_channel_with_external_funding",
+                    params: [withoutNulls(params.json)],
+                });
             },
         );
 
-        it.each(openTenant.results.map((entry) => [entry.name, entry] as const))("reads the %s result", async (_, entry) => {
-            const params = caseOf(openTenant.params, "private, no options");
+        it.each(tenantOpenResults.map((entry) => [entry.name, entry] as const))("reads the %s result", async (_, entry) => {
+            const params = caseOf(tenantOpenParams, "tenant, no options");
             const mock = answering(entry.json);
             await expect(clientOf(mock).openTenantChannel(toOpenTenantChannelParams(params.values))).resolves.toEqual(
                 toOpenTenantChannelResult(entry.values),
@@ -621,24 +601,33 @@ describe("FiberRpcClient", () => {
 
         it("refuses params it cannot write before sending anything", async () => {
             const mock = new FetchMock();
-            const params = toOpenTenantChannelParams(caseOf(openTenant.params, "private, no options").values);
+            const params = toOpenTenantChannelParams(caseOf(tenantOpenParams, "tenant, no options").values);
             await expect(clientOf(mock).openTenantChannel({ ...params, fundingAmountShannons: "-1" })).rejects.toThrow(TypeError);
             expect(mock.requests).toHaveLength(0);
         });
 
         it("surfaces the node's refusal as an RpcError", async () => {
-            const params = toOpenTenantChannelParams(caseOf(openTenant.params, "private, no options").values);
+            const params = toOpenTenantChannelParams(caseOf(tenantOpenParams, "tenant, no options").values);
             const error = await rejection(clientOf(refusing(-32000, "different channel opening")).openTenantChannel(params));
             expect(error).toBeInstanceOf(RpcError);
-            expect(error).toMatchObject({ method: "open_tenant_channel", code: -32000, message: "different channel opening" });
+            expect(error).toMatchObject({
+                method: "open_channel_with_external_funding",
+                code: -32000,
+                message: "different channel opening",
+            });
         });
 
-        it("names the field of a result without an opening context", async () => {
-            const params = toOpenTenantChannelParams(caseOf(openTenant.params, "private, no options").values);
-            const json = { ...(caseOf(openTenant.results, "opening context").json as object), opening_context: undefined };
+        it.each([
+            [
+                "a tenant's answer stripped of its opening context",
+                { ...(caseOf(tenantOpenResults, "tenant, opening context").json as object), opening_context: undefined },
+            ],
+            ["the operator's answer", caseOf(open.results, "ckb channel").json],
+        ])("refuses %s, naming the missing opening context", async (_, json) => {
+            const params = toOpenTenantChannelParams(caseOf(tenantOpenParams, "tenant, no options").values);
             const error = await rejection(clientOf(answering(json)).openTenantChannel(params));
             expect(error).toBeInstanceOf(RpcResponseError);
-            expect(error).toMatchObject({ method: "open_tenant_channel", path: "response.result.opening_context" });
+            expect(error).toMatchObject({ method: "open_channel_with_external_funding", path: "response.result.opening_context" });
         });
     });
 });

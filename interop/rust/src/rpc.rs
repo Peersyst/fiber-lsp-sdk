@@ -12,13 +12,13 @@ use fiber_json_types::{
     AbandonChannelParams, Attribute, AwaitingChannelReadyFlags, AwaitingTxSignaturesFlags, Channel,
     ChannelBasePublicKeys, ChannelOpenSignerMaterial, ChannelSigningStatus, ChannelState, CkbInvoice,
     CkbInvoiceStatus, CloseFlags, CollaboratingFundingTxFlags, Currency, GetChannelSigningStatusParams,
-    GetChannelSigningStatusResult, GetInvoiceResult, GetLspTenantRegistryNonceParams,
-    GetLspTenantRegistryNonceResult, GetPaymentCommandParams, GetPaymentCommandResult,
-    GetWatchtowerSigningStatusParams, GetWatchtowerSigningStatusResult, Hash256, HashAlgorithm, Htlc,
-    InboundTlcStatus, InvoiceData, InvoiceParams, InvoiceResult, ListChannelsParams, ListChannelsResult,
-    LspTenantRuntimeStatus, LspTenantStatus, NegotiatingFundingFlags, NewInvoiceParams, NextChannelSignerMaterial,
-    OnchainKeyPurpose, OnchainSigningContent, OpenChannelWithExternalFundingParams, OpenChannelWithExternalFundingResult,
-    OpenTenantChannelResult, OutboundTlcStatus, PaymentCustomRecords, PaymentStatus, Pubkey, RegisterLspTenantParams,
+    GetChannelSigningStatusResult, GetInvoiceParams, GetInvoiceResult, GetPaymentCommandParams,
+    GetPaymentCommandResult, GetWatchtowerSigningStatusParams, GetWatchtowerSigningStatusResult, Hash256,
+    HashAlgorithm, Htlc, InboundTlcStatus, InvoiceData, InvoiceParams, InvoiceResult, ListChannelsParams,
+    ListChannelsResult, LspTenantChannel, LspTenantRuntimeStatus, LspTenantStatus, NegotiatingFundingFlags,
+    NewInvoiceParams, NextChannelSignerMaterial, OnchainKeyPurpose, OnchainSigningContent,
+    OpenChannelWithExternalFundingParams, OpenChannelWithExternalFundingResult, OutboundTlcStatus,
+    PaymentCustomRecords, PaymentStatus, Pubkey, RegisterLspTenantParams,
     RegisterLspTenantResult, SendPaymentCommandParams, SettleInvoiceParams, SettleInvoiceResult,
     ShutdownChannelParams, ShuttingDownFlags, SigningCommitmentFlags, SubmitChannelSignatureParams,
     SubmitChannelSignatureResult, SubmitSignedFundingTxParams, SubmitSignedFundingTxResult,
@@ -38,20 +38,18 @@ use serde_json::{json, Value};
 use crate::{blake160, blake2b_256, packed_out_point, packed_script, pubkey_of, OutPointVector, ScriptVector, FIBER_REF};
 
 const JSONRPSEE_VERSION: &str = "0.25.1";
-// Literals at crates/fiber-lib/src/rpc/middleware.rs:188-228; the message suffix names the Biscuit limit hit.
+// Literals at crates/fiber-lib/src/rpc/middleware.rs:256-296; the message suffix names the Biscuit limit hit.
 const UNAUTHORIZED_CODE: i32 = -32999;
 const UNAUTHORIZED_MESSAGE: &str = "Unauthorized";
 const UNAUTHORIZED_TIMEOUT_MESSAGE: &str = "Unauthorized: Biscuit authorization timed out";
 const SECP256K1_BLAKE160_CODE_HASH: &str = "9bd7e06f3ecf4be0f2fcd2188b23f1b9fcc88e5d4b65a8637b17723bbda3cce8";
 const SECP256K1_SIGNATURE_LEN: usize = 65;
 
-// --- the vector file ---
-
 #[derive(Serialize, Deserialize)]
 pub struct RpcVectors {
     fiber_ref: String,
     jsonrpsee_version: String,
-    /// Per channel state, the flag names fiber writes with every bit set: the state's whole list, in declaration order.
+    /// Per channel state, the flag names fiber writes with every bit set, in declaration order.
     channel_state_flags: BTreeMap<String, Vec<String>>,
     envelopes: EnvelopeVectors,
     methods: MethodVectors,
@@ -102,13 +100,11 @@ struct MethodVectors {
     cancel_invoice: MethodCases,
     send_payment: MethodCases,
     get_payment: MethodCases,
-    open_tenant_channel: MethodCases,
     shutdown_channel: MethodCases,
     get_channel_signing_status: MethodCases,
     submit_channel_signature: MethodCases,
     get_watchtower_signing_status: MethodCases,
     submit_watchtower_signature: MethodCases,
-    lsp_get_tenant_registry_nonce: MethodCases,
     lsp_register_tenant: MethodCases,
 }
 
@@ -132,8 +128,6 @@ fn case<V: Serialize, J: Serialize>(name: &str, values: &V, json: &J) -> Case {
         json: serde_json::to_value(json).unwrap(),
     }
 }
-
-// --- the fixed values, in the harness's forms ---
 
 #[derive(Serialize, Clone)]
 struct CellDepValues {
@@ -312,6 +306,7 @@ struct SendPaymentParamsValues {
 struct OpenChannelResultValues {
     channel_id: String,
     unsigned_funding_tx: TransactionValues,
+    opening_context: Option<OpeningContextValues>,
 }
 
 #[derive(Serialize)]
@@ -350,8 +345,9 @@ struct SignerMaterialValues {
     channel_announcement_nonce: Option<String>,
 }
 
+/// The tenant's form of `open_channel_with_external_funding`: the signer's opening block, `public` always false.
 #[derive(Serialize)]
-struct OpenTenantChannelParamsValues {
+struct TenantOpenChannelParamsValues {
     pubkey: String,
     funding_amount: String,
     shutdown_script: ScriptVector,
@@ -373,13 +369,6 @@ struct OpeningContextValues {
     remote_amount: String,
     local_reserved_ckb_amount: String,
     remote_reserved_ckb_amount: String,
-}
-
-#[derive(Serialize)]
-struct OpenTenantChannelResultValues {
-    channel_id: String,
-    unsigned_funding_tx: TransactionValues,
-    opening_context: OpeningContextValues,
 }
 
 #[derive(Serialize)]
@@ -439,22 +428,18 @@ struct SubmissionResultValues {
 }
 
 #[derive(Serialize)]
-struct RootSignerPubkeyParamsValues {
-    root_signer_pubkey: String,
-}
-
-#[derive(Serialize)]
-struct TenantRegistryNonceResultValues {
-    lsp_node_id: String,
-    root_signer_pubkey: String,
-    nonce: String,
-}
-
-#[derive(Serialize)]
 struct RegisterTenantParamsValues {
     root_signer_pubkey: String,
-    nonce: String,
+    request_id: String,
+    signed_at: String,
     signature: String,
+}
+
+#[derive(Serialize)]
+struct TenantChannelValues {
+    channel_id: String,
+    funding_udt_type_script: Option<ScriptVector>,
+    online: bool,
 }
 
 #[derive(Serialize)]
@@ -462,10 +447,9 @@ struct TenantStatusValues {
     tenant_id: String,
     root_signer_pubkey: Option<String>,
     invoice_pubkey: String,
-    private_channel_id: Option<String>,
+    channels: Vec<TenantChannelValues>,
     created_at: String,
     runtime_status: String,
-    channel_online: bool,
 }
 
 #[derive(Serialize)]
@@ -473,8 +457,6 @@ struct RegisterTenantResultValues {
     tenant: TenantStatusValues,
     access_token: String,
 }
-
-// --- from the harness's forms to fiber's types ---
 
 fn bytes_of<const N: usize>(hex_str: &str) -> [u8; N] {
     hex::decode(hex_str).unwrap().try_into().unwrap()
@@ -558,7 +540,6 @@ fn json_transaction(tx: &TransactionValues) -> Transaction {
     }
 }
 
-// --- every value fiber has, which the vectors must cover ---
 // Each list sits next to an exhaustive match, so a variant a fiber release adds fails to compile.
 
 fn invoice_statuses() -> Vec<CkbInvoiceStatus> {
@@ -716,7 +697,6 @@ fn named<T: Serialize + Copy>(all: &[T], name: &str) -> T {
     *all.iter().find(|value| name_of(*value) == name).unwrap_or_else(|| panic!("fiber has no {name}"))
 }
 
-/// The variant name of a union fiber tags with `type`.
 fn tag_of<T: Serialize>(value: &T) -> String {
     serde_json::to_value(value).unwrap()["type"].as_str().unwrap().to_string()
 }
@@ -926,8 +906,6 @@ fn json_channel(values: &ChannelValues, state: ChannelState) -> Channel {
     }
 }
 
-// --- fixtures ---
-
 fn hash_hex(label: &str) -> String {
     hex::encode(blake2b_256(label.as_bytes()))
 }
@@ -999,10 +977,8 @@ fn funding_tx(udt: bool, signed: bool) -> TransactionValues {
     tx
 }
 
-/// A watchtower spend as crates/fiber-lib/src/watchtower/actor.rs:1653-1840 builds it: the commitment lock cell, then the
-/// watchtower's sponsor; the remainder, then the watchtower's output; the settlement unlock, its signature zeroed, then the
-/// sponsor's placeholder. `purpose` picks a TLC claimed by timeout from the commitment, or the last party's settlement. The
-/// view is the device's own, so its balance comes first and 0xfe settles it.
+/// A watchtower spend as crates/fiber-lib/src/watchtower/actor.rs:1733-1921 builds it, its signature zeroed: `purpose` picks a
+/// TLC timeout or the last party's settlement. In the device's own view its balance comes first and 0xfe settles it.
 fn watchtower_spend(purpose: &OnchainKeyPurpose) -> TransactionValues {
     let commitment_lock = |args: &[u8]| ScriptVector {
         code_hash: hash_hex("commitment lock code hash"),
@@ -1123,7 +1099,7 @@ fn base_channel(label: &str) -> ChannelValues {
     }
 }
 
-/// What `only_pending` synthesizes for an unstored opening (crates/fiber-lib/src/rpc/channel.rs:387-468).
+/// What `only_pending` synthesizes for an unstored opening (crates/fiber-lib/src/rpc/channel.rs:358-439).
 fn synthetic_channel(label: &str) -> ChannelValues {
     let mut channel = base_channel(label);
     channel.is_public = false;
@@ -1195,9 +1171,10 @@ fn open_channels() -> Vec<(ChannelValues, Channel)> {
 fn pending_channels() -> Vec<(ChannelValues, Channel)> {
     let mut aborted = synthetic_channel("funding aborted");
     aborted.failure_detail = Some("funding transaction not submitted within the timeout".to_string());
-    // A settled abandon fails the open record with this literal (crates/fiber-lib/src/fiber/network.rs:1733).
+    // A settled abandon fails the open record with this message (crates/fiber-lib/src/fiber/network.rs:2682-2684).
     let mut abandoned = synthetic_channel("abandoned");
-    abandoned.failure_detail = Some("Channel was abandoned".to_string());
+    let abandoned_id = fiber_types::Hash256::from(bytes_of::<32>(&abandoned.channel_id));
+    abandoned.failure_detail = Some(format!("[Channel {abandoned_id}] Channel was abandoned"));
     // ABANDONED is never synthesized: only a stored actor state carries it.
     let mut abandoning = base_channel("abandoning");
     abandoning.channel_outpoint = None;
@@ -1318,7 +1295,7 @@ fn signed_message(label: &str) -> Message {
     Message::from_digest(blake2b_256(label.as_bytes()))
 }
 
-/// The 65 bytes of a recoverable signature: the compact form, then the recovery id.
+/// The compact form, then the recovery id.
 fn recoverable_signature_hex(key: &str, label: &str) -> String {
     let (recovery_id, compact) =
         SECP256K1.sign_ecdsa_recoverable(&signed_message(label), &signing_key(key)).serialize_compact();
@@ -1329,7 +1306,6 @@ fn compact_signature_hex(key: &str, label: &str) -> String {
     hex::encode(SECP256K1.sign_ecdsa(&signed_message(label), &signing_key(key)).serialize_compact())
 }
 
-/// A musig2 public nonce from a fixed seed, as the device publishes it: 66 bytes.
 fn pubnonce_hex(label: &str) -> String {
     hex::encode(SecNonceBuilder::new(blake2b_256(label.as_bytes())).build().public_nonce().serialize())
 }
@@ -1395,14 +1371,21 @@ fn json_tenant_status(tenant: &TenantStatusValues) -> LspTenantStatus {
         tenant_id: tenant.tenant_id.clone(),
         root_signer_pubkey: tenant.root_signer_pubkey.as_deref().map(pubkey),
         invoice_pubkey: pubkey(&tenant.invoice_pubkey),
-        private_channel_id: tenant.private_channel_id.as_deref().map(hash256),
+        channels: tenant
+            .channels
+            .iter()
+            .map(|channel| LspTenantChannel {
+                channel_id: hash256(&channel.channel_id),
+                funding_udt_type_script: channel.funding_udt_type_script.as_ref().map(json_script),
+                online: channel.online,
+            })
+            .collect(),
         created_at: u64_of(&tenant.created_at),
         runtime_status: named(&tenant_runtime_statuses(), &tenant.runtime_status),
-        channel_online: tenant.channel_online,
     }
 }
 
-/// The id fiber derives for a root signer, bare hex as `TenantId` writes it.
+/// Bare hex, as `TenantId` writes it.
 fn tenant_id(root_signer_pubkey: &str) -> String {
     TenantId::from_root_signer_pubkey(&fiber_types::Pubkey(bytes_of(root_signer_pubkey))).as_str().to_string()
 }
@@ -1510,6 +1493,7 @@ fn methods() -> MethodVectors {
         let json = OpenChannelWithExternalFundingResult {
             channel_id: hash256(&values.channel_id),
             unsigned_funding_tx: json_transaction(&values.unsigned_funding_tx),
+            opening_context: values.opening_context.as_ref().map(json_opening_context),
         };
         case(name, &values, &json)
     };
@@ -1539,7 +1523,8 @@ fn methods() -> MethodVectors {
         let values = PaymentHashParamsValues { payment_hash: hash.to_string() };
         (
             case(name, &values, &InvoiceParams { payment_hash: hash256(hash) }),
-            case(name, &values, &GetPaymentCommandParams { payment_hash: hash256(hash) }),
+            case(name, &values, &GetInvoiceParams { payment_hash: hash256(hash), tenant_id: None }),
+            case(name, &values, &GetPaymentCommandParams { payment_hash: hash256(hash), tenant_id: None }),
         )
     };
     let send_payment = |name: &str, values: SendPaymentParamsValues| {
@@ -1596,10 +1581,10 @@ fn methods() -> MethodVectors {
     largest.created_at = u64::MAX.to_string();
     largest.last_updated_at = u64::MAX.to_string();
 
-    let (get_invoice_params, get_payment_params) = payment_hash_params("by payment hash", &payment_hash);
-    let (cancel_invoice_params, _) = payment_hash_params("by payment hash", &hash_hex("payment hash cancelled"));
+    let (_, get_invoice_params, get_payment_params) = payment_hash_params("by payment hash", &payment_hash);
+    let (cancel_invoice_params, _, _) = payment_hash_params("by payment hash", &hash_hex("payment hash cancelled"));
 
-    let open_tenant_channel = |name: &str, values: OpenTenantChannelParamsValues| {
+    let open_channel_as_tenant = |name: &str, values: TenantOpenChannelParamsValues| {
         let json = OpenChannelWithExternalFundingParams {
             pubkey: pubkey(&values.pubkey),
             funding_amount: u128_of(&values.funding_amount),
@@ -1617,14 +1602,6 @@ fn methods() -> MethodVectors {
             max_tlc_value_in_flight: None,
             max_tlc_number_in_flight: None,
             external_channel_signer: Some(json_signer_material(&values.external_channel_signer)),
-        };
-        case(name, &values, &json)
-    };
-    let open_tenant_result = |name: &str, values: OpenTenantChannelResultValues| {
-        let json = OpenTenantChannelResult {
-            channel_id: hash256(&values.channel_id),
-            unsigned_funding_tx: json_transaction(&values.unsigned_funding_tx),
-            opening_context: json_opening_context(&values.opening_context),
         };
         case(name, &values, &json)
     };
@@ -1671,7 +1648,7 @@ fn methods() -> MethodVectors {
     let tenant_channel_id = hash_hex("channel tenant");
     let tenant_shutdown = sighash_script("tenant shutdown args");
     let tenant_lock = sighash_script("tenant lock args");
-    let tenant_open = |delay: Option<&str>, fee_rate: Option<&str>, announced: bool| OpenTenantChannelParamsValues {
+    let tenant_open = |delay: Option<&str>, fee_rate: Option<&str>, announced: bool| TenantOpenChannelParamsValues {
         pubkey: peer.clone(),
         funding_amount: "80500000000".to_string(),
         shutdown_script: tenant_shutdown.clone(),
@@ -1715,7 +1692,7 @@ fn methods() -> MethodVectors {
     let (channel_status_result, watchtower_status_result) = signing_status("no signature required");
     let watchtower_signature_required = |name: &str, purpose: OnchainKeyPurpose| {
         let transaction = watchtower_spend(&purpose);
-        // fiber's request id: the hash of the molecule transaction it hands over (crates/fiber-lib/src/watchtower/signer.rs:95).
+        // fiber's request id: the hash of the molecule transaction it hands over (crates/fiber-lib/src/watchtower/signer.rs:102).
         let packed: ckb_types::packed::Transaction = json_transaction(&transaction).into();
         let values = WatchtowerSignatureRequiredValues {
             channel_id: tenant_channel_id.clone(),
@@ -1753,32 +1730,40 @@ fn methods() -> MethodVectors {
         signature: recoverable_signature_hex("tenant settlement", "watchtower request"),
     };
     let root_signer = pubkey_hex("root signer");
-    let registry_nonce = hash_hex("tenant registry nonce");
-    let root_signer_params = RootSignerPubkeyParamsValues { root_signer_pubkey: root_signer.clone() };
-    let nonce_result = TenantRegistryNonceResultValues {
-        lsp_node_id: pubkey_hex("lsp node"),
+    let register = |signed_at: &str| RegisterTenantParamsValues {
         root_signer_pubkey: root_signer.clone(),
-        nonce: registry_nonce.clone(),
-    };
-    let register = RegisterTenantParamsValues {
-        root_signer_pubkey: root_signer.clone(),
-        nonce: registry_nonce.clone(),
+        request_id: hash_hex("tenant registry request"),
+        signed_at: signed_at.to_string(),
         signature: compact_signature_hex("root signer", "tenant registry payload"),
+    };
+    let register_tenant = |name: &str, values: RegisterTenantParamsValues| {
+        let json = RegisterLspTenantParams {
+            root_signer_pubkey: pubkey(&values.root_signer_pubkey),
+            request_id: hash256(&values.request_id),
+            signed_at: u64_of(&values.signed_at),
+            signature: values.signature.clone(),
+        };
+        case(name, &values, &json)
     };
     let tenant = |label: &str| TenantStatusValues {
         tenant_id: tenant_id(&root_signer),
         root_signer_pubkey: None,
         invoice_pubkey: pubkey_hex(&format!("{label} invoice key")),
-        private_channel_id: None,
+        channels: vec![],
         created_at: "1726000000000".to_string(),
         runtime_status: "cold".to_string(),
-        channel_online: false,
     };
     let mut active_tenant = tenant("active tenant");
     active_tenant.root_signer_pubkey = Some(root_signer.clone());
-    active_tenant.private_channel_id = Some(tenant_channel_id.clone());
+    active_tenant.channels = vec![
+        TenantChannelValues { channel_id: tenant_channel_id.clone(), funding_udt_type_script: None, online: true },
+        TenantChannelValues {
+            channel_id: hash_hex("channel tenant udt"),
+            funding_udt_type_script: Some(udt_script()),
+            online: false,
+        },
+    ];
     active_tenant.runtime_status = "active".to_string();
-    active_tenant.channel_online = true;
 
     MethodVectors {
         open_channel_with_external_funding: MethodCases {
@@ -1824,17 +1809,52 @@ fn methods() -> MethodVectors {
                         funding_lock_script_cell_deps: Some(wallet_lock_cell_deps.clone()),
                     },
                 ),
+                open_channel_as_tenant("tenant, no options", tenant_open(None, None, false)),
+                open_channel_as_tenant(
+                    "tenant, with delay and fee rate",
+                    tenant_open(Some(&((12u64 << 40) | (3 << 24) | 7).to_string()), Some("2500"), false),
+                ),
+                open_channel_as_tenant("tenant, with the announcement nonce", tenant_open(None, None, true)),
+                open_channel_as_tenant(
+                    "tenant, with the funding lock's cell deps",
+                    TenantOpenChannelParamsValues {
+                        funding_lock_script: wallet_lock.clone(),
+                        funding_lock_script_cell_deps: Some(wallet_lock_cell_deps.clone()),
+                        ..tenant_open(None, None, false)
+                    },
+                ),
             ],
             results: vec![
                 open_result(
                     "ckb channel",
-                    OpenChannelResultValues { channel_id: channel_id.clone(), unsigned_funding_tx: funding_tx(false, false) },
+                    OpenChannelResultValues {
+                        channel_id: channel_id.clone(),
+                        unsigned_funding_tx: funding_tx(false, false),
+                        opening_context: None,
+                    },
                 ),
                 open_result(
                     "udt channel with deps",
                     OpenChannelResultValues {
                         channel_id: hash_hex("channel udt"),
                         unsigned_funding_tx: funding_tx(true, false),
+                        opening_context: None,
+                    },
+                ),
+                open_result(
+                    "tenant, opening context",
+                    OpenChannelResultValues {
+                        channel_id: tenant_channel_id.clone(),
+                        unsigned_funding_tx: funding_tx(false, false),
+                        opening_context: Some(opening_context("tenant")),
+                    },
+                ),
+                open_result(
+                    "tenant, opening context, large amounts",
+                    OpenChannelResultValues {
+                        channel_id: hash_hex("channel tenant large"),
+                        unsigned_funding_tx: funding_tx(false, false),
+                        opening_context: Some(large_context),
                     },
                 ),
             ],
@@ -2008,42 +2028,6 @@ fn methods() -> MethodVectors {
                 payment_case("failed", failed),
             ],
         },
-        open_tenant_channel: MethodCases {
-            params: vec![
-                open_tenant_channel("private, no options", tenant_open(None, None, false)),
-                open_tenant_channel(
-                    "with delay and fee rate",
-                    tenant_open(Some(&((12u64 << 40) | (3 << 24) | 7).to_string()), Some("2500"), false),
-                ),
-                open_tenant_channel("with the announcement nonce", tenant_open(None, None, true)),
-                open_tenant_channel(
-                    "with the funding lock's cell deps",
-                    OpenTenantChannelParamsValues {
-                        funding_lock_script: wallet_lock.clone(),
-                        funding_lock_script_cell_deps: Some(wallet_lock_cell_deps.clone()),
-                        ..tenant_open(None, None, false)
-                    },
-                ),
-            ],
-            results: vec![
-                open_tenant_result(
-                    "opening context",
-                    OpenTenantChannelResultValues {
-                        channel_id: tenant_channel_id.clone(),
-                        unsigned_funding_tx: funding_tx(false, false),
-                        opening_context: opening_context("tenant"),
-                    },
-                ),
-                open_tenant_result(
-                    "opening context, large amounts",
-                    OpenTenantChannelResultValues {
-                        channel_id: hash_hex("channel tenant large"),
-                        unsigned_funding_tx: funding_tx(false, false),
-                        opening_context: large_context,
-                    },
-                ),
-            ],
-        },
         shutdown_channel: MethodCases {
             params: vec![
                 shutdown_channel(
@@ -2122,32 +2106,11 @@ fn methods() -> MethodVectors {
                 submission_case(&watchtower_submission_results(), "already applied", "AlreadyApplied"),
             ],
         },
-        lsp_get_tenant_registry_nonce: MethodCases {
-            params: vec![case(
-                "root signer pubkey",
-                &root_signer_params,
-                &GetLspTenantRegistryNonceParams { root_signer_pubkey: pubkey(&root_signer_params.root_signer_pubkey) },
-            )],
-            results: vec![case(
-                "nonce",
-                &nonce_result,
-                &GetLspTenantRegistryNonceResult {
-                    lsp_node_id: pubkey(&nonce_result.lsp_node_id),
-                    root_signer_pubkey: pubkey(&nonce_result.root_signer_pubkey),
-                    nonce: hash256(&nonce_result.nonce),
-                },
-            )],
-        },
         lsp_register_tenant: MethodCases {
-            params: vec![case(
-                "signed payload",
-                &register,
-                &RegisterLspTenantParams {
-                    root_signer_pubkey: pubkey(&register.root_signer_pubkey),
-                    nonce: hash256(&register.nonce),
-                    signature: register.signature.clone(),
-                },
-            )],
+            params: vec![
+                register_tenant("signed payload", register("1726000000000")),
+                register_tenant("signed at the largest timestamp", register(&u64::MAX.to_string())),
+            ],
             results: vec![
                 register_tenant_result(
                     "cold tenant without a channel",
@@ -2157,7 +2120,7 @@ fn methods() -> MethodVectors {
                     },
                 ),
                 register_tenant_result(
-                    "active tenant with a private channel",
+                    "active tenant with a ckb and a udt channel",
                     RegisterTenantResultValues { tenant: active_tenant, access_token: "tenant-access-token-active".to_string() },
                 ),
             ],
@@ -2191,7 +2154,7 @@ fn error_envelope(name: &str, id: Id<'static>, error: ErrorObject<'static>) -> E
 
 fn envelopes() -> EnvelopeVectors {
     let payment_hash = hash256(&hash_hex("payment hash held"));
-    let params = json!([GetPaymentCommandParams { payment_hash }]);
+    let params = json!([GetPaymentCommandParams { payment_hash, tenant_id: None }]);
     let raw_params = serde_json::value::to_raw_value(&params).unwrap();
     let request = Request::borrowed("get_payment", Some(&raw_params), Id::Number(7));
     let submitted = SubmitSignedFundingTxResult {
@@ -2255,8 +2218,6 @@ pub fn gen_rpc_vectors(out_path: &str) {
     println!("rpc vectors written to {out_path}");
 }
 
-// --- verify-rpc-params ---
-
 #[derive(Deserialize)]
 struct TsParamsCase {
     name: String,
@@ -2281,12 +2242,11 @@ fn method_params<'a>(methods: &'a MethodVectors, method: &str) -> Option<(&'a Me
         "abandon_channel" => (&methods.abandon_channel, round_trip::<AbandonChannelParams>),
         "list_channels" => (&methods.list_channels, round_trip::<ListChannelsParams>),
         "new_invoice" => (&methods.new_invoice, round_trip::<NewInvoiceParams>),
-        "get_invoice" => (&methods.get_invoice, round_trip::<InvoiceParams>),
+        "get_invoice" => (&methods.get_invoice, round_trip::<GetInvoiceParams>),
         "settle_invoice" => (&methods.settle_invoice, round_trip::<SettleInvoiceParams>),
         "cancel_invoice" => (&methods.cancel_invoice, round_trip::<InvoiceParams>),
         "send_payment" => (&methods.send_payment, round_trip::<SendPaymentCommandParams>),
         "get_payment" => (&methods.get_payment, round_trip::<GetPaymentCommandParams>),
-        "open_tenant_channel" => (&methods.open_tenant_channel, round_trip::<OpenChannelWithExternalFundingParams>),
         "shutdown_channel" => (&methods.shutdown_channel, round_trip::<ShutdownChannelParams>),
         "get_channel_signing_status" => {
             (&methods.get_channel_signing_status, round_trip::<GetChannelSigningStatusParams>)
@@ -2297,9 +2257,6 @@ fn method_params<'a>(methods: &'a MethodVectors, method: &str) -> Option<(&'a Me
         }
         "submit_watchtower_signature" => {
             (&methods.submit_watchtower_signature, round_trip::<SubmitWatchtowerSignatureParams>)
-        }
-        "lsp_get_tenant_registry_nonce" => {
-            (&methods.lsp_get_tenant_registry_nonce, round_trip::<GetLspTenantRegistryNonceParams>)
         }
         "lsp_register_tenant" => (&methods.lsp_register_tenant, round_trip::<RegisterLspTenantParams>),
         _ => return None,
@@ -2448,7 +2405,7 @@ mod tests {
     }
 
     #[test]
-    fn refuses_a_method_outside_the_eighteen() {
+    fn refuses_a_method_outside_the_sixteen() {
         let mut written = identity();
         written.as_object_mut().unwrap().insert("connect_peer".to_string(), json!([]));
         assert_refused(written, "connect_peer: not a method of the vectors");
@@ -2484,7 +2441,11 @@ mod tests {
     #[test]
     fn refuses_a_misspelt_funding_lock_cell_deps_field_fiber_drops_in_silence() {
         assert_refused(
-            renamed("/open_tenant_channel/3/params", "funding_lock_script_cell_deps", "funding_lock_cell_deps"),
+            renamed(
+                "/open_channel_with_external_funding/6/params",
+                "funding_lock_script_cell_deps",
+                "funding_lock_cell_deps",
+            ),
             "do not come back unchanged",
         );
     }
@@ -2492,7 +2453,10 @@ mod tests {
     #[test]
     fn refuses_a_funding_lock_cell_dep_in_another_spelling() {
         assert_refused(
-            with("/open_tenant_channel/3/params/funding_lock_script_cell_deps/1/dep_type", json!("depGroup")),
+            with(
+                "/open_channel_with_external_funding/6/params/funding_lock_script_cell_deps/1/dep_type",
+                json!("depGroup"),
+            ),
             "fiber refuses the params",
         );
     }

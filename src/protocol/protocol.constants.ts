@@ -10,9 +10,6 @@ import type {
     WatchtowerSigningStatusWire,
 } from "./protocol.types";
 
-/**
- * Shared by fiber's channel and watchtower signing statuses.
- */
 export const SIGNING_STATUS_TYPES = [
     "NoSignatureRequired",
     "SignatureRequired",
@@ -56,7 +53,7 @@ export const COMMITMENT_COUNTERS = { Local: "local", Remote: "remote" } as const
 /**
  * What each transition must carry, as fiber builds and checks it (`fiber-lsp-sdk/src/lifecycle.rs:118-180`): the slot,
  * counter and content of a revocation or a close
- * (`fiber-lib/src/fiber/channel.rs:7999-8018,9200-9213,10194-10216`), the peer's evidence (`:11040-11080`), the
+ * (`fiber-lib/src/fiber/channel.rs:8184-8200,9379-9392,10364-10380`), the peer's evidence (`:11207-11247`), the
  * settlement and the next material (`fiber-types/src/channel_signer.rs:348-358,380-388`).
  */
 export const CHANNEL_SIGNING_RULES = {

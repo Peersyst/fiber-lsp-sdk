@@ -13,7 +13,6 @@ import type {
 import type { ChannelSigningTransition } from "../protocol";
 import type {
     FiberRpcClient,
-    GetTenantRegistryNonceResult,
     IFetchLike,
     NewInvoiceParams,
     RegisterTenantParams,
@@ -111,9 +110,8 @@ type SigningEventPayload = {
     requestId: string | null;
     transition: ChannelSigningTransition | null;
     /**
-     * When fiber force-closes the channel still awaiting the signature, in ms since the epoch. An upper bound, over the node's
-     * unchecked expiries on a refusal. Absent when the device cannot compute it (no TLC, no pinned delay, a failed pin read),
-     * not when fiber has none.
+     * When fiber force-closes the channel still awaiting the signature, ms since the epoch, an upper bound. Absent when the
+     * device cannot compute it (no TLC, no pinned delay, a failed pin read), not when fiber has none.
      */
     deadlineMs?: number;
 } & ({ outcome: Exclude<SigningEventOutcome, "refused"> } | { outcome: "refused"; error: SignerRefusal });
@@ -321,7 +319,10 @@ export type SdkPayment = {
 
 export type SdkPayableInvoice = { paymentHash: Uint8Array; amountShannons: string; payeePublicKey: Uint8Array };
 
-export type SdkTenantChallenge = GetTenantRegistryNonceResult;
+/**
+ * The host's to pick: the SDK draws no randomness and reads no clock for a registration.
+ */
+export type SdkTenantRegistrationRequest = Pick<RegisterTenantParams, "requestId" | "signedAtMs">;
 
 export type SdkTenantRegistration = RegisterTenantParams & { tenantId: string };
 

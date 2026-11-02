@@ -3,9 +3,11 @@ import { existsSync, mkdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import type {
     AgentChannel,
+    AgentPaymentTerms,
     AgentState,
     CloseAuthorization,
     InvoiceAuthorization,
+    PaymentAuthorization,
     ScriptJson,
     WatchtowerAuthorization,
 } from "./agent.types";
@@ -20,12 +22,12 @@ const MASTER_SEED_LENGTH = 32;
 
 const HASH256_PATTERN = /^0x[0-9a-f]{64}$/;
 
-const NODE_ID_PATTERN = /^[0-9a-f]{66}$/;
-
-// The fee rates and the fee cap, written as `readAuthorization` reads them.
+// The fee rates, the fee cap and a payment's amount and times, written as `readAuthorization` reads them.
 const DECIMAL_PATTERN = /^(?:0|[1-9][0-9]*)$/;
 
 type FieldReader = (key: string) => unknown;
+
+const TERMS_FIELDS = ["paymentHash", "hashAlgorithm", "amountShannons", "expiresAtMs", "minTlcExpiryDeltaMs", "maxTlcExpiryMs"] as const;
 
 /**
  * Builds the refusal of a malformed `agent.json` field.
@@ -136,6 +138,23 @@ function readChannel(value: unknown, path: string): AgentChannel {
 }
 
 /**
+ * Reads the terms an invoice or a payment authorization keeps.
+ * @param at The authorization's field reader.
+ * @param path Where the authorization sits, from the root.
+ * @returns The terms.
+ */
+function readTerms(at: FieldReader, path: string): AgentPaymentTerms {
+    return {
+        paymentHash: readHash256(at("paymentHash"), `${path}.paymentHash`),
+        hashAlgorithm: readLiteral(at("hashAlgorithm"), `${path}.hashAlgorithm`, HASH_ALGORITHMS),
+        amountShannons: readDecimal(at("amountShannons"), `${path}.amountShannons`),
+        expiresAtMs: readDecimal(at("expiresAtMs"), `${path}.expiresAtMs`),
+        minTlcExpiryDeltaMs: readDecimal(at("minTlcExpiryDeltaMs"), `${path}.minTlcExpiryDeltaMs`),
+        maxTlcExpiryMs: readDecimal(at("maxTlcExpiryMs"), `${path}.maxTlcExpiryMs`),
+    };
+}
+
+/**
  * Reads a value as an invoice authorization, filed under its payment hash.
  * @param value The value.
  * @param path Where it sits, from the root.
@@ -143,16 +162,43 @@ function readChannel(value: unknown, path: string): AgentChannel {
  * @returns The authorization.
  */
 function readInvoice(value: unknown, path: string, key: string): InvoiceAuthorization {
-    const at = readExactObject(value, path, ["type", "channelId", "preimage", "paymentHash", "hashAlgorithm"]);
+    const at = readExactObject(value, path, ["type", "channelId", "preimage", ...TERMS_FIELDS]);
     const invoice: InvoiceAuthorization = {
         type: readLiteral(at("type"), `${path}.type`, ["Invoice"]),
         channelId: readHash256(at("channelId"), `${path}.channelId`),
         preimage: readHash256(at("preimage"), `${path}.preimage`),
-        paymentHash: readHash256(at("paymentHash"), `${path}.paymentHash`),
-        hashAlgorithm: readLiteral(at("hashAlgorithm"), `${path}.hashAlgorithm`, HASH_ALGORITHMS),
+        ...readTerms(at, path),
     };
     if (invoice.paymentHash !== key) throw malformed(`${path}.paymentHash`, "must be the key it is filed under");
     return invoice;
+}
+
+/**
+ * Reads a value as a decimal integer string.
+ * @param value The value.
+ * @param path Where it sits, from the root.
+ * @returns The string.
+ */
+function readDecimal(value: unknown, path: string): string {
+    return readPattern(value, path, DECIMAL_PATTERN, "a decimal integer string");
+}
+
+/**
+ * Reads a value as a payment authorization, filed under its payment hash.
+ * @param value The value.
+ * @param path Where it sits, from the root.
+ * @param key The payment hash it is filed under.
+ * @returns The authorization.
+ */
+function readPayment(value: unknown, path: string, key: string): PaymentAuthorization {
+    const at = readExactObject(value, path, ["type", "channelId", ...TERMS_FIELDS]);
+    const payment: PaymentAuthorization = {
+        type: readLiteral(at("type"), `${path}.type`, ["Payment"]),
+        channelId: readHash256(at("channelId"), `${path}.channelId`),
+        ...readTerms(at, path),
+    };
+    if (payment.paymentHash !== key) throw malformed(`${path}.paymentHash`, "must be the key it is filed under");
+    return payment;
 }
 
 /**
@@ -226,23 +272,19 @@ export function loadOrCreateMasterSeed(storeDir: string): Uint8Array {
  */
 export function readAgentState(storeDir: string): AgentState {
     const path = join(storeDir, AGENT_STATE_FILE);
-    if (!existsSync(path)) return { tenantToken: null, lspPubkey: null, channels: {}, invoices: {}, closes: {}, watchtower: null };
+    if (!existsSync(path)) return { tenantToken: null, channels: {}, invoices: {}, payments: {}, closes: {}, watchtower: null };
     let parsed: unknown;
     try {
         parsed = JSON.parse(readFileSync(path, "utf8"));
     } catch {
         throw new Error(`${AGENT_STATE_FILE} is not JSON`);
     }
-    const at = readExactObject(parsed, "state", ["tenantToken", "lspPubkey", "channels", "invoices", "closes", "watchtower"]);
-    const lspPubkey = at("lspPubkey");
+    const at = readExactObject(parsed, "state", ["tenantToken", "channels", "invoices", "payments", "closes", "watchtower"]);
     return {
         tenantToken: readTokenOrNull(at("tenantToken"), "state.tenantToken"),
-        lspPubkey:
-            lspPubkey === null
-                ? null
-                : readPattern(lspPubkey, "state.lspPubkey", NODE_ID_PATTERN, "33 bytes of lowercase hex without 0x, or null"),
         channels: readIdRecord(at("channels"), "state.channels", readChannel),
         invoices: readIdRecord(at("invoices"), "state.invoices", readInvoice),
+        payments: readIdRecord(at("payments"), "state.payments", readPayment),
         closes: readIdRecord(at("closes"), "state.closes", readClose),
         watchtower: readWatchtower(at("watchtower"), "state.watchtower"),
     };

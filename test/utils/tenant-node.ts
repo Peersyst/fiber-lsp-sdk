@@ -1,9 +1,10 @@
 import { secp256k1 } from "@noble/curves/secp256k1.js";
-import { bytesToNumberBE, equalBytes } from "@noble/curves/utils.js";
+import { bytesToNumberBE, equalBytes, numberToBytesBE } from "@noble/curves/utils.js";
 import { bytesToHex, concatBytes, hexToBytes, utf8ToBytes } from "@noble/hashes/utils.js";
 import { Session } from "@scure/btc-signer/musig2.js";
 import type { CellDep, OutPoint, Script, ScriptTemplate, TlcDirection, TlcHashAlgorithm, Transaction } from "../../src/common";
 import {
+    COMPACT_ECDSA_SIGNATURE_LENGTH,
     COMPRESSED_POINT_LENGTH,
     HASH256_LENGTH,
     MILLISECONDS_PER_SECOND,
@@ -14,6 +15,7 @@ import {
     RECOVERABLE_ECDSA_SIGNATURE_LENGTH,
     SHANNONS_PER_CKB,
     UINT128_MAX,
+    UINT64_LENGTH,
     UINT64_MAX,
     assertCompressedPoint,
     blake160,
@@ -21,7 +23,7 @@ import {
     compareBytes,
 } from "../../src/common";
 import type { FiberChannelKeys } from "../../src/derivation";
-import { MAX_COMMITMENT_NUMBER, derivePublicKey, getCommitmentPoint, pubkeyOf } from "../../src/derivation";
+import { MAX_COMMITMENT_NUMBER, blake2bHashWithSalt, derivePublicKey, getCommitmentPoint, pubkeyOf } from "../../src/derivation";
 import type { CommitmentLockLayout, CommitmentTxInput, RevocationInput } from "../../src/digest";
 import {
     FUNDING_LOCK_TESTNET,
@@ -60,9 +62,13 @@ import type {
     IFetchLike,
     ListChannelsParamsWire,
     NewInvoiceParamsWire,
+    LspTenantChannelWire,
+    LspTenantStatusWire,
     NextChannelSignerMaterialWire,
+    OpenChannelWithExternalFundingResultWire,
     OpenTenantChannelParamsWire,
-    OpenTenantChannelResultWire,
+    RegisterTenantParamsWire,
+    RegisterTenantResultWire,
     RpcChannelIdParamsWire,
     RpcChannelStateName,
     RpcChannelStateWire,
@@ -134,7 +140,7 @@ const FIXED_LENGTH_MEMBERS = ["channel_id", "request_id", "partial_signature", "
 
 const CURVE_ORDER = secp256k1.Point.Fn.ORDER;
 
-// `ProcessingChannelError::Musig2VerifyError` around musig2's `VerifyError::BadSignature`, as `channel.rs:2271` wraps it.
+// `ProcessingChannelError::Musig2VerifyError` around musig2's `VerifyError::BadSignature`, as `channel.rs:2284` wraps it.
 const INVALID_SIGNATURE = "Invalid parameter: signature is invalid: Musig2 VerifyError: failed to verify signature: signature is invalid";
 
 // The cells the funding tx spends, which nothing resolves here: the user's, collected under the open's `funding_lock_script`, and
@@ -168,6 +174,15 @@ const NODE_CURRENCY: InvoiceCurrency = "Fibt";
 // The tenant's own node key, which the LSP generated and keeps (`rpc/invoice.rs:107-118`): the payee of the tenant's invoices.
 const TENANT_SECRET_KEY = ckbBlake2b(utf8ToBytes("tenant node tenant key"));
 
+// Fiber's (`fiber-types/src/hosted_lsp.rs:11-20`), written out rather than taken from the SDK, whose payload the double checks.
+const REGISTRY_PROTOCOL = utf8ToBytes("fiber-hosted-lsp-tenant-registry/v2");
+
+const TENANT_ID_SALT = utf8ToBytes("fiber-hosted-lsp-tenant-id/v1");
+
+const REGISTRY_MAX_SIGNED_AT_AGE_MS = 5n * 60n * 1000n;
+
+const REGISTRY_MAX_SIGNED_AT_FUTURE_SKEW_MS = 30n * 1000n;
+
 // Fiber's `MIN_TLC_EXPIRY_DELTA`, two thirds of the one-epoch default delay (`fiber/config.rs:39`, `:54-55`).
 const MIN_TLC_EXPIRY_DELTA_MS = (BigInt(SIGNING_MILLISECONDS_PER_EPOCH) * 2n) / 3n;
 
@@ -182,6 +197,16 @@ const CHECK_CHANNELS_INTERVAL_MS = 60_000n;
 
 const MAX_DESCRIPTION_LENGTH = 639;
 
+// The calls fiber answers without the tenant's runtime: the registration (`rpc/lsp.rs:28-32`), the channel's signing status, read
+// from the tenant's store (`lsp/service.rs:518-534`), and the watchtower's, served under the token's `RpcContext`
+// (`rpc/watchtower.rs:388-487`). A registered tenant's other calls start it through `GetTenantRpcContext` (`lsp/service.rs:506-517`).
+const COLD_TENANT_METHODS: ReadonlySet<string> = new Set([
+    "lsp_register_tenant",
+    "get_channel_signing_status",
+    "get_watchtower_signing_status",
+    "submit_watchtower_signature",
+]);
+
 // `trampoline_route_hint` sets `TRAMPOLINE_ROUTING_OPTIONAL`, bit 5, in a fresh one-byte vector (`invoice/invoice_impl.rs:103-106`,
 // `fiber-types/src/protocol.rs:245`, `:271-277`).
 const TRAMPOLINE_FEATURE_BITS = Uint8Array.of(0x20);
@@ -190,9 +215,9 @@ const TRAMPOLINE_FEATURE_BITS = Uint8Array.of(0x20);
 const BASIC_MPP_FEATURE_MASK = 0x0c;
 
 // Fiber's payment values, spelled here like the ones above: the default fee cap, 5 per mille rounded up (`fiber/payment.rs:50-51`,
-// `fee.rs:151-175`), a trampoline's forwarding fee rate per million (`channel.rs:349`, `graph.rs:1759-1783`), the cap on trampoline
+// `fee.rs:151-175`), a trampoline's forwarding fee rate per million (`channel.rs:346`, `graph.rs:1759-1783`), the cap on trampoline
 // hops (`payment.rs:49`), a forward's expiry delta and how many a trampoline segment budgets (`config.rs:42`, `graph.rs:49`), and
-// the payment actor's status check, which stops an actor whose payment is still in flight (`payment.rs:810`, `:1148-1188`).
+// the payment actor's status check, which stops an actor whose payment is still in flight (`payment.rs:823`, `:1161-1201`).
 const DEFAULT_MAX_FEE_RATE = 5n;
 
 const MAX_FEE_RATE_DENOMINATOR = 1000n;
@@ -209,7 +234,7 @@ const TRAMPOLINE_FORWARDING_ROUTE_DELTA_COUNT = 3n;
 
 const PAYMENT_STATUS_CHECK_INTERVAL_MS = 60_000n;
 
-// The members of fiber's `SendPaymentCommandParams` (`fiber-json-types/src/payment.rs:163-268`) the SDK never sends.
+// The members of fiber's `SendPaymentCommandParams` (`fiber-json-types/src/payment.rs:167-272`) the SDK never sends.
 const UNSERVED_PAYMENT_MEMBERS = [
     "target_pubkey",
     "amount",
@@ -273,7 +298,7 @@ type NodeTlc = {
     amountShannons: bigint;
     paymentHash: Uint8Array;
     expiryMs: bigint;
-    // Fiber's `created_at` (`channel.rs:9046`, `:9075`): the counters when the TLC was added.
+    // Fiber's `created_at` (`channel.rs:9227`, `:9256`): the counters when the TLC was added.
     createdAt: { local: number; remote: number };
     // Received, committed in both commitments and checked against its invoice, which holds it.
     held: boolean;
@@ -287,8 +312,8 @@ type NodeInvoice = {
     invoice: Invoice;
     // What `new_invoice` answered.
     address: string;
-    // `Expired` is an `Open` one past its expiry, never stored (`rpc/invoice.rs:440-446`), and a tenant has no `cancel_invoice`
-    // (`rpc/tenant.rs:22-44`).
+    // `Expired` is an `Open` one past its expiry, never stored (`rpc/invoice.rs:449-455`), and the facade never calls
+    // `cancel_invoice` (a tenant's since `rpc/tenant.rs:61-85`).
     status: "Open" | "Received" | "Paid";
     // What `settle_invoice` stored.
     preimage: Uint8Array | null;
@@ -300,7 +325,6 @@ type NodeInvoiceStatus = Exclude<RpcInvoiceStatus, "Cancelled">;
 type NodeNewInvoiceParamsWire = NewInvoiceParamsWire &
     Record<"payment_preimage" | "fallback_address" | "udt_type_script" | "allow_mpp" | "allow_trampoline_routing", unknown>;
 
-// An absent option `null`.
 type InvoiceRequest = {
     amountShannons: bigint;
     description: string | null;
@@ -318,7 +342,6 @@ type InvoiceRequest = {
 
 type NodeSendPaymentParamsWire = SendPaymentParamsWire & Record<(typeof UNSERVED_PAYMENT_MEMBERS)[number] | "trampoline_hops", unknown>;
 
-// An absent option `null`.
 type PaymentRequest = {
     invoice: string | null;
     maxFeeShannons: bigint | null;
@@ -331,11 +354,11 @@ type PaymentData = {
     paymentHash: Uint8Array;
     target: Uint8Array;
     amountShannons: bigint;
-    // `min(max_fee_amount, cap)`, the cap when absent (`fiber/payment.rs:443-449`).
+    // `min(max_fee_amount, cap)`, the cap when absent (`fiber/payment.rs:450-456`).
     maxFeeShannons: bigint;
     // What the request asked for, the cap when absent: what an overcharge goes past.
     requestedMaxFeeShannons: bigint;
-    // The request's, else the invoice's hint (`payment.rs:401-408`).
+    // The request's, else the invoice's hint (`payment.rs:408-415`).
     trampolineHops: Uint8Array[] | null;
     hashAlgorithm: TlcHashAlgorithm;
     finalExpiryDeltaMs: bigint;
@@ -349,7 +372,7 @@ type NodePayment = {
     trampoline: boolean;
     status: RpcPaymentStatus;
     createdAtMs: bigint;
-    // Moved by a failure alone (`fiber-types/src/payment.rs:1130-1134`): an attempt's success leaves it (`fiber/payment.rs:1936-1953`).
+    // Moved by a failure alone (`fiber-types/src/payment.rs:1130-1134`): an attempt's success leaves it (`fiber/payment.rs:1949-1966`).
     lastUpdatedAtMs: bigint;
     failedError: string | null;
     // What the attempt's first hop carries, `null` without one or once it failed (`fiber-types/src/payment.rs:728-730`, `:994-1006`).
@@ -357,7 +380,7 @@ type NodePayment = {
     preimage: Uint8Array | null;
 };
 
-// Fiber's `GetPaymentCommandResult` as a release build writes it (`fiber-json-types/src/payment.rs:61-96`), `send_payment`'s too.
+// Fiber's `GetPaymentCommandResult` as a release build writes it (`fiber-json-types/src/payment.rs:65-100`), `send_payment`'s too.
 type NodePaymentWire = RpcPaymentWire & { payment_preimage: HexWire | null; custom_records: null };
 
 // Each side's liquid amount, TLCs aside.
@@ -392,7 +415,7 @@ type BuiltContent = {
 // Fiber's `ShutdownInfo` (`fiber-types/src/channel.rs:1104-1110`): what a side's shutdown states for its share of the close.
 type ShutdownInfo = { closeScript: Script; feeRate: bigint };
 
-// The params of `shutdown_channel` (`fiber-json-types/src/channel.rs:609-623`), an absent option `null`.
+// The params of `shutdown_channel` (`fiber-json-types/src/channel.rs:603-617`).
 type ShutdownRequest = { channelId: string; closeScript: Script | null; feeRate: bigint | null; force: boolean | null };
 
 type NextMaterial = { point: Uint8Array | null; commitmentNonce: Uint8Array | null; revocationNonce: Uint8Array | null };
@@ -432,7 +455,7 @@ type WatchtowerRequest = { purpose: WatchtowerKeyPurpose; transaction: Transacti
 
 type WatchtowerSubmission = { channelId: string; requestId: string; signature: Uint8Array };
 
-// The params of `open_tenant_channel` the double reads (`fiber-json-types/src/channel.rs:182-260`), an absent option `null`.
+// The params of the tenant's `open_channel_with_external_funding` the double reads.
 type OpenRequest = {
     pubkey: Uint8Array;
     fundingShannons: bigint;
@@ -446,8 +469,8 @@ type OpenRequest = {
     material: ChannelOpenSignerMaterial | null;
 };
 
-// Fiber's `TenantChannelOpening` (`fiber/channel.rs:11921`): the command as serde writes it, its channel and the result it froze.
-type TenantOpening = { command: string; channelId: string; result: OpenTenantChannelResultWire; terminated: boolean };
+// Fiber's `TenantChannelOpening` (`fiber/channel.rs:12089`): the command as serde writes it, its channel and the result it froze.
+type TenantOpening = { command: string; channelId: string; result: OpenChannelWithExternalFundingResultWire; terminated: boolean };
 
 // Fiber's `ChannelOpenRecord` (`fiber-types/src/channel.rs:1376`), which outlives an aborted channel's state.
 type OpenRecord = {
@@ -459,7 +482,13 @@ type OpenRecord = {
     failureDetail: string | null;
 };
 
-// The funding of a channel `open_tenant_channel` opened: the tx it froze, and whether the peer's commitment came before it was
+// The params of `lsp_register_tenant` the double reads.
+type RegistryRequest = { rootSignerPubkey: Uint8Array; requestId: Uint8Array; signedAtMs: bigint; signature: Uint8Array };
+
+// Fiber's `HostedTenantRecord` of the one tenant the double serves, less what the double does not model.
+type RegisteredTenant = { rootSignerPubkey: Uint8Array; createdAtMs: bigint };
+
+// The funding of a channel the tenant's opening opened: the tx it froze, and whether the peer's commitment came before it was
 // signed.
 type ExternalFunding = { unsigned: Transaction; signedSubmitted: boolean; early: boolean };
 
@@ -487,11 +516,11 @@ export type TenantNodeChannel = {
 export type TenantNodePayment = { paymentHash: string; amountShannons: string; hashAlgorithm: TlcHashAlgorithm; expiryMs: string };
 
 // Without an expiry the TLC pays an invoice of the node's, and expires at the node's clock plus the invoice's final expiry delta:
-// the least fiber accepts once it is committed (`channel.rs:1724-1726`).
+// the least fiber accepts once it is committed (`channel.rs:1738-1740`).
 export type TenantNodeReceivedPayment = Omit<TenantNodePayment, "expiryMs"> & { expiryMs?: string };
 
 // A `TlcErrorCode` the LSP fails an offered TLC with (`fiber-types/src/payment.rs:804-830`), whose name the payment stores as its
-// `failed_error` (`:189-193`, `fiber/payment.rs:1993-1999`).
+// `failed_error` (`:189-193`, `fiber/payment.rs:2006-2012`).
 export type TenantNodeTlcErrorCode =
     "TemporaryNodeFailure" | "IncorrectOrUnknownPaymentDetails" | "InvoiceExpired" | "InvoiceCancelled" | "HoldTlcTimeout";
 
@@ -529,7 +558,9 @@ export type TenantNodeOpeningTamper =
     | { kind: "reserve"; side: "local" | "remote"; shannons: string }
     | { kind: "channelId"; channelId: string }
     // Locks output 0 of the funding tx with another script.
-    | { kind: "fundingLock"; lock: Script };
+    | { kind: "fundingLock"; lock: Script }
+    // Answers as the operator's form of the method does, without the opening context.
+    | { kind: "noContext" };
 
 export type TenantNodeServed = {
     requestId: string;
@@ -542,18 +573,18 @@ export type TenantNodeServed = {
 };
 
 export type TenantNodeForceClose = {
-    // The funding lock's, which fiber adds to the commitment it broadcasts (`fiber/channel.rs:11567-11581`).
+    // The funding lock's, which fiber adds to the commitment it broadcasts (`fiber/channel.rs:11730-11744`).
     fundingCellDeps: CellDep[];
-    // The commitment lock's, ckb-auth's and the secp256k1 dep group's, which every spend carries (`watchtower/actor.rs:1726-1729`).
+    // The commitment lock's, ckb-auth's and the secp256k1 dep group's, which every spend carries (`watchtower/actor.rs:1806-1809`).
     settlementCellDeps: CellDep[];
-    // The node's secp256k1 lock: its watchtower pays every spend there, and takes the fee from its cells (`actor.rs:1303-1306`).
+    // The node's secp256k1 lock: its watchtower pays every spend there, and takes the fee from its cells (`actor.rs:1383-1386`).
     nodeLock: Script;
     // The chain's median time, which tells what has expired; the tip is past every delay of the lock.
     medianTimeMs: string;
     // What the node's watchtower holds through `CreatePreimage`, lowercase hex, besides those `settle_invoice` hands it.
     preimages: string[];
     // How many commitments before the view's last one the broadcast one is. Fiber's watchtower settles one it holds the snapshot
-    // of (`watchtower/actor.rs:571-579`): the last local one, the last remote one and, until the peer revokes it, the remote one
+    // of (`watchtower/actor.rs:588-596`): the last local one, the last remote one and, until the peer revokes it, the remote one
     // before (`fiber/onchain_tlc_reconcile.rs:128-160`).
     commitmentsBack: number;
 };
@@ -597,7 +628,7 @@ export type TenantNodeOptions = {
     // the keys whose funding key its open's material carries.
     deviceKeys: FiberChannelKeys[];
     peerKeys: FiberChannelKeys;
-    // Milliseconds since the epoch, the device's clock in a flow; defaults to `Date.now`.
+    // The device's clock in a flow.
     now?: () => number;
 };
 
@@ -665,7 +696,7 @@ export class InMemoryTenantNode {
 
     private nextTlcIds: Record<TlcDirection, number> = { offered: 0, received: 0 };
 
-    // The peer messages fiber buffers behind the request in flight (`channel.rs:6239`), drained once it completes (`:2195`).
+    // The peer messages fiber buffers behind the request in flight (`channel.rs:6346`), drained once it completes (`:2208`).
     private readonly queue: Step[] = [];
 
     private pending: PendingRequest | null = null;
@@ -689,15 +720,25 @@ export class InMemoryTenantNode {
 
     private forceClosed: ForceClosed | null = null;
 
-    // Fiber's `ChannelState` as `list_channels` writes it (`fiber-json-types/src/channel.rs:430-462`), each name whose bits
+    // Fiber's `ChannelState` as `list_channels` writes it (`fiber-json-types/src/channel.rs:424-456`), each name whose bits
     // overlap joined by `|` (`serde_utils.rs:475-506`). The handshake's states but the funding tx's collaboration and the wait for
     // its signature are not modeled.
     private channelState: RpcChannelStateWire = { state_name: "ChannelReady" };
 
     private watchRow = false;
 
-    // The tenant's single opening slot (`fiber/network.rs:3679-3790`).
-    private opening: TenantOpening | null = null;
+    // The tenant's openings, one per signer's TLC base key in bare hex (`fiber/network.rs:3770-3809`).
+    private readonly openings = new Map<string, TenantOpening>();
+
+    private tenant: RegisteredTenant | null = null;
+
+    // The registry's consumed requests (`lsp/registry.rs:283-295`), `<root signer>:<request id>` in bare hex.
+    private readonly consumedRequests = new Set<string>();
+
+    // Cold until a registered tenant's call outside `COLD_TENANT_METHODS`.
+    private tenantActive = false;
+
+    private issuedTokens = 0;
 
     // By channel id, as fiber's store keys them.
     private readonly records = new Map<string, OpenRecord>();
@@ -720,8 +761,8 @@ export class InMemoryTenantNode {
     // Names the node's cell a spend's fee comes from.
     private sponsorLabel = "node";
 
-    // Fiber's `WatchtowerExternalSignerState` (`fiber-types/src/watchtower.rs:141-154`) less its `last_applied`, which names a
-    // request `signed_signatures` keeps too, so both answer a resubmission alike (`rpc/watchtower.rs:424-447`).
+    // Fiber's `WatchtowerExternalSignerState` (`fiber-types/src/watchtower.rs:247-260`) less its `last_applied`, which names a
+    // request `signed_signatures` keeps too, so both answer a resubmission alike (`rpc/watchtower.rs:436-459`).
     private readonly watchtowerPending = new Map<string, WatchtowerRequest>();
 
     private readonly watchtowerSigned = new Map<string, WatchtowerRequest>();
@@ -817,7 +858,7 @@ export class InMemoryTenantNode {
     }
 
     // The open up to the funding tx's collaboration: listed already, but fiber creates the tenant's watch row only at
-    // `RemoteTxComplete` (`event_handler.rs:41-67`, fired at `fiber/channel.rs:9520-9530`).
+    // `RemoteTxComplete` (`event_handler.rs:41-65`, fired at `fiber/channel.rs:9698-9707`).
     negotiateTenantChannel(material: ChannelOpenSignerMaterial): string {
         this.install(material, this.terms);
         this.channelState = { state_name: "CollaboratingFundingTx", state_flags: "AWAITING_REMOTE_TX_COLLABORATION_MSG" };
@@ -839,14 +880,14 @@ export class InMemoryTenantNode {
     }
 
     // The next opening's peer sends its commitment_signed before the funding tx is signed, as fiber allows
-    // (`fiber/channel.rs:4086-4095`): the device's own commitment is asked for while the opening waits.
+    // (`fiber/channel.rs:4181-4190`): the device's own commitment is asked for while the opening waits.
     receiveCommitmentEarly(): void {
         this.commitsEarly = true;
     }
 
-    // Fiber's external funding timeout, 300 s by default (`fiber/config.rs:97`), fired (`fiber/channel.rs:4374-4395`): the channel
-    // stops `Closed(FUNDING_ABORTED)`, the tenant's opening terminated (`fiber/network.rs:2574-2586`), its open record failed with
-    // the detail (`:2588-2620`) and its state deleted (`:8387-8398`) with its watch row (`event_handler.rs:186-191`).
+    // Fiber's external funding timeout, 300 s by default (`fiber/config.rs:97`), fired (`fiber/channel.rs:4470-4491`): the channel
+    // stops `Closed(FUNDING_ABORTED)`, the tenant's opening terminated (`fiber/network.rs:2665-2675`), its open record failed with
+    // the detail (`:2677-2709`) and its state deleted (`:8577-8590`) with its watch row (`event_handler.rs:182-191`).
     expireOpening(): void {
         if (this.material === null || this.external === null || this.external.signedSubmitted) {
             throw new Error("no opening waits for its signed funding tx");
@@ -854,10 +895,10 @@ export class InMemoryTenantNode {
         const { channelId } = this.channel;
         const record = this.recordOf(channelId);
         record.status = "failed";
-        // The id in its display form, the state in its debug form (`fiber/channel.rs:4385-4390`).
+        // The id in its display form, the state in its debug form (`fiber/channel.rs:4481-4486`).
         const state = stateDebugOf(this.channelState);
         record.failureDetail = `[Channel Hash256(${channelId})] External funding transaction submission timed out in state ${state}`;
-        if (this.opening?.channelId === channelId) this.opening.terminated = true;
+        for (const opening of this.openings.values()) if (opening.channelId === channelId) opening.terminated = true;
         this.forgetChannel();
     }
 
@@ -892,7 +933,7 @@ export class InMemoryTenantNode {
             if (preimage === undefined || !equalBytes(hashPreimage(tlc.hashAlgorithm, hexToBytes(preimage)), tlc.paymentHash)) {
                 throw new Error(`the payment under ${paymentHash} is fulfilled with its preimage`);
             }
-            // The attempt's success completes the session (`fiber/payment.rs:1936-1953`), its preimage the payment's (`:640-643`).
+            // The attempt's success completes the session (`fiber/payment.rs:1949-1966`), its preimage the payment's (`:647-650`).
             this.removeTlc(tlc, true, () => {
                 payment.status = "Success";
                 payment.preimage = hexToBytes(preimage);
@@ -913,7 +954,7 @@ export class InMemoryTenantNode {
         if (!payment.trampoline && errorCode === "TemporaryNodeFailure") {
             throw new Error("fiber retries a direct payment the final node fails temporarily (`history.rs:339-344`): the double does not");
         }
-        // `set_attempt_fail_with_error` with no other attempt active (`fiber/payment.rs:1662-1677`, `:1644-1660`).
+        // `set_attempt_fail_with_error` with no other attempt active (`fiber/payment.rs:1675-1690`, `:1657-1673`).
         this.removeTlc(tlc, false, () => {
             payment.status = "Failed";
             payment.failedError = errorCode;
@@ -927,8 +968,8 @@ export class InMemoryTenantNode {
         this.overcharge = BigInt(shannons);
     }
 
-    // Fiber's expiry maintenance (`channel.rs:3474-3507`): a committed received TLC expiring before the delay's two thirds and
-    // a check interval from now is failed back through the tenant's round; its invoice stays `Received` (`network.rs:4432-4437`).
+    // Fiber's expiry maintenance (`channel.rs:3559-3592`): a committed received TLC expiring before the delay's two thirds and
+    // a check interval from now is failed back through the tenant's round; its invoice stays `Received` (`network.rs:4568-4573`).
     failHeldTlc(paymentHash: string): void {
         const tlc = this.tlcs.find((candidate) => candidate.held && bytesToHex(candidate.paymentHash) === paymentHash);
         if (tlc === undefined) throw new Error(`no TLC under ${paymentHash} is held`);
@@ -951,8 +992,8 @@ export class InMemoryTenantNode {
         );
     }
 
-    // The peer shuts down first: fiber's node stores its shutdown as it comes (`channel.rs:1932-1936`), and answers at once with
-    // the open's script and a fee rate of 0 (`:11774-11795`), paying none of the close.
+    // The peer shuts down first: fiber's node stores its shutdown as it comes (`channel.rs:1946-1950`), and answers at once with
+    // the open's script and a fee rate of 0 (`:11937-11958`), paying none of the close.
     peerShutdown(options: TenantNodePeerShutdown = {}): void {
         const { channel } = this;
         const remote = {
@@ -960,11 +1001,11 @@ export class InMemoryTenantNode {
             feeRate: options.feeRate ?? channel.commitmentFeeRate,
         };
         this.requireShutdownable();
-        // `check_shutdown_fee_valid` refuses the message (`channel.rs:1926-1930`).
+        // `check_shutdown_fee_valid` refuses the message (`channel.rs:1940-1944`).
         if (this.shutdownFeeRefusal("remote", remote) !== null) {
             throw new Error("fiber's node refuses a shutdown whose fee the peer's share cannot pay");
         }
-        // `check_valid_to_auto_accept_shutdown` (`channel.rs:8753-8757`).
+        // `check_valid_to_auto_accept_shutdown` (`channel.rs:8934-8938`).
         if (remote.feeRate < channel.commitmentFeeRate) {
             throw new Error("fiber's node answers no shutdown below the commitment fee rate: the double leaves the wait out");
         }
@@ -982,23 +1023,23 @@ export class InMemoryTenantNode {
         this.queue.length = 0;
         const [output] = commitment.transaction.outputs;
         if (output === undefined) throw new Error("a commitment holds its cell at output 0");
-        // Its on-chain hash covers the funding lock's cell deps fiber adds (`fiber/channel.rs:11567-11581`).
+        // Its on-chain hash covers the funding lock's cell deps fiber adds (`fiber/channel.rs:11730-11744`).
         const txHash = computeTxHash({ ...commitment.transaction, cellDeps: options.fundingCellDeps });
         this.forceClosed = {
             forRemote: commitment.forRemote,
             settlementCellDeps: options.settlementCellDeps,
             nodeLock: options.nodeLock,
             medianTimeMs: BigInt(options.medianTimeMs),
-            // `settle_invoice` hands its preimage to the watchtower too (`fiber/network.rs:4858-4865`).
+            // `settle_invoice` hands its preimage to the watchtower too (`fiber/network.rs:4994-5001`).
             preimages: [...options.preimages.map(hexToBytes), ...[...this.invoices.values()].flatMap(({ preimage }) => preimage ?? [])],
             tlcs: commitment.tlcs,
             live: { outPoint: { txHash, index: 0 }, output, body: commitment.body, first: true },
         };
         this.onchainLog.push({ by: view === "local" ? "node" : "peer", what: `${view} commitment`, txHash: bytesToHex(txHash) });
-        // Named once confirmed, either close (`channel.rs:11679`).
+        // Named once confirmed, either close (`channel.rs:11842`).
         this.shutdownTxHash = txHash;
-        // From the broadcast fiber's own commitment is `ShuttingDown(WAITING_COMMITMENT_CONFIRMATION)` (`channel.rs:2723`) and,
-        // confirmed, as it is here at once, `Closed` (`:11665-11673`).
+        // From the broadcast fiber's own commitment is `ShuttingDown(WAITING_COMMITMENT_CONFIRMATION)` (`channel.rs:2802`) and,
+        // confirmed, as it is here at once, `Closed` (`:11828-11836`).
         const side = view === "local" ? "UNCOOPERATIVE_LOCAL" : "UNCOOPERATIVE_REMOTE";
         this.channelState = { state_name: "Closed", state_flags: `${side}|WAITING_ONCHAIN_SETTLEMENT` };
     }
@@ -1031,7 +1072,7 @@ export class InMemoryTenantNode {
     }
 
     // The node's watchtower pays the fee of every spend it builds from now on from another of its cells: the spend waiting is
-    // rebuilt under a new request, and fiber keeps the one it supersedes pending (`watchtower/actor.rs:2151-2155`).
+    // rebuilt under a new request, and fiber keeps the one it supersedes pending (`watchtower/actor.rs:2237-2241`).
     fundSpendsFrom(sponsorLabel: string): void {
         this.sponsorLabel = sponsorLabel;
     }
@@ -1098,10 +1139,11 @@ export class InMemoryTenantNode {
     }
 
     private answer(method: string, params: unknown): RpcAnswer {
+        if (this.tenant !== null && !COLD_TENANT_METHODS.has(method)) this.tenantActive = true;
         switch (method) {
             case "list_channels":
                 return this.listChannels(params);
-            case "open_tenant_channel":
+            case "open_channel_with_external_funding":
                 return this.openChannelByRpc(params);
             case "submit_signed_funding_tx":
                 return this.submitSignedFundingTx(params);
@@ -1127,6 +1169,8 @@ export class InMemoryTenantNode {
                 return this.getPayment(params);
             case "shutdown_channel":
                 return this.shutdownChannel(params);
+            case "lsp_register_tenant":
+                return this.registerTenant(params);
             default:
                 return { error: { code: METHOD_NOT_FOUND_CODE, message: "Method not found" } };
         }
@@ -1135,17 +1179,17 @@ export class InMemoryTenantNode {
     private signingStatus(params: unknown): RpcAnswer {
         const channelId = readParams<RpcChannelIdParamsWire, string>(params, (at) => requireHexBytes(at("channel_id"), HASH256_LENGTH));
         if (channelId instanceof WireError) return invalidParams(params, channelId);
-        // `rpc/channel.rs:824-826`, the id in fiber's `Hash256` debug form.
+        // `rpc/channel.rs:796-798`, the id in fiber's `Hash256` debug form.
         if (!this.isChannel(channelId)) return failed(`channel Hash256(${channelId}) not found`);
         const status: ChannelSigningStatusWire = this.pending?.status ?? { type: "NoSignatureRequired" };
         return { result: { channel_id: channelId, status: structuredClone(status) } };
     }
 
-    // Fiber's `validate_and_checkpoint_signer_notification` and its continuation (`channel.rs:2208-2285`).
+    // Fiber's `validate_and_checkpoint_signer_notification` and its continuation (`channel.rs:2221-2300`).
     private submit(params: unknown): RpcAnswer {
         const submission = readParams<SubmitChannelSignatureParamsWire, Submission>(params, readSubmission);
         if (submission instanceof WireError) return invalidParams(params, submission);
-        // Converted before the network actor sees them (`rpc/channel.rs:840-847`): musig2's scalar, then each nonce.
+        // Converted before the network actor sees them (`rpc/channel.rs:812-819`): musig2's scalar, then each nonce.
         if (bytesToNumberBE(submission.partialSignature) >= CURVE_ORDER) return failed("received invalid scalar bytes");
         const material = submission.nextMaterial;
         for (const nonce of material === null ? [] : [material.commitmentNonce, material.revocationNonce]) {
@@ -1153,7 +1197,7 @@ export class InMemoryTenantNode {
                 return failed(`error decoding musig2::nonces::PubNonce: unexpected length ${nonce.length}`);
             }
         }
-        // The network actor's lookup (`network.rs:3325-3327`).
+        // The network actor's lookup (`network.rs:3414-3416`).
         if (!this.isChannel(submission.channelId)) return failed(`channel Hash256(${submission.channelId}) not found`);
         const receipt = receiptOf(submission);
         // `replay_or_pending` (`fiber-types/src/channel_signer.rs:542-560`); a request never outlives its apply here.
@@ -1171,17 +1215,17 @@ export class InMemoryTenantNode {
         if (pending.requestId !== submission.requestId) {
             return failed("Invalid state: signature request id does not match the current request");
         }
-        // Against the nonce the device published for the slot (`channel.rs:6167-6206`).
+        // Against the nonce the device published for the slot (`channel.rs:6274-6313`).
         if (!this.verifiesDeviceHalf(pending, submission.partialSignature)) return failed(INVALID_SIGNATURE);
         const refusal = this.installNextMaterial(pending, submission.nextMaterial);
         if (refusal !== null) return failed(refusal);
         this.lastApplied = { requestId: submission.requestId, receipt, served: pending.served };
         pending.served.answers.push("Applied");
-        // `finish_received_commitment_signed` (`fiber/channel.rs:2525-2550`): the peer's commitment taken while the funding waits.
+        // `finish_received_commitment_signed` (`fiber/channel.rs:2604-2629`): the peer's commitment taken while the funding waits.
         if (pending.transition === "CompleteReceivedCommitment" && this.channelState.state_flags === "AWAITING_EXTERNAL_FUNDING") {
             this.channelState = { state_name: "SigningCommitment", state_flags: "THEIR_COMMITMENT_SIGNED_SENT|COMMITMENT_SIGNED_SENT" };
         }
-        // The close lands and confirms at once (`channel.rs:9236`, `:11676`).
+        // The close lands and confirms at once (`channel.rs:9414`, `:11839`).
         if (pending.transition === "SendClosingSigned") {
             this.channelState = { state_name: "Closed", state_flags: "COOPERATIVE" };
             this.shutdownTxHash = pending.closingTxHash;
@@ -1204,7 +1248,7 @@ export class InMemoryTenantNode {
         );
     }
 
-    // Fiber's `apply_next_signer_material` (`channel.rs:6009-6139`): checked whole, then installed at the slot's number plus one.
+    // Fiber's `apply_next_signer_material` (`channel.rs:6127-6257`): checked whole, then installed at the slot's number plus one.
     private installNextMaterial(pending: PendingRequest, material: NextMaterial | null): string | null {
         const required = ADVANCING_TRANSITIONS.includes(pending.transition);
         if (material === null) {
@@ -1250,12 +1294,12 @@ export class InMemoryTenantNode {
 
     // A commitment_signed never moves L.
     private advance(transition: NodeTransition, state: CommitmentState): void {
-        // `finish_send_revoke_and_ack` (`channel.rs:6313`) and `finish_received_revoke_and_ack` (`:6462`).
+        // `finish_send_revoke_and_ack` (`channel.rs:6420`) and `finish_received_revoke_and_ack` (`:6569`).
         if (transition === "SendRevokeAndAck") this.remote += 1;
         if (transition === "CompleteReceivedRevokeAndAck") this.local += 1;
         // The peer's revoke_and_ack commits the offered adds its commitment held (`fiber-types/src/channel.rs:835-840`, called at
-        // `channel.rs:6467`); the peer's commitment only moves the received ones past `RemoteAnnounced`, to an `AnnounceWait*`
-        // status, uncommitted yet (`fiber-types/src/channel.rs:811-831`, `channel.rs:2554`).
+        // `channel.rs:6574`); the peer's commitment only moves the received ones past `RemoteAnnounced`, to an `AnnounceWait*`
+        // status, uncommitted yet (`fiber-types/src/channel.rs:811-831`, `channel.rs:2633`).
         const direction =
             transition === "CompleteReceivedRevokeAndAck" ? "offered" : transition === "CompleteReceivedCommitment" ? "received" : null;
         for (const tlc of state.tlcs) if (tlc.direction === direction) tlc.announced = false;
@@ -1346,7 +1390,7 @@ export class InMemoryTenantNode {
         return tamper ?? null;
     }
 
-    // The request sites: `channel.rs:6209`, `:9704`, `:8007`, `:10202`, `:9200`.
+    // The request sites: `channel.rs:6316`, `:9875`, `:8190`, `:10370`, `:9379`.
     private slotOf(transition: NodeTransition): NodeSlot {
         switch (transition) {
             case "SendRevokeAndAck":
@@ -1360,7 +1404,7 @@ export class InMemoryTenantNode {
         }
     }
 
-    // `order_things_for_musig2` for a funding spend (`channel.rs:11028-11042`); a revocation keeps its lock's role order (`:11120-11129`).
+    // `order_things_for_musig2` for a funding spend (`channel.rs:11195-11209`); a revocation keeps its lock's role order (`:11287-11296`).
     private keyAggregationOf(transition: NodeTransition): [Uint8Array, Uint8Array] {
         const device = this.openMaterial().fundingPubkey;
         const peer = pubkeyOf(this.peerKeys.fundingKey);
@@ -1371,12 +1415,12 @@ export class InMemoryTenantNode {
 
     private contentOf(transition: NodeTransition, slot: NodeSlot, state: CommitmentState, tamper: TenantNodeTamper | null): BuiltContent {
         switch (transition) {
-            // The tx's version is L for the peer's commitment, R for the device's own (`channel.rs:11349`).
+            // The tx's version is L for the peer's commitment, R for the device's own (`channel.rs:11516`).
             case "SendCommitmentSigned":
                 return this.commitmentContent(state, true, this.local, tamper);
             case "CompleteReceivedCommitment":
                 return this.commitmentContent(state, false, this.remote, tamper);
-            // Each revokes the version below its slot's (`channel.rs:7987`, `:10182`).
+            // Each revokes the version below its slot's (`channel.rs:8172`, `:10352`).
             case "SendRevokeAndAck":
                 return this.revocationContent(false, slot.commitmentNumber - 1);
             case "CompleteReceivedRevokeAndAck":
@@ -1443,7 +1487,7 @@ export class InMemoryTenantNode {
         };
     }
 
-    // Fiber's `get_tlc_keys` for an external signer (`channel.rs:8588-8615`): each key from its side's published point.
+    // Fiber's `get_tlc_keys` for an external signer (`channel.rs:8770-8797`): each key from its side's published point.
     private settlementTlc(tlc: NodeTlc): SigningSettlementTlcWire {
         const localKeyPubkey = derivePublicKey(this.openMaterial().tlcBaseKey, this.publishedPoint(tlc.createdAt.remote));
         return {
@@ -1487,7 +1531,7 @@ export class InMemoryTenantNode {
         };
     }
 
-    // Fiber's `build_shutdown_tx` (`channel.rs:11175-11307`): each side's total less its own fee, over both shutdowns' scripts.
+    // Fiber's `build_shutdown_tx` (`channel.rs:11342-11474`): each side's total less its own fee, over both shutdowns' scripts.
     private closingContent(state: CommitmentState, tamper: TenantNodeTamper | null): BuiltContent {
         const { channel, shutdownInfo } = this;
         if (shutdownInfo === null) throw new Error("the close is asked for once both shutdowns are exchanged");
@@ -1539,7 +1583,7 @@ export class InMemoryTenantNode {
     }
 
     private addTlc(direction: TlcDirection, payment: TenantNodePayment): NodeTlc {
-        // `check_for_tlc_update` (`fiber/channel.rs:8883-8894`).
+        // `check_for_tlc_update` (`fiber/channel.rs:9064-9075`).
         if (this.channelState.state_name === "ShuttingDown") throw new Error("fiber adds no TLC to a channel shutting down");
         const tlc: NodeTlc = {
             id: this.nextTlcIds[direction],
@@ -1570,7 +1614,7 @@ export class InMemoryTenantNode {
     // The side the TLC pays removes it, the peer an offered one and the tenant's node a received one: a fulfil pays its payee, a
     // fail returns it to its payer. `applied` runs where the node applies the removal: a received TLC's before the round's last
     // request, the node's revoke_and_ack; an offered one's once the peer's revoke_and_ack is applied, after the round
-    // (`channel.rs:2484-2502`, `:1323-1349`), which tells the payer (`:1997-2008`).
+    // (`channel.rs:2563-2581`, `:1337-1363`), which tells the payer (`:2011-2022`).
     private removeTlc(tlc: NodeTlc, fulfilled: boolean, applied?: () => void): void {
         this.tlcs = this.tlcs.filter((candidate) => candidate !== tlc);
         if ((tlc.direction === "received") === fulfilled) {
@@ -1589,8 +1633,8 @@ export class InMemoryTenantNode {
         return (BigInt(this.now()) + finalExpiryDeltaOf(entry.invoice)).toString();
     }
 
-    // `apply_add_tlc_operation_with_peeled_onion_packet`'s checks of a final TLC against its invoice, in order (`channel.rs:1708-1727`,
-    // `:1771-1774`): one that fails any is failed back (`:1282-1321`), one that passes is held and its invoice `Received`
+    // `apply_add_tlc_operation_with_peeled_onion_packet`'s checks of a final TLC against its invoice, in order (`channel.rs:1722-1741`,
+    // `:1785-1788`): one that fails any is failed back (`:1296-1335`), one that passes is held and its invoice `Received`
     // (`settle_tlc_set_command.rs:217-232`, `:345-351`).
     private holdReceived(tlc: NodeTlc, entry: NodeInvoice): void {
         if (!this.tlcs.includes(tlc)) return;
@@ -1609,7 +1653,7 @@ export class InMemoryTenantNode {
     }
 
     // `Paid` once the fulfil is applied: on the peer's commitment_signed, the node asks for its revoke_and_ack, which returns at
-    // once, then applies the settled removals (`channel.rs:2409`, `:2553-2555`, `:1250-1271`, `:1956-1962`, `:6146-6163`).
+    // once, then applies the settled removals (`channel.rs:2488`, `:2632-2634`, `:1264-1285`, `:1970-1976`, `:6264-6271`).
     private fulfilHeld(tlc: NodeTlc, entry: NodeInvoice): void {
         if (entry.preimage === null) {
             throw new Error(`the node holds no preimage of the invoice under ${bytesToHex(tlc.paymentHash)}: settle_invoice stores it`);
@@ -1623,7 +1667,7 @@ export class InMemoryTenantNode {
         return entry.status === "Open" && isInvoiceExpired(entry.invoice, BigInt(this.now())) ? "Expired" : entry.status;
     }
 
-    // `new_invoice` on a tenant's path (`rpc/invoice.rs:184-197`, `:298-413`), its checks in order, then the LSP's registration
+    // `new_invoice` on a tenant's path (`rpc/invoice.rs:184-197`, `:307-422`), its checks in order, then the LSP's registration
     // (`lsp/invoice.rs:160-238`), which refuses an invoice without expiry (`:193-195`) once its row is stored.
     private newInvoice(params: unknown): RpcAnswer {
         const request = readParams<NodeNewInvoiceParamsWire, InvoiceRequest>(params, readInvoiceRequest);
@@ -1657,7 +1701,7 @@ export class InMemoryTenantNode {
         return { result: { invoice_address: address, invoice: invoiceJson(invoice) } };
     }
 
-    // In the builder's order (`rpc/invoice.rs:332-399`): description, expiry, fallback address, the feature and the hint of the
+    // In the builder's order (`rpc/invoice.rs:341-408`): description, expiry, fallback address, the feature and the hint of the
     // tenant's path, the final expiry delta, the UDT script, the hash algorithm, then the tenant's key as payee.
     private buildInvoice(
         request: InvoiceRequest,
@@ -1721,7 +1765,7 @@ export class InMemoryTenantNode {
         return { invoice, address: uppercase ? address.toUpperCase() : address };
     }
 
-    // `get_invoice` (`rpc/invoice.rs:434-457`).
+    // `get_invoice` (`rpc/invoice.rs:443-466`).
     private getInvoice(params: unknown): RpcAnswer {
         const paymentHash = readParams<RpcPaymentHashParamsWire, Uint8Array>(params, (at) =>
             decodeHexBytes(at("payment_hash"), PAYMENT_HASH_LENGTH),
@@ -1732,7 +1776,7 @@ export class InMemoryTenantNode {
         return { result: { invoice_address: entry.address, invoice: invoiceJson(entry.invoice), status: this.invoiceStatusOf(entry) } };
     }
 
-    // `settle_invoice` (`fiber/network.rs:4821-4871`): its checks in order, then the preimage stored, which the watchtower gets too,
+    // `settle_invoice` (`fiber/network.rs:4957-5007`): its checks in order, then the preimage stored, which the watchtower gets too,
     // and the held TLC fulfilled with it. Once its TLC is gone, a repeat finds nothing to fulfil.
     private settleInvoice(params: unknown): RpcAnswer {
         const request = readParams<SettleInvoiceParamsWire, { paymentHash: Uint8Array; preimage: Uint8Array }>(params, (at) => ({
@@ -1761,15 +1805,15 @@ export class InMemoryTenantNode {
         return { result: {} };
     }
 
-    // `send_payment` on a tenant's path (`rpc/payment.rs:230-294`): the payment data checked by the network actor
-    // (`fiber/network.rs:3479-3496`), the payment actor's slot (`:5537-5555`) and store (`fiber/payment.rs:2185-2213`), the session
-    // (`:2215-2238`), its route (`graph.rs:1299-1365`) and the add, which the node sends without waiting for its result
-    // (`network.rs:4959-4961`): the answer says `Created`, the session is `Inflight` once the add lands (`payment.rs:1860-1867`).
+    // `send_payment` on a tenant's path (`rpc/payment.rs:240-304`): the payment data checked by the network actor
+    // (`fiber/network.rs:3568-3586`), the payment actor's slot (`:5681-5699`) and store (`fiber/payment.rs:2198-2226`), the session
+    // (`:2228-2251`), its route (`graph.rs:1299-1365`) and the add, which the node sends without waiting for its result
+    // (`network.rs:5095-5097`): the answer says `Created`, the session is `Inflight` once the add lands (`payment.rs:1873-1880`).
     private sendPaymentByRpc(params: unknown): RpcAnswer {
         const request = readParams<NodeSendPaymentParamsWire, PaymentRequest>(params, readPaymentRequest);
         if (request instanceof WireError) return invalidParams(params, request);
         if (request.dryRun === true) throw new Error("the double serves no dry run");
-        // Fiber's conversion refuses a hop off the curve before the network actor (`rpc/payment.rs:240-249`); the SDK never sends one.
+        // Fiber's conversion refuses a hop off the curve before the network actor (`rpc/payment.rs:250-259`); the SDK never sends one.
         request.trampolineHops?.forEach((hop, index) => assertCompressedPoint(`trampoline_hops[${index}]`, hop));
         const data = this.paymentDataOf(request);
         if (typeof data === "string") return failed(`InvalidParameter: Failed to validate payment request: "${data}"`);
@@ -1799,7 +1843,7 @@ export class InMemoryTenantNode {
         this.payments.set(key, payment);
         const refusal = this.routeRefusal(data);
         if (refusal !== null) {
-            // `build_payment_routes` fails the session with the error it returns (`payment.rs:1386-1397`, `:1740-1747`).
+            // `build_payment_routes` fails the session with the error it returns (`payment.rs:1399-1410`, `:1753-1760`).
             payment.status = "Failed";
             payment.failedError = `Send payment error: Failed to build route, ${refusal}`;
             return failed(payment.failedError);
@@ -1824,8 +1868,8 @@ export class InMemoryTenantNode {
         return answer;
     }
 
-    // `SendPaymentData::new` and its builder's `validate` (`fiber/payment.rs:382-569`, `:224-336`), their checks in order: a refusal
-    // is the message the network actor answers without a row (`network.rs:3479-3487`, `payment.rs:724-731`).
+    // `SendPaymentData::new` and its builder's `validate` (`fiber/payment.rs:383-576`, `:224-336`), their checks in order: a refusal
+    // is the message the network actor answers without a row (`network.rs:3568-3577`, `payment.rs:731-739`).
     private paymentDataOf(request: PaymentRequest): PaymentData | string {
         if (request.invoice === null) return "target_pubkey is missing";
         let invoice: Invoice;
@@ -1898,7 +1942,7 @@ export class InMemoryTenantNode {
         return reached ? null : "PathFind error: no path found";
     }
 
-    // The channel's `to_local_amount` (`channel.rs:8037-8041`, `:7599-7601`); without a channel, none (`graph.rs:1320-1348`).
+    // The channel's `to_local_amount` (`channel.rs:8219-8223`, `:7787-7789`); without a channel, none (`graph.rs:1320-1348`).
     private outboundLiquidity(): bigint {
         if (this.material === null) return 0n;
         if (this.channelState.state_name !== "ChannelReady") throw new Error("the double routes a payment over a ready channel only");
@@ -1906,13 +1950,13 @@ export class InMemoryTenantNode {
     }
 
     // The payment's actor answers a second send for its hash until it stops, on the payment's final status or the status check
-    // after it (`fiber/payment.rs:1198-1214`, `:1148-1188`).
+    // after it (`fiber/payment.rs:1211-1227`, `:1161-1201`).
     private actorAlive(payment: NodePayment): boolean {
         const final = payment.status === "Success" || payment.status === "Failed";
         return !final && BigInt(this.now()) < payment.createdAtMs + PAYMENT_STATUS_CHECK_INTERVAL_MS;
     }
 
-    // `get_payment` (`rpc/payment.rs:296-306`), from the tenant's store (`fiber/network.rs:5455-5462`).
+    // `get_payment` (`rpc/payment.rs:306-321`), from the tenant's store (`fiber/network.rs:5591-5606`).
     private getPayment(params: unknown): RpcAnswer {
         const paymentHash = readParams<RpcPaymentHashParamsWire, Uint8Array>(params, (at) =>
             decodeHexBytes(at("payment_hash"), PAYMENT_HASH_LENGTH),
@@ -1924,9 +1968,9 @@ export class InMemoryTenantNode {
         return { result: paymentWire(payment) };
     }
 
-    // `shutdown_channel` (`rpc/channel.rs:719-751`, a tenant's as any node's at `:295-305`): the network actor's lookup
-    // (`fiber/network.rs:8076-8093`), then `handle_shutdown_command`'s checks in order (`fiber/channel.rs:2726-2767`) but the
-    // peer's being offline. The peer answers at once (`:11774-11795`).
+    // `shutdown_channel` (`rpc/channel.rs:690-722`, a tenant's as any node's at `:289-299`): the network actor's lookup
+    // (`fiber/network.rs:8265-8282`), then `handle_shutdown_command`'s checks in order (`fiber/channel.rs:2805-2846`) but the
+    // peer's being offline. The peer answers at once (`:11937-11958`).
     private shutdownChannel(params: unknown): RpcAnswer {
         const request = readParams<ShutdownChannelParamsWire, ShutdownRequest>(params, (at) => ({
             channelId: requireHexBytes(at("channel_id"), HASH256_LENGTH),
@@ -1954,7 +1998,7 @@ export class InMemoryTenantNode {
             closeScript: request.closeScript ?? channel.localCloseScript,
             feeRate: request.feeRate ?? channel.commitmentFeeRate,
         };
-        // `check_shutdown_fee_rate` (`fiber/channel.rs:7542-7596`), the rate in ckb's `FeeRate` display form.
+        // `check_shutdown_fee_rate` (`fiber/channel.rs:7730-7784`), the rate in ckb's `FeeRate` display form.
         if (local.feeRate < channel.commitmentFeeRate) {
             return failed(
                 `Invalid parameter: Fee rate ${local.feeRate} shannons/KW is less than commitment fee rate ${channel.commitmentFeeRate}`,
@@ -1966,9 +2010,9 @@ export class InMemoryTenantNode {
         return { result: null };
     }
 
-    // `check_shutdown_fee_rate`'s balance checks on a CKB channel (`fiber/channel.rs:7554-7594`), which `check_shutdown_fee_valid`
-    // makes of the peer's share without its texts (`:8709-8751`): the fee within the side's amount and reserve past its close
-    // script's occupied capacity. Fiber's amounts keep each side's offered TLCs (`:8195-8225`).
+    // `check_shutdown_fee_rate`'s balance checks on a CKB channel (`fiber/channel.rs:7742-7782`), which `check_shutdown_fee_valid`
+    // makes of the peer's share without its texts (`:8890-8932`): the fee within the side's amount and reserve past its close
+    // script's occupied capacity. Fiber's amounts keep each side's offered TLCs (`:8377-8407`).
     private shutdownFeeRefusal(side: "local" | "remote", info: ShutdownInfo): string | null {
         const { channel } = this;
         const amount =
@@ -1982,7 +2026,7 @@ export class InMemoryTenantNode {
             // The other side's as the node holds it before its shutdown: the open's.
             remoteCloseScript: side === "local" ? channel.remoteCloseScript : channel.localCloseScript,
         });
-        // `occupied_capacity` (`fiber/channel.rs:5866-5890`), the reserve less the shutdown fee it holds.
+        // `occupied_capacity` (`fiber/channel.rs:5984-6008`), the reserve less the shutdown fee it holds.
         const occupied = reservedCkbShannons(info.closeScript, channel.lockLayout) - RESERVED_SHUTDOWN_FEE_SHANNONS;
         if (amount < occupied) return `Local shutdown capacity is less than occupied capacity ${occupied}`;
         const available = amount - occupied;
@@ -1991,7 +2035,7 @@ export class InMemoryTenantNode {
     }
 
     // A move's shutdown, which waits for no add in progress: fiber's command refuses only an offered TLC still `LocalAnnounced`
-    // (`fiber/channel.rs:2737-2747`) and the peer's message only a received one still `RemoteAnnounced` (`:1896-1906`); the
+    // (`fiber/channel.rs:2816-2826`) and the peer's message only a received one still `RemoteAnnounced` (`:1910-1920`); the
     // double holds either move to both.
     private requireShutdownable(): void {
         const name = this.channelState.state_name;
@@ -1999,14 +2043,14 @@ export class InMemoryTenantNode {
         if (this.tlcs.some((tlc) => tlc.announced)) throw new Error("the double shuts down only once no TLC's add is still announced");
     }
 
-    // Both shutdowns exchanged (`fiber/channel.rs:11762-11803`); the close waits for the TLCs left.
+    // Both shutdowns exchanged (`fiber/channel.rs:11925-11966`); the close waits for the TLCs left.
     private exchangeShutdowns(local: ShutdownInfo, remote: ShutdownInfo): void {
         this.shutdownInfo = { local, remote };
         this.channelState = { state_name: "ShuttingDown", state_flags: SHUTDOWNS_EXCHANGED };
         this.closeOnceSettled();
     }
 
-    // `maybe_transfer_to_shutdown` (`fiber/channel.rs:9143-9215`): no TLC left, past the request in flight, the pending ones are
+    // `maybe_transfer_to_shutdown` (`fiber/channel.rs:9324-9393`): no TLC left, past the request in flight, the pending ones are
     // dropped and the closing signature asked for.
     private closeOnceSettled(): void {
         if (this.tlcs.length > 0) return;
@@ -2033,7 +2077,7 @@ export class InMemoryTenantNode {
     }
 
     // The network actor's channel actors: a close confirmed with nothing left to settle stops its actor
-    // (`fiber/channel.rs:4272-4283`), which leaves them (`fiber/network.rs:8366-8376`).
+    // (`fiber/channel.rs:4369-4380`), which leaves them (`fiber/network.rs:8556-8566`).
     private hasActor(channelId: string): boolean {
         const flags = this.channelState.state_flags?.split("|") ?? [];
         const stopped = this.channelState.state_name === "Closed" && !flags.includes("WAITING_ONCHAIN_SETTLEMENT");
@@ -2058,7 +2102,7 @@ export class InMemoryTenantNode {
         return point;
     }
 
-    // Fiber's `list_channels` (`rpc/channel.rs:506-680`): the channel while its state is stored, closed (`fiber-types/src/
+    // Fiber's `list_channels` (`rpc/channel.rs:477-651`): the channel while its state is stored, closed (`fiber-types/src/
     // channel.rs:297-303`) only to a call that asks for closed ones; to one that asks for pending ones, the channel while it opens
     // (`fiber-json-types/src/convert.rs:143-158`) and each failed opening whose state is gone, as fiber makes it up.
     private listChannels(params: unknown): RpcAnswer {
@@ -2084,7 +2128,7 @@ export class InMemoryTenantNode {
         return { result: { channels } };
     }
 
-    // Fiber's `to_local_amount` keeps an offered TLC until it is fulfilled (`fiber/channel.rs:8195-8225`), where the double's
+    // Fiber's `to_local_amount` keeps an offered TLC until it is fulfilled (`fiber/channel.rs:8377-8407`), where the double's
     // balance moves it at once.
     private listedChannel(): RpcChannelWire {
         const { channel, shutdownTxHash } = this;
@@ -2106,7 +2150,7 @@ export class InMemoryTenantNode {
         };
     }
 
-    // The entry fiber makes up for a failed opening (`rpc/channel.rs:601-680`): the open's amount on the tenant's side.
+    // The entry fiber makes up for a failed opening (`rpc/channel.rs:572-651`): the open's amount on the tenant's side.
     private abortedChannel(record: OpenRecord): RpcChannelWire {
         return {
             channel_id: record.channelId,
@@ -2123,8 +2167,9 @@ export class InMemoryTenantNode {
         };
     }
 
-    // `open_tenant_channel` (`rpc/channel.rs:345-370`): the params checked (`:1110-1124`), then the network actor's single opening
-    // per tenant (`fiber/network.rs:3679-3790`). Never parked: the double freezes the funding tx within the call.
+    // `open_channel_with_external_funding` under a tenant's token (`rpc/channel.rs:317-342`): the params checked (`:1082-1096`), then
+    // the network actor's opening of the signer (`fiber/network.rs:3770-3921`). Never parked: the double freezes the funding tx
+    // within the call.
     private openChannelByRpc(params: unknown): RpcAnswer {
         const request = readParams<OpenTenantChannelParamsWire, OpenRequest>(params, readOpenRequest);
         if (request instanceof WireError) return invalidParams(params, request);
@@ -2134,24 +2179,26 @@ export class InMemoryTenantNode {
         if (material === null) return failed("tenant channel requires external_channel_signer");
         // Fiber compares the commands it converts the params to, the material's nonces included.
         const command = canonicalJson(openCommandOf(params));
-        const { opening } = this;
-        if (opening !== null && !opening.terminated) {
-            if (opening.command !== command) return failed("tenant already has a different channel opening");
+        const signer = bytesToHex(material.tlcBaseKey);
+        const opening = this.openings.get(signer);
+        if (opening !== undefined && !opening.terminated) {
+            if (opening.command !== command) return failed("tenant already has a different channel opening for this signer");
             if (this.recordOf(opening.channelId).status === "ready") return failed("tenant channel is already open");
             return { result: structuredClone(opening.result) };
         }
-        // A terminated opening is cleared; only a failed record lets another open.
-        this.opening = null;
-        if ([...this.records.values()].some((record) => record.status !== "failed")) return failed("tenant already has a channel");
+        // A terminated opening is cleared.
+        this.openings.delete(signer);
+        // Fiber opens another signer's channel beside the first; the double models one channel.
+        if (this.material !== null) throw new Error("the double opens one channel: another signer's opening is fiber's second one");
         const result = this.openExternallyFunded(request, material);
-        this.opening = { command, channelId: this.channel.channelId, result, terminated: false };
+        this.openings.set(signer, { command, channelId: this.channel.channelId, result, terminated: false });
         return { result: structuredClone(result) };
     }
 
-    // The channel fiber's actor opens (`fiber/channel.rs:4913-4960`), through `TxComplete` into the wait for the host's signature
-    // (`:4155-4167`), and its frozen terms (`:5911-5944`). The tenant's reserve covers the open's shutdown script
-    // (`get_funding_and_reserved_amount`, `:4946-4951`, `:5811-5851`); the LSP's is the vectors', over its own.
-    private openExternallyFunded(request: OpenRequest, material: ChannelOpenSignerMaterial): OpenTenantChannelResultWire {
+    // The channel fiber's actor opens (`fiber/channel.rs:5015-5062`), through `TxComplete` into the wait for the host's signature
+    // (`:4252-4264`), and its frozen terms (`:6029-6062`). The tenant's reserve covers the open's shutdown script
+    // (`get_funding_and_reserved_amount`, `:5048-5053`, `:5929-5969`); the LSP's is the vectors', over its own.
+    private openExternallyFunded(request: OpenRequest, material: ChannelOpenSignerMaterial): OpenChannelWithExternalFundingResultWire {
         const { terms } = this;
         const localReserved = reservedCkbShannons(request.shutdownScript, terms.lockLayout);
         const remoteReserved = terms.remoteReservedCkbShannons;
@@ -2164,7 +2211,7 @@ export class InMemoryTenantNode {
         const commitmentFeeRate = request.commitmentFeeRate ?? terms.commitmentFeeRate;
         const channelId = tenantChannelId(material.tlcBaseKey, peerTlcBasePubkey);
         const fundingLock: Script = { ...terms.fundingLock, args: fundingLockArgs(material.fundingPubkey, peerFundingPubkey) };
-        const stated = { channelId, commitmentDelayEpoch, localReserved, remoteReserved, fundingLock };
+        const stated = { channelId, commitmentDelayEpoch, localReserved, remoteReserved, fundingLock, withContext: true };
         for (const tamper of this.openingTampers.splice(0)) {
             switch (tamper.kind) {
                 case "delayEpoch":
@@ -2178,6 +2225,9 @@ export class InMemoryTenantNode {
                     break;
                 case "fundingLock":
                     stated.fundingLock = tamper.lock;
+                    break;
+                case "noContext":
+                    stated.withContext = false;
             }
         }
         const unsigned = this.fundingTx(stated.fundingLock, localAmount + remoteAmount, request);
@@ -2200,9 +2250,13 @@ export class InMemoryTenantNode {
             this.drain();
         }
         this.commitsEarly = false;
-        return {
+        const result = {
             channel_id: stated.channelId,
             unsigned_funding_tx: encodeTransaction("unsignedFundingTx", unsigned),
+        };
+        if (!stated.withContext) return result;
+        return {
+            ...result,
             opening_context: {
                 remote_funding_key: encodeBareHexBytes("remoteFundingKey", peerFundingPubkey, COMPRESSED_POINT_LENGTH),
                 remote_settlement_key: encodeBareHexBytes("remoteSettlementKey", peerTlcBasePubkey, COMPRESSED_POINT_LENGTH),
@@ -2214,6 +2268,62 @@ export class InMemoryTenantNode {
                 local_reserved_ckb_amount: encodeUintHex("localReservedCkbAmount", stated.localReserved, UINT64_MAX),
                 remote_reserved_ckb_amount: encodeUintHex("remoteReservedCkbAmount", stated.remoteReserved, UINT64_MAX),
             } satisfies TenantChannelOpeningContextWire,
+        };
+    }
+
+    // `lsp_register_tenant` (`rpc/lsp.rs:79-109`), the payload over the node's own id, then the service's checks in order
+    // (`lsp/service.rs:420-467`) and the registry's (`lsp/registry.rs:283-357`).
+    private registerTenant(params: unknown): RpcAnswer {
+        const request = readParams<RegisterTenantParamsWire, RegistryRequest>(params, (at) => ({
+            rootSignerPubkey: decodeBareHexBytes(at("root_signer_pubkey"), COMPRESSED_POINT_LENGTH),
+            requestId: decodeHexBytes(at("request_id"), HASH256_LENGTH),
+            signedAtMs: decodeUintHex(at("signed_at"), UINT64_MAX),
+            // Fiber also takes it 0x-prefixed; the SDK writes it bare.
+            signature: decodeBareHexBytes(at("signature"), COMPACT_ECDSA_SIGNATURE_LENGTH),
+        }));
+        if (request instanceof WireError) return invalidParams(params, request);
+        const { rootSignerPubkey, requestId, signedAtMs, signature } = request;
+        const signedAt = numberToBytesBE(signedAtMs, UINT64_LENGTH);
+        const payload = concatBytes(REGISTRY_PROTOCOL, this.lspPubkey, rootSignerPubkey, requestId, signedAt);
+        const digest = blake2bHashWithSalt(payload, new Uint8Array(0));
+        // libsecp256k1's verification, which refuses a high S.
+        if (!secp256k1.verify(signature, digest, rootSignerPubkey, { prehash: false, lowS: true })) {
+            return failed("invalid RootSigner registration proof: signature failed verification");
+        }
+        const nowMs = BigInt(this.now());
+        if (signedAtMs > nowMs && signedAtMs - nowMs > REGISTRY_MAX_SIGNED_AT_FUTURE_SKEW_MS) {
+            return failed("invalid RootSigner registration proof: tenant registration signed_at is too far in the future");
+        }
+        if (signedAtMs <= nowMs && nowMs - signedAtMs > REGISTRY_MAX_SIGNED_AT_AGE_MS) {
+            return failed("invalid RootSigner registration proof: tenant registration signed_at is too old");
+        }
+        const consumed = `${bytesToHex(rootSignerPubkey)}:${bytesToHex(requestId)}`;
+        if (this.consumedRequests.has(consumed)) return failed("tenant registration request was already consumed");
+        // A refresh keeps the record, its creation included.
+        this.tenant ??= { rootSignerPubkey, createdAtMs: nowMs };
+        if (!equalBytes(this.tenant.rootSignerPubkey, rootSignerPubkey)) throw new Error("the double serves one tenant");
+        this.consumedRequests.add(consumed);
+        this.issuedTokens += 1;
+        const result: RegisterTenantResultWire = {
+            tenant: this.tenantStatus(this.tenant),
+            access_token: `tenant node token ${this.issuedTokens}`,
+        };
+        return { result };
+    }
+
+    // `tenant_status` (`lsp/service.rs:185-207`): a channel is bound once ready, and online until its peer disconnects
+    // (`fiber/network.rs:9696-9711`), which the double never does.
+    private tenantStatus(tenant: RegisteredTenant): LspTenantStatusWire {
+        const channels: LspTenantChannelWire[] = [...this.records.values()]
+            .filter((record) => record.status === "ready")
+            .map((record) => ({ channel_id: record.channelId, funding_udt_type_script: null, online: true }));
+        return {
+            tenant_id: bytesToHex(blake2bHashWithSalt(tenant.rootSignerPubkey, TENANT_ID_SALT)),
+            root_signer_pubkey: encodeBareHexBytes("rootSignerPubkey", tenant.rootSignerPubkey, COMPRESSED_POINT_LENGTH),
+            invoice_pubkey: encodeBareHexBytes("invoicePubkey", pubkeyOf(TENANT_SECRET_KEY), COMPRESSED_POINT_LENGTH),
+            channels,
+            created_at: encodeUintHex("createdAt", tenant.createdAtMs, UINT64_MAX),
+            runtime_status: this.tenantActive ? "active" : "cold",
         };
     }
 
@@ -2239,8 +2349,8 @@ export class InMemoryTenantNode {
         };
     }
 
-    // `submit_signed_funding_tx` (`rpc/channel.rs:799-816`): the network actor's lookup (`fiber/network.rs:3832-3842`), then
-    // `handle_submit_external_funding_tx` (`fiber/channel.rs:4075-4125`), whose commitment signing resumes the open.
+    // `submit_signed_funding_tx` (`rpc/channel.rs:771-788`): the network actor's lookup (`fiber/network.rs:3960-3970`), then
+    // `handle_submit_external_funding_tx` (`fiber/channel.rs:4170-4220`), whose commitment signing resumes the open.
     private submitSignedFundingTx(params: unknown): RpcAnswer {
         const submission = readParams<SubmitSignedFundingTxParamsWire, { channelId: string; signed: Transaction }>(params, (at) => ({
             channelId: requireHexBytes(at("channel_id"), HASH256_LENGTH),
@@ -2250,7 +2360,7 @@ export class InMemoryTenantNode {
         // The id in `Hash256`'s debug form.
         if (!this.isChannel(submission.channelId)) return failed(`Channel not found error: Hash256(${submission.channelId})`);
         const funding = this.external;
-        if (funding === null) throw new Error("the double serves submit_signed_funding_tx only to a channel open_tenant_channel opened");
+        if (funding === null) throw new Error("the double serves submit_signed_funding_tx only to a channel the tenant's opening opened");
         if (funding.signedSubmitted) return failed("Repeated processing message: Signed funding tx has already been submitted");
         // The hash covers the raw transaction, the witnesses aside.
         const txHash = computeTxHash(submission.signed);
@@ -2260,7 +2370,7 @@ export class InMemoryTenantNode {
             );
         }
         funding.signedSubmitted = true;
-        // `install_external_funding_signed_tx`, called keeping a signing state (`fiber/channel.rs:4007-4022`, `:4109`).
+        // `install_external_funding_signed_tx`, called keeping a signing state (`fiber/channel.rs:4102-4117`, `:4204`).
         if (this.channelState.state_name !== "SigningCommitment") {
             this.channelState = {
                 state_name: "CollaboratingFundingTx",
@@ -2273,8 +2383,8 @@ export class InMemoryTenantNode {
         return { result: { channel_id: submission.channelId, funding_tx_hash: encodeHexBytes("fundingTxHash", txHash, HASH256_LENGTH) } };
     }
 
-    // Installed as fiber's `apply_open_signer_material` does (`channel.rs:5958-6005`); a tenant channel has no announcement. The
-    // open record is written at the open (`fiber/network.rs:7549-7555`), over any of the same id.
+    // Installed as fiber's `apply_open_signer_material` does (`channel.rs:6076-6123`); a tenant channel has no announcement. The
+    // open record is written at the open (`fiber/network.rs:7728-7734`), over any of the same id.
     private install(material: ChannelOpenSignerMaterial, channel: TenantNodeChannel): void {
         if (this.material !== null) throw new Error("the node already opened its channel");
         this.material = material;
@@ -2295,8 +2405,8 @@ export class InMemoryTenantNode {
         });
     }
 
-    // `TxComplete`: the watch row exists from here on (`event_handler.rs:41-67`, fired at `fiber/channel.rs:9520-9530`); R+1 at
-    // TxComplete (`channel.rs:9545`), L+1 entering the wait for the external funding (`:4161`).
+    // `TxComplete`: the watch row exists from here on (`event_handler.rs:41-65`, fired at `fiber/channel.rs:9698-9707`); R+1 at
+    // TxComplete (`channel.rs:9718`), L+1 entering the wait for the external funding (`:4258`).
     private collaborate(): void {
         if (this.watchRow) throw new Error("the funding tx's collaboration already completed");
         this.watchRow = true;
@@ -2309,7 +2419,7 @@ export class InMemoryTenantNode {
         this.queue.push(...transitions.map((transition): Step => ({ kind: "request", transition, state })));
     }
 
-    // ChannelReady moves both counters (`channel.rs:9905`); an open by RPC is shown ready only then.
+    // ChannelReady moves both counters (`channel.rs:10075`); an open by RPC is shown ready only then.
     private queueChannelReady(shown: boolean): void {
         this.queue.push({
             kind: "event",
@@ -2362,19 +2472,19 @@ export class InMemoryTenantNode {
         return keys;
     }
 
-    // A cooperative close deletes the tenant's watch row (`event_handler.rs:186-191`, wired at `lsp/runtime.rs:214-222`); a force
-    // close emits no `ChannelClosed` (`network.rs:8340-8346`).
+    // A cooperative close deletes the tenant's watch row (`event_handler.rs:182-191`, wired at `lsp/runtime.rs:218-227`); a force
+    // close emits no `ChannelClosed` (`network.rs:8534-8540`).
     private isWatched(channelId: string): boolean {
         return this.isChannel(channelId) && this.watchRow && this.channelState.state_flags !== "COOPERATIVE";
     }
 
-    // `get_watchtower_signing_status` (`rpc/watchtower.rs:379-400`) once the watchtower has checked the cell on chain.
+    // `get_watchtower_signing_status` (`rpc/watchtower.rs:388-409`) once the watchtower has checked the cell on chain.
     private watchtowerStatus(params: unknown): RpcAnswer {
         const channelId = readParams<RpcChannelIdParamsWire, string>(params, (at) => requireHexBytes(at("channel_id"), HASH256_LENGTH));
         if (channelId instanceof WireError) return invalidParams(params, channelId);
         if (!this.isWatched(channelId)) return failed("watched channel not found");
         if (this.forceClosed !== null) this.runWatchtower(this.forceClosed, true);
-        // The `first_pending` of a map ordered by request id (`fiber-types/src/watchtower.rs:160-162`).
+        // The `first_pending` of a map ordered by request id (`fiber-types/src/watchtower.rs:266-268`).
         const [requestId] = [...this.watchtowerPending.keys()].sort();
         const request = this.watchtowerPending.get(requestId ?? "");
         const status: WatchtowerSigningStatusWire =
@@ -2391,13 +2501,13 @@ export class InMemoryTenantNode {
         return { result: { channel_id: channelId, status } };
     }
 
-    // `submit_watchtower_signature` (`rpc/watchtower.rs:402-472`), its checks in order: a refusal writes nothing, so the request
+    // `submit_watchtower_signature` (`rpc/watchtower.rs:411-487`), its checks in order: a refusal writes nothing, so the request
     // stays pending. The device's channel always has an external signer.
     private watchtowerSubmit(params: unknown): RpcAnswer {
         const submission = readParams<SubmitWatchtowerSignatureParamsWire, WatchtowerSubmission>(params, (at) => ({
             channelId: requireHexBytes(at("channel_id"), HASH256_LENGTH),
             requestId: requireHexBytes(at("request_id"), HASH256_LENGTH),
-            // A `Vec<u8>` (`fiber-json-types/src/channel.rs:1014-1017`): any length reads, the handler refuses.
+            // A `Vec<u8>` (`fiber-json-types/src/channel.rs:1008-1011`): any length reads, the handler refuses.
             signature: decodeAnyHexBytes(at("signature")),
         }));
         if (submission instanceof WireError) return invalidParams(params, submission);
@@ -2425,7 +2535,7 @@ export class InMemoryTenantNode {
         return { result: { type: "Applied" } };
     }
 
-    // `expected_onchain_pubkey` (`fiber-types/src/watchtower.rs:184-223`) over the local, remote and pending remote snapshots: the
+    // `expected_onchain_pubkey` (`fiber-types/src/watchtower.rs:305-344`) over the local, remote and pending remote snapshots: the
     // last local commitment and the last two remote ones. Every key at a number derives alike, so its conflict check never fires.
     private expectedOnchainPubkey(purpose: WatchtowerKeyPurpose): Uint8Array | string {
         const { tlcBaseKey } = this.openMaterial();
@@ -2439,7 +2549,7 @@ export class InMemoryTenantNode {
         return derivePublicKey(tlcBaseKey, this.publishedPoint(commitmentNumber));
     }
 
-    // Fiber's periodic check (`watchtower/actor.rs:558-873`, `:2082-2175`), collapsed: the spend of the cell on chain lands once
+    // Fiber's periodic check (`watchtower/actor.rs:574-899`, `:2164-2263`), collapsed: the spend of the cell on chain lands once
     // signed and the check goes on with its remainder; one unsigned waits as a request, unless the peer's spend lands first.
     private runWatchtower(closed: ForceClosed, waits: boolean): void {
         for (let spend = this.nodeSpend(closed); spend !== null; spend = this.nodeSpend(closed)) {
@@ -2480,7 +2590,7 @@ export class InMemoryTenantNode {
             requestId: encodeHexBytes("requestId", watchtowerRequestId(transaction), HASH256_LENGTH),
             purpose,
             transaction,
-            // Fiber reads it from the lock args, which every remainder keeps (`watchtower/actor.rs:1268-1269`).
+            // Fiber reads it from the lock args, which every remainder keeps (`watchtower/actor.rs:1348-1349`).
             commitmentNumber: readCommitmentLockVersion(cell.output.lock.args),
             tlcEntry: pick.record === null ? null : bytesToHex(pick.record),
             unlock: pick.label,
@@ -2546,7 +2656,7 @@ function finalExpiryDeltaOf(invoice: Invoice): bigint {
     return findInvoiceAttribute(invoice, "finalHtlcMinimumExpiryDelta")?.milliseconds ?? DEFAULT_FINAL_TLC_EXPIRY_DELTA_MS;
 }
 
-// Fiber's `tlc_expiry_delay` (`channel.rs:5894-5899`), spelled here rather than read from `src`: two thirds of the delay in
+// Fiber's `tlc_expiry_delay` (`channel.rs:6012-6017`), spelled here rather than read from `src`: two thirds of the delay in
 // f64, the epoch's number, index and length in its low 24, next 16 and next 16 bits.
 function fiberTlcExpiryDelayMs(delayEpoch: bigint): bigint {
     const number = Number(delayEpoch & 0xffffffn);
@@ -2668,7 +2778,7 @@ function readNextMaterial(field: WireField): NextMaterial {
     const at = readObject<NextChannelSignerMaterialWire>(field);
     return {
         point: readOption(at("next_commitment_point"), (member) => decodeBareHexBytes(member, COMPRESSED_POINT_LENGTH)),
-        // `Option<SliceHex>` over a `Vec<u8>` (`fiber-json-types/src/channel.rs:912-919`): any length reads, the submit refuses.
+        // `Option<SliceHex>` over a `Vec<u8>` (`fiber-json-types/src/channel.rs:906-913`): any length reads, the submit refuses.
         commitmentNonce: readOption(at("next_commitment_nonce"), decodeAnyHexBytes),
         revocationNonce: readOption(at("next_revocation_nonce"), decodeAnyHexBytes),
     };
@@ -2750,7 +2860,7 @@ function readOption<Value>(field: WireField, read: (field: WireField) => Value):
 }
 
 // Serde writes a struct's members in declaration order, so two requests compare alike whatever order their JSON members came in.
-// Fiber's conversion reads absent, null and empty `funding_lock_script_cell_deps` as one empty list (`rpc/channel.rs:1130-1136`).
+// Fiber's conversion reads absent, null and empty `funding_lock_script_cell_deps` as one empty list (`rpc/channel.rs:1102-1108`).
 function openCommandOf(params: unknown): unknown {
     if (typeof params !== "object" || params === null) return params;
     return Object.fromEntries(

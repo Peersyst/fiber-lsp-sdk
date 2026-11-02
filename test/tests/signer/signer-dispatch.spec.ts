@@ -13,6 +13,7 @@ import * as musig2Engine from "../../../src/signer/musig2-engine";
 import * as onchainSignature from "../../../src/signer/onchain-signature";
 import type { WireField } from "../../../src/wire";
 import { decodeTransaction } from "../../../src/wire";
+import { NonceCapBypassStorage } from "../../../e2e/agent/src/nonce-cap-bypass";
 import { InMemorySignerStorage } from "../../mocks/policy";
 import { toScript } from "../../utils/digest-inputs";
 import { asRecord } from "../../utils/json-shape";
@@ -109,7 +110,7 @@ function faultOf(outcome: DispatchOutcome): unknown {
     return outcome.cause;
 }
 
-// Handles a status that must be refused before the claim: nothing is written, nor is the record changed.
+// Refused before the claim: nothing written, the record unchanged.
 async function refusedUnclaimed(channel: SigningChannel, status: WireField, channelId = channel.channelId): Promise<SignerRefusal> {
     const before = [...channel.storage.map.entries()];
     channel.storage.ops.length = 0;
@@ -1031,16 +1032,25 @@ describe("a second session on a served slot", () => {
         expect(writes(channel.storage)).toEqual([]);
     });
 
-    it("keeps the complete revocation signature of a received revocation reused under allow", async () => {
+    // Both revocations land on REVOKE:4: the device's own moves onto it with its revoked version, after its local replacement.
+    async function revocationChannel(): Promise<SigningChannel> {
         const channel = await openSigningChannel(vectors, caseOf("CompleteReceivedRevokeAndAck"), { nonceReuse: "allow" });
-        // Both revocations land on REVOKE:4: the device's own moves onto it with its revoked version, after its local replacement.
         const local = { commitmentNumber: 4, txHash: caseOf("CompleteReceivedCommitment").expected.message };
         await updateRecord(channel, (record) => ({ ...record, commitmentHashes: { ...record.commitmentHashes, local } }));
+        return channel;
+    }
+
+    // The device's own revocation moved onto REVOKE:4, its peer half signed under the given randomness.
+    function sentOnRevokeFour(randByte: number): WireField {
         const args = (statusOf("SendRevokeAndAck").value as { content: { content: { commitment_lock_script_args: string } } }).content
             .content.commitment_lock_script_args;
         const moved = mutated(statusOf("SendRevokeAndAck"), "content.slot.commitment_number", "0x4");
-        const sent = resigned(mutated(moved, "content.content.commitment_lock_script_args", `${args.slice(0, -2)}03`), 0x73);
-        expect(signedOf(await channel.dispatch.handle(channel.channelId, sent)).status).toBe("fresh");
+        return resigned(mutated(moved, "content.content.commitment_lock_script_args", `${args.slice(0, -2)}03`), randByte);
+    }
+
+    it("keeps the complete revocation signature of a received revocation reused under allow", async () => {
+        const channel = await revocationChannel();
+        expect(signedOf(await channel.dispatch.handle(channel.channelId, sentOnRevokeFour(0x73))).status).toBe("fresh");
         expect((await recordOf(channel)).revocations).toEqual([]);
 
         const received = statusOf("CompleteReceivedRevokeAndAck");
@@ -1050,6 +1060,28 @@ describe("a second session on a served slot", () => {
         expect((await recordOf(channel)).revocations).toEqual([
             { version: 3, forRemote: true, signature: caseOf("CompleteReceivedRevokeAndAck").expected.signature },
         ]);
+    });
+
+    // The e2e agent's `--nonce-cap-bypass` over the real policy: it reads the policy's own marks, so a drift in their shape fails here.
+    it("serves a third session through the e2e agent's nonce-cap bypass, and answers its repeat as already signed with its bytes", async () => {
+        const channel = await revocationChannel();
+        const dispatch = new SignerDispatch({
+            masterSeed: MASTER_SEED,
+            commitmentLock: COMMITMENT_LOCK,
+            fundingLockCellDepsCount: 2,
+            millisecondsPerEpoch: SIGNING_MILLISECONDS_PER_EPOCH,
+            policy: new PolicyEngine(new SignerStore(new NonceCapBypassStorage(channel.storage)), { nonceReuse: "allow" }),
+        });
+        expect(signedOf(await dispatch.handle(channel.channelId, sentOnRevokeFour(0x73))).status).toBe("fresh");
+        expect(signedOf(await dispatch.handle(channel.channelId, statusOf("CompleteReceivedRevokeAndAck"))).status).toBe("reused");
+
+        const third = signedOf(await dispatch.handle(channel.channelId, sentOnRevokeFour(0x74)));
+        expect(third.status).toBe("reused");
+        channel.storage.ops.length = 0;
+        const thirdAgain = signedOf(await dispatch.handle(channel.channelId, sentOnRevokeFour(0x74)));
+        expect(thirdAgain.status).toBe("already-signed");
+        expect(bytesToHex(thirdAgain.partialSignature)).toBe(bytesToHex(third.partialSignature));
+        expect(writes(channel.storage)).toEqual([]);
     });
 });
 

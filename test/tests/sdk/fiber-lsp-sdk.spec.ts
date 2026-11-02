@@ -1,11 +1,13 @@
+import { secp256k1 } from "@noble/curves/secp256k1.js";
 import { bytesToHex, hexToBytes } from "@noble/hashes/utils.js";
-import { deriveChannelKeys, pubkeyOf } from "../../../src/derivation";
+import { blake2bHashWithSalt, deriveChannelKeys, pubkeyOf } from "../../../src/derivation";
 import { COMMITMENT_LOCK_MAINNET, COMMITMENT_LOCK_TESTNET, FUNDING_LOCK_MAINNET, FUNDING_LOCK_TESTNET } from "../../../src/digest";
 import type { UnsignedInvoice } from "../../../src/invoice";
 import { encodeInvoice } from "../../../src/invoice";
 import { CHANNEL_ALIAS_KEY_PREFIX } from "../../../src/policy";
 import type { Script, Transaction } from "../../../src/common";
-import type { FiberLspSdkOptions, SdkContext, SdkEvent } from "../../../src/sdk";
+import { UINT64_MAX } from "../../../src/common";
+import type { FiberLspSdkOptions, SdkContext, SdkEvent, SdkTenantRegistrationRequest } from "../../../src/sdk";
 import {
     ActivityTracker,
     DEFAULT_POLL_INTERVAL_MS,
@@ -24,6 +26,7 @@ import { flush } from "../../utils/flush";
 import { signInvoice } from "../../utils/invoice-signing";
 import { TimerMock } from "../../mocks/common";
 import { loadInteropVectors } from "../../utils/interop-vectors";
+import { refusalOf } from "../../utils/refusal";
 import { rejection } from "../../utils/rejection";
 import { LIST_CHANNELS_WITH_CLOSED_CALL, signingStatusCall, watchtowerStatusCall } from "../../utils/rpc-answers";
 import type { SigningChannel } from "../../utils/signing-channel";
@@ -169,7 +172,6 @@ function harness(overrides: Partial<FiberLspSdkOptions> = {}, seed: Uint8Array =
     return { sdk, timer, storage, fetch, events, errors, polls };
 }
 
-// Read through the private context until the operations observe the wiring.
 function contextOf(sdk: FiberLspSdk): SdkContext {
     return (sdk as unknown as { context: SdkContext }).context;
 }
@@ -228,12 +230,9 @@ const registry = vectors.tenant_registry;
 // The RootSigner of the master seed 0x25 repeated.
 const OTHER_ROOT_SIGNER_PUBKEY = "038abd41e20e2c0b61c0c2acfbbd2146d648f275165c3256d8116ee20c78c1f095";
 
-function challengeOf(): { lspNodeId: Uint8Array; rootSignerPubkey: Uint8Array; nonce: Uint8Array } {
-    return {
-        lspNodeId: hexToBytes(registry.lsp_node_id),
-        rootSignerPubkey: hexToBytes(registry.root_signer_pubkey),
-        nonce: hexToBytes(registry.nonce),
-    };
+// The vector's request, which the vector's LSP takes.
+function requestOf(): SdkTenantRegistrationRequest {
+    return { requestId: hexToBytes(registry.request_id), signedAtMs: BigInt(registry.signed_at) };
 }
 
 describe("FiberLspSdk", () => {
@@ -895,7 +894,7 @@ describe("FiberLspSdk", () => {
             expect(harness().sdk.tenantId).toBe(registry.tenant_id);
         });
 
-        it("exposes the RootSigner's key, which the host asks the registry nonce for", () => {
+        it("exposes the RootSigner's key, which the registration names", () => {
             expect(bytesToHex(harness().sdk.rootSignerPubkey)).toBe(registry.root_signer_pubkey);
         });
 
@@ -905,7 +904,7 @@ describe("FiberLspSdk", () => {
             expect(h.sdk.rootSignerPubkey).not.toBe(read);
             read.fill(0);
             expect(bytesToHex(h.sdk.rootSignerPubkey)).toBe(registry.root_signer_pubkey);
-            expect(bytesToHex(h.sdk.signTenantRegistration(challengeOf()).signature)).toBe(registry.signature);
+            expect(bytesToHex(h.sdk.signTenantRegistration(requestOf()).signature)).toBe(registry.signature);
         });
 
         it("is another tenant under another seed", () => {
@@ -921,100 +920,105 @@ describe("FiberLspSdk", () => {
         }
 
         it("signs fiber's registration byte for byte, with the params and the tenant id they register", () => {
-            const registration = registering().signTenantRegistration(challengeOf());
-            expect(Object.keys(registration).sort()).toEqual(["nonce", "rootSignerPubkey", "signature", "tenantId"]);
+            const registration = registering().signTenantRegistration(requestOf());
+            expect(Object.keys(registration).sort()).toEqual(["requestId", "rootSignerPubkey", "signature", "signedAtMs", "tenantId"]);
             expect(bytesToHex(registration.signature)).toBe(registry.signature);
             expect(bytesToHex(registration.rootSignerPubkey)).toBe(registry.root_signer_pubkey);
-            expect(bytesToHex(registration.nonce)).toBe(registry.nonce);
+            expect(bytesToHex(registration.requestId)).toBe(registry.request_id);
+            expect(registration.signedAtMs).toBe(BigInt(registry.signed_at));
             expect(registration.tenantId).toBe(registry.tenant_id);
         });
 
-        it("returns bytes of its own: writing to the challenge or to the result changes neither, nor what it signs next", () => {
+        it("returns bytes of its own: writing to the request or to the result changes neither, nor what it signs next", () => {
             const sdk = registering();
-            const challenge = challengeOf();
-            const registration = sdk.signTenantRegistration(challenge);
-            expect(registration.rootSignerPubkey).not.toBe(challenge.rootSignerPubkey);
-            expect(registration.nonce).not.toBe(challenge.nonce);
-            challenge.rootSignerPubkey.fill(0);
-            challenge.nonce.fill(0);
-            expect(bytesToHex(registration.rootSignerPubkey)).toBe(registry.root_signer_pubkey);
-            expect(bytesToHex(registration.nonce)).toBe(registry.nonce);
+            const request = requestOf();
+            const registration = sdk.signTenantRegistration(request);
+            expect(registration.requestId).not.toBe(request.requestId);
+            request.requestId.fill(0);
+            expect(bytesToHex(registration.requestId)).toBe(registry.request_id);
             registration.rootSignerPubkey.fill(0);
+            registration.requestId.fill(0);
             expect(bytesToHex(sdk.rootSignerPubkey)).toBe(registry.root_signer_pubkey);
-            expect(bytesToHex(sdk.signTenantRegistration(challengeOf()).signature)).toBe(registry.signature);
+            expect(bytesToHex(sdk.signTenantRegistration(requestOf()).signature)).toBe(registry.signature);
         });
 
-        it("checks the challenge against its copy of the LSP's key, whatever the host does to its bytes", () => {
+        it("signs for its own copy of the LSP's key, whatever the host does to its bytes", () => {
             const lspPubkey = hexToBytes(registry.lsp_node_id);
             const { sdk } = harness({ lspPubkey });
             lspPubkey.fill(0);
-            expect(bytesToHex(sdk.signTenantRegistration(challengeOf()).signature)).toBe(registry.signature);
+            expect(bytesToHex(sdk.signTenantRegistration(requestOf()).signature)).toBe(registry.signature);
         });
 
-        it("makes no call and writes nothing", () => {
-            const h = harness({ lspPubkey: hexToBytes(registry.lsp_node_id) });
-            h.sdk.signTenantRegistration(challengeOf());
+        it("signs for the LSP of lspPubkey: another LSP's registration is another payload", () => {
+            const registration = harness({ lspPubkey: LSP_PUBKEY }).sdk.signTenantRegistration(requestOf());
+            expect(bytesToHex(registration.signature)).not.toBe(registry.signature);
+            const digest = blake2bHashWithSalt(
+                hexToBytes(registry.payload.replace(registry.lsp_node_id, bytesToHex(LSP_PUBKEY))),
+                new Uint8Array(0),
+            );
+            const rootSignerPubkey = hexToBytes(registry.root_signer_pubkey);
+            expect(secp256k1.verify(registration.signature, digest, rootSignerPubkey, { prehash: false })).toBe(true);
+        });
+
+        it("signs for lspPubkey whatever LSP the request names", () => {
+            const request = { ...requestOf(), lspNodeId: LSP_PUBKEY };
+            expect(bytesToHex(registering().signTenantRegistration(request).signature)).toBe(registry.signature);
+        });
+
+        it.each([
+            ["0", 0n, "0000000000000000"],
+            ["u64's maximum", UINT64_MAX, "ffffffffffffffff"],
+        ])("signs a signing time of %s, which the node's window judges, not the device", (_, signedAtMs, written) => {
+            const registration = registering().signTenantRegistration({ ...requestOf(), signedAtMs });
+            expect(registration.signedAtMs).toBe(signedAtMs);
+            const digest = blake2bHashWithSalt(hexToBytes(`${registry.payload.slice(0, -16)}${written}`), new Uint8Array(0));
+            const rootSignerPubkey = hexToBytes(registry.root_signer_pubkey);
+            expect(secp256k1.verify(registration.signature, digest, rootSignerPubkey, { prehash: false })).toBe(true);
+        });
+
+        it("makes no call, writes nothing and reads no clock", () => {
+            const now = jest.fn(() => NOW_MS);
+            const h = harness({ lspPubkey: hexToBytes(registry.lsp_node_id), now });
+            h.sdk.signTenantRegistration(requestOf());
             expect(h.fetch.requests).toEqual([]);
             expect(h.storage.ops).toEqual([]);
+            expect(now).not.toHaveBeenCalled();
         });
 
         it.each([
             ["null", null],
             ["undefined", undefined],
             ["an array", []],
-            ["a string", "challenge"],
-        ])("refuses a challenge that is %s", (_, challenge) => {
-            expect(() => registering().signTenantRegistration(challenge as never)).toThrow(new TypeError("challenge must be an object"));
-        });
-
-        it.each([
-            ["absent", undefined, "challenge.lspNodeId must be a Uint8Array"],
-            ["in hex", registry.lsp_node_id, "challenge.lspNodeId must be a Uint8Array"],
-            ["of 32 bytes", hexToBytes(registry.lsp_node_id).slice(0, 32), "challenge.lspNodeId must be 33 bytes, got 32"],
-            ["of 34 bytes", hexToBytes(`${registry.lsp_node_id}00`), "challenge.lspNodeId must be 33 bytes, got 34"],
-            ["33 zero bytes, no point", new Uint8Array(33), "challenge.lspNodeId must be a compressed point on secp256k1"],
-            ["another LSP's key", LSP_PUBKEY, "challenge.lspNodeId must be lspPubkey: the nonce was issued by another LSP"],
-            [
-                "the LSP's x under the other parity",
-                hexToBytes(`02${registry.lsp_node_id.slice(2)}`),
-                "challenge.lspNodeId must be lspPubkey: the nonce was issued by another LSP",
-            ],
-        ])("refuses an LSP node id %s", (_, lspNodeId, message) => {
-            expect(() => registering().signTenantRegistration({ ...challengeOf(), lspNodeId: lspNodeId as Uint8Array })).toThrow(
-                new TypeError(message),
+            ["a string", "request"],
+        ])("refuses a request that is %s", (_, request) => {
+            expect(refusalOf(TypeError, () => registering().signTenantRegistration(request as never)).message).toBe(
+                "request must be an object",
             );
         });
 
         it.each([
-            ["absent", undefined, "challenge.rootSignerPubkey must be a Uint8Array"],
-            ["in hex", registry.root_signer_pubkey, "challenge.rootSignerPubkey must be a Uint8Array"],
-            ["of 32 bytes", hexToBytes(registry.root_signer_pubkey).slice(0, 32), "challenge.rootSignerPubkey must be 33 bytes, got 32"],
-            ["of 34 bytes", hexToBytes(`${registry.root_signer_pubkey}00`), "challenge.rootSignerPubkey must be 33 bytes, got 34"],
-            [
-                "another RootSigner's key",
-                hexToBytes(OTHER_ROOT_SIGNER_PUBKEY),
-                "challenge.rootSignerPubkey must be this identity's public key: the nonce was issued to another RootSigner",
-            ],
-        ])("refuses a RootSigner key %s", (_, rootSignerPubkey, message) => {
-            const challenge = { ...challengeOf(), rootSignerPubkey: rootSignerPubkey as Uint8Array };
-            expect(() => registering().signTenantRegistration(challenge)).toThrow(new TypeError(message));
+            ["absent", undefined, "request.requestId must be a Uint8Array"],
+            ["null", null, "request.requestId must be a Uint8Array"],
+            ["in hex", registry.request_id, "request.requestId must be a Uint8Array"],
+            ["of 31 bytes", new Uint8Array(31).fill(0x5a), "request.requestId must be 32 bytes, got 31"],
+            ["of 33 bytes", new Uint8Array(33).fill(0x5a), "request.requestId must be 32 bytes, got 33"],
+        ])("refuses a request id %s", (_, requestId, message) => {
+            const request = { ...requestOf(), requestId: requestId as Uint8Array };
+            expect(refusalOf(TypeError, () => registering().signTenantRegistration(request)).message).toBe(message);
         });
 
         it.each([
-            ["absent", undefined, "challenge.nonce must be a Uint8Array"],
-            ["in hex", registry.nonce, "challenge.nonce must be a Uint8Array"],
-            ["of 31 bytes", new Uint8Array(31).fill(0x5a), "challenge.nonce must be 32 bytes, got 31"],
-            ["of 33 bytes", new Uint8Array(33).fill(0x5a), "challenge.nonce must be 32 bytes, got 33"],
-        ])("refuses a nonce %s", (_, nonce, message) => {
-            expect(() => registering().signTenantRegistration({ ...challengeOf(), nonce: nonce as Uint8Array })).toThrow(
-                new TypeError(message),
-            );
-        });
-
-        it("checks the LSP before the RootSigner, so a challenge wrong on both names the LSP", () => {
-            const challenge = { ...challengeOf(), lspNodeId: LSP_PUBKEY, rootSignerPubkey: hexToBytes(OTHER_ROOT_SIGNER_PUBKEY) };
-            expect(() => registering().signTenantRegistration(challenge)).toThrow(
-                new TypeError("challenge.lspNodeId must be lspPubkey: the nonce was issued by another LSP"),
+            ["absent", undefined, "undefined"],
+            ["null", null, "null"],
+            ["a number", 1_700_000_000_123, "1700000000123"],
+            ["a number that is no integer", 0.5, "0.5"],
+            ["a decimal string", "1700000000123", "1700000000123"],
+            ["negative", -1n, "-1"],
+            ["past u64's maximum", UINT64_MAX + 1n, "18446744073709551616"],
+        ])("refuses a signing time %s", (_, signedAtMs, got) => {
+            const request = { ...requestOf(), signedAtMs: signedAtMs as bigint };
+            expect(refusalOf(RangeError, () => registering().signTenantRegistration(request)).message).toBe(
+                `request.signedAtMs must be a bigint between 0 and 18446744073709551615, got ${got}`,
             );
         });
     });
@@ -1125,7 +1129,7 @@ describe("FiberLspSdk", () => {
             expect(opening.openingContext.localAmountShannons).toBe(OPENING_AMOUNT);
             expect(h.node.calls()).toEqual([
                 {
-                    method: "open_tenant_channel",
+                    method: "open_channel_with_external_funding",
                     params: expect.objectContaining({
                         pubkey: OPENING_LSP_PUBKEY,
                         funding_amount: "0x10c388d000",
@@ -1203,7 +1207,7 @@ describe("FiberLspSdk", () => {
             const h = await openingHarness();
             h.node.result(OPENING_ANSWER).result(OPENING_SUBMIT_ANSWER);
             await expect(h.sdk.openChannel(OPENING_AMOUNT, OPENING_USER_LOCK, signed)).resolves.toBe(OPENING_CHANNEL_ID);
-            expect(h.node.calls().map((call) => call.method)).toEqual(["open_tenant_channel", "submit_signed_funding_tx"]);
+            expect(h.node.calls().map((call) => call.method)).toEqual(["open_channel_with_external_funding", "submit_signed_funding_tx"]);
         });
 
         it("passes the user lock's cell deps to the node from both entry points", async () => {
@@ -1217,7 +1221,10 @@ describe("FiberLspSdk", () => {
             await rejection(opened.sdk.openChannel(OPENING_AMOUNT, OPENING_USER_LOCK, signed, deps));
             for (const h of [prepared, opened]) {
                 expect(h.node.calls()).toEqual([
-                    { method: "open_tenant_channel", params: expect.objectContaining({ funding_lock_script_cell_deps: sentDeps }) },
+                    {
+                        method: "open_channel_with_external_funding",
+                        params: expect.objectContaining({ funding_lock_script_cell_deps: sentDeps }),
+                    },
                 ]);
             }
         });

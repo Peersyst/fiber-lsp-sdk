@@ -1,3 +1,4 @@
+import { randomBytes } from "node:crypto";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -5,9 +6,9 @@ import { hexToBytes } from "@noble/hashes/utils.js";
 import { FiberLspSdk } from "@peersyst/fiber-lsp-sdk";
 import type { SdkChannelOpening, SdkEvent, SdkEventType, SigningEventOutcome, Transaction } from "@peersyst/fiber-lsp-sdk";
 import { registerAgentTenant, SDK_STORE_FILE } from "../../src/agent";
-import { HEX_BYTES_PATTERN } from "../../src/agent.constants";
+import { HEX_BYTES_PATTERN, OPEN_CHANNEL_WITH_EXTERNAL_FUNDING_METHOD } from "../../src/agent.constants";
 import { loadOrCreateMasterSeed } from "../../src/agent-store";
-import { OpenResultCapture } from "../../src/capturing-fetch";
+import { OpenResultCapture, checkedOpenResult } from "../../src/capturing-fetch";
 import { FileSignerStorage } from "../../src/file-storage";
 import { bareLowerHex, messageOf } from "../../src/agent.utils";
 import { AgentJsonRpc } from "../../src/json-rpc";
@@ -152,7 +153,7 @@ export class ScenarioDevice {
                     nonceReuse: "allow",
                 });
             const sdk = build();
-            const tenant = await registerAgentTenant(sdk, registry, env.operatorToken);
+            const tenant = await registerAgentTenant(sdk, registry, env.operatorToken, { now: Date.now, randomBytes });
             sdk.setBiscuitToken(tenant.accessToken);
             const rebuild = (): FiberLspSdk => build(tenant.accessToken);
             const device = new ScenarioDevice(sdk, env, nodes, faults, tenant.tenantId, tenant.accessToken, storeDir, rebuild, capture);
@@ -241,14 +242,10 @@ export class ScenarioDevice {
         } finally {
             raw = this.capture.take();
         }
-        if (raw === null) throw new Error(`open_tenant_channel's result for ${opening.channelId} was not captured`);
-        const rawChannelId = raw.channel_id;
-        if (typeof rawChannelId !== "string" || bareLowerHex(rawChannelId) !== bareLowerHex(opening.channelId)) {
-            throw new Error(`open_tenant_channel's result names channel ${String(rawChannelId)}, the SDK opened ${opening.channelId}`);
-        }
-        const unsignedTx = raw.unsigned_funding_tx;
+        const method = OPEN_CHANNEL_WITH_EXTERNAL_FUNDING_METHOD;
+        const unsignedTx = checkedOpenResult(raw, opening.channelId).unsigned_funding_tx;
         if (typeof unsignedTx !== "object" || unsignedTx === null || Array.isArray(unsignedTx)) {
-            throw new Error("open_tenant_channel: unsigned_funding_tx must be an object");
+            throw new Error(`${method}: unsigned_funding_tx must be an object`);
         }
         const signedTx = await node1.signExternalFundingTx(unsignedTx as Record<string, unknown>, this.env.fundingPrivkey);
         // The signer only writes witnesses, which the tx hash the SDK pinned leaves out.

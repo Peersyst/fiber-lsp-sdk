@@ -51,8 +51,7 @@ describe("musig interop vectors", () => {
     }
 });
 
-// The jest half of the signing loop: what the device answers each request of `signing.json`, which `verify-signing`
-// verifies under fiber's musig2 crate and aggregates with the peer's half.
+// The jest half of the signing loop; `verify-signing` verifies and aggregates it under fiber's musig2 crate.
 describe("signing interop vectors", () => {
     const vectors = loadSigningVectors();
     const keys = signingDeviceKeys(vectors);
@@ -98,6 +97,10 @@ describe("signing interop vectors", () => {
     }
 
     const watchtowerSpends = vectors.watchtower.views.flatMap((view) => view.spends);
+
+    it("declares the fiber release they were generated with", () => {
+        expect(vectors.fiber_ref).toBe("d8dd6d28");
+    });
 
     it("signs with the funding key the vectors name for the device", () => {
         expect(bytesToHex(pubkeyOf(keys.fundingKey))).toBe(vectors.device.funding_pubkey);

@@ -9,7 +9,10 @@ const LSP_NODE_ID = "02b7ca5d4b3a7e8e5e47d16d9b0d4a8e3f1c2b3a4d5e6f708192a3b4c5d
 
 const ROOT_SIGNER = "03aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 
-const NONCE = "0x0101010101010101010101010101010101010101010101010101010101010101";
+const REQUEST_ID = "0x0101010101010101010101010101010101010101010101010101010101010101";
+
+// 2027-01-15T08:00:00Z.
+const SIGNED_AT_MS = 1_800_000_000_000n;
 
 const SIGNATURE =
     "4444444444444444444444444444444444444444444444444444444444444444" + "5555555555555555555555555555555555555555555555555555555555555555";
@@ -52,105 +55,23 @@ function bytes(hex: string): Uint8Array {
 }
 
 describe("AgentJsonRpc", () => {
-    describe("nodeInfo", () => {
-        it("sends node_info without params under the operator's token and returns the node id", async () => {
-            const { fetch, requests } = fetchResult({ version: "0.9.0", pubkey: LSP_NODE_ID, addresses: [] });
-            assert.equal(await new AgentJsonRpc(URL, fetch).nodeInfo("operator"), LSP_NODE_ID);
-            assertSent(requests, "operator", '{"jsonrpc":"2.0","method":"node_info","params":[],"id":1}');
-        });
-
-        it("reads its answer through jsonRpcCall, whose failures name node_info", async () => {
-            const { fetch } = fetchAnswering(500, "denied");
-            await assert.rejects(new AgentJsonRpc(URL, fetch).nodeInfo("operator"), { message: `node_info: HTTP 500 from ${URL}: denied` });
-        });
-
-        it("refuses a result that is not an object", async () => {
-            const { fetch } = fetchResult(null);
-            await assert.rejects(new AgentJsonRpc(URL, fetch).nodeInfo("operator"), { message: "node_info: the result must be an object" });
-        });
-
-        for (const [name, pubkey] of [
-            ["absent", undefined],
-            ["with 0x", `0x${LSP_NODE_ID}`],
-            ["uppercase", LSP_NODE_ID.toUpperCase()],
-            ["of 32 bytes", LSP_NODE_ID.slice(2)],
-            ["of 34 bytes", `${LSP_NODE_ID}00`],
-        ] as const) {
-            it(`refuses a pubkey ${name}`, async () => {
-                const { fetch } = fetchResult({ pubkey });
-                await assert.rejects(new AgentJsonRpc(URL, fetch).nodeInfo("operator"), {
-                    message: "node_info: pubkey must be 33 bytes of bare lowercase hex",
-                });
-            });
-        }
-    });
-
-    describe("getTenantRegistryNonce", () => {
-        const answer = { lsp_node_id: LSP_NODE_ID, root_signer_pubkey: ROOT_SIGNER, nonce: NONCE };
-
-        it("sends the bare root signer key under the operator's token and returns the challenge as bytes", async () => {
-            const { fetch, requests } = fetchResult(answer);
-            assert.deepEqual(await new AgentJsonRpc(URL, fetch).getTenantRegistryNonce(ROOT_SIGNER, "operator"), {
-                lspNodeId: bytes(LSP_NODE_ID),
-                rootSignerPubkey: bytes(ROOT_SIGNER),
-                nonce: bytes(NONCE),
-            });
-            assertSent(
-                requests,
-                "operator",
-                `{"jsonrpc":"2.0","method":"lsp_get_tenant_registry_nonce","params":[{"root_signer_pubkey":"${ROOT_SIGNER}"}],"id":1}`,
-            );
-        });
-
-        for (const [name, key] of [
-            ["with 0x", `0x${ROOT_SIGNER}`],
-            ["uppercase", ROOT_SIGNER.toUpperCase()],
-            ["of 32 bytes", ROOT_SIGNER.slice(2)],
-        ] as const) {
-            it(`refuses a root signer key ${name} before sending`, async () => {
-                const { fetch, requests } = fetchResult(answer);
-                await assert.rejects(new AgentJsonRpc(URL, fetch).getTenantRegistryNonce(key, "operator"), {
-                    message: "rootSignerPubkeyHex must be 33 bytes of bare lowercase hex",
-                });
-                assert.equal(requests.length, 0);
-            });
-        }
-
-        const fieldCases: [keyof typeof answer, string, unknown, string][] = [
-            ["lsp_node_id", "absent", undefined, "33 bytes of bare lowercase hex"],
-            ["lsp_node_id", "with 0x", `0x${LSP_NODE_ID}`, "33 bytes of bare lowercase hex"],
-            ["lsp_node_id", "of 32 bytes", LSP_NODE_ID.slice(2), "33 bytes of bare lowercase hex"],
-            ["root_signer_pubkey", "absent", undefined, "33 bytes of bare lowercase hex"],
-            ["root_signer_pubkey", "uppercase", ROOT_SIGNER.toUpperCase(), "33 bytes of bare lowercase hex"],
-            ["root_signer_pubkey", "of 34 bytes", `${ROOT_SIGNER}00`, "33 bytes of bare lowercase hex"],
-            ["nonce", "absent", undefined, "32 bytes of 0x-prefixed lowercase hex"],
-            ["nonce", "without 0x", NONCE.slice(2), "32 bytes of 0x-prefixed lowercase hex"],
-            ["nonce", "of 31 bytes", NONCE.slice(0, -2), "32 bytes of 0x-prefixed lowercase hex"],
-            ["nonce", "of 33 bytes", `${NONCE}01`, "32 bytes of 0x-prefixed lowercase hex"],
-        ];
-        for (const [field, name, value, shape] of fieldCases) {
-            it(`refuses a ${field} ${name}`, async () => {
-                const { fetch } = fetchResult({ ...answer, [field]: value });
-                await assert.rejects(new AgentJsonRpc(URL, fetch).getTenantRegistryNonce(ROOT_SIGNER, "operator"), {
-                    message: `lsp_get_tenant_registry_nonce: ${field} must be ${shape}`,
-                });
-            });
-        }
-    });
-
     describe("registerTenant", () => {
-        const registration = { rootSignerPubkey: bytes(ROOT_SIGNER), nonce: bytes(NONCE), signature: bytes(SIGNATURE) };
+        const registration = {
+            rootSignerPubkey: bytes(ROOT_SIGNER),
+            requestId: bytes(REQUEST_ID),
+            signedAtMs: SIGNED_AT_MS,
+            signature: bytes(SIGNATURE),
+        };
         const tenant = {
             tenant_id: TENANT_ID,
             root_signer_pubkey: ROOT_SIGNER,
             invoice_pubkey: LSP_NODE_ID,
-            private_channel_id: null,
+            channels: [],
             created_at: "0x1",
             runtime_status: "Active",
-            channel_online: false,
         };
 
-        it("sends the key and signature bare and the nonce with 0x, and returns the tenant id and token", async () => {
+        it("sends the key and signature bare, the request id and the signing time with 0x, and returns the tenant id and token", async () => {
             const { fetch, requests } = fetchResult({ tenant, access_token: "tenant-token" });
             assert.deepEqual(await new AgentJsonRpc(URL, fetch).registerTenant(registration, "operator"), {
                 tenantId: TENANT_ID,
@@ -159,13 +80,41 @@ describe("AgentJsonRpc", () => {
             assertSent(
                 requests,
                 "operator",
-                `{"jsonrpc":"2.0","method":"lsp_register_tenant","params":[{"root_signer_pubkey":"${ROOT_SIGNER}","nonce":"${NONCE}","signature":"${SIGNATURE}"}],"id":1}`,
+                `{"jsonrpc":"2.0","method":"lsp_register_tenant","params":[{"root_signer_pubkey":"${ROOT_SIGNER}","request_id":"${REQUEST_ID}","signed_at":"0x1a3185c5000","signature":"${SIGNATURE}"}],"id":1}`,
             );
         });
 
+        for (const [name, signedAtMs, written] of [
+            ["0", 0n, "0x0"],
+            ["u64's largest", 2n ** 64n - 1n, "0xffffffffffffffff"],
+        ] as const) {
+            it(`writes a signing time of ${name}`, async () => {
+                const { fetch, requests } = fetchResult({ tenant, access_token: "tenant-token" });
+                await new AgentJsonRpc(URL, fetch).registerTenant({ ...registration, signedAtMs }, "operator");
+                const sent = JSON.parse(requests[0]?.init.body ?? "{}") as { params: [{ signed_at: unknown }] };
+                assert.equal(sent.params[0].signed_at, written);
+            });
+        }
+
+        for (const [name, signedAtMs] of [
+            ["below 0", -1n],
+            ["past u64", 2n ** 64n],
+            ["a number", 1_800_000_000_000],
+        ] as const) {
+            it(`refuses a signing time ${name} before sending`, async () => {
+                const { fetch, requests } = fetchResult({ tenant, access_token: "tenant-token" });
+                const wrong = { ...registration, signedAtMs } as unknown as typeof registration;
+                await assert.rejects(new AgentJsonRpc(URL, fetch).registerTenant(wrong, "operator"), {
+                    name: "RangeError",
+                    message: "signedAtMs must be a bigint within u64",
+                });
+                assert.equal(requests.length, 0);
+            });
+        }
+
         for (const [field, length] of [
             ["rootSignerPubkey", 33],
-            ["nonce", 32],
+            ["requestId", 32],
             ["signature", 64],
         ] as const) {
             for (const wrong of [length - 1, length + 1]) {

@@ -1,4 +1,4 @@
-import { OPEN_TENANT_CHANNEL_METHOD } from "../../src/agent.constants";
+import { OPEN_CHANNEL_WITH_EXTERNAL_FUNDING_METHOD } from "../../src/agent.constants";
 import type { AgentNodeFetch } from "../../src/agent.types";
 import { bareLowerHex, readJsonObject } from "../../src/agent.utils";
 import { readJsonRpcRequest } from "../../src/json-rpc";
@@ -30,7 +30,7 @@ type Interceptor = {
     rewrite: FaultyFetchRewrite | null;
 };
 
-export { OPEN_TENANT_CHANNEL_METHOD };
+export { OPEN_CHANNEL_WITH_EXTERNAL_FUNDING_METHOD };
 export const SUBMIT_CHANNEL_SIGNATURE_METHOD = "submit_channel_signature";
 export const SUBMIT_SIGNED_FUNDING_TX_METHOD = "submit_signed_funding_tx";
 export const GET_CHANNEL_SIGNING_STATUS_METHOD = "get_channel_signing_status";

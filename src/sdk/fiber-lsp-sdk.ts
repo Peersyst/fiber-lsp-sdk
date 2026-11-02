@@ -1,12 +1,14 @@
-import { equalBytes } from "@noble/curves/utils.js";
 import {
+    HASH256_LENGTH,
     ListenerSet,
+    UINT64_MAX,
     assertBytes,
     assertCompressedPoint,
     assertFunction,
     isPlainObject,
     assertNonEmptyString,
     assertTimerDelayMs,
+    assertUnsignedBigInt,
 } from "../common";
 import type { CellDep, Script, Transaction } from "../common";
 import { MASTER_SEED_LENGTH } from "../derivation";
@@ -42,8 +44,8 @@ import type {
     SdkInvoiceOptions,
     SdkPayment,
     SdkSignFundingInputs,
-    SdkTenantChallenge,
     SdkTenantRegistration,
+    SdkTenantRegistrationRequest,
     SdkTransferOptions,
 } from "./sdk.types";
 import { resolveSdkNetwork, runtimeTimer } from "./utils";
@@ -57,7 +59,7 @@ export class FiberLspSdk {
     /**
      * Wires the device from its seed and the host's effects; nothing connects until `connect()`.
      * @param masterSeed The 32-byte master seed, copied.
-     * @param options The network, the host's effects, the node's endpoint, the LSP's key, the nonce reuse mode and the watchtower's approval.
+     * @param options The network, the node, the LSP's key, the host's effects and the signing modes.
      */
     constructor(masterSeed: Uint8Array, options: FiberLspSdkOptions) {
         assertBytes("masterSeed", masterSeed, MASTER_SEED_LENGTH);
@@ -134,7 +136,7 @@ export class FiberLspSdk {
     }
 
     /**
-     * The RootSigner's public key, which the host asks the LSP's registry nonce for.
+     * The RootSigner's public key, which `lsp_register_tenant` registers and the tenant id derives from.
      * @returns A copy of the 33-byte compressed key.
      */
     get rootSignerPubkey(): Uint8Array {
@@ -142,18 +144,18 @@ export class FiberLspSdk {
     }
 
     /**
-     * Signs the LSP's registry nonce, refusing one issued by another LSP or to another RootSigner; the host makes both calls.
-     * @param challenge The result of `lsp_get_tenant_registry_nonce`.
+     * Signs the RootSigner's registration with the LSP of `lspPubkey`; the host sends it as `lsp_register_tenant`.
+     * @param request A fresh 32-byte request id and the signing time in Unix milliseconds, both of the host's choosing.
      * @returns The params of `lsp_register_tenant`, copies, with the tenant id they register.
      */
-    signTenantRegistration(challenge: SdkTenantChallenge): SdkTenantRegistration {
-        if (!isPlainObject(challenge)) throw new TypeError("challenge must be an object");
-        assertCompressedPoint("challenge.lspNodeId", challenge.lspNodeId);
-        if (!equalBytes(challenge.lspNodeId, this.context.lspPubkey)) {
-            throw new TypeError("challenge.lspNodeId must be lspPubkey: the nonce was issued by another LSP");
-        }
-        const { identity } = this.context;
-        return { ...identity.signRegistration(challenge), tenantId: identity.tenantId };
+    signTenantRegistration(request: SdkTenantRegistrationRequest): SdkTenantRegistration {
+        if (!isPlainObject(request)) throw new TypeError("request must be an object");
+        const { requestId, signedAtMs } = request;
+        assertBytes("request.requestId", requestId, HASH256_LENGTH);
+        assertUnsignedBigInt("request.signedAtMs", signedAtMs, UINT64_MAX);
+        const { identity, lspPubkey } = this.context;
+        const params = identity.signRegistration({ lspNodeId: lspPubkey, requestId, signedAtMs });
+        return { ...params, tenantId: identity.tenantId };
     }
 
     /**

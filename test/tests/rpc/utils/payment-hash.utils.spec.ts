@@ -1,7 +1,7 @@
 import { hexToBytes } from "@noble/hashes/utils.js";
 import type { RpcPaymentHashParams } from "../../../../src/rpc";
 import { encodeRpcPaymentHashParams } from "../../../../src/rpc";
-import { toRpcPaymentHashParams } from "../../../utils/rpc-typed";
+import { toRpcPaymentHashParams, withoutNulls } from "../../../utils/rpc-typed";
 import { loadRpcVectors } from "../../../utils/rpc-vectors";
 
 const vectors = loadRpcVectors();
@@ -22,8 +22,9 @@ describe("encodeRpcPaymentHashParams", () => {
         expect(encodeRpcPaymentHashParams(params)).toEqual({ payment_hash: `0x${"00".repeat(32)}` });
     });
 
+    // Fiber writes the tenant id it reads on get_invoice and get_payment as null; a tenant's token leaves it out.
     it.each(CASES)("writes %s / %s as fiber's serde does", (_, __, entry) => {
-        expect(encodeRpcPaymentHashParams(toRpcPaymentHashParams(entry.values))).toEqual(entry.json);
+        expect(encodeRpcPaymentHashParams(toRpcPaymentHashParams(entry.values))).toEqual(withoutNulls(entry.json));
     });
 
     it.each<[string, unknown, Error]>([

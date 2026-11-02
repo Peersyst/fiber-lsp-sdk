@@ -31,6 +31,7 @@ import {
 } from "../../utils/tenant-flow";
 import type { InMemoryTenantNode, TenantNodePayment } from "../../utils/tenant-node";
 import { writes } from "../../utils/stored-records";
+import { rejection } from "../../utils/rejection";
 
 const vectors = loadSigningVectors();
 const SIGNED_TICK = ["get_channel_signing_status", "submit_channel_signature"];
@@ -1045,14 +1046,20 @@ describe("the signing step over the tenant node", () => {
             const rpc = new FiberRpcClient({ url: TENANT_NODE_URL, fetch: h.node.fetch });
             const request = h.node.served[0];
             if (request === undefined) throw new Error("the node served no request");
-            await expect(
+            const refused = await rejection(
                 rpc.submitChannelSignature({
                     channelId: CHANNEL_ID,
                     requestId: hexToBytes(request.requestId.slice(2)),
                     partialSignature: new Uint8Array(32).fill(1),
                     nextMaterial: null,
                 }),
-            ).rejects.toEqual(new RpcError("submit_channel_signature", -32000, "Invalid state: channel is not waiting for a signature"));
+            );
+            expect(refused).toBeInstanceOf(RpcError);
+            expect(refused).toMatchObject({
+                method: "submit_channel_signature",
+                code: -32000,
+                message: "Invalid state: channel is not waiting for a signature",
+            });
         });
     });
 });

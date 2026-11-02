@@ -113,7 +113,7 @@ function readChannelSigningStatus(field: WireField): ChannelSigningStatus {
 }
 
 /**
- * Reads the nonce slot, its purpose the transition's and its number one the device can sign at and publish the next of.
+ * Reads the nonce slot, its purpose the transition's and its next number still derivable.
  * @param field The `slot` member.
  * @param transition The request's transition.
  * @param rule What the transition must carry.
@@ -128,7 +128,7 @@ function decodeNonceSlot(field: WireField, transition: ChannelSigningTransition,
     }
     const number = at("commitment_number");
     const commitmentNumber = decodeUintHexNumber(number, MAX_SIGNING_SLOT_NUMBER);
-    // The announcement nonce has a single slot, fiber's `validate_nonce_slot` (`fiber-lsp-sdk/src/signer.rs:1586`).
+    // The announcement nonce has a single slot, fiber's `validate_nonce_slot` (`fiber-lsp-sdk/src/signer.rs:1587`).
     if (context === "ANNOUNCEMENT" && commitmentNumber !== 0) malformedWireField(number, "must be 0 for a channel announcement");
     return { context, commitmentNumber };
 }

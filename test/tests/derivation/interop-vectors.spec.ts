@@ -30,7 +30,7 @@ const vectors = loadInteropVectors();
 describe("cross-implementation vectors", () => {
     it("declares the scheme and the fiber release they were generated for", () => {
         expect(vectors.scheme_version).toBe(1);
-        expect(vectors.fiber_ref).toBe("8db6a117");
+        expect(vectors.fiber_ref).toBe("d8dd6d28");
     });
 
     it("covers the boundaries of every input range", () => {

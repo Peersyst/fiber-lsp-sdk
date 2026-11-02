@@ -209,7 +209,7 @@ final. What else the facade knows of a payment in flight, the hashes whose `tran
 the payment step is reading (`reading`), is held in memory alone and never written: a restart empties both, and the
 watched entry, with the intent the policy keeps, is what the next tick resumes from ([sdk.md](./sdk.md)).
 
-The pending opening is one key, not one per channel, because fiber keeps a single opening per tenant. Its record is
+The pending opening is one key, not one per channel, because the SDK opens one channel at a time. Its record is
 `{ version, opening }`, and `opening` is `null` once dropped, since the storage has no delete, or:
 
 | Field              | What                                                                                                            |

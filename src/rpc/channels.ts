@@ -49,7 +49,6 @@ import type {
     OpenTenantChannelParams,
     OpenTenantChannelParamsWire,
     OpenTenantChannelResult,
-    OpenTenantChannelResultWire,
     RpcChannel,
     RpcChannelState,
     RpcChannelStateFlag,
@@ -102,7 +101,7 @@ function encodeFundingLockScriptCellDeps(deps: CellDep[]): CellDepWire[] {
 }
 
 /**
- * Reads the result of `open_channel_with_external_funding`.
+ * Reads the result of `open_channel_with_external_funding` in the operator's form, which carries no opening context.
  * @param field The result field.
  * @returns The final channel id and the unsigned funding transaction.
  */
@@ -115,7 +114,7 @@ export function decodeOpenChannelWithExternalFundingResult(field: WireField): Op
 }
 
 /**
- * Writes the params of `open_tenant_channel`: the external-funding open, private, with the device's public signer material.
+ * Writes the params of `open_channel_with_external_funding` in the tenant's form: private, with the device's signer material.
  * @param params The channel to open and the material of its signer.
  * @returns The wire params.
  */
@@ -179,12 +178,12 @@ function encodeChannelOpenSignerMaterial(material: ChannelOpenSignerMaterial): C
 }
 
 /**
- * Reads the result of `open_tenant_channel`.
+ * Reads the result of `open_channel_with_external_funding` in the tenant's form, refusing one without its opening context.
  * @param field The result field.
  * @returns The final channel id, the unsigned funding transaction and the terms the node froze.
  */
 export function decodeOpenTenantChannelResult(field: WireField): OpenTenantChannelResult {
-    const at = readObject<OpenTenantChannelResultWire>(field);
+    const at = readObject<OpenChannelWithExternalFundingResultWire>(field);
     return {
         ...decodeOpenChannelWithExternalFundingResult(field),
         openingContext: decodeTenantChannelOpeningContext(at("opening_context")),

@@ -28,3 +28,13 @@ export function messageOf(error: unknown): string {
 export function bareLowerHex(hex: string): string {
     return (hex.startsWith("0x") ? hex.slice(2) : hex).toLowerCase();
 }
+
+/**
+ * Tells whether a value is lowercase hex of an exact number of characters, without `0x`.
+ * @param value The value.
+ * @param length The number of hex characters.
+ * @returns Whether it is.
+ */
+export function isBareHex(value: unknown, length: number): value is string {
+    return typeof value === "string" && value.length === length && /^[0-9a-f]*$/.test(value);
+}

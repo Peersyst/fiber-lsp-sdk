@@ -32,20 +32,13 @@ import {
     encodeSubmitChannelSignatureParams,
     encodeSubmitWatchtowerSignatureParams,
 } from "./signing";
-import {
-    decodeGetTenantRegistryNonceResult,
-    decodeRegisterTenantResult,
-    encodeGetTenantRegistryNonceParams,
-    encodeRegisterTenantParams,
-} from "./tenants";
+import { decodeRegisterTenantResult, encodeRegisterTenantParams } from "./tenants";
 import type {
     AbandonChannelParams,
     RpcChannel,
     RpcChannelIdParams,
     RpcListedChannelState,
     FiberRpcClientOptions,
-    GetTenantRegistryNonceParams,
-    GetTenantRegistryNonceResult,
     ListChannelsParams,
     NewInvoiceParams,
     NewInvoiceResult,
@@ -140,7 +133,7 @@ export class FiberRpcClient {
     }
 
     /**
-     * Opens a channel funded by the user's cells, blocking until the node has built the funding transaction.
+     * Opens a channel funded by the user's cells in the operator's form, blocking until the node has built the funding transaction.
      * @param params The channel to open.
      * @returns The final channel id and the unsigned funding transaction.
      */
@@ -153,12 +146,12 @@ export class FiberRpcClient {
     }
 
     /**
-     * Opens a private channel for the tenant, funded by the user's cells, with the device's public signer material.
+     * Opens the tenant's private channel, funded by the user's cells, with the device's public signer material.
      * @param params The channel to open.
      * @returns The final channel id, the unsigned funding transaction and the opening context the node commits to.
      */
     async openTenantChannel(params: OpenTenantChannelParams): Promise<OpenTenantChannelResult> {
-        return this.call("open_tenant_channel", encodeOpenTenantChannelParams(params), decodeOpenTenantChannelResult);
+        return this.call("open_channel_with_external_funding", encodeOpenTenantChannelParams(params), decodeOpenTenantChannelResult);
     }
 
     /**
@@ -294,17 +287,8 @@ export class FiberRpcClient {
     }
 
     /**
-     * Fetches the nonce a root signer signs to register as a tenant; needs the operator's token.
-     * @param params The root signer's public key.
-     * @returns The node's id, the key it echoes and the nonce.
-     */
-    async getTenantRegistryNonce(params: GetTenantRegistryNonceParams): Promise<GetTenantRegistryNonceResult> {
-        return this.call("lsp_get_tenant_registry_nonce", encodeGetTenantRegistryNonceParams(params), decodeGetTenantRegistryNonceResult);
-    }
-
-    /**
-     * Registers a tenant with the root signer's signature over the nonce; needs the operator's token.
-     * @param params The root signer's public key, the nonce and the signature.
+     * Registers a tenant with the root signer's signature over the registry payload; needs the operator's token.
+     * @param params The root signer's public key, the request id, the signing time and the signature.
      * @returns The tenant as registered and its access token.
      */
     async registerTenant(params: RegisterTenantParams): Promise<RegisterTenantResult> {

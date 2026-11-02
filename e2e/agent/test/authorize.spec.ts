@@ -34,6 +34,22 @@ const INVOICE_BODY = {
         max_tlc_expiry_ms: 1793782800000,
     },
 };
+// `e2e/lsp` step 27b: node 1's invoice of 100000 under preimage 0x33..33, plus the 500 the tenant's send_payment budgets for routing.
+const OUTGOING_HASH = "0xdbddb41b1249f996f6ef6ef69499964db5b200dd8e82360b7de82448e36cc1e4";
+const PAYMENT_BODY = {
+    type: "Payment",
+    channel_id: CHANNEL_ID,
+    terms: {
+        payment_hash: OUTGOING_HASH,
+        hash_algorithm: "ckb_hash",
+        inbound: false,
+        amount: 100500,
+        expires_at_ms: 1793174400000,
+        min_tlc_expiry_delta_ms: 60000,
+        max_tlc_expiry_ms: 1793782800000,
+    },
+};
+const FULFILLMENT_BODY = { type: "Fulfillment", channel_id: CHANNEL_ID, payment_hash: CKB_HASH, preimage: PREIMAGE };
 const RELEASE_TO_WATCHTOWER_BODY = {
     type: "ReleasePreimage",
     channel_id: CHANNEL_ID,
@@ -64,8 +80,11 @@ function patched(body: object, patch: Record<string, unknown>): Record<string, u
     return next;
 }
 
-function withTerms(patch: Record<string, unknown>): Record<string, unknown> {
-    return patched(INVOICE_BODY, { terms: patched(INVOICE_BODY.terms, patch) });
+function withTerms(
+    patch: Record<string, unknown>,
+    body: typeof INVOICE_BODY | typeof PAYMENT_BODY = INVOICE_BODY,
+): Record<string, unknown> {
+    return patched(body, { terms: patched(body.terms, patch) });
 }
 
 function refuses(body: unknown, field: string): void {
@@ -77,13 +96,39 @@ function refuses(body: unknown, field: string): void {
 
 describe("readAuthorization", () => {
     describe("the suites' bodies", () => {
-        it("reads Invoice, keeping the hash and its algorithm", () => {
+        it("reads Invoice, its amount and times as decimal strings", () => {
             assert.deepEqual(readAuthorization(INVOICE_BODY), {
                 type: "Invoice",
                 channelId: CHANNEL_ID,
                 preimage: PREIMAGE,
                 paymentHash: CKB_HASH,
                 hashAlgorithm: "ckb_hash",
+                amountShannons: "1000000",
+                expiresAtMs: "1793174400000",
+                minTlcExpiryDeltaMs: "86400000",
+                maxTlcExpiryMs: "1793782800000",
+            });
+        });
+
+        it("reads Payment, its amount and times as decimal strings", () => {
+            assert.deepEqual(readAuthorization(PAYMENT_BODY), {
+                type: "Payment",
+                channelId: CHANNEL_ID,
+                paymentHash: OUTGOING_HASH,
+                hashAlgorithm: "ckb_hash",
+                amountShannons: "100500",
+                expiresAtMs: "1793174400000",
+                minTlcExpiryDeltaMs: "60000",
+                maxTlcExpiryMs: "1793782800000",
+            });
+        });
+
+        it("reads Fulfillment", () => {
+            assert.deepEqual(readAuthorization(FULFILLMENT_BODY), {
+                type: "Fulfillment",
+                channelId: CHANNEL_ID,
+                paymentHash: CKB_HASH,
+                preimage: PREIMAGE,
             });
         });
 
@@ -160,10 +205,11 @@ describe("readAuthorization", () => {
         refuses(patched(WATCHTOWER_BODY, { type: "watchtower" }), "type");
         refuses(patched(RELEASE_TO_INVOICE_BODY, { type: "Release_Preimage" }), "type");
         refuses(patched(CLOSE_BODY, { type: "CLOSE" }), "type");
-        refuses(patched(INVOICE_BODY, { type: "Payment" }), "type");
+        refuses(patched(PAYMENT_BODY, { type: "payment" }), "type");
+        refuses(patched(FULFILLMENT_BODY, { type: "Fulfilment" }), "type");
     });
 
-    for (const body of [INVOICE_BODY, RELEASE_TO_INVOICE_BODY, CLOSE_BODY, WATCHTOWER_BODY]) {
+    for (const body of [INVOICE_BODY, PAYMENT_BODY, FULFILLMENT_BODY, RELEASE_TO_INVOICE_BODY, CLOSE_BODY, WATCHTOWER_BODY]) {
         it(`refuses ${body.type} with an absent or malformed channel_id`, () => {
             refuses(patched(body, { channel_id: undefined }), "channel_id");
             refuses(patched(body, { channel_id: CHANNEL_ID.slice(0, -2) }), "channel_id");
@@ -174,36 +220,15 @@ describe("readAuthorization", () => {
     }
 
     describe("Invoice", () => {
+        it("reads a sha256 hash", () => {
+            const sha = readAuthorization(withTerms({ payment_hash: SHA256_HASH, hash_algorithm: "sha256" }));
+            assert.equal(sha.type === "Invoice" && sha.hashAlgorithm, "sha256");
+        });
+
         it("refuses an absent or malformed preimage", () => {
             refuses(patched(INVOICE_BODY, { preimage: undefined }), "preimage");
             refuses(patched(INVOICE_BODY, { preimage: PREIMAGE.slice(0, -2) }), "preimage");
             refuses(patched(INVOICE_BODY, { preimage: 22 }), "preimage");
-        });
-
-        it("refuses absent or non-object terms", () => {
-            refuses(patched(INVOICE_BODY, { terms: undefined }), "terms");
-            refuses(patched(INVOICE_BODY, { terms: null }), "terms");
-            refuses(patched(INVOICE_BODY, { terms: [] }), "terms");
-        });
-
-        it("refuses an absent or malformed payment_hash", () => {
-            refuses(withTerms({ payment_hash: undefined }), "terms.payment_hash");
-            refuses(withTerms({ payment_hash: CKB_HASH.slice(0, -2) }), "terms.payment_hash");
-        });
-
-        it("reads each hash_algorithm, its spelling exact", () => {
-            const sha = readAuthorization(withTerms({ payment_hash: SHA256_HASH, hash_algorithm: "sha256" }));
-            assert.equal(sha.type === "Invoice" && sha.hashAlgorithm, "sha256");
-            refuses(withTerms({ hash_algorithm: undefined }), "terms.hash_algorithm");
-            refuses(withTerms({ hash_algorithm: "ckb-hash" }), "terms.hash_algorithm");
-            refuses(withTerms({ hash_algorithm: "CkbHash" }), "terms.hash_algorithm");
-            refuses(withTerms({ hash_algorithm: "Sha256" }), "terms.hash_algorithm");
-        });
-
-        it("refuses an absent or non-boolean inbound", () => {
-            refuses(withTerms({ inbound: undefined }), "terms.inbound must be a boolean");
-            refuses(withTerms({ inbound: "true" }), "terms.inbound must be a boolean");
-            refuses(withTerms({ inbound: 1 }), "terms.inbound must be a boolean");
         });
 
         it("refuses an outgoing payment, as fiber's authorize_invoice", () => {
@@ -214,17 +239,93 @@ describe("readAuthorization", () => {
             refuses(patched(INVOICE_BODY, { preimage: `0x${"22".repeat(31)}23` }), "preimage does not hash to payment_hash under ckb_hash");
             refuses(withTerms({ hash_algorithm: "sha256" }), "preimage does not hash to payment_hash under sha256");
         });
+    });
 
-        for (const field of ["amount", "expires_at_ms", "min_tlc_expiry_delta_ms", "max_tlc_expiry_ms"]) {
-            it(`refuses an absent or non-integer ${field}, and accepts 0`, () => {
-                assert.doesNotThrow(() => readAuthorization(withTerms({ [field]: 0 })));
-                refuses(withTerms({ [field]: undefined }), `terms.${field}`);
-                refuses(withTerms({ [field]: -1 }), `terms.${field}`);
-                refuses(withTerms({ [field]: 1.5 }), `terms.${field}`);
-                refuses(withTerms({ [field]: "1000000" }), `terms.${field}`);
-                refuses(withTerms({ [field]: 2 ** 53 }), `terms.${field}`);
+    describe("Payment", () => {
+        it("refuses an incoming payment with fiber's authorize_payment message", () => {
+            refuses(withTerms({ inbound: true }, PAYMENT_BODY), "inbound authorization requires authorize_invoice and a matching preimage");
+        });
+
+        it("reads a sha256 hash and the largest exact amount", () => {
+            const read = readAuthorization(withTerms({ hash_algorithm: "sha256", amount: Number.MAX_SAFE_INTEGER }, PAYMENT_BODY));
+            assert.equal(read.type === "Payment" && read.hashAlgorithm, "sha256");
+            assert.equal(read.type === "Payment" && read.amountShannons, "9007199254740991");
+        });
+
+        it("takes no preimage, ignoring one", () => {
+            assert.deepEqual(readAuthorization(patched(PAYMENT_BODY, { preimage: "placeholder" })), readAuthorization(PAYMENT_BODY));
+        });
+    });
+
+    for (const body of [INVOICE_BODY, PAYMENT_BODY]) {
+        describe(`${body.type}'s terms`, () => {
+            const terms = (patch: Record<string, unknown>) => withTerms(patch, body);
+
+            it("refuses absent or non-object terms", () => {
+                refuses(patched(body, { terms: undefined }), "terms");
+                refuses(patched(body, { terms: null }), "terms");
+                refuses(patched(body, { terms: [] }), "terms");
             });
-        }
+
+            it("refuses an absent or malformed payment_hash", () => {
+                refuses(terms({ payment_hash: undefined }), "terms.payment_hash");
+                refuses(terms({ payment_hash: CKB_HASH.slice(0, -2) }), "terms.payment_hash");
+            });
+
+            it("refuses an absent or misspelt hash_algorithm", () => {
+                refuses(terms({ hash_algorithm: undefined }), "terms.hash_algorithm");
+                refuses(terms({ hash_algorithm: "ckb-hash" }), "terms.hash_algorithm");
+                refuses(terms({ hash_algorithm: "CkbHash" }), "terms.hash_algorithm");
+                refuses(terms({ hash_algorithm: "Sha256" }), "terms.hash_algorithm");
+            });
+
+            it("refuses an absent or non-boolean inbound", () => {
+                refuses(terms({ inbound: undefined }), "terms.inbound must be a boolean");
+                refuses(terms({ inbound: "true" }), "terms.inbound must be a boolean");
+                refuses(terms({ inbound: 1 }), "terms.inbound must be a boolean");
+            });
+
+            for (const field of ["amount", "expires_at_ms", "min_tlc_expiry_delta_ms", "max_tlc_expiry_ms"]) {
+                it(`refuses an absent or non-integer ${field}`, () => {
+                    refuses(terms({ [field]: undefined }), `terms.${field}`);
+                    refuses(terms({ [field]: -1 }), `terms.${field}`);
+                    refuses(terms({ [field]: 1.5 }), `terms.${field}`);
+                    refuses(terms({ [field]: "1000000" }), `terms.${field}`);
+                    refuses(terms({ [field]: 2 ** 53 }), `terms.${field}`);
+                });
+            }
+
+            // As fiber's `CommitmentState::authorize`.
+            const BOUNDS = "invalid payment amount or expiry bounds";
+            it("refuses an amount of 0, and accepts 1", () => {
+                refuses(terms({ amount: 0 }), BOUNDS);
+                assert.doesNotThrow(() => readAuthorization(terms({ amount: 1 })));
+            });
+
+            it("refuses a min_tlc_expiry_delta_ms of 0, and accepts 1", () => {
+                refuses(terms({ min_tlc_expiry_delta_ms: 0 }), BOUNDS);
+                assert.doesNotThrow(() => readAuthorization(terms({ min_tlc_expiry_delta_ms: 1 })));
+            });
+
+            it("refuses a max_tlc_expiry_ms at or below expires_at_ms, and accepts one above", () => {
+                refuses(terms({ expires_at_ms: 1000, max_tlc_expiry_ms: 1000 }), BOUNDS);
+                refuses(terms({ expires_at_ms: 1000, max_tlc_expiry_ms: 999 }), BOUNDS);
+                assert.doesNotThrow(() => readAuthorization(terms({ expires_at_ms: 1000, max_tlc_expiry_ms: 1001 })));
+                assert.doesNotThrow(() => readAuthorization(terms({ expires_at_ms: 0, max_tlc_expiry_ms: 1 })));
+            });
+        });
+    }
+
+    describe("Fulfillment", () => {
+        it("refuses an absent or malformed payment_hash", () => {
+            refuses(patched(FULFILLMENT_BODY, { payment_hash: undefined }), "payment_hash");
+            refuses(patched(FULFILLMENT_BODY, { payment_hash: "placeholder" }), "payment_hash");
+        });
+
+        it("refuses an absent or malformed preimage", () => {
+            refuses(patched(FULFILLMENT_BODY, { preimage: undefined }), "preimage");
+            refuses(patched(FULFILLMENT_BODY, { preimage: `${PREIMAGE}22` }), "preimage");
+        });
     });
 
     describe("ReleasePreimage", () => {

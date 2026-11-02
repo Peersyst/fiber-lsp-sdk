@@ -22,9 +22,7 @@ import { loadInvoiceVectors } from "../../utils/invoice-vectors";
 const vectors = loadInvoiceVectors();
 const PAYEE_SECRET_KEY = hexToBytes(vectors.payee_secret_key);
 
-/**
- * Strings fiber reads and writes back unchanged that the SDK refuses on purpose, each with its refusal.
- */
+// Strings fiber round-trips that the SDK refuses on purpose.
 const DELIBERATE_REFUSALS: Record<string, string> = {
     "recovery id flipped, with a payee key": "signature must be by the payee key the invoice carries",
     "duplicate expiry": "data.attributes[1] must not repeat an attribute type",
@@ -42,7 +40,7 @@ function decodeOrRefusal(text: string): Invoice | InvoiceError {
     }
 }
 
-// --- invoices the SDK writes that the vectors do not hold, for fiber's decoder to read ---
+// Invoices the SDK writes that the vectors lack, for fiber's decoder.
 
 function xorshift(seed: number): () => number {
     let state = seed;
@@ -106,7 +104,7 @@ function generatedInvoices(count: number): UnsignedInvoice[] {
 
 describe("invoice interop vectors", () => {
     it("declares the fiber release they were generated with, and the payee key of its secret", () => {
-        expect(vectors.fiber_ref).toBe("8db6a117");
+        expect(vectors.fiber_ref).toBe("d8dd6d28");
         expect(bytesToHex(secp256k1.getPublicKey(PAYEE_SECRET_KEY, true))).toBe(vectors.payee_public_key);
     });
 

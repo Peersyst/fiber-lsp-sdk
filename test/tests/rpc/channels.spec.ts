@@ -43,7 +43,7 @@ import {
     toSubmitSignedFundingTxResult,
     withoutNulls,
 } from "../../utils/rpc-typed";
-import { loadRpcVectors } from "../../utils/rpc-vectors";
+import { isTenantOpenParams, isTenantOpenResult, loadRpcVectors } from "../../utils/rpc-vectors";
 import { ABOVE_U64, ABOVE_U128, U64_MAX_HEX, U128_MAX_HEX } from "../../utils/uint-hex";
 import { withField } from "../../utils/with-field";
 
@@ -52,9 +52,14 @@ const {
     open_channel_with_external_funding: open,
     submit_signed_funding_tx: submit,
     list_channels: list,
-    open_tenant_channel: openTenant,
     shutdown_channel: shutdown,
 } = vectors.methods;
+
+// One method, two forms: the tenant's carries the signer material and is answered with the opening context.
+const operatorOpenParams = open.params.flatMap(({ name, values, json }) => (isTenantOpenParams(values) ? [] : [{ name, values, json }]));
+const tenantOpenParams = open.params.flatMap(({ name, values, json }) => (isTenantOpenParams(values) ? [{ name, values, json }] : []));
+const operatorOpenResults = open.results.flatMap(({ name, values, json }) => (isTenantOpenResult(values) ? [] : [{ name, values, json }]));
+const tenantOpenResults = open.results.flatMap(({ name, values, json }) => (isTenantOpenResult(values) ? [{ name, values, json }] : []));
 
 const CHANNEL_ID = `0x${"11".repeat(32)}`;
 const PEER = `02${"ab".repeat(32)}`;
@@ -109,6 +114,9 @@ const CLOSED_CHANNEL = {
     shutdown_transaction_hash: `0x${"5d".repeat(32)}`,
 };
 
+// Fiber's own message for an abandoned opening, the id in `Hash256`'s display form.
+const ABANDONED_DETAIL = `[Channel Hash256(${CHANNEL_ID})] Channel was abandoned`;
+
 // A failed opening as `only_pending` synthesizes it: unfunded, told from a timeout by its detail alone.
 const ABORTED_CHANNEL = {
     ...READY_CHANNEL,
@@ -121,7 +129,7 @@ const ABORTED_CHANNEL = {
     enabled: false,
     tlc_expiry_delta: "0x0",
     tlc_fee_proportional_millionths: "0x0",
-    failure_detail: "Channel was abandoned",
+    failure_detail: ABANDONED_DETAIL,
 };
 
 const LISTING = { channels: [READY_CHANNEL, CLOSED_CHANNEL, ABORTED_CHANNEL] };
@@ -219,7 +227,7 @@ describe("open_channel_with_external_funding", () => {
             });
         });
 
-        it.each(open.params.map((entry) => [entry.name, entry] as const))("writes the %s case as fiber's serde does", (_, entry) => {
+        it.each(operatorOpenParams.map((entry) => [entry.name, entry] as const))("writes the %s case as fiber's serde does", (_, entry) => {
             expect(encodeOpenChannelWithExternalFundingParams(toOpenChannelWithExternalFundingParams(entry.values))).toEqual(
                 withoutNulls(entry.json),
             );
@@ -304,13 +312,20 @@ describe("open_channel_with_external_funding", () => {
     });
 
     describe("decodeOpenChannelWithExternalFundingResult", () => {
-        it.each(open.results.map((entry) => [entry.name, entry] as const))("reads the %s", (_, entry) => {
+        it.each(operatorOpenResults.map((entry) => [entry.name, entry] as const))("reads the %s", (_, entry) => {
             expect(decodeOpenChannelWithExternalFundingResult(result(entry.json))).toEqual(
                 toOpenChannelWithExternalFundingResult(entry.values),
             );
         });
 
         const json = caseOf(open.results, "ckb channel").json;
+
+        it("reads a tenant's answer without its opening context, which only the tenant's form reads", () => {
+            const entry = caseOf(tenantOpenResults, "tenant, opening context");
+            expect(decodeOpenChannelWithExternalFundingResult(result(entry.json))).toEqual(
+                toOpenChannelWithExternalFundingResult(entry.values),
+            );
+        });
 
         it.each([
             ["channel_id", "11".repeat(32)],
@@ -445,7 +460,7 @@ describe("list_channels", () => {
                     receivedTlcBalanceShannons: "0",
                     createdAtMs: 1726000000000n,
                     shutdownTransactionHash: null,
-                    failureDetail: "Channel was abandoned",
+                    failureDetail: ABANDONED_DETAIL,
                 },
             ]);
         });
@@ -620,7 +635,7 @@ describe("list_channels", () => {
     });
 });
 
-describe("open_tenant_channel", () => {
+describe("open_channel_with_external_funding, in the tenant's form", () => {
     describe("encodeOpenTenantChannelParams", () => {
         it("writes the open's five members, public always false, and the material, leaving the two options to the node", () => {
             const wire = encodeOpenTenantChannelParams(OPEN_TENANT);
@@ -724,7 +739,7 @@ describe("open_tenant_channel", () => {
             expect(encodeOpenTenantChannelParams({ ...OPEN_TENANT, public: true } as OpenTenantChannelParams).public).toBe(false);
         });
 
-        it.each(openTenant.params.map((entry) => [entry.name, entry] as const))("writes the %s case as fiber's serde does", (_, entry) => {
+        it.each(tenantOpenParams.map((entry) => [entry.name, entry] as const))("writes the %s case as fiber's serde does", (_, entry) => {
             expect(encodeOpenTenantChannelParams(toOpenTenantChannelParams(entry.values))).toEqual(withoutNulls(entry.json));
         });
 
@@ -843,11 +858,15 @@ describe("open_tenant_channel", () => {
     });
 
     describe("decodeOpenTenantChannelResult", () => {
-        it.each(openTenant.results.map((entry) => [entry.name, entry] as const))("reads the %s", (_, entry) => {
+        it.each(tenantOpenResults.map((entry) => [entry.name, entry] as const))("reads the %s", (_, entry) => {
             expect(decodeOpenTenantChannelResult(result(entry.json))).toEqual(toOpenTenantChannelResult(entry.values));
         });
 
-        const json = caseOf(openTenant.results, "opening context").json as Record<string, unknown>;
+        const json = caseOf(open.results, "ckb channel").json as Record<string, unknown>;
+
+        it("refuses the operator's answer, which carries no opening context", () => {
+            expect(refusal(() => decodeOpenTenantChannelResult(result(json))).path).toBe(`${RESULT}.opening_context`);
+        });
 
         it("reads a literal opening context field by field, the amounts and reserves in decimal shannons", () => {
             expect(decodeOpenTenantChannelResult(result({ ...json, opening_context: OPENING_CONTEXT })).openingContext).toEqual({
@@ -1113,16 +1132,16 @@ describe("FiberRpcClient channel methods", () => {
     });
 
     it("opens a tenant channel through call and reads the frozen terms", async () => {
-        const entry = caseOf(openTenant.results, "opening context, large amounts");
+        const entry = caseOf(tenantOpenResults, "tenant, opening context, large amounts");
         const mock = answering(entry.json);
         const client = new FiberRpcClient({ url: URL, fetch: mock.fetch });
         await expect(
-            client.call("open_tenant_channel", encodeOpenTenantChannelParams(OPEN_TENANT), decodeOpenTenantChannelResult),
+            client.call("open_channel_with_external_funding", encodeOpenTenantChannelParams(OPEN_TENANT), decodeOpenTenantChannelResult),
         ).resolves.toEqual(toOpenTenantChannelResult(entry.values));
         expect(sent(mock)).toEqual({
             jsonrpc: "2.0",
             id: 1,
-            method: "open_tenant_channel",
+            method: "open_channel_with_external_funding",
             params: [encodeOpenTenantChannelParams(OPEN_TENANT)],
         });
     });

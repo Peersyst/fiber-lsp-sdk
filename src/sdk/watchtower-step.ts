@@ -118,7 +118,7 @@ export function buildWatchtowerSigningStep(options: WatchtowerSigningStepOptions
     };
 
     return async (run) => {
-        // Never `list_channels`: fiber wakes an evicted tenant for it, and not for a watchtower status (`rpc/watchtower.rs:379-400`).
+        // Never `list_channels`: fiber wakes an evicted tenant for it, and not for a watchtower status (`rpc/watchtower.rs:388-409`).
         // The list before the activity: an opening is watched before it is listed, so one listed and unwatched was seen closed.
         const listed = await channels.read();
         const open = (await activity.read()).channels;

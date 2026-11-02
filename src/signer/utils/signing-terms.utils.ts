@@ -147,7 +147,7 @@ function buildRevocationOperation(
     const { slot, transition } = request;
     assertCkbOutput("the revocation output", output);
     const revokedCommitmentNumber = readCommitmentLockVersion(commitmentLockArgs);
-    // Fiber revokes the version one below the slot's (`fiber-lib/src/fiber/channel.rs:7987`, `:10182`).
+    // Fiber revokes the version one below the slot's (`fiber-lib/src/fiber/channel.rs:8172`, `:10352`).
     if (revokedCommitmentNumber + 1 !== slot.commitmentNumber) {
         throw new TypeError(
             `the revocation at slot ${slot.commitmentNumber} must revoke version ${slot.commitmentNumber - 1}, not ${revokedCommitmentNumber}`,
