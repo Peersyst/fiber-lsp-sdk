@@ -6,7 +6,7 @@ check that the string the node returns for an invoice the device asked for carri
 Both need a reader that sees what fiber's decoder sees, so the `invoice` module is a port, pinned against fiber's own encoder
 and decoder by vectors of its own.
 
-Every claim about fiber refers to `nervosnetwork/fiber` @ `8db6a117`, `crates/fiber-types/src/invoice.rs` unless another file
+Every claim about fiber refers to `nervosnetwork/fiber` @ `d8dd6d28`, `crates/fiber-types/src/invoice.rs` unless another file
 is named.
 
 ## The string

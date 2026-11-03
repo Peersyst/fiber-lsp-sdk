@@ -9,7 +9,7 @@ with the request, the key order, the aggregate nonce, the peer's signature and t
 [signing.md](./signing.md); the gate it passes is [policy.md](./policy.md); the message it rebuilds from the content is
 [digest.md](./digest.md).
 
-The protocol is fiber's, not the SDK's: the types are `fiber-json-types/src/channel.rs:650-870` and `:948-1027` at the
+The protocol is fiber's, not the SDK's: the types are `fiber-json-types/src/channel.rs:644-864` and `:942-1021` at the
 hosted-LSP PR, and nothing here proposes a form of its own.
 
 ## The status
@@ -131,7 +131,7 @@ Each TLC:
 
 What each transition must carry, as the node builds it and fiber's own device SDK checks it
 (`fiber-lsp-sdk/src/lifecycle.rs:118-180`): the slot, counter and content of a revocation or a close
-(`fiber-lib/src/fiber/channel.rs:7999-8018,9200-9213,10194-10216`), the peer's evidence (`:11040-11080`), the settlement
+(`fiber-lib/src/fiber/channel.rs:8184-8200,9379-9392,10364-10380`), the peer's evidence (`:11207-11247`), the settlement
 and the next material (`fiber-types/src/channel_signer.rs:348-358,380-388`). The decoder enforces every column but the last before anything
 reads the content; `CHANNEL_SIGNING_RULES` is the table, and the dispatch reads its last column.
 

@@ -46,8 +46,6 @@ const FUNDING_LOCK_CELL_DEPS_COUNT: u32 = 2;
 pub(crate) const DEVICE: &str = "device";
 pub(crate) const PEER: &str = "peer";
 
-// --- the vector file ---
-
 #[derive(Serialize, Deserialize)]
 struct SigningVectors {
     fiber_ref: String,
@@ -76,7 +74,6 @@ pub(crate) struct PeerVector {
     pub(crate) tlc_base_pubkey: String,
 }
 
-/// The channel of every case: the terms a signer pins and the builds' inputs.
 #[derive(Serialize, Deserialize, Clone)]
 struct SigningChannelVector {
     channel_id: String,
@@ -143,7 +140,7 @@ struct Verdict {
     message: Option<String>,
 }
 
-/// The watchtower's spends of the two commitments a force close can put on chain, built over the channel's keys.
+/// The watchtower's spends of both commitments a force close can put on chain.
 #[derive(Serialize, Deserialize)]
 struct WatchtowerVectors {
     funding_cell_deps: Vec<JsonCellDep>,
@@ -211,8 +208,6 @@ struct WatchtowerVariant {
     fiber_error: String,
 }
 
-// --- the two signers ---
-
 struct Signers {
     device: FiberSigner,
     peer: FiberSigner,
@@ -261,7 +256,7 @@ impl Signers {
     }
 
     /// As a fiber node derives it: `derive_musig2_nonce` (crates/fiber-types/src/channel.rs:1343-1350), or the salted
-    /// base nonce for the announcement (crates/fiber-lib/src/fiber/channel.rs:8457-8467).
+    /// base nonce for the announcement (crates/fiber-lib/src/fiber/channel.rs:8639-8649).
     fn peer_secnonce(&self, slot: NonceSlot) -> SecNonce {
         match slot.purpose {
             NoncePurpose::Commitment => self.peer_native.derive_musig2_nonce(slot.commitment_number, Musig2Context::Commitment),
@@ -295,7 +290,7 @@ fn nonce_context(purpose: NoncePurpose) -> &'static str {
     }
 }
 
-/// Funding-cell spends sort the keys (crates/fiber-lib/src/fiber/channel.rs:11029-11042); a revocation keeps the
+/// Funding-cell spends sort the keys (crates/fiber-lib/src/fiber/channel.rs:11196-11209); a revocation keeps the
 /// revoked lock's role order (:11120-11129), `[remote, local]` sent and `[local, remote]` received.
 #[derive(Clone, Copy)]
 enum KeyOrder {
@@ -314,7 +309,7 @@ impl KeyOrder {
     }
 }
 
-/// fiber `to_rpc_signing_settlement` (crates/fiber-lib/src/rpc/channel.rs:913-945), ported: fiber-lib keeps it private.
+/// fiber `to_rpc_signing_settlement` (crates/fiber-lib/src/rpc/channel.rs:885-917), ported: fiber-lib keeps it private.
 pub(crate) fn to_rpc_signing_settlement(
     settlement: &SettlementData,
     local_settlement_key: fiber_types::Pubkey,
@@ -345,8 +340,6 @@ pub(crate) fn to_rpc_signing_settlement(
     }
 }
 
-// --- the cases ---
-
 /// One request as fiber's channel actor shapes it.
 struct Request {
     name: &'static str,
@@ -357,7 +350,7 @@ struct Request {
     signable: Musig2SignableContent,
     /// The harness builders' digest, which fiber's `signing_message` must equal.
     digest: [u8; 32],
-    /// The peer signs first on `CompleteReceived*` (crates/fiber-lib/src/fiber/channel.rs:11054-11079).
+    /// The peer signs first on `CompleteReceived*` (crates/fiber-lib/src/fiber/channel.rs:11221-11246).
     peer_signed: bool,
     settlement: Option<SigningSettlement>,
     /// Only the transitions that advance a commitment (crates/fiber-types/src/channel_signer.rs:380-388).
@@ -373,7 +366,7 @@ fn transition_name(transition: ChannelSigningTransition) -> String {
     serde_json::to_value(transition).unwrap().as_str().unwrap().to_string()
 }
 
-/// One musig2 session of the device and the peer on a slot, both halves verified and aggregated into a valid signature.
+/// One musig2 session on a slot, both halves verified and aggregated.
 struct MusigSession {
     key_agg_ctx: KeyAggContext,
     agg_nonce: AggNonce,
@@ -563,7 +556,7 @@ fn signing_channel(signers: &Signers) -> SigningChannelVector {
         to_remote: "18500000000".to_string(),
         local_reserved: reserved_capacity(&local_close_script, features).to_string(),
         // The node, the acceptor, sizes its reserve over its own close script under the channel's layout
-        // (`get_funding_and_reserved_amount`, crates/fiber-lib/src/fiber/network.rs:7586-7593, channel.rs:5811-5850).
+        // (`get_funding_and_reserved_amount`, crates/fiber-lib/src/fiber/network.rs:7770-7777, channel.rs:5929-5968).
         remote_reserved: reserved_capacity(&remote_close_script, features).to_string(),
         local_close_script,
         remote_close_script,
@@ -580,12 +573,11 @@ fn signing_channel(signers: &Signers) -> SigningChannelVector {
     }
 }
 
-/// fiber's `build_settlement_data` with every TLC pending (crates/fiber-lib/src/fiber/channel.rs:11409-11530).
+/// fiber's `build_settlement_data` with every TLC pending (crates/fiber-lib/src/fiber/channel.rs:11576-11697).
 fn pending_amount(tlcs: &[TlcVector], direction: &str) -> u128 {
     tlcs.iter().filter(|tlc| tlc.direction == direction).map(|tlc| tlc.amount.parse::<u128>().unwrap()).sum()
 }
 
-/// The commitment at `version` of one view, over the channel's terms and TLCs.
 fn commitment_case(channel: &SigningChannelVector, name: &str, for_remote: bool, version: u64) -> CommitmentCaseVector {
     let to_local: u128 = channel.to_local.parse().unwrap();
     let to_remote: u128 = channel.to_remote.parse().unwrap();
@@ -756,7 +748,7 @@ fn announcement_request(signers: &Signers, channel: &SigningChannelVector, name:
     Request {
         name,
         transition: ChannelSigningTransition::SignChannelAnnouncement,
-        // fiber's one announcement slot, number zero and no counter (crates/fiber-lib/src/fiber/channel.rs:7767-7786).
+        // fiber's one announcement slot, number zero and no counter (crates/fiber-lib/src/fiber/channel.rs:7955-7968).
         slot: NonceSlot { purpose: NoncePurpose::ChannelAnnouncement, commitment_number: 0 },
         counter: None,
         order: KeyOrder::Sorted,
@@ -768,8 +760,6 @@ fn announcement_request(signers: &Signers, channel: &SigningChannelVector, name:
         keeps_signature: false,
     }
 }
-
-// --- the variants ---
 
 /// A compressed key whose x has no point on the curve, the first such of a fixed sequence.
 fn off_curve_key() -> [u8; 33] {
@@ -829,11 +819,9 @@ fn signing_variants(base: &SigningCase) -> Vec<SigningVariant> {
         .collect()
 }
 
-// --- the watchtower ---
-
-/// fiber's `XUDT_COMPATIBLE_WITNESS` (crates/fiber-lib/src/fiber/channel.rs:11961), an empty `WitnessArgs`.
+/// fiber's `XUDT_COMPATIBLE_WITNESS` (crates/fiber-lib/src/fiber/channel.rs:12133), an empty `WitnessArgs`.
 const XUDT_COMPATIBLE_WITNESS: [u8; 16] = [16, 0, 0, 0, 16, 0, 0, 0, 16, 0, 0, 0, 16, 0, 0, 0];
-/// The watchtower's fee rate, a literal there (crates/fiber-lib/src/watchtower/actor.rs:1746).
+/// The watchtower's fee rate, a literal there (crates/fiber-lib/src/watchtower/actor.rs:1826).
 const WATCHTOWER_FEE_RATE: u64 = 1000;
 const SECP256K1_BLAKE160_CODE_HASH: &str = "9bd7e06f3ecf4be0f2fcd2188b23f1b9fcc88e5d4b65a8637b17723bbda3cce8";
 const SINCE_VALUE_MASK: u64 = 0x00ff_ffff_ffff_ffff;
@@ -879,7 +867,7 @@ fn relative_epoch_since(epoch: EpochNumberWithFraction) -> u64 {
     SINCE_RELATIVE_EPOCH_FLAGS | epoch.full_value()
 }
 
-/// fiber's `mul` (crates/fiber-lib/src/watchtower/actor.rs:2493-2522), its overflow checks dropped: a fraction of a delay,
+/// fiber's `mul` (crates/fiber-lib/src/watchtower/actor.rs:2581-2610), its overflow checks dropped: a fraction of a delay,
 /// the epoch length normalized to at most 1800.
 fn mul(delay: EpochNumberWithFraction, numerator: u64, denominator: u64) -> EpochNumberWithFraction {
     let full_numerator = numerator * (delay.number() * delay.length() + delay.index());
@@ -915,7 +903,7 @@ fn settlement_cell_deps() -> Vec<CellDep> {
     ]
 }
 
-/// The watchtower's secp256k1 lock, which it pays every spend to (crates/fiber-lib/src/watchtower/actor.rs:1303-1306).
+/// The watchtower's secp256k1 lock, which it pays every spend to (crates/fiber-lib/src/watchtower/actor.rs:1383-1386).
 fn watchtower_lock(label: &str) -> PackedScript {
     let key = secp256k1::SecretKey::from_slice(&blake2b_256(label.as_bytes())).unwrap();
     packed_script(&ScriptVector {
@@ -938,7 +926,7 @@ fn watchtower_tlcs(signers: &Signers, preimage: [u8; 32]) -> Vec<TlcVector> {
     .collect()
 }
 
-/// fiber's `create_witness_for_funding_cell` (crates/fiber-lib/src/fiber/channel.rs:11979-11990).
+/// fiber's `create_witness_for_funding_cell` (crates/fiber-lib/src/fiber/channel.rs:12151-12162).
 fn funding_witness(session: &MusigSession) -> Vec<u8> {
     let xonly = session.aggregated.x_only_public_key().0.serialize();
     [XUDT_COMPATIBLE_WITNESS.as_slice(), &xonly, &session.signature.serialize()].concat()
@@ -1305,7 +1293,7 @@ fn epoch_at_least(actual: u64, required: u64, numerator: u128, denominator: u128
     }
 }
 
-/// fiber's `Unlock` (crates/fiber-lib/src/watchtower/actor.rs:2353-2403), with the signature it is handed over without.
+/// fiber's `Unlock` (crates/fiber-lib/src/watchtower/actor.rs:2441-2491), with the signature it is handed over without.
 struct Unlock {
     unlock_type: u8,
     preimage: Option<[u8; 32]>,
@@ -1320,7 +1308,7 @@ impl Unlock {
     }
 }
 
-/// What the watchtower settles on a cell, the first input's since and the sponsors' (actor.rs:1637-1652) with it.
+/// What the watchtower settles on a cell, the first input's since and the sponsors' (actor.rs:1717-1732) with it.
 struct Pick {
     kind: &'static str,
     unlock: Unlock,
@@ -1345,7 +1333,7 @@ fn body_parts(body: &[u8], tlc_len: usize) -> (Vec<&[u8]>, &[u8]) {
     (body[1..1 + count * tlc_len].chunks_exact(tlc_len).collect(), &body[1 + count * tlc_len..])
 }
 
-/// fiber's `SettlementWitness::update` of one unlock (crates/fiber-lib/src/watchtower/actor.rs:2447-2476): a TLC leaves the
+/// fiber's `SettlementWitness::update` of one unlock (crates/fiber-lib/src/watchtower/actor.rs:2535-2564): a TLC leaves the
 /// body, `0xFF` zeroes the second balance and `0xFE` the first.
 fn next_settlement_body(body: &[u8], unlock_type: u8, tlc_len: usize) -> Vec<u8> {
     let balances = 1 + usize::from(body[0]) * tlc_len;
@@ -1416,12 +1404,12 @@ impl Side {
     }
 }
 
-/// fiber's `verified_watch_preimage` (crates/fiber-lib/src/watchtower/actor.rs:1212-1231).
+/// fiber's `verified_watch_preimage` (crates/fiber-lib/src/watchtower/actor.rs:1291-1310).
 fn preimage_in(preimages: &[[u8; 32]], tlc: &fiber_types::SettlementTlc) -> Option<[u8; 32]> {
     preimages.iter().copied().find(|preimage| tlc.hash_algorithm.hash(preimage) == *tlc.payment_hash.as_ref())
 }
 
-/// The TLC a witness record stands for, by fiber's identity mapping (crates/fiber-lib/src/watchtower/actor.rs:822-866).
+/// The TLC a witness record stands for, by fiber's identity mapping (crates/fiber-lib/src/watchtower/actor.rs:847-891).
 fn tlc_of<'a>(fixture: &WatchtowerFixture, watched: &'a WatchedCommitment, entry: &[u8]) -> &'a fiber_types::SettlementTlc {
     let tlcs = &watched.built.settlement.tlcs;
     tlcs.iter()
@@ -1453,7 +1441,7 @@ fn settlement_pick(for_remote: bool, amount: u128, since: u64, two_parties_all_s
     }
 }
 
-/// The unlock fiber's `build_settlement_tx` picks on a cell for one side (crates/fiber-lib/src/watchtower/actor.rs:1310-1621):
+/// The unlock fiber's `build_settlement_tx` picks on a cell for one side (crates/fiber-lib/src/watchtower/actor.rs:1390-1701):
 /// its descendant arm on a remainder, its first arm on the commitment, at a tip past every delay, so only the clock and the
 /// preimages choose. The witness flag of a TLC is the device's id, so the side's view decides which TLCs time out.
 fn pick_unlock(
@@ -1504,7 +1492,7 @@ fn pick_unlock(
         }
         let expiry = (since & SINCE_VALUE_MASK) * 1000;
         let tlc = tlc_of(fixture, watched, entry);
-        // fiber's witness flag: bit 0 clear for an offered TLC (crates/fiber-lib/src/watchtower/actor.rs:2333-2335).
+        // fiber's witness flag: bit 0 clear for an offered TLC (crates/fiber-lib/src/watchtower/actor.rs:2421-2423).
         if (entry[0] & 1 == 0) == for_remote {
             if now_ms > expiry {
                 return Some(tlc_pick(index, tlc, None, 0));
@@ -1518,7 +1506,7 @@ fn pick_unlock(
     (pending == 0).then(|| settlement_pick(for_remote, own_amount, 0, false))
 }
 
-/// The CKB arm of fiber's `build_settlement_tx` (crates/fiber-lib/src/watchtower/actor.rs:1653-1840): the remainder first and
+/// The CKB arm of fiber's `build_settlement_tx` (crates/fiber-lib/src/watchtower/actor.rs:1733-1921): the remainder first and
 /// the destination's output second, the sponsors added one at a time until they pay for that output and the fee. Returns the
 /// spend and the body its remainder commits, if it has one.
 fn build_spend(
@@ -1573,7 +1561,7 @@ fn build_spend(
     panic!("the sponsors do not cover the spend");
 }
 
-/// fiber-lsp-sdk's on-chain arm of `sign_content` (crates/fiber-lsp-sdk/src/signer.rs:1237-1252): recoverable ECDSA over
+/// fiber-lsp-sdk's on-chain arm of `sign_content` (crates/fiber-lsp-sdk/src/signer.rs:1238-1253): recoverable ECDSA over
 /// the transaction message with the purpose's key, the recovery id last.
 fn sign_onchain(signer: &InMemorySigner, purpose: OnchainKeyPurpose, message: [u8; 32]) -> ([u8; 65], fiber_types::Pubkey) {
     let key = match purpose {
@@ -1587,8 +1575,8 @@ fn sign_onchain(signer: &InMemorySigner, purpose: OnchainKeyPurpose, message: [u
     (signature, key.pubkey())
 }
 
-/// fiber's `verify_onchain_signature` (crates/fiber-lib/src/watchtower/signer.rs:131-147), after the length check of
-/// `submit_watchtower_signature` (crates/fiber-lib/src/rpc/watchtower.rs:412-416).
+/// fiber's `verify_onchain_signature` (crates/fiber-lib/src/watchtower/signer.rs:138-154), after the length check of
+/// `submit_watchtower_signature` (crates/fiber-lib/src/rpc/watchtower.rs:421-425).
 fn verify_onchain_signature(expected: &[u8; 33], message: [u8; 32], signature: &[u8]) -> Result<(), String> {
     if signature.len() != 65 {
         return Err("watchtower signature must be 65 bytes".to_string());
@@ -1613,7 +1601,7 @@ fn json_purpose(purpose: OnchainKeyPurpose) -> JsonOnchainKeyPurpose {
 }
 
 /// The commitment of one view as fiber broadcasts it: signed, with the funding lock's deps
-/// (crates/fiber-lib/src/fiber/channel.rs:11567-11581).
+/// (crates/fiber-lib/src/fiber/channel.rs:11730-11744).
 fn watched_commitment(signers: &Signers, fixture: &WatchtowerFixture, for_remote: bool) -> WatchedCommitment {
     let (label, version) =
         if for_remote { ("peer's commitment", REMOTE_BROADCAST_VERSION) } else { ("own commitment", LOCAL_BROADCAST_VERSION) };
@@ -1662,7 +1650,8 @@ fn watched_commitment(signers: &Signers, fixture: &WatchtowerFixture, for_remote
     WatchedCommitment { for_remote, label, built, broadcast, record }
 }
 
-/// The external-signer watch channel fiber registers for the two views (crates/fiber-lib/src/fiber/channel.rs:11533-11552).
+/// The external-signer watch channel fiber registers for the two views: `hosted_watch_channel_snapshot`
+/// (crates/fiber-lib/src/fiber/channel.rs:11701-11715), its keys by `watch_channel_keys` (8803-8819).
 fn watch_channel(
     signers: &Signers,
     fixture: &WatchtowerFixture,
@@ -2029,8 +2018,6 @@ fn watchtower_vectors(signers: &Signers, channel: &SigningChannelVector) -> Watc
     }
 }
 
-// --- gen-signing-vectors ---
-
 fn signing_vectors() -> SigningVectors {
     let signers = Signers::new(&REMOTE_SIGNER_SEED);
     let channel = signing_channel(&signers);
@@ -2078,8 +2065,6 @@ pub fn gen_signing_vectors(out_path: &str) {
     std::fs::write(out_path, format!("{json}\n")).unwrap();
     println!("signing vectors written to {out_path}");
 }
-
-// --- verify-signing ---
 
 #[derive(Deserialize)]
 struct TsSigningOutput {

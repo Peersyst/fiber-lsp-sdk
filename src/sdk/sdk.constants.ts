@@ -55,7 +55,7 @@ export const ACTIVITY_RECORD_VERSION = 1;
 export const ACTIVITY_KINDS = ["channel", "payment", "invoice"] as const;
 
 /**
- * One key, not one per channel: fiber keeps a single opening per tenant.
+ * One key, not one per channel: the device opens one channel at a time, though fiber keeps an opening per channel signer.
  */
 export const PENDING_OPENING_RECORD_KEY = `${STORAGE_KEY_NAMESPACE}:opening`;
 
@@ -89,12 +89,12 @@ export const SDK_EVENT_TYPES = [
 /**
  * Fiber's answer while no watch row exists: `RemoteTxComplete` creates it, a tenant channel's ready or online event restores
  * it (`lsp/watch.rs:15-71`), neither of which a closed channel emits, and a cooperative close or a failed opening deletes it
- * (`rpc/watchtower.rs:386-391`, `event_handler.rs:41-78`, `fiber/network.rs:8338-8345`).
+ * (`rpc/watchtower.rs:395-400`, `event_handler.rs:41-76`, `fiber/network.rs:8532-8539`).
  */
 export const WATCHTOWER_UNWATCHED_ERROR = { code: RPC_CALL_FAILED_CODE, message: "watched channel not found" } as const;
 
 /**
- * Fiber's answer to `settle_invoice` once the fulfil is applied (`fiber/network.rs:4854`, `rpc/utils.rs:90-131`): the settlement is done.
+ * Fiber's answer to `settle_invoice` once the fulfil is applied (`fiber/network.rs:4990`, `rpc/utils.rs:90-131`): the settlement is done.
  */
 export const SDK_INVOICE_ALREADY_PAID_ERROR = { code: RPC_CALL_FAILED_CODE, message: "Invoice is already paid" } as const;
 
@@ -149,7 +149,7 @@ export const SDK_INVOICE_TIMESTAMP_SKEW_MS = 600_000n;
 export const SDK_RELEASE_EXPIRY_SLACK_MS = 600_000n;
 
 /**
- * Fiber's `get_payment` answer for a hash with no session, followed by `Hash256(0x…)` (`fiber/network.rs:5455-5462`,
+ * Fiber's `get_payment` answer for a hash with no session, followed by `Hash256(0x…)` (`fiber/network.rs:5591-5606`,
  * `primitives.rs:358-369`): the send never ran.
  */
 export const SDK_PAYMENT_NOT_FOUND_ERROR = {
@@ -180,8 +180,8 @@ export const SDK_ACTOR_REPLY_LOST_ERROR = { code: RPC_CALL_FAILED_CODE, message:
 
 /**
  * Fiber's `send_payment` answers while it holds a session under the hash, each around `Hash256(0x…)`: the actor still
- * running (`fiber/network.rs:5544-5551`), a session not failed, with its Debug status (`fiber/payment.rs:2194-2198`), and a
- * failed one with attempts in flight (`fiber/payment.rs:2204-2208`).
+ * running (`fiber/network.rs:5688-5695`), a session not failed, with its Debug status (`fiber/payment.rs:2207-2211`), and a
+ * failed one with attempts in flight (`fiber/payment.rs:2217-2221`).
  */
 export const SDK_PAYMENT_SESSION_EXISTS_ERRORS = [
     { code: RPC_CALL_FAILED_CODE, messagePrefix: "Payment session already exists, stop start new payment actor for ", messageSuffix: "" },

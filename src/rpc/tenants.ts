@@ -4,22 +4,22 @@ import {
     decodeBareHexBytes,
     decodeBoolean,
     decodeEnum,
-    decodeHexBytes,
     decodeNonEmptyString,
     decodeOrNull,
+    decodeScriptOrNull,
     decodeUintHex,
     encodeBareHexBytes,
     encodeHexBytes,
+    encodeUintHex,
     malformedWireField,
+    readArray,
     readObject,
     requireHexBytes,
 } from "../wire";
 import { RPC_TENANT_RUNTIME_STATUSES } from "./rpc.constants";
 import type {
-    GetTenantRegistryNonceParams,
-    GetTenantRegistryNonceParamsWire,
-    GetTenantRegistryNonceResult,
-    GetTenantRegistryNonceResultWire,
+    LspTenantChannel,
+    LspTenantChannelWire,
     LspTenantStatus,
     LspTenantStatusWire,
     RegisterTenantParams,
@@ -29,37 +29,15 @@ import type {
 } from "./rpc.types";
 
 /**
- * Writes the params of `lsp_get_tenant_registry_nonce`.
- * @param params The root signer the nonce is issued to.
- * @returns The wire params.
- */
-export function encodeGetTenantRegistryNonceParams(params: GetTenantRegistryNonceParams): GetTenantRegistryNonceParamsWire {
-    return { root_signer_pubkey: encodeBareHexBytes("rootSignerPubkey", params.rootSignerPubkey, COMPRESSED_POINT_LENGTH) };
-}
-
-/**
- * Reads the result of `lsp_get_tenant_registry_nonce`.
- * @param field The result field.
- * @returns The LSP's node id, the root signer the nonce is bound to, and the nonce.
- */
-export function decodeGetTenantRegistryNonceResult(field: WireField): GetTenantRegistryNonceResult {
-    const at = readObject<GetTenantRegistryNonceResultWire>(field);
-    return {
-        lspNodeId: decodeBareHexBytes(at("lsp_node_id"), COMPRESSED_POINT_LENGTH),
-        rootSignerPubkey: decodeBareHexBytes(at("root_signer_pubkey"), COMPRESSED_POINT_LENGTH),
-        nonce: decodeHexBytes(at("nonce"), HASH256_LENGTH),
-    };
-}
-
-/**
  * Writes the params of `lsp_register_tenant`, the signature as bare hex, as fiber's own agent writes it.
- * @param params The root signer, the nonce it was issued, and its signature over the registry payload.
+ * @param params The root signer, the request id, the signing time, and the signature over the registry payload.
  * @returns The wire params.
  */
 export function encodeRegisterTenantParams(params: RegisterTenantParams): RegisterTenantParamsWire {
     return {
         root_signer_pubkey: encodeBareHexBytes("rootSignerPubkey", params.rootSignerPubkey, COMPRESSED_POINT_LENGTH),
-        nonce: encodeHexBytes("nonce", params.nonce, HASH256_LENGTH),
+        request_id: encodeHexBytes("requestId", params.requestId, HASH256_LENGTH),
+        signed_at: encodeUintHex("signedAtMs", params.signedAtMs, UINT64_MAX),
         signature: encodeBareHexBytes("signature", params.signature, COMPACT_ECDSA_SIGNATURE_LENGTH),
     };
 }
@@ -85,10 +63,23 @@ function decodeLspTenantStatus(field: WireField): LspTenantStatus {
         tenantId: decodeTenantId(at("tenant_id")),
         rootSignerPubkey: decodeOrNull(at("root_signer_pubkey"), (key) => decodeBareHexBytes(key, COMPRESSED_POINT_LENGTH)),
         invoicePubkey: decodeBareHexBytes(at("invoice_pubkey"), COMPRESSED_POINT_LENGTH),
-        privateChannelId: decodeOrNull(at("private_channel_id"), (id) => requireHexBytes(id, HASH256_LENGTH)),
+        channels: readArray(at("channels")).map(decodeLspTenantChannel),
         createdAtMs: decodeUintHex(at("created_at"), UINT64_MAX),
         runtimeStatus: decodeEnum(at("runtime_status"), RPC_TENANT_RUNTIME_STATUSES),
-        channelOnline: decodeBoolean(at("channel_online")),
+    };
+}
+
+/**
+ * Reads one channel of a tenant's status.
+ * @param field Field to read.
+ * @returns The channel.
+ */
+function decodeLspTenantChannel(field: WireField): LspTenantChannel {
+    const at = readObject<LspTenantChannelWire>(field);
+    return {
+        channelId: requireHexBytes(at("channel_id"), HASH256_LENGTH),
+        fundingUdtTypeScript: decodeScriptOrNull(at("funding_udt_type_script")),
+        online: decodeBoolean(at("online")),
     };
 }
 

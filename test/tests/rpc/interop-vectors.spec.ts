@@ -16,7 +16,14 @@ import {
 import { WIRE_TLC_HASH_ALGORITHMS } from "../../../src/wire";
 import { caseOf } from "../../utils/interop-vectors";
 import { RPC_PARAMS_ENCODERS, withoutNulls } from "../../utils/rpc-typed";
-import { loadRpcVectors, type ChannelVector, type RpcCaseVector, type TransactionVector } from "../../utils/rpc-vectors";
+import {
+    isTenantOpenParams,
+    isTenantOpenResult,
+    loadRpcVectors,
+    type ChannelVector,
+    type RpcCaseVector,
+    type TransactionVector,
+} from "../../utils/rpc-vectors";
 
 function stateFlagsOf(json: unknown): unknown {
     const state = (json as { state: Record<string, unknown> }).state;
@@ -34,7 +41,7 @@ describe("rpc interop vectors", () => {
     const openResults = vectors.methods.open_channel_with_external_funding.results;
 
     it("declares the fiber release and the jsonrpsee version they were generated with", () => {
-        expect(vectors.fiber_ref).toBe("8db6a117");
+        expect(vectors.fiber_ref).toBe("d8dd6d28");
         expect(vectors.jsonrpsee_version).toBe("0.25.1");
     });
 
@@ -144,8 +151,8 @@ describe("rpc interop vectors", () => {
             expect(tx.inputs.some((input) => BigInt(input.since) === UINT64_MAX)).toBe(true);
         });
 
-        it("differ between the open's answer and the submit's params in the witnesses only", () => {
-            for (const name of openResults.map((entry) => entry.name)) {
+        it("differ between the operator's open answer and the submit's params in the witnesses only", () => {
+            for (const name of openResults.filter((entry) => !isTenantOpenResult(entry.values)).map((entry) => entry.name)) {
                 const { witnesses: unsignedWitnesses, ...unsignedRest } = unsigned(name);
                 const { witnesses: signedWitnesses, ...signedRest } = signed(name);
                 expect(signedRest).toEqual(unsignedRest);
@@ -191,12 +198,15 @@ describe("rpc interop vectors", () => {
 
     describe("tenant channels, signing requests and registrations", () => {
         const tenants = vectors.methods.lsp_register_tenant.results.map((entry) => entry.values.tenant);
-        const openParams = vectors.methods.open_tenant_channel.params.map((entry) => entry.values);
+        const tenantChannels = tenants.flatMap((tenant) => tenant.channels);
+        const opens = vectors.methods.open_channel_with_external_funding.params.map((entry) => entry.values);
+        const openParams = opens.filter(isTenantOpenParams);
+        const operatorOpenParams = opens.filter((entry) => !isTenantOpenParams(entry));
         const shutdownParams = vectors.methods.shutdown_channel.params.map((entry) => entry.values);
 
-        it("cover both opens with the funding lock's cell deps, of both dep types, and without them", () => {
+        it("cover both forms of the open with the funding lock's cell deps, of both dep types, and without them", () => {
             const groups = [
-                vectors.methods.open_channel_with_external_funding.params.map((entry) => entry.values.funding_lock_script_cell_deps),
+                operatorOpenParams.map((entry) => entry.funding_lock_script_cell_deps),
                 openParams.map((entry) => entry.funding_lock_script_cell_deps),
             ];
             for (const deps of groups) {
@@ -210,6 +220,14 @@ describe("rpc interop vectors", () => {
             expect(openParams.some((entry) => entry.commitment_delay_epoch !== null && entry.commitment_fee_rate !== null)).toBe(true);
             expect(openParams.some((entry) => entry.external_channel_signer.channel_announcement_nonce === null)).toBe(true);
             expect(openParams.some((entry) => entry.external_channel_signer.channel_announcement_nonce !== null)).toBe(true);
+        });
+
+        it("cover the open's answer with the opening context and without it, which fiber leaves out of the JSON", () => {
+            const answers = vectors.methods.open_channel_with_external_funding.results;
+            const bare = answers.filter((entry) => !isTenantOpenResult(entry.values));
+            expect(bare).not.toHaveLength(0);
+            for (const entry of bare) expect(entry.json).not.toHaveProperty("opening_context");
+            expect(answers.some((entry) => isTenantOpenResult(entry.values))).toBe(true);
         });
 
         it("cover a shutdown by channel id alone and one with its three options", () => {
@@ -251,11 +269,21 @@ describe("rpc interop vectors", () => {
             },
         );
 
+        it("cover a registration signed at the largest timestamp", () => {
+            const signedAt = vectors.methods.lsp_register_tenant.params.map((entry) => BigInt(entry.values.signed_at));
+            expect(signedAt).toContain(UINT64_MAX);
+        });
+
         it("cover both runtime statuses, a tenant without a root signer or a channel and one with both", () => {
             expect(new Set(tenants.map((tenant) => tenant.runtime_status))).toEqual(new Set(RPC_TENANT_RUNTIME_STATUSES));
-            expect(tenants.some((tenant) => tenant.root_signer_pubkey === null && tenant.private_channel_id === null)).toBe(true);
-            expect(tenants.some((tenant) => tenant.root_signer_pubkey !== null && tenant.private_channel_id !== null)).toBe(true);
-            expect(new Set(tenants.map((tenant) => tenant.channel_online))).toEqual(new Set([true, false]));
+            expect(tenants.some((tenant) => tenant.root_signer_pubkey === null && tenant.channels.length === 0)).toBe(true);
+            expect(tenants.some((tenant) => tenant.root_signer_pubkey !== null && tenant.channels.length > 0)).toBe(true);
+        });
+
+        it("cover a tenant's channel online and offline, in CKB and in a UDT", () => {
+            expect(new Set(tenantChannels.map((channel) => channel.online))).toEqual(new Set([true, false]));
+            expect(tenantChannels.some((channel) => channel.funding_udt_type_script === null)).toBe(true);
+            expect(tenantChannels.some((channel) => channel.funding_udt_type_script !== null)).toBe(true);
         });
     });
 

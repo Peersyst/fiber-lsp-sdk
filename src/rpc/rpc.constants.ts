@@ -9,13 +9,11 @@ export const RPC_METHODS = [
     "cancel_invoice",
     "send_payment",
     "get_payment",
-    "open_tenant_channel",
     "shutdown_channel",
     "get_channel_signing_status",
     "submit_channel_signature",
     "get_watchtower_signing_status",
     "submit_watchtower_signature",
-    "lsp_get_tenant_registry_nonce",
     "lsp_register_tenant",
 ] as const;
 

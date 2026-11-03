@@ -142,7 +142,7 @@ answers.
 Without the rule, a peer's commitment could supersede its predecessor before that one's revocation was served. The
 replacement rule (below) would then refuse that revocation as `stale_state` for good, since its view has moved past it, and
 the older commitment, never revoked, would stay one the LSP could publish. An honest fiber never asks for it: it sends no
-`commitment_signed` while it waits for the peer's `revoke_and_ack` (`waiting_ack`, `channel.rs:2032`, cleared at `:6468`).
+`commitment_signed` while it waits for the peer's `revoke_and_ack` (`waiting_ack`, `channel.rs:2046`, cleared at `:6575`).
 The device's own view keeps the looser rule, `v` above `w`.
 
 ### A revocation follows its replacement
@@ -212,9 +212,10 @@ leave a nonce pair that answers both for every candidate key, which hides it, an
 
 The known cost: a round the device starts leaves its own completed commitment on `Commitment@L`, after its
 `CompleteReceivedRevokeAndAck` moved L, and the peer's next round puts its two commitments on that same slot. That is a
-third message on one slot, which `allow` refuses, so after any round of the device's the peer's next round stalls: the
-fulfil of a payment the device sent, and a payment received after one it fulfilled. It lasts until fiber gives each message its own
-nonce ([signing.md](./signing.md) runs both sequences).
+third message on one slot, which `allow` refuses, so after any round of the device's the peer's next round cannot complete: the
+fulfil of a payment the device sent, and a payment received after one it fulfilled. Fiber force-closes the channel once
+its revocation nonce ledger has stayed unbalanced for 30 s (`crates/fiber-lib/src/fiber/channel.rs:6760-6793`; some 31 s on the devnet), until it
+gives each message its own nonce ([signing.md](./signing.md) runs both sequences).
 
 ## The claim is written before anything is signed
 
@@ -320,7 +321,7 @@ Five choices sit in that table:
 - **A close pays both pinned scripts, and a revocation the device receives the device's own.** Both pay the device's
   close script (fiber's `local_shutdown_script`), so they state that pin. A close also pays the peer's, held to the term the
   host pinned: fiber lets the peer's `Shutdown` replace the script of the open, checking the new script's capacity and fee
-  against the peer's balance but never that it is the open's (`channel.rs:1926-1936`), and the
+  against the peer's balance but never that it is the open's (`channel.rs:1940-1950`), and the
   close's size, which each side's rate is multiplied by for its fee, counts both scripts, so the peer's script moves the
   device's fee. Pinned, a peer that changes it is refused, as fiber's own device SDK refuses it
   (`fiber-lsp-sdk/src/commitment.rs:849-953`), and the fee the facade checks before it asks for a close is the fee the
@@ -538,7 +539,7 @@ TLC, the amount, the expiry. Each channel counts at its weaker view for the reas
 channel at its worst: the node aggregates both partial signatures of every channel, so it may broadcast either
 commitment of each, and the sum of the weaker views is what it holds whichever it broadcasts. The expiry is held to a
 margin because the preimage, once out, is worth something only if the fulfil it starts is signed before fiber fails the
-TLC on its own (`channel.rs:3474-3507`); the margin is the facade's to compute, from fiber's arithmetic and the poller's
+TLC on its own (`channel.rs:3559-3592`); the margin is the facade's to compute, from fiber's arithmetic and the poller's
 pace ([sdk.md](./sdk.md)), and comes in as a function, since `policy` does not import `signer`. The release judges the
 latest commitment of each view, as the balance rule does, and rests on the same premise
 ([What this layer deliberately does not do](#what-this-layer-deliberately-does-not-do)).
@@ -613,7 +614,7 @@ that one past its revocation is harmless: a revoked commitment that lands is pun
 path, not this one. A commitment signed before the record kept cells registers nothing.
 
 Input 0's tx hash is not read. The peer broadcasts its commitment with cell deps of its choosing, which no signature covers
-(`channel.rs:11567-11581`), so a hash rebuilt over deps the device picked would refuse an honest peer configured otherwise.
+(`channel.rs:11730-11744`), so a hash rebuilt over deps the device picked would refuse an honest peer configured otherwise.
 The source is told by its content instead, and by its `since`:
 
 - **A since past zero** spends a commitment's own cell, which the lock holds to the delay: the settlement body in witness
@@ -627,7 +628,7 @@ The source is told by its content instead, and by its `since`:
   know.
 
 More than one registered commitment can fit: fiber may sign a commitment again with nothing changed but its number (a
-nonce rotation, `channel.rs:2473-2478`), and a descendant of one version can descend from the next too. The source is then
+nonce rotation, `channel.rs:2552-2557`), and a descendant of one version can descend from the next too. The source is then
 the one whose first 36 lock args, which carry the commitment number and which a remainder keeps, equal output 0's. A spend
 that leaves no remainder, the final sweep, names none, and is attributed to the first that fits, in the order last remote,
 previous remote, last local.
@@ -666,12 +667,12 @@ unlock: the view, the version and the entry.
 - **A repeat** of a request id is answered `already-signed` with the signature recorded for it, once every rule has passed
   again against the record and the approval as they stand; one whose tx differs is refused. It writes nothing.
 - **Only an unsigned claim is replaced.** Fiber rebuilds a spend under a new request id when what it holds changes, the
-  node's cells that pay the fee among it, and keeps the old request pending (`watchtower/actor.rs:2151-2155`). A request for
+  node's cells that pay the fee among it, and keeps the old request pending (`watchtower/actor.rs:2237-2241`). A request for
   an unlock whose claim was never signed replaces that claim. One for an unlock whose spend is signed leaves it in place,
   and is answered `unclaimed`: signed and handed over, with nothing written. The record names the first spend signed for
   each unlock, and a lost answer or a lost write cannot let a later request take its place.
 - **`applied`** is set by `markWatchtowerSpendApplied` once fiber answered the submission `Applied` or `AlreadyApplied`. It
-  means accepted by fiber, not landed: fiber also accepts the signature of an old request whose spend can no longer land.
+  means accepted by fiber, not landed: fiber accepts the signature of an old request whose spend can no longer land until a competing settlement confirms, which prunes the request and answers a later submission "signature request id not found in pending requests".
   It is evidence, which no rule reads.
 - **Two identical TLC entries**, the parts of one payment, share a key, so the second's spend goes unclaimed: it is signed
   as any spend is, and the evidence of the first alone is kept.

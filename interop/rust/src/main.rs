@@ -13,10 +13,6 @@ use secp256k1::{PublicKey, Scalar, Secp256k1, SecretKey};
 use serde::{Deserialize, Serialize};
 use sha2::Sha512;
 
-// --- CKB hashing ---
-
-/// CKB-style blake2b-256 over the concatenated chunks (personalization
-/// "ckb-default-hash", which `ckb_hash` applies).
 fn ckb_blake2b(chunks: &[&[u8]]) -> [u8; 32] {
     let mut hasher = ckb_hash::new_blake2b();
     for chunk in chunks {
@@ -31,19 +27,19 @@ fn blake2b_256(data: &[u8]) -> [u8; 32] {
     ckb_blake2b(&[data])
 }
 
-/// fiber `blake2b_hash_with_salt`: the salt is hashed BEFORE the data.
+/// fiber `blake2b_hash_with_salt`: the salt is hashed first.
 fn blake2b_hash_with_salt(data: &[u8], salt: &[u8]) -> [u8; 32] {
     ckb_blake2b(&[salt, data])
 }
 
-// --- fiber scheme (ported from crates/fiber-types/src/channel.rs) ---
+// fiber's scheme, ported from crates/fiber-types/src/channel.rs.
 
 fn pubkey_of(sk: &SecretKey) -> PublicKey {
     let secp = Secp256k1::new();
     PublicKey::from_secret_key(&secp, sk)
 }
 
-/// fiber `Privkey::tweak`: (scalar + sk) mod n.
+/// fiber `Privkey::tweak`.
 fn tweak(sk: &SecretKey, scalar: [u8; 32]) -> SecretKey {
     let scalar = Scalar::from_be_bytes(scalar).expect("scalar in range");
     sk.add_tweak(&scalar).expect("valid tweak")
@@ -83,8 +79,7 @@ struct FiberSigner {
 }
 
 impl FiberSigner {
-    /// fiber `InMemorySigner::generate_from_seed`, including the upstream
-    /// "musig nocne" spelling, which is part of the derivation.
+    /// fiber `InMemorySigner::generate_from_seed`; its "musig nocne" typo is part of the derivation.
     fn generate_from_seed(params: &[u8]) -> Self {
         let seed = blake2b_256(params);
         let commitment_seed = ckb_blake2b(&[&seed, b"commitment seed"]);
@@ -113,17 +108,14 @@ impl FiberSigner {
         derive_private_key(&self.tlc_base_key, &self.get_commitment_point(n))
     }
 
-    /// The fiber half of the nonce derivation: the per-commitment secret the SDK
-    /// then binds a context string to in `nonce_seed` (below).
+    /// fiber's per-commitment nonce secret, which `nonce_seed` binds a context to.
     fn musig2_nonce_seckey(&self, n: u64) -> SecretKey {
         derive_private_key(&self.musig2_base_nonce, &self.get_commitment_point(n))
     }
 }
 
-// --- SDK-owned derivations (not part of fiber's scheme) ---
+// SDK-owned derivations, not fiber's.
 
-/// BIP32 master node from a seed: HMAC-SHA512 under the fixed "Bitcoin seed" key,
-/// left half the key and right half the chain code.
 fn bip32_master(seed: &[u8]) -> (SecretKey, [u8; 32]) {
     let mut mac = Hmac::<Sha512>::new_from_slice(b"Bitcoin seed").expect("hmac takes any key length");
     mac.update(seed);
@@ -136,10 +128,7 @@ fn bip32_master(seed: &[u8]) -> (SecretKey, [u8; 32]) {
     )
 }
 
-/// BIP32 hardened child. The parent's PRIVATE key goes into the hash, which is what
-/// makes the branch unwalkable from a public key alone. BIP32's "retry with the next
-/// index" rule for an invalid child is left out on both sides on purpose: a 2^-127
-/// event should fail loudly here and in `@scure/bip32`, not diverge in silence.
+/// BIP32 hardened child without the retry on an invalid child: both sides fail loudly on that 2^-127 event.
 fn bip32_derive_hardened(parent: &(SecretKey, [u8; 32]), index: u32) -> (SecretKey, [u8; 32]) {
     let (parent_key, parent_chain_code) = parent;
     let hardened = index.checked_add(0x8000_0000).expect("account index fits a hardened level");
@@ -155,8 +144,7 @@ fn bip32_derive_hardened(parent: &(SecretKey, [u8; 32]), index: u32) -> (SecretK
     (tweak(parent_key, scalar), chain_code)
 }
 
-/// The master seed the SDK is constructed with: the private key at the hardened
-/// path m/1017'/309'/account'.
+/// The SDK's master seed: the private key at m/1017'/309'/account'.
 fn master_seed(bip39_seed: &[u8; 64], account_index: u32) -> [u8; 32] {
     let purpose = bip32_derive_hardened(&bip32_master(bip39_seed), MASTER_SEED_PURPOSE);
     let coin_type = bip32_derive_hardened(&purpose, MASTER_SEED_COIN_TYPE);
@@ -167,13 +155,11 @@ fn master_seed_path(account_index: u32) -> String {
     format!("m/{MASTER_SEED_PURPOSE}'/{MASTER_SEED_COIN_TYPE}'/{account_index}'")
 }
 
-/// Wallet identity key: it identifies the master seed, not the handset.
 fn wallet_identity_key(master_seed: &[u8; 32]) -> [u8; 32] {
     ckb_blake2b(&[master_seed, b"wallet identity"])
 }
 
-/// Per-channel seed. Deterministic on purpose: it replaces fiber's node-side
-/// random channel seed so every channel is recoverable from the master seed.
+/// Replaces fiber's random channel seed, so every channel is recoverable from the master seed.
 fn channel_seed(master_seed: &[u8; 32], channel_index: u64) -> [u8; 32] {
     ckb_blake2b(&[
         master_seed,
@@ -181,13 +167,12 @@ fn channel_seed(master_seed: &[u8; 32], channel_index: u64) -> [u8; 32] {
     ])
 }
 
-/// Deterministic musig2 nonce seed for one (commitment number, context) slot.
 fn nonce_seed(signer: &FiberSigner, commitment_number: u64, context: &str) -> [u8; 32] {
     let seckey = signer.musig2_nonce_seckey(commitment_number);
     ckb_blake2b(&[&seckey.secret_bytes(), context.as_bytes()])
 }
 
-// --- digest reconstruction: fiber-types' own witness, message and settlement check; what fiber-lib keeps private is ported, cited ---
+// The digests: fiber-types' own functions where public; what fiber-lib keeps private is ported, cited.
 
 use ckb_types::packed::{
     Byte, Bytes as PackedBytes, BytesVec, CellDep, CellDepVec, CellInput, CellInputVec, CellOutput, CellOutputVec,
@@ -204,10 +189,8 @@ use fiber_types::{
 const FUNDING_CELL_WITNESS_LEN: usize = 112;
 const SINCE_RELATIVE_EPOCH_FLAGS: u64 = 0xA000_0000_0000_0000;
 const FEE_RATE_WEIGHT_SCALE: u128 = 1000;
-/// fiber `DEFAULT_MIN_SHUTDOWN_FEE`.
 const DEFAULT_MIN_SHUTDOWN_FEE: u64 = 100_000_000;
 
-/// The vectors' name of a lock layout (`CommitmentContractFeatures`, crates/fiber-types/src/channel.rs:1521-1575).
 fn lock_layout_name(features: CommitmentContractFeatures) -> &'static str {
     if features.has_full_payment_hash() {
         "full_payment_hash"
@@ -228,7 +211,7 @@ fn blake160(data: &[u8]) -> [u8; 20] {
     blake2b_256(data)[0..20].try_into().unwrap()
 }
 
-/// fiber `derive_public_key` / `try_derive_tlc_pubkey`: base + blake2b(point)*G.
+/// fiber `derive_public_key` / `try_derive_tlc_pubkey`.
 fn derive_public_key(base: &PublicKey, commitment_point: &PublicKey) -> PublicKey {
     let secp = Secp256k1::new();
     let tweak = Scalar::from_be_bytes(get_tweak_by_commitment_point(commitment_point)).unwrap();
@@ -239,7 +222,7 @@ fn fiber_pubkey(key: &PublicKey) -> fiber_types::Pubkey {
     fiber_types::Pubkey(key.serialize())
 }
 
-/// The x-only aggregate of the two keys in the exact order given, as fiber bakes it into lock args.
+/// x-only aggregate in the order given, unsorted, as fiber writes it into lock args.
 fn xonly_agg(first: &PublicKey, second: &PublicKey) -> [u8; 32] {
     let keys = vec![
         musig2::secp256k1::PublicKey::from_slice(&first.serialize()).unwrap(),
@@ -292,7 +275,7 @@ fn packed_out_point(out_point: &OutPointVector) -> PackedOutPoint {
 #[derive(Serialize, Deserialize, Clone)]
 struct TlcVector {
     id: u64,
-    /// Direction from the local (device) side, before any for_remote flip.
+    /// From the device's side, before any for_remote flip.
     direction: String,
     hash_algorithm: String,
     amount: String,
@@ -304,7 +287,7 @@ struct TlcVector {
     remote_tlc_pubkey: String,
 }
 
-/// fiber `get_active_tlcs_for_settlement` (crates/fiber-lib/src/fiber/channel.rs:8667-8691) over `get_tlc_keys` (8588-8620).
+/// fiber `get_active_tlcs_for_settlement` (crates/fiber-lib/src/fiber/channel.rs:8848-8872) over `get_tlc_keys` (8770-8802).
 fn settlement_tlc(local: &FiberSigner, tlc: &TlcVector, for_remote: bool) -> SettlementTlc {
     let id = match tlc.direction.as_str() {
         "offered" => TLCId::Offered(tlc.id),
@@ -332,7 +315,7 @@ fn settlement_tlc(local: &FiberSigner, tlc: &TlcVector, for_remote: bool) -> Set
     }
 }
 
-/// fiber `get_active_tlcs` ordering (crates/fiber-lib/src/fiber/channel.rs:8647-8665): two direction groups, ascending by id.
+/// fiber `get_active_tlcs` ordering (crates/fiber-lib/src/fiber/channel.rs:8828-8846): two direction groups, ascending by id.
 fn ordered_tlcs(tlcs: &[TlcVector], for_remote: bool) -> Vec<&TlcVector> {
     let first_direction = if for_remote { "received" } else { "offered" };
     let mut first: Vec<&TlcVector> = tlcs.iter().filter(|tlc| tlc.direction == first_direction).collect();
@@ -342,7 +325,7 @@ fn ordered_tlcs(tlcs: &[TlcVector], for_remote: bool) -> Vec<&TlcVector> {
     first.into_iter().chain(second).collect()
 }
 
-/// The settlement data of one commitment, in the shape fiber hands its own `settlement_data_to_witness`.
+/// In the shape fiber hands its own `settlement_data_to_witness`.
 fn settlement_data(
     local: &FiberSigner,
     for_remote: bool,
@@ -360,7 +343,7 @@ fn settlement_data(
     }
 }
 
-/// fiber `get_settlement_pubkeys` (crates/fiber-lib/src/fiber/channel.rs:8640-8645): both TLC base keys.
+/// fiber `get_settlement_pubkeys` (crates/fiber-lib/src/fiber/channel.rs:8821-8826): both TLC base keys.
 fn settlement_pubkeys(local: &FiberSigner, remote_tlc_base: &PublicKey) -> (fiber_types::Pubkey, fiber_types::Pubkey) {
     (fiber_pubkey(&pubkey_of(&local.tlc_base_key)), fiber_pubkey(remote_tlc_base))
 }
@@ -413,7 +396,7 @@ fn shutdown_tx_size(cell_deps_count: usize, udt_type_script: &Option<ScriptVecto
     mock_tx_size(cell_deps_count, outputs, vec![data.pack(), data.pack()])
 }
 
-/// fiber `reserved_capacity` (crates/fiber-lib/src/fiber/channel.rs:5853-5890): close script args at no less than `lock_args_len()`.
+/// fiber `reserved_capacity` (crates/fiber-lib/src/fiber/channel.rs:5971-6008): close script args at no less than `lock_args_len()`.
 fn reserved_capacity(shutdown_script: &ScriptVector, features: CommitmentContractFeatures) -> u64 {
     let script = packed_script(shutdown_script);
     let lock_args_len = features.lock_args_len();
@@ -435,7 +418,7 @@ fn fee_from_rate(fee_rate: u64, tx_size: u64) -> u64 {
     u64::try_from(u128::from(fee_rate) * u128::from(tx_size) / FEE_RATE_WEIGHT_SCALE).unwrap()
 }
 
-/// fiber's commitment lock args (crates/fiber-lib/src/fiber/channel.rs:11352-11372): the features byte follows the `0x00`.
+/// fiber's commitment lock args (crates/fiber-lib/src/fiber/channel.rs:11519-11539): the features byte follows the `0x00`.
 fn commitment_lock_args(
     xonly: &[u8; 32],
     delay_epoch: u64,
@@ -455,8 +438,6 @@ fn commitment_lock_args(
     args
 }
 
-// --- Vector file shape ---
-
 #[derive(Serialize, Deserialize)]
 struct Vectors {
     scheme_version: u32,
@@ -472,7 +453,7 @@ struct Vectors {
 
 #[derive(Serialize, Deserialize)]
 struct DigestVectors {
-    /// The commitment lock template of every case; the SDK's testnet preset, so the vectors also pin that constant.
+    /// The SDK's testnet preset, so the vectors pin that constant too.
     commitment_lock: ScriptVector,
     remote: RemoteSignerVector,
     commitment_cases: Vec<CommitmentCaseVector>,
@@ -525,7 +506,6 @@ struct CommitmentCaseVector {
     lock_args: String,
     tx_size: u64,
     fee: String,
-    /// The unsigned commitment as fiber's JSON writes it (`ckb-jsonrpc-types`).
     transaction: JsonTransaction,
     /// fiber's `to_rpc_signing_settlement` of this commitment.
     settlement: Option<fiber_json_types::SigningSettlement>,
@@ -549,7 +529,6 @@ struct ShutdownCaseVector {
     tx_size: u64,
     local_fee: String,
     remote_fee: String,
-    /// The unsigned closing transaction as fiber's JSON writes it.
     transaction: JsonTransaction,
     digest: String,
 }
@@ -668,7 +647,8 @@ struct TenantRegistryVector {
     lsp_node_secret: String,
     lsp_node_id: String,
     root_signer_pubkey: String,
-    nonce: String,
+    request_id: String,
+    signed_at: u64,
     payload: String,
     digest: String,
     signature: String,
@@ -683,16 +663,16 @@ struct MusigVector {
     message: String,
 }
 
-/// The funding lock and the id of the signing channel, from the two parties `signing.json` holds.
+/// The signing channel's funding lock and id, from the parties of `signing.json`.
 #[derive(Serialize, Deserialize)]
 struct FundingLockVector {
     device: signing::DeviceVector,
     peer: signing::PeerVector,
     /// Whose funding key `get_deterministic_musig2_agg_context` aggregates first.
     key_order: [String; 2],
-    /// The x-only aggregate of the two funding keys in that order.
+    /// x-only, over the keys in that order.
     aggregated_pubkey: String,
-    /// The testnet funding lock with the channel's args: fiber's `get_script_by_contract(Contract::FundingLock, args)`.
+    /// fiber's `get_script_by_contract(Contract::FundingLock, args)` on testnet.
     lock: ScriptVector,
     /// As fiber's JSON writes it.
     channel_id: String,
@@ -704,18 +684,17 @@ struct TsOutput {
     partial_signature: String,
 }
 
-// --- Fixed public test inputs (test keys only) ---
+// Test keys only.
 
-/// Channel seed used for the standalone fiber-scheme half.
 const CHANNEL_SEED_PARAMS: [u8; 32] = [0x42; 32];
-/// Master seed used for the SDK-owned half.
 const MASTER_SEED: [u8; 32] = [0x24; 32];
-/// BIP39 seed used for the master seed path; unrelated to MASTER_SEED, which the
-/// rest of the SDK half starts from directly.
+/// Only for the master seed path: the rest starts from `MASTER_SEED` directly.
 const BIP39_SEED: [u8; 64] = [0x37; 64];
 const REMOTE_SEED: [u8; 32] = [0x99; 32];
 const LSP_NODE_SECRET: [u8; 32] = [0x11; 32];
-const TENANT_REGISTRY_NONCE: [u8; 32] = [0x5a; 32];
+// The request id and the timestamp of fiber's own fixed vector (crates/fiber-types/src/hosted_lsp.rs:188-200).
+const TENANT_REGISTRY_REQUEST_ID: [u8; 32] = [3; 32];
+const TENANT_REGISTRY_SIGNED_AT: u64 = 1_700_000_000_123;
 
 const MASTER_SEED_PURPOSE: u32 = 1017;
 const MASTER_SEED_COIN_TYPE: u32 = 309;
@@ -723,8 +702,7 @@ const MASTER_SEED_COIN_TYPE: u32 = 309;
 /// The last index is the highest a hardened level can hold (2^31 - 1).
 const ACCOUNT_INDICES: [u32; 3] = [0, 1, 2147483647];
 
-/// Includes the boundaries of the 48-bit commitment chain: a lone top bit and
-/// all 48 bits set (the maximum a commitment number may reach).
+/// With the 48-bit chain's edges: a lone top bit and all 48 bits set, the highest number.
 const COMMITMENT_NUMBERS: [u64; 9] = [
     0,
     1,
@@ -737,24 +715,21 @@ const COMMITMENT_NUMBERS: [u64; 9] = [
     281474976710655,
 ];
 
-/// The last index is JS's `Number.MAX_SAFE_INTEGER`: the channel index is
-/// formatted into a string, so both sides must agree at that boundary.
+/// Up to JS's `Number.MAX_SAFE_INTEGER`: the index is formatted into a string, so both sides must agree there.
 const CHANNEL_INDICES: [u64; 6] = [0, 1, 2, 7, 1000, 9007199254740991];
 
 /// A cooperative close signs under the `COMMITMENT` context: fiber's `NoncePurpose` has no close of its own.
 const NONCE_CONTEXTS: [&str; 3] = ["COMMITMENT", "REVOKE", "ANNOUNCEMENT"];
 
 const SCHEME_VERSION: u32 = 1;
-const FIBER_REF: &str = "8db6a117";
+const FIBER_REF: &str = "d8dd6d28";
 
-/// Peer-side channel signer for the digest cases: its public halves are the "remote" inputs the node would attach.
 const REMOTE_SIGNER_SEED: [u8; 32] = [0x77; 32];
 
-/// The SDK's testnet commitment lock preset; keeping it in the vectors pins the TS constant too.
+/// The SDK's testnet preset; here so the vectors pin the TS constant too.
 const COMMITMENT_LOCK_TESTNET_CODE_HASH: &str = "740dee83f87c6f309824d8fd3fbdd3c8380ee6fc9acc90b1a748438afcdf81d8";
 
-/// The SDK's testnet funding lock preset, `FundingLock` in fiber's config/testnet/config.yml at the pin; keeping it in the
-/// vectors pins the TS constant too.
+/// `FundingLock` of fiber's config/testnet/config.yml; here so the vectors pin the TS constant too.
 const FUNDING_LOCK_TESTNET_CODE_HASH: &str = "6c67887fe201ee0c7853f1682c0b77c0e6214044c156c7558269390a8afa6d7c";
 
 /// Default commitment delay: EpochNumberWithFraction(number 1, index 0, length 1) as a full value.
@@ -764,7 +739,7 @@ fn remote_secnonce() -> SecNonce {
     SecNonceBuilder::new(REMOTE_SEED).build()
 }
 
-/// One commitment as fiber builds it (crates/fiber-lib/src/fiber/channel.rs:11319-11407), with the parts the vectors pin.
+/// One commitment as fiber builds it (crates/fiber-lib/src/fiber/channel.rs:11486-11574), with the parts the vectors pin.
 struct CommitmentBuild {
     tx: Transaction,
     settlement: SettlementData,
@@ -861,7 +836,6 @@ fn build_commitment_case(
     case
 }
 
-/// One closing transaction as fiber builds it, with its outputs' two fees.
 struct ShutdownBuild {
     tx: Transaction,
     tx_size: u64,
@@ -932,7 +906,7 @@ fn build_shutdown_case(local: &FiberSigner, remote: &FiberSigner, mut case: Shut
     case
 }
 
-/// One revocation's plaintext as fiber builds it (crates/fiber-lib/src/fiber/channel.rs:7945-8003 and 10140-10198).
+/// One revocation's plaintext as fiber builds it (crates/fiber-lib/src/fiber/channel.rs:8130-8188 and 10310-10368).
 struct RevocationBuild {
     output: CellOutput,
     output_data: Vec<u8>,
@@ -1074,7 +1048,8 @@ fn tenant_registry_vector() -> TenantRegistryVector {
     let payload = TenantRegistryPayload::new(
         lsp_node_secret.public_key(secp030::SECP256K1).into(),
         root_signer_secret.public_key(secp030::SECP256K1).into(),
-        TENANT_REGISTRY_NONCE,
+        TENANT_REGISTRY_REQUEST_ID,
+        TENANT_REGISTRY_SIGNED_AT,
     );
     let compact = secp030::SECP256K1
         .sign_ecdsa(&secp030::Message::from_digest(payload.digest()), &root_signer_secret)
@@ -1087,7 +1062,8 @@ fn tenant_registry_vector() -> TenantRegistryVector {
         lsp_node_secret: hex::encode(LSP_NODE_SECRET),
         lsp_node_id: hex::encode(payload.lsp_node_id.0),
         root_signer_pubkey: hex::encode(payload.root_signer_pubkey.0),
-        nonce: hex::encode(payload.nonce),
+        request_id: hex::encode(payload.request_id),
+        signed_at: payload.signed_at,
         payload: hex::encode(payload.canonical_bytes()),
         digest: hex::encode(payload.digest()),
         signature: hex::encode(signature.serialize()),
@@ -1105,17 +1081,15 @@ fn funding_keys_xonly(keys: &[[u8; 33]; 2]) -> [u8; 32] {
     ctx.aggregated_pubkey::<musig2::secp::Point>().serialize_xonly()
 }
 
-/// The id fiber's channel actor gives a channel, `derive_channel_id_from_tlc_keys` (crates/fiber-lib/src/fiber/channel.rs:5796-5804,
-/// private there and ported), as fiber's JSON writes it.
+/// fiber's private `derive_channel_id_from_tlc_keys` (crates/fiber-lib/src/fiber/channel.rs:5914-5922), ported, in its JSON form.
 pub(crate) fn derived_channel_id(mut tlc_base_keys: [[u8; 33]; 2]) -> String {
     tlc_base_keys.sort();
     let channel_id = fiber_json_types::Hash256(ckb_hash::blake2b_256(tlc_base_keys.concat()));
     serde_json::to_value(channel_id).unwrap().as_str().unwrap().to_string()
 }
 
-/// The funding lock and the id of the signing channel as fiber's channel actor derives them, ported because it derives both
-/// from its own state: the args from the funding keys in the order of `get_deterministic_musig2_agg_context`
-/// (crates/fiber-lib/src/fiber/channel.rs:8426-8455, 11029-11042), the id by `derived_channel_id`.
+/// As fiber's channel actor derives them from its private state: the args in the key order of
+/// `get_deterministic_musig2_agg_context` (crates/fiber-lib/src/fiber/channel.rs:8608-8637, 11196-11209).
 fn funding_lock_vector() -> FundingLockVector {
     let (device, peer) = signing::channel_parties();
     let device_funding = fiber_types::Pubkey(pubkey_bytes(&device.funding_pubkey));
@@ -1146,9 +1120,8 @@ fn funding_lock_vector() -> FundingLockVector {
     case
 }
 
-/// The case as fiber-lsp-sdk reads it, its two checks ported because both are private there: the args
-/// `musig2_matches_approved_lock` requires of the sorted keys' context (crates/fiber-lsp-sdk/src/signer.rs:1454-1467), and
-/// the id `validate_opening` requires (crates/fiber-lsp-sdk/src/opening.rs:174-193).
+/// fiber-lsp-sdk's two private checks, ported: `musig2_matches_approved_lock` on the sorted keys' context
+/// (crates/fiber-lsp-sdk/src/signer.rs:1455-1468) and `validate_opening` on the id (crates/fiber-lsp-sdk/src/opening.rs:179-198).
 fn check_funding_lock(case: &FundingLockVector) -> Result<(), Vec<String>> {
     let mut failures = Vec::new();
     let device_funding = pubkey_bytes(&case.device.funding_pubkey);
@@ -1285,7 +1258,6 @@ fn gen_vectors(out_path: &str) {
     println!("vectors written to {out_path}");
 }
 
-/// The digest half of the vectors: fixture channels through the ported fiber build functions.
 fn digest_vectors(local: &FiberSigner) -> DigestVectors {
     let remote = FiberSigner::generate_from_seed(&REMOTE_SIGNER_SEED);
     let commitment_lock = ScriptVector {
@@ -1554,7 +1526,6 @@ fn digest_vectors(local: &FiberSigner) -> DigestVectors {
     let node_two = pubkey_of(&SecretKey::from_slice(&blake2b_256(b"node two")).unwrap()).serialize();
     let (smaller_node, larger_node) = if node_one <= node_two { (node_one, node_two) } else { (node_two, node_one) };
     let sorted_node_ids = [hex::encode(smaller_node), hex::encode(larger_node)];
-    // Handed over larger-first on purpose: both implementations must sort by node pubkey themselves.
     let unsorted_node_ids = [hex::encode(larger_node), hex::encode(smaller_node)];
     let announcement_case = |name: &str| AnnouncementCaseVector {
         name: name.to_string(),
@@ -1567,7 +1538,6 @@ fn digest_vectors(local: &FiberSigner) -> DigestVectors {
     };
     let announcement_cases = vec![
         build_announcement_case(local, &remote, announcement_case("ckb")),
-        // The same channel with the node ids already in sorted order: the other branch of the node id sort.
         build_announcement_case(local, &remote, {
             let mut case = announcement_case("ckb, node ids already sorted");
             case.node_ids = sorted_node_ids.clone();

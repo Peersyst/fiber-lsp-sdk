@@ -28,8 +28,6 @@ const PAYEE_SECRET_KEY: [u8; 32] = [0x11; 32];
 const OTHER_SECRET_KEY: [u8; 32] = [0x22; 32];
 const PAYMENT_HASH: [u8; 32] = [0x03; 32];
 
-// --- the vector file ---
-
 #[derive(Serialize, Deserialize)]
 pub struct InvoiceVectors {
     fiber_ref: String,
@@ -103,7 +101,7 @@ struct VariantCase {
     error: Option<String>,
 }
 
-// --- the coder, ported verbatim from crates/fiber-types/src/invoice.rs:158-199 ---
+// fiber's coder, ported verbatim from crates/fiber-types/src/invoice.rs:158-199.
 
 fn ar_encompress(data: &[u8]) -> Vec<u8> {
     let mut model = Model::builder().num_bits(8).eof(EOFKind::EndAddOne).build();
@@ -135,8 +133,6 @@ fn ar_decompress_with_limit(data: &[u8], max_len: usize) -> Option<Vec<u8>> {
     decompressed_data.pop()?;
     Some(decompressed_data)
 }
-
-// --- building strings ---
 
 fn secret(bytes: [u8; 32]) -> SecretKey {
     SecretKey::from_slice(&bytes).unwrap()
@@ -182,7 +178,7 @@ fn signed_string(hrp: &str, molecule: &[u8], key: [u8; 32]) -> String {
     encode_string(hrp, 1, &compressed, &sign(hrp, &compressed, key), Variant::Bech32m)
 }
 
-// --- molecule by hand, for what fiber's builders refuse to write ---
+// Molecule by hand, for what fiber's builders refuse to write.
 
 fn le(value: u128, width: usize) -> Vec<u8> {
     value.to_le_bytes()[..width].to_vec()
@@ -231,8 +227,6 @@ fn hint_attr(key: &[u8]) -> Vec<u8> {
     attr(10, table(&[mol_bytes(key)]))
 }
 
-// --- fiber's invoices ---
-
 fn currency_name(currency: Currency) -> &'static str {
     match currency {
         Currency::Fibb => "Fibb",
@@ -263,7 +257,7 @@ fn script_vector(script: &CkbScript) -> ScriptVector {
     }
 }
 
-/// Names each of fiber's attributes in an exhaustive match, so a variant a new release adds fails to compile here.
+/// An exhaustive match: an attribute a fiber release adds fails to compile here.
 fn attribute_values(attribute: &Attribute) -> AttributeValues {
     let (kind, value) = match attribute {
         Attribute::FinalHtlcTimeout(value) => ("final_htlc_timeout", json!(value.to_string())),
@@ -355,7 +349,7 @@ fn invoice_case(name: &str, currency: Currency, amount: Option<u128>, timestamp:
     let hrp = hrp_of(&invoice);
     let signature = invoice.signature.as_ref().map(|signature| signature_bytes(&signature.0));
     let string = invoice.to_string();
-    // The port of the coder and of the layout is pinned to fiber's own `Display` here.
+    // Pins the coder's and the layout's port to fiber's own `Display`.
     let flag = u8::from(signature.is_some());
     assert_eq!(
         encode_string(&hrp, flag, &compressed, signature.as_deref().unwrap_or_default(), Variant::Bech32m),
@@ -438,7 +432,7 @@ fn invoices() -> Vec<InvoiceCase> {
             vec![
                 Attribute::Description("coffee".to_string()),
                 Attribute::ExpiryTime(Duration::from_secs(3600)),
-                // The hint sets the trampoline feature, then pushes itself (invoice_impl.rs:103-106, rpc/invoice.rs:370-372).
+                // The hint sets the trampoline feature, then pushes itself (invoice_impl.rs:103-106, rpc/invoice.rs:379-381).
                 Attribute::Feature(trampoline_feature()),
                 Attribute::TrampolineRouteHint(hint),
                 Attribute::FinalHtlcMinimumExpiryDelta(9_600_000),
@@ -555,7 +549,7 @@ fn assert_invoice_coverage(cases: &[InvoiceCase]) {
     assert_eq!(largest.molecule.len() / 2, MAX_INVOICE_DATA_LENGTH, "largest data sits at the decoder's limit");
 }
 
-// --- the coder past what an invoice reaches ---
+// The coder past what an invoice reaches.
 
 fn coder() -> CoderVectors {
     let mut state: u32 = 0x9e37_79b9;
@@ -596,8 +590,7 @@ fn coder() -> CoderVectors {
         ("garbage".to_string(), vec![0xff; 32]),
         ("16385 zero bytes".to_string(), ar_encompress(&vec![0; MAX_INVOICE_DATA_LENGTH + 1])),
         ("16384 zero bytes".to_string(), ar_encompress(&vec![0; MAX_INVOICE_DATA_LENGTH])),
-        // Found by search: decoding ends on the last of the 48 zero bits the decoder pads a short input with, and with one
-        // zero byte fewer it would need 56, so the padding budget is pinned at both edges.
+        // Decoding ends on the last of the 48 zero bits padding a short input; one zero byte fewer needs 56.
         ("needs all 48 padding bits".to_string(), [vec![0x4e], vec![0; 10]].concat()),
         ("needs 56 padding bits".to_string(), [vec![0x4e], vec![0; 9]].concat()),
     ];
@@ -620,7 +613,7 @@ fn coder() -> CoderVectors {
     CoderVectors { compress, decompress }
 }
 
-// --- UTF-8 as fiber reads it (`String::from_utf8`, invoice.rs:1078,1097) ---
+// UTF-8 as fiber reads it (`String::from_utf8`, invoice.rs:1078,1097).
 
 fn utf8() -> Vec<Utf8Case> {
     let cases: Vec<(&str, Vec<u8>)> = vec![
@@ -663,8 +656,6 @@ fn utf8() -> Vec<Utf8Case> {
         })
         .collect()
 }
-
-// --- the variants of one invoice, with fiber's verdict ---
 
 fn verdict(string: &str) -> (String, Option<String>) {
     let owned = string.to_string();
@@ -884,8 +875,6 @@ pub fn gen_invoice_vectors(out_path: &str) {
     std::fs::write(out_path, format!("{json}\n")).unwrap();
     println!("invoice vectors written to {out_path}");
 }
-
-// --- verify-invoices ---
 
 #[derive(Deserialize)]
 struct TsInvoiceCase {

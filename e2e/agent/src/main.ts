@@ -1,3 +1,4 @@
+import { randomBytes } from "node:crypto";
 import { setTimeout as sleep } from "node:timers/promises";
 import { FiberLspSdk } from "@peersyst/fiber-lsp-sdk";
 import { Agent } from "./agent";
@@ -18,7 +19,7 @@ function fail(error: unknown, code: number): never {
 }
 
 /**
- * Runs the agent: the configuration, the control server when it has an address, then the agent until a signal or a shutdown.
+ * Runs the agent until a signal or a shutdown.
  */
 async function main(): Promise<void> {
     let config: AgentConfig;
@@ -30,6 +31,7 @@ async function main(): Promise<void> {
     const effects: AgentEffects = {
         fetch,
         now: Date.now,
+        randomBytes: (length) => randomBytes(length),
         sleep: (ms) => sleep(ms),
         exit: (code) => process.exit(code),
         log: (line) => process.stdout.write(`${line}\n`),

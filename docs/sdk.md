@@ -62,8 +62,8 @@ it and names it `options.nonceReuse`. `"allow"` exists because Fiber's current n
 on the slots of a channel's opening, of each round the peer starts and of each revocation round: under the default no
 channel opens against Fiber today, so a host that must work with it now sets `"allow"`, and the mode goes once Fiber's
 nonces are strict. Even under `"allow"`, a round the peer starts after one of the device's own asks for a third session
-on one slot, which is refused, so a channel stalls at the fulfil of a payment it sent or at a payment received after one
-it fulfilled ([policy.md](./policy.md), "The known cost"). Every effect that is a bare function (`fetch`, the clock, the
+on one slot, which is refused, so the round cannot complete at the fulfil of a payment it sent or at a payment received
+after one it fulfilled, and fiber force-closes the channel ([policy.md](./policy.md), "The known cost"). Every effect that is a bare function (`fetch`, the clock, the
 runtime's timer functions) is called without a receiver, the storage and the timer as methods of the host's own object,
 so none sees an SDK object as `this`. Nothing schedules or reads the storage until `connect()`.
 
@@ -261,10 +261,10 @@ twice, or the read throws.
 
 **What wakes the tenant.** The LSP's operator evicts a tenant with `lsp_evict_tenant`, which fiber refuses while the
 tenant's runtime is busy, with a payment in flight, an active TLC or a pending channel operation
-(`lsp/runtime.rs:71-90`, `lsp/service.rs:407-420`). Any channel, invoice or payment call that carries the tenant's token
+(`lsp/runtime.rs:71-90`, `lsp/service.rs:481-494`). Any channel, invoice or payment call that carries the tenant's token
 brings an evicted tenant back: fiber resolves the tenant's runtime for each (`supervisor.ensure`,
-`lsp/service.rs:432-442`), `list_channels` included. The two signing statuses do not: fiber reads them from the tenant's
-store and its watchtower (`rpc/channel.rs:387-412`, `rpc/watchtower.rs:379-400`). So no step lists the node's channels
+`lsp/service.rs:506-517`), `list_channels` included. The two signing statuses do not: fiber reads them from the tenant's
+store and its watchtower (`rpc/channel.rs:358-383`, `rpc/watchtower.rs:388-409`). So no step lists the node's channels
 to find what to poll: the signing step reads the channels the activity list watches, the watchtower step the device's
 list, each asking a channel's status alone, and the channel, invoice and payment steps call the node only while
 something is watched. A device with nothing in flight, no opening, no channel open and no invoice nor payment
@@ -348,7 +348,7 @@ step, which the poller reports as any other. A request is answered within one in
 being posted, against a deadline, when there is one, of TLC expiries; the step reports it on `SIGNING` and never waits
 on it or hurries for it. A call that
 never answers holds the whole step until its deadline, and the next tick starts from the same channel: the channels
-after it wait as long, which with fiber's one channel per tenant is no channel at all.
+after it wait as long, which with the SDK's one channel at a time is no channel at all.
 
 The run's `abandoned` is read before the dispatch, before the submission and before every event: an answer that outlived
 its run acts on nothing, and the next channel is not polled. A signature abandoned before it was submitted is not lost:
@@ -369,14 +369,14 @@ the policy has registered, one at a time:
 
 1. `get_watchtower_signing_status`. Fiber holds no watch row for a channel before `RemoteTxComplete` creates it, nor
    after a cooperative close, an abandon or an aborted funding deletes it, and answers `-32000` with "watched channel not
-   found" (`WATCHTOWER_UNWATCHED_ERROR`, `rpc/watchtower.rs:386-391`, `event_handler.rs:41-78`). That answer is nothing
+   found" (`WATCHTOWER_UNWATCHED_ERROR`, `rpc/watchtower.rs:395-400`, `event_handler.rs:41-76`). That answer is nothing
    pending. On an open channel the row may come yet, so the channel stays listed. On a closed one it never comes back:
    fiber creates a row at the opening's `RemoteTxComplete`, and again, when missing, on each `TenantChannelOnline` the
-   channel's `ChannelReady` or `ChannelOnline` sends (`fiber/network.rs:9501-9506`, `lsp/service.rs:524-555`,
+   channel's `ChannelReady` or `ChannelOnline` sends (`fiber/network.rs:9698-9703`, `lsp/service.rs:611-652`,
    `ensure_hosted_watch_channel` in `lsp/watch.rs:15-71`), and a closed channel emits neither; it removes one only once
    the channel is closed. So the channel is dropped from the list, unless the run was abandoned, and no tick asks about
    it again. A force close keeps its row, which fiber never deletes (`ChannelClosed` is notified for a cooperative close
-   alone, `fiber/network.rs:8338-8345`), so a force-closed channel is polled for as long as fiber watches it, as fiber's
+   alone, `fiber/network.rs:8532-8539`), so a force-closed channel is polled for as long as fiber watches it, as fiber's
    own watchtower keeps it. Any other answer, another message or another code, is a failure. An answer for another
    channel than the one asked is refused as `malformed`, with neither request id nor purpose, and never reaches the
    dispatch.
@@ -384,7 +384,10 @@ the policy has registered, one at a time:
    refuses ([signing.md](./signing.md)). Nothing pending is nothing done.
 3. A signature goes back through `submit_watchtower_signature`; `Applied` and `AlreadyApplied` are both success. Then
    the spend is marked applied, `PolicyEngine.markWatchtowerSpendApplied`, unless the dispatch signed it unclaimed, and
-   `WATCHTOWER_SIGNING` is emitted. A refusal is emitted at once and nothing is submitted: the spend stays pending, and
+   `WATCHTOWER_SIGNING` is emitted. A request the watchtower pruned once a settlement confirmed
+   (`watchtower/actor.rs:1019-1058`) is answered "signature request id not found in pending requests"
+   (`rpc/watchtower.rs:463`), which is a failure of the step like any other and harmless, since the input it spent is
+   spent. A refusal is emitted at once and nothing is submitted: the spend stays pending, and
    the funds where they are.
 
 A channel whose registration, status read, submission, mark or drop fails, or whose dispatch faults, is reported as a
@@ -397,20 +400,21 @@ submission is not lost: the claim was written, and the next tick answers the sam
 ## The tenant's registration
 
 A device is a tenant of the hosted LSP once its RootSigner, the key the master seed derives as the wallet identity
-([signing.md](./signing.md)), is registered there. The facade signs and the host calls: the two registration methods take
-the operator's token, so the host or its backend makes them ([rpc.md](./rpc.md)), never the facade.
+([signing.md](./signing.md)), is registered there. The facade signs and the host calls: the registration method takes
+the operator's token, so the host or its backend makes it ([rpc.md](./rpc.md)), never the facade.
 
-- `rootSignerPubkey`, the RootSigner's 33-byte compressed key, a copy on every read: the key the host asks
-  `lsp_get_tenant_registry_nonce` for.
+- `rootSignerPubkey`, the RootSigner's 33-byte compressed key, a copy on every read: the key the registration
+  names.
 - `tenantId`, fiber's tenant id of that key (`TenantId::from_root_signer_pubkey`), 64 lowercase hex characters.
-- `signTenantRegistration(challenge)` takes the nonce's result decoded to bytes, `SdkTenantChallenge`
-  (`{ lspNodeId, rootSignerPubkey, nonce }`), and returns `SdkTenantRegistration`, the params of `lsp_register_tenant`
-  (`{ rootSignerPubkey, nonce, signature }`, the signature 64 bytes of compact ECDSA) plus `tenantId`, bytes of its own.
-  It is synchronous, calls nothing and writes nothing. It refuses, with a `TypeError` naming the field, a challenge that
-  is not an object; a `lspNodeId` absent, not bytes, not 33 bytes, not a point, or not the `lspPubkey` the facade was
-  built with (compared with its own copy), since a nonce another LSP issued is no registration with this one; then, as
-  the identity does, a `rootSignerPubkey` that is not this device's, and a nonce that is not 32 bytes. The LSP is checked
-  first, so a challenge wrong on both names the LSP.
+- `signTenantRegistration(request)` takes `SdkTenantRegistrationRequest` (`{ requestId, signedAtMs }`: 32 bytes the host
+  draws and its clock in Unix milliseconds as a `bigint`) and returns `SdkTenantRegistration`, the params of
+  `lsp_register_tenant` (`{ rootSignerPubkey, requestId, signedAtMs, signature }`, the signature 64 bytes of compact
+  ECDSA) plus `tenantId`, bytes of its own. It signs for the `lspPubkey` the facade was built with, over the 141 bytes
+  of fiber's registry payload ([signing.md](./signing.md)). It is synchronous, reads no clock, draws no randomness, calls
+  nothing and writes nothing. It refuses, with a `TypeError` naming the field by its path, a request that is not an object
+  and a `request.requestId` that is not 32 bytes, and, with a `RangeError`, a `request.signedAtMs` that is not a u64
+  `bigint`. The node accepts a `signedAtMs` from five minutes behind its clock to thirty seconds ahead and refuses a
+  `requestId` it has seen, so a lost answer is retried with a fresh id.
 
 `setBiscuitToken(token)` hands the token `lsp_register_tenant` returned to the rpc client, which puts it on the next call
 on, the poller's included; a token the client refuses (not printable ASCII without spaces) throws its `TypeError` and
@@ -420,7 +424,7 @@ client does (`finish_registration`): the facade sees only the token, so it canno
 
 ## Opening a channel
 
-On fiber's side a tenant channel opens in two calls: `open_tenant_channel` blocks while the node agrees the channel with
+On fiber's side a tenant channel opens in two calls: `open_channel_with_external_funding` blocks while the node agrees the channel with
 the LSP and answers with the funding tx it froze, and `submit_signed_funding_tx` takes that tx signed
 ([rpc.md](./rpc.md)). The facade has three methods over them:
 
@@ -508,15 +512,16 @@ cannot read, passes through as itself.
 
 ### The pending opening
 
-Fiber keeps one opening per tenant: it answers the identical request, signer material and nonces included, with the
-result it froze, and refuses another while the first is open ("tenant already has a different channel opening"). An
-opening whose answer never reached the device is therefore recovered only by sending the same request again, which
-takes the same index. So the device records the opening, under `fiber-lsp-sdk:opening`, before it asks
-([persistence.md](./persistence.md)):
+Fiber keys an opening by the signer's `tlc_base_key`: it answers the identical request, signer material and nonces
+included, with the result it froze, and refuses a different request for the same signer ("tenant already has a different
+channel opening for this signer"). A fresh index is a fresh signer, which fiber negotiates beside the old opening until
+its funding abort, 300 s on. The SDK opens one channel at a time, its own limit, so it keeps one pending opening. An
+opening whose answer never reached the device is recovered only by sending the same request again, which takes the same
+index. So the device records the opening, under `fiber-lsp-sdk:opening`, before it asks ([persistence.md](./persistence.md)):
 
 - **Fresh.** With no pending opening asked with the same amount, lock and cell deps, a fresh index is allocated and the
-  opening written under it with no channel yet, replacing any other; while fiber still holds that other one, it
-  refuses the fresh request as "a different channel opening" until it aborts it.
+  opening written under it with no channel yet, replacing any other; fiber still holds that other one, a signer of its
+  own, until its funding abort.
 - **Resumed.** A pending opening asked with the same three, the cell deps compared in order, is resumed under its index,
   and the request sent again is identical, since the material is a function of the index. When it already names a
   channel, the node is first asked `only_pending`: a channel it shows `Closed` was aborted, so the opening is dropped and
@@ -526,25 +531,25 @@ takes the same index. So the device records the opening, under `fiber-lsp-sdk:op
 - **Dropped** when the device refuses the answer, `opening_rejected` or `opening_conflict`, by its index, so an opening
   another call wrote meanwhile survives; and by the channel step, by its id, once the channel is ready or closed.
 - **Kept** on every failure of the request itself. Fiber answers an open interrupted after 30 seconds with "tenant opening
-  interrupted; retry the same request" (`rpc/channel.rs:345-370`) and a stopped one with "tenant channel opening
-  stopped" (`network.rs:8366-8370`), both keeping the opening on its side; neither can be told from a lost answer or any
+  interrupted; retry the same request" (`rpc/channel.rs:317-342`) and a stopped one with "tenant channel opening
+  stopped" (`network.rs:8556-8560`), both keeping the opening on its side; neither can be told from a lost answer or any
   other error, and a final refusal retried only meets the refusal again.
 
 An opening given up for good is not the device's to cancel: fiber aborts one left unfunded once its external funding
 timeout passes (`external_funding_timeout_seconds`, 300 by default), the channel step announces `CHANNEL_CLOSED` for it
 if it was watched, and the next same call opens afresh under a new index.
 
-| Failure                                               | Error                                                             | The pending opening                                     |
-| ----------------------------------------------------- | ----------------------------------------------------------------- | ------------------------------------------------------- |
-| An argument, the signer included                      | `TypeError`, or the policy's `RangeError` naming `fundedShannons` | Untouched: nothing written or sent                      |
-| The index's allocation                                | `clock_before_floor`                                              | Untouched                                               |
-| `only_pending`, resuming a named one                  | The rpc client's                                                  | Kept                                                    |
-| `open_tenant_channel`, its answer unreadable included | The rpc client's                                                  | Kept                                                    |
-| The check                                             | `opening_rejected`                                                | Dropped                                                 |
-| A registration or pin the policy refuses              | `opening_conflict`                                                | Dropped                                                 |
-| The storage                                           | Its own                                                           | Kept as last written                                    |
-| The host's signer, in `openChannel`                   | Its own                                                           | Kept, named; the channel registered, watched and listed |
-| The submission                                        | Below                                                             | Kept, until the channel step sees ready or closed       |
+| Failure                                     | Error                                                             | The pending opening                                     |
+| ------------------------------------------- | ----------------------------------------------------------------- | ------------------------------------------------------- |
+| An argument, the signer included            | `TypeError`, or the policy's `RangeError` naming `fundedShannons` | Untouched: nothing written or sent                      |
+| The index's allocation                      | `clock_before_floor`                                              | Untouched                                               |
+| `only_pending`, resuming a named one        | The rpc client's                                                  | Kept                                                    |
+| The opening, its answer unreadable included | The rpc client's                                                  | Kept                                                    |
+| The check                                   | `opening_rejected`                                                | Dropped                                                 |
+| A registration or pin the policy refuses    | `opening_conflict`                                                | Dropped                                                 |
+| The storage                                 | Its own                                                           | Kept as last written                                    |
+| The host's signer, in `openChannel`         | Its own                                                           | Kept, named; the channel registered, watched and listed |
+| The submission                              | Below                                                             | Kept, until the channel step sees ready or closed       |
 
 A drop that fails leaves the refusal its code and its cause, its message saying the opening could not be dropped and why;
 the next same call drops the leftover again, or finds it aborted.
@@ -648,7 +653,7 @@ when omitted: fiber has no default, and a tenant's invoice without an expiry fai
 
 The final delta is fiber's `DEFAULT_FINAL_TLC_EXPIRY_DELTA`, the one its own suite sends. Left out, fiber's `new_invoice`
 writes its minimum, two thirds of its default commitment delay (160 minutes in a release build), and fiber fails a
-received TLC once its expiry is within two thirds of the channel's delay and 60 seconds of now (`channel.rs:3474-3507`):
+received TLC once its expiry is within two thirds of the channel's delay and 60 seconds of now (`channel.rs:3559-3592`):
 a payment under that delta would arrive with no margin left to release it. It is not an option: a delta shorter than the
 release's margin ([The invoice step](#the-invoice-step)) would leave every payment of the invoice unreleasable.
 
@@ -706,7 +711,7 @@ they just signed. It reads the activity list and, when no invoice is watched, ca
 
 - **`Open`**: nothing, and the invoice stays watched. Fiber itself answers an `Open` invoice past its expiry as `Expired`.
 - **`Received`**: fiber's word that a payment of the invoice is committed in both of the tenant's commitments
-  (`channel.rs:1323-1352`). `PAYMENT_PENDING` goes out the first time, then the status is recorded, and the release is
+  (`channel.rs:1337-1366`). `PAYMENT_PENDING` goes out the first time, then the status is recorded, and the release is
   tried on every tick the invoice stays `Received`:
   1. The record is read (`readHoldInvoice`), and the index it keeps must derive the watched hash, before anything is marked
      or settled: a record whose index derives another hash is a `TypeError`, a `poll_failed`, and is never released.
@@ -720,15 +725,15 @@ they just signed. It reads the activity list and, when no invoice is watched, ca
   4. Once marked, `settle_invoice` hands the node the preimage. Fiber stores it, gives it to its watchtower and queues the
      fulfil, whose requests the device then signs, so the step asks the poller for a tick at once (`pollNow`).
 - **`Paid`**: fiber's word that the fulfil was applied. `PAYMENT_RECEIVED`, then the invoice is no longer watched.
-- **`Expired`** or **`Cancelled`**: `PAYMENT_EXPIRED`, then the invoice is no longer watched. A tenant has no
-  `cancel_invoice` (`rpc/tenant.rs:22-44`), so a cancelled one is the operator's doing.
+- **`Expired`** or **`Cancelled`**: `PAYMENT_EXPIRED`, then the invoice is no longer watched. The facade never
+  calls `cancel_invoice`, which a tenant may (`rpc/tenant.rs:61-85`), so a cancelled one is the host's or the operator's doing.
 
 A release that waits, `not_held`, `expiry_too_close` or `offered_in_flight`, is no failure: no event, and the release is
 tried again on the next tick, while a payment still arrives in one view or an offered TLC beside it resolves. Any other
 refusal, `algorithm_mismatch` among them, never resolves on its own and is a `poll_failed`. A waiting release ends the
 invoice when it can no longer be paid: past its expiry and with no view of any channel it lists still showing a TLC of it
 (`listsHoldInvoiceTlc`), it is `PAYMENT_EXPIRED` and no longer watched. Fiber keeps an invoice whose TLC failed
-`Received` for good (`network.rs:4432-4437`), so nothing else would end it. The expiry is fiber's `is_expired`, read off
+`Received` for good (`network.rs:4568-4573`), so nothing else would end it. The expiry is fiber's `is_expired`, read off
 the string `get_invoice` returns, decoded and held to the watched hash: past it once the timestamp plus the expiry is
 strictly below the clock's reading the release took, so the exact millisecond is not past it, and an invoice without an
 expiry never is.
@@ -741,7 +746,7 @@ pays it, and an `Expired` or `Cancelled` one whose preimage it released, since t
 settled again should fiber report it `Received`.
 
 A settlement fiber answers with `-32000` and "Invoice is already paid" (`SDK_INVOICE_ALREADY_PAID_ERROR`,
-`network.rs:4854`), which it does once the fulfil is applied, is the settlement done: `Paid` confirms it on the next tick.
+`network.rs:4990`), which it does once the fulfil is applied, is the settlement done: `Paid` confirms it on the next tick.
 Any other refusal, under that code with another message included, is a `poll_failed`.
 
 The events are at least once, as everywhere: each is emitted only while the run stands and before its mark or its drop,
@@ -787,7 +792,7 @@ up as fiber rounds it (`DEFAULT_SDK_MAX_FEE_PER_MILLE` over `SDK_MAX_FEE_RATE_DE
 and `calculate_fee_with_base`, `fee.rs:151-175`). The budget the device approves is the amount plus that fee, and
 `send_payment` carries the same fee as `max_fee_amount`, so the node routes within what the device signs: under
 trampoline the first hop carries the amount plus the whole fee fiber settles on (`graph.rs:1647-1653`), at most the
-budget. Fiber takes `min(max_fee_amount, 0.5%)` whatever the host asks (`payment.rs:443-449`), so a budget above 0.5% is
+budget. Fiber takes `min(max_fee_amount, 0.5%)` whatever the host asks (`payment.rs:450-456`), so a budget above 0.5% is
 approved as asked and spent no further than fiber's cap: the intent is then loose, never short. `max_fee_rate` is not
 sent. Under trampoline fiber also refuses a budget below `ceil(amount / 1000)`, what the trampoline asks for forwarding
 ("max_fee_amount is too low for trampoline routing"), so such a budget, 0 included, fails the route as the node's
@@ -862,10 +867,10 @@ found" and ends the payment.
 
 Three of fiber's answers say a session under the hash already exists (`SDK_PAYMENT_SESSION_EXISTS_ERRORS`): "Payment session
 already exists, stop start new payment actor for `Hash256(0x…)`" while the payment's actor still runs
-(`fiber/network.rs:5544-5551`), "InvalidParameter: Payment session already exists: `Hash256(0x…)` with payment session status:
-…" for a stored session that has not failed (`fiber/payment.rs:2194-2198`), and "InvalidParameter: Payment session
+(`fiber/network.rs:5688-5695`), "InvalidParameter: Payment session already exists: `Hash256(0x…)` with payment session status:
+…" for a stored session that has not failed (`fiber/payment.rs:2207-2211`), and "InvalidParameter: Payment session
 `Hash256(0x…)` has attempts that are in flight state, can not retry" for a failed one with an attempt still out
-(`:2204-2208`). Each is matched by its code, `-32000`, and its whole message around this very hash, in fiber's `Hash256`
+(`:2217-2221`). Each is matched by its code, `-32000`, and its whole message around this very hash, in fiber's `Hash256`
 form: the node runs a payment under it, so the intent and the watch are kept for the step to report, and the refusal is
 `payment_in_flight`. The same texts under another hash or another code, and the stored session's under `Failed`, which
 fiber sends again, are plain refusals.
@@ -883,14 +888,14 @@ its way, and read on the next tick; any other is held in `reading` and asked `ge
 `poll_failed`. Its status:
 
 - **`Created`** or **`Inflight`**: nothing, and the payment stays watched with its intent open. Fiber answers the send
-  itself `Created`, since the node does not wait for the add (`network.rs:4959-4961`), and the payment is `Inflight` once
-  the add is out, before the device has signed it (`channel.rs:4445-4472`): a payment whose TLC the device refuses stays
+  itself `Created`, since the node does not wait for the add (`network.rs:5095-5097`), and the payment is `Inflight` once
+  the add is out, before the device has signed it (`channel.rs:4541-4568`): a payment whose TLC the device refuses stays
   `Inflight`, and watched.
 - **`Success`**: the intent closed, if there is one, `PAYMENT_SENT`, then the payment no longer watched.
 - **`Failed`**: the intent closed, `PAYMENT_FAILED` with fiber's `failed_error` verbatim, an empty one included, or
   `SDK_PAYMENT_UNEXPLAINED_FAILURE_REASON` when fiber gives none, then the payment no longer watched.
 - **Not found**: fiber's "InvalidParameter: Payment session not found: `Hash256(0x…)`" for this very hash, under `-32000`
-  (`SDK_PAYMENT_NOT_FOUND_ERROR`, `network.rs:5455-5462`), says the node holds no session of it: the send never ran. The
+  (`SDK_PAYMENT_NOT_FOUND_ERROR`, `network.rs:5591-5606`), says the node holds no session of it: the send never ran. The
   intent closed, if there is one, `PAYMENT_FAILED` with `SDK_PAYMENT_NEVER_SENT_REASON`, then the payment no longer watched.
   A request that reaches the node late finds the intent closed and its add refused: the safe side.
 - **Anything else**, another refusal, one that only looks like the not found, a status the client does not know or a call
@@ -925,7 +930,7 @@ channel closed. Every close pays the device's side to the user's lock, the close
    field.
 2. The channel's record, through `readSdkChannelRecord`: `unknown_channel` for one this device never registered.
 3. The fee. Both close scripts are read back from their pins through `common`'s `decodeMoleculeScript`, and the rate is
-   the host's or, without one, the pinned `commitmentFeeRate`, which is fiber's own default (`fiber/channel.rs:2759-2765`).
+   the host's or, without one, the pinned `commitmentFeeRate`, which is fiber's own default (`fiber/channel.rs:2838-2844`).
    The device's fee is digest's `calculateShutdownTxFee` over them, fiber's: `floor(rate * size / 1000)`, the size that
    of fiber's mock close over both scripts and the network's `fundingLockCellDepsCount` zeroed cell deps, the count fiber
    sizes the close with (`fee.rs:65-70`), as it sizes the commitment ([digest.md](./digest.md)). With both scripts pinned
@@ -970,27 +975,27 @@ tick.
 
 ### What fiber does with it
 
-Fiber serves a tenant's `shutdown_channel` as any node's (`rpc/channel.rs:295-305`) and checks nothing of the tenant's
+Fiber serves a tenant's `shutdown_channel` as any node's (`rpc/channel.rs:289-299`) and checks nothing of the tenant's
 own: with no script it pays the open's, with no rate it takes the commitment's, and it refuses either beside `force`
-(`:723-729`). Its checks, in order, the network actor's lookup and then `handle_shutdown_command`'s
-(`fiber/channel.rs:2726-2767`), each an `RpcError`:
+(`:694-700`). Its checks, in order, the network actor's lookup and then `handle_shutdown_command`'s
+(`fiber/channel.rs:2805-2846`), each an `RpcError`:
 
-- **A channel it holds no actor for**: "Channel not found error: `Hash256(0x…)`" (`fiber/network.rs:8076-8093`), which is
+- **A channel it holds no actor for**: "Channel not found error: `Hash256(0x…)`" (`fiber/network.rs:8265-8282`), which is
   also what a second `closeChannel` meets once the close is confirmed, since the channel's actor stops.
 - **The peer offline**: "Invalid state: Cannot cooperatively shutdown channel `Hash256(0x…)` while peer is offline", the
-  prefix and the id's form those of fiber's `ProcessingChannelError` (`:5692`).
+  prefix and the id's form those of fiber's `ProcessingChannelError` (`:5836`).
 - **A channel not `ChannelReady`**: "Invalid state: Trying to send shutdown message while in invalid state …", the state
   in its debug form; a second `closeChannel` while the first close runs meets it.
 - **An outbound TLC not yet committed**, its add still `LocalAnnounced` before the peer's `revoke_and_ack`: "Invalid
   state: Unable to process shutdown command, as there are pending outbound tlcs". TLCs already committed, either way, do
   not stop the close: both sides exchange their shutdowns, and the channel stays `closing` until every TLC settles, the
-  device signing their rounds as usual, and only then asks for the close (`:9143-9215`).
-- **The fee** (`check_shutdown_fee_rate`, `:7542-7596`): a rate below the commitment fee rate, and a fee the device's
+  device signing their rounds as usual, and only then asks for the close (`:9324-9393`).
+- **The fee** (`check_shutdown_fee_rate`, `:7730-7784`): a rate below the commitment fee rate, and a fee the device's
   balance cannot pay. Fiber sets no other bound.
 
-Each side pays its own fee, its rate times the size of the same mock close (`channel.rs:11188-11203`). A fiber node
-answers the other side's shutdown on its own, with the open's script and a rate of 0 (`:11774-11795`), when that
-shutdown's rate is at least the commitment fee rate (`:8753-8757`), so only the side that started the close pays for it:
+Each side pays its own fee, its rate times the size of the same mock close (`channel.rs:11355-11370`). A fiber node
+answers the other side's shutdown on its own, with the open's script and a rate of 0 (`:11937-11958`), when that
+shutdown's rate is at least the commitment fee rate (`:8934-8938`), so only the side that started the close pays for it:
 a close the device asks for comes out of the device's output alone, and one the peer starts out of the peer's. Below the
 commitment fee rate, which only the peer's shutdown can carry since fiber refuses it from the device's side, the node
 does not answer: the channel stays `closing`, no `SendClosingSigned` comes, and only a force close ends it. When both
@@ -998,7 +1003,7 @@ sides send their shutdown at once, neither answers the other's, and each pays it
 
 A fiber bug can stall a close the device asks for at a rate of its own. On a reconnection while the channel is
 `ShuttingDown` and the peer's shutdown has not arrived, fiber sends the device's shutdown again with the open's script and
-the commitment fee rate, not the rate stored for the close (`channel.rs:10675-10688`). With a host `feeRate` other than
+the commitment fee rate, not the rate stored for the close (`channel.rs:10842-10855`). With a host `feeRate` other than
 the commitment's, the two sides then build different closes and the close stalls until a force close; the default rate
 is unaffected.
 
@@ -1012,10 +1017,10 @@ device's output short of its balance by no more than 1 CKB, which at a rate of 0
 stall the channel. `CHANNEL_CLOSED` reports it, the channel watched since its opening.
 
 Fiber stores the peer's shutdown as it comes and never holds its script to the open's `remote_shutdown_script`
-(`channel.rs:1932-1936`), so a peer can ask for its share to be paid elsewhere. The close then states another script than
+(`channel.rs:1946-1950`), so a peer can ask for its share to be paid elsewhere. The close then states another script than
 the pin and the device refuses it, as fiber's own device SDK does (`fiber-lsp-sdk/src/commitment.rs:849-953`):
 `SIGNING` reports it `refused` with `policy_refusal`, naming `remoteCloseScript` and both values, on every tick. A shutdown
-that does not complete never times out in fiber (`channel.rs:6622-6624`): the channel stays `closing`, a `closeChannel`
+that does not complete never times out in fiber (`channel.rs:6729-6731`): the channel stays `closing`, a `closeChannel`
 meets fiber's invalid state, and only a force close, the node's or the peer's, ends it, which the watchtower step then
 follows ([The watchtower step](#the-watchtower-step)).
 
@@ -1025,7 +1030,7 @@ The tick `closeChannel` asks for signs the close if fiber built it already, whic
 exchanged and no TLC is left: the channel step reads the channel `closing` and does nothing, and the signing step signs
 and reports `SIGNING`, which carries no `deadlineMs` ([Events](#events)). `CHANNEL_CLOSED` comes from the channel step of
 a later tick, the first that lists the channel `Closed`, and the channel is no longer watched. Fiber removes the
-channel's watch row as it handles the close's notification, apart from the channel's state (`event_handler.rs:69-78`),
+channel's watch row as it handles the close's notification, apart from the channel's state (`event_handler.rs:67-76`),
 so the watchtower step of that tick or of a later one reads fiber's "watched channel not found" for it and drops it from
 the device's channels, after which the device calls the node for nothing about it.
 
@@ -1033,7 +1038,7 @@ the device's channels, after which the device calls the node for nothing about i
 
 `src/index.ts` exports the facade, `FiberLspSdk`, with its options, network and event types, `SdkError` with its codes,
 the event type list, the network names and the default poll interval, the nonce reuse mode, the watchtower option
-(`SdkWatchtowerOptions`), the registration's two forms (`SdkTenantChallenge`, `SdkTenantRegistration`), the opening's
+(`SdkWatchtowerOptions`), the registration's two forms (`SdkTenantRegistrationRequest`, `SdkTenantRegistration`), the opening's
 forms (`SdkChannelOpening`, `SdkSignFundingInputs`, and the rpc client's `TenantChannelOpeningContext` the opening hands
 back), the listing's (`SdkChannelInfo`, `SdkChannelState`, `SDK_CHANNEL_STATES`), the evidence
 (`SdkChannelEvidence`), the invoice's (`SdkInvoice`, `SdkInvoiceOptions`, which `createInvoice` takes and returns through
@@ -1053,14 +1058,14 @@ through the facade alone.
 - **No keysend, UDT, multi-path or amountless payment.** `transfer` pays one CKB invoice that names its amount, in one
   part, and sends no `max_fee_rate`: fiber caps the fee at 0.5% whatever is asked.
 - **No proof of payment.** `PAYMENT_SENT` is the node's word; the preimage fiber keeps for a paid payment is not read.
-- **No invoice cancelled.** Fiber gives a tenant no `cancel_invoice`; an invoice never paid ends at its expiry, as
-  `PAYMENT_EXPIRED`.
+- **No invoice cancelled.** The facade calls no `cancel_invoice`, which a tenant may call; an invoice never paid ends at
+  its expiry, as `PAYMENT_EXPIRED`.
 - **No check of the funding inputs.** The device holds the funding cell to what it asked; what the inputs spend, the
   change and the fee are the host signer's, which can read the chain.
 - **No force close.** `closeChannel` is cooperative and never sends `force`: a force close is the node's or the peer's,
   and what follows it is the watchtower step's.
-- **No operator call.** The facade signs the registration and takes the token; the two calls that need the operator's
-  token are the host's.
+- **No operator call.** The facade signs the registration and takes the token; the call that needs the operator's
+  token is the host's.
 - **No deadline acted on.** `SIGNING`'s `deadlineMs` is reported, and every request is answered when it is seen.
 - **No app state.** The host calls `connect()` and `disconnect()`; the facade does not know whether the app is open.
 - **No automatic retry.** Whether a lost answer is read back from the node is each operation's decision, with the rpc
@@ -1540,10 +1545,10 @@ sweep below, the invoice step's specs included:
 development chain its own, under which the deadline reported changes; the context keeps the store the engine writes and
 the identity of the seed. `tenantId` is fiber's of the seed's RootSigner and another seed's differs; `rootSignerPubkey`
 is a copy on every read. `signTenantRegistration` signs fiber's `tenant_registry` vector byte for byte, returns bytes of
-its own, checks the LSP against its own copy of `lspPubkey`, calls nothing and writes nothing, and refuses each field of
-the challenge (the challenge not an object, then each key absent, in hex, short or long, the LSP's node id not a point,
-another LSP's or the other parity of its x, the root signer another's, the nonce short or long), the LSP named first
-when both are wrong. `setBiscuitToken` puts the token on the poller's next calls, on an instance built with one and
+its own, signs for its own copy of `lspPubkey` whatever LSP the request names, calls nothing, writes nothing and reads no
+clock, and refuses each field of the request
+(the request not an object, the request id absent, in hex, short or long, the time absent, a number or out of
+the u64). `setBiscuitToken` puts the token on the poller's next calls, on an instance built with one and
 without, and a refused token keeps the previous one. `channelEvidence` reads a signed channel's evidence from the host's
 storage and refuses an unknown channel, and a bare hex id before reading anything. `utils/network.utils.spec.ts` adds
 the epoch to the network's refusals field by field (1, 2,000, 14,400,000 and `Number.MAX_SAFE_INTEGER` accepted; absent,
@@ -1576,8 +1581,11 @@ The tenant's surface (the registration, the token, the evidence, the network's e
 | ----------------------------------------------------- | ----------------- |
 | The deadline is never reported                        | 24                |
 | The deadline is reported as a bigint                  | 23                |
+| The signing time is the clock's                       | 19                |
+| The LSP's key is the root signer's                    | 16                |
 | A missing deadline is reported as null                | 15                |
 | A development chain's epoch is not checked            | 13                |
+| The registration is also sent to the node             | 10                |
 | The channel id is not checked                         | 9                 |
 | The commitment number is lost                         | 9                 |
 | The hex carries no prefix                             | 9                 |
@@ -1587,16 +1595,15 @@ The tenant's surface (the registration, the token, the evidence, the network's e
 | No spends reads as a failure                          | 6                 |
 | The token is not handed to the client                 | 6                 |
 | A refusal carries no deadline                         | 5                 |
-| The LSP's node id is not checked as a point           | 5                 |
 | The revocations come out in reverse                   | 5                 |
-| A challenge that is not an object reaches the fields  | 4                 |
 | A spend's applied flag is always true                 | 4                 |
 | An unsigned spend is listed                           | 4                 |
 | The root signer's key is the LSP's                    | 4                 |
-| A challenge from another LSP is signed                | 3                 |
+| A request that is not an object reaches the fields    | 4                 |
 | An unknown channel reads as empty evidence            | 2                 |
 | A lost record reads as an unknown channel             | 1                 |
 | The dispatch reads the release epoch on every network | 1                 |
+| An LSP the request names is signed for                | 1                 |
 | The registration carries no tenant id                 | 1                 |
 
 `channel-opening.spec.ts` pins the three operations over a scripted node, an in-memory storage and the real policy and
@@ -1607,7 +1614,7 @@ watched and listed as the device's, in that order, before the tx is handed out, 
 step from then on and not before; a watchtower tick started at each of 41 microtask offsets into the pin's last writes
 leaves the channel listed. The
 pending opening: resumed under its index with the identical request after a lost answer, an answer the client cannot
-read and fiber's interruption; kept through fiber's refusals (an opening stopped, a different opening, a channel already
+read, one without its opening context and fiber's interruption; kept through fiber's refusals (an opening stopped, a different opening, a channel already
 there, a channel already open); a named one resumed while the node lists it opening, lists nothing pending or another
 channel aborted, and dropped once its own is aborted, opening under a fresh index, dropped even when no fresh index can
 be allocated, and leaving an opening another call wrote; another amount or lock opening under a fresh index without a listing; kept
@@ -1841,6 +1848,7 @@ same way (`test/tests/sdk`, its flow specs included, still 100% on all four metr
 | A stored cell dep's type is not checked                           | 2                 |
 | A typed funding output passes                                     | 2                 |
 | An abandoned run reads the pending channels                       | 2                 |
+| An answer without its opening context drops the pending opening   | 2                 |
 | An empty list of cell deps is kept as one                         | 2                 |
 | Any failure to pin is opening_conflict                            | 2                 |
 | Funding output data passes                                        | 2                 |

@@ -13,7 +13,7 @@ import { Agent } from "../src/agent";
 import { AgentRequestError } from "../src/agent.error";
 import { MAX_CONTROL_BODY_BYTES, startControlServer } from "../src/control-server";
 import type { ControlHandlers } from "../src/control-server";
-import { DEVICE_SEED_HEX, DEVICE_TENANT_ID, FakeNode } from "./utils/fake-node";
+import { DEVICE_SEED_HEX, DEVICE_TENANT_ID, FakeNode, LSP_PUBKEY, REGISTRATION_REQUEST_ID } from "./utils/fake-node";
 
 type ControlResponse = { status: number; headers: IncomingHttpHeaders; body: string };
 
@@ -187,6 +187,8 @@ describe("startControlServer", () => {
             ["GET", "/status/"],
             ["GET", "/status?x=1"],
             ["PUT", "/authorize"],
+            // Fiber's multi-channel suite allocates a second channel's key there; this agent opens one channel at a time.
+            ["POST", "/prepare-channel"],
         ] as const) {
             it(`answers ${method} ${path} as 404`, async (t) => {
                 const server = await overStubs(t, async () => null);
@@ -210,7 +212,7 @@ describe("startControlServer", () => {
             const node = new FakeNode();
             let release: () => void = () => undefined;
             const held = new Promise<void>((resolve) => (release = resolve));
-            node.beforeAnswer = (method) => (method === "node_info" ? held : Promise.resolve());
+            node.beforeAnswer = (method) => (method === "lsp_register_tenant" ? held : Promise.resolve());
             const exits: number[] = [];
             const agent = new Agent(
                 {
@@ -219,12 +221,15 @@ describe("startControlServer", () => {
                     statusFile,
                     controlAddr: { host: "127.0.0.1", port: 0 },
                     operatorToken: "operator-token",
+                    lspNodeId: LSP_PUBKEY,
                     intervalMs: 60_000,
                     contractsDir,
+                    nonceCapBypass: false,
                 },
                 {
                     fetch: node.fetch,
                     now: () => 1_800_000_000_000,
+                    randomBytes: () => Uint8Array.from(REGISTRATION_REQUEST_ID),
                     sleep: (ms) => delay(ms),
                     exit: (code) => exits.push(code),
                     log: () => undefined,

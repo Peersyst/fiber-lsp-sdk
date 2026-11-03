@@ -12,7 +12,7 @@ and its id, which the facade holds the node's answer to ([The funding lock and t
 ## Four messages, not one
 
 Fiber does not sign one kind of message. Each signing context rebuilds differently, ported from `nervosnetwork/fiber` @
-`8db6a117`:
+`d8dd6d28`:
 
 | Builder                            | Message                                                                                                 |
 | ---------------------------------- | ------------------------------------------------------------------------------------------------------- |
@@ -37,17 +37,17 @@ key material: base key hashes and per-TLC keys, derived through the `derivation`
 
 ## From fiber's snapshot to the commitment input
 
-A commitment request carries fiber's `SigningSettlement` (`to_rpc_signing_settlement`, `rpc/channel.rs:915-947`) next to
+A commitment request carries fiber's `SigningSettlement` (`to_rpc_signing_settlement`, `rpc/channel.rs:887-919`) next to
 the transaction. `settlementToCommitmentInput(keys, settlement, terms, commitmentNumber)` turns it into the
 `CommitmentTxInput` the digest rebuilds, taking from `CommitmentSettlementTerms` what no snapshot states: the channel's pins
 (out point, the peer's funding key, delay, layout, reserves, fee rate, liquid capacity) and the network's constants
 (commitment lock, cell-dep count). The commitment number is the version the lock args carry (`readCommitmentLockVersion`).
 
 - **Amounts.** The snapshot's `local_amount` and `remote_amount` are the settlement witness amounts: adjusted by the TLCs and,
-  on a CKB channel, with each side's reserve already added (`build_settlement_data`, `channel.rs:11409-11530`). The
+  on a CKB channel, with each side's reserve already added (`build_settlement_data`, `channel.rs:11576-11697`). The
   converter takes the reserve back out, since `CommitmentTxInput` keeps the amounts before it; on a UDT channel fiber adds
   nothing and the amounts pass whole. An amount below its side's reserve cannot be one fiber wrote, and is refused.
-- **Settlement keys.** Fiber settles on the TLC base keys (`get_settlement_keys`, `channel.rs:8621-8638`): the local one must
+- **Settlement keys.** Fiber settles on the TLC base keys (`watch_channel_keys`, `channel.rs:8808-8820`): the local one must
   be the device's TLC base pubkey, refused otherwise as fiber's own signer refuses it
   (`fiber-lsp-sdk/src/commitment.rs:319-325`). The remote one is the peer's TLC base key the witness binds, and the
   converter takes it as stated: the device derives no key to compare it with, so the check is the policy's, which pins it
@@ -66,14 +66,14 @@ maps to `malformed`.
 ## The liquid capacity
 
 Fiber only ever reads the two channel balances summed: `to_local + to_remote` (`checked_liquid_capacity`,
-`get_total_ckb_amount`, `channel.rs:7868-7906`) sizes the commitment output's capacity, and on a UDT channel it is the
+`get_total_ckb_amount`, `channel.rs:8053-8091`) sizes the commitment output's capacity, and on a UDT channel it is the
 output's data. A commitment and a revocation take that sum, `liquidCapacityShannons`, rather than the pair: the device pins
 it at the opening, and it stays constant for the channel's life, since a TLC only moves value from one side to the other.
 `ShutdownTxInput` keeps the pair, because a UDT close writes each side's amount into its own output.
 
 ## TLC keys as stated
 
-The settlement witness hashes two keys per TLC (fiber's `get_tlc_keys`, `channel.rs:8588-8618`):
+The settlement witness hashes two keys per TLC (fiber's `get_tlc_keys`, `channel.rs:8770-8800`):
 
 - the device's, derived from its TLC base key at the TLC's `localKeyCommitmentNumber` (the remote commitment number the TLC
   was created at), recomputed by the device;
@@ -110,7 +110,7 @@ byte for byte with the same molecule serializer rather than approximated.
 The cell-dep count is fiber's `get_cell_deps_count(vec![FundingLock], udt)` (`fee.rs:27-35`): the funding lock's deps,
 plus the UDT's on a UDT channel. No transaction states it, since the digest blanks the deps, so it is a network constant:
 `fundingLockCellDepsCount` is 2 on the mainnet and testnet presets, and a dev network declares its own
-([sdk.md](./sdk.md)), as fiber's own signer reads it from the network (`fiber-lsp-sdk/src/opening.rs:24`).
+([sdk.md](./sdk.md)), as fiber's own signer reads it from the network (`fiber-lsp-sdk/src/opening.rs:26`).
 
 The two fees are exported on their own. `calculateCommitmentTxFee` (a commitment and a revocation take the same one) is
 the policy's, which bounds it: the digest binds the signature to whatever fee the node's rate produces, and judging how
@@ -138,8 +138,8 @@ context nor a settlement states it, so it is read from the args of the commitmen
 and the device rebuilds the args itself, so the strict reader leaves nothing signable out. Which layout a channel stays on
 is the policy's pin ([policy.md](./policy.md)).
 
-Two more readers take the fields fiber reads out of the args, written by `channel.rs:11352-11357` and read back by its
-device SDK (`fiber-lsp-sdk/src/commitment.rs:623,641-645`) and its watchtower (`watchtower/actor.rs:1267-1269`):
+Two more readers take the fields fiber reads out of the args, written by `channel.rs:11519-11524` and read back by its
+device SDK (`fiber-lsp-sdk/src/commitment.rs:623,641-645`) and its watchtower (`watchtower/actor.rs:1347-1349`):
 `readCommitmentLockDelay` (bytes 20 to 28, the little-endian since of a relative epoch delay, returned with its `0xa0` flags
 stripped, any other flags refused) and `readCommitmentLockVersion` (bytes 28 to 36, the big-endian commitment number,
 refused above `MAX_COMMITMENT_NUMBER`). Both take the 57 and 58 bytes of a commitment lock and the 36 bytes a revocation
@@ -153,7 +153,7 @@ leaves, any other byte refused). Each returns bytes of its own, whatever buffer 
 
 A close request carries the transaction but not the two fee rates it was built from, so `ShutdownTxInput` cannot be filled
 from it. `ClosingTxInput` instead takes what the tx states: the funding out point, the two close scripts and the two output
-capacities, and `computeClosingTxDigest` rebuilds fiber's `build_shutdown_tx` (`channel.rs:11175-11308`) from them: one
+capacities, and `computeClosingTxDigest` rebuilds fiber's `build_shutdown_tx` (`channel.rs:11342-11475`) from them: one
 input, no cell deps, and the two outputs in the funding-pubkey order (`order_things_for_musig2`, local first when its key
 sorts first), each with empty data. Judging the capacities, the local one against the channel's exposure, is the policy's
 ([policy.md](./policy.md)).
@@ -179,11 +179,11 @@ over the plaintext a request carries.
   of one serializer.
 - `computeRevocationContentMessage(output, outputData, args)` is the revocation's: the blake2b of the molecule `CellOutput`,
   the output data and the revoked cell's args, concatenated in that order. Fiber hands over the data as the molecule `Bytes`
-  slice, its 4-byte length header included (`channel.rs:7999-8003`), and the function hashes it as given;
+  slice, its 4-byte length header included (`channel.rs:8184-8188`), and the function hashes it as given;
   `computeRevocationDigest` wraps the data it rebuilds the same way.
 
 The message is not the transaction's on-chain hash: the transaction fiber broadcasts adds the funding lock's cell deps back
-(`get_latest_commitment_transaction`, `channel.rs:11567-11581`). That hash is `computeTxHash(tx)`, CKB's `calc_tx_hash`: the
+(`get_latest_commitment_transaction`, `channel.rs:11730-11744`). That hash is `computeTxHash(tx)`, CKB's `calc_tx_hash`: the
 same molecule `RawTransaction`, its cell deps written, each one checked first (an out point and `code` or `dep_group`). It
 is the hash a spend's input names the cell it spends by; the watchtower's rules record each spend's, and compare it only
 to tell a repeat of the same spend ([policy.md](./policy.md)). The two share one serializer,
@@ -235,7 +235,7 @@ the peer's. The readers refuse a prefix, a count or a flag fiber never writes, a
 unlock type naming no TLC and no balance, an unlock whose length its flag contradicts and a balance's unlock with a
 preimage; and each returns bytes of its own.
 
-What the unlock leaves is fiber's too (`SettlementWitness::update`, `watchtower/actor.rs:2448`):
+What the unlock leaves is fiber's too (`SettlementWitness::update`, `watchtower/actor.rs:2536`):
 `nextSettlementWitness(unlock, forRemote)` is the body with the unlocked TLC dropped, or with the device's balance zeroed,
 its key hash and amount; it refuses to settle the peer's balance. `buildRemainderLockArgs(sourceArgs, nextBody)` is the
 remainder's lock args: the source's first 36 bytes, which carry the commitment number, the `blake160` of the next body,
@@ -249,11 +249,11 @@ Opening a tenant channel, the node answers with the channel's id and the funding
 them as stated:
 
 - `fundingLockArgs(fundingPubkeyA, fundingPubkeyB)` is the args of fiber's `get_funding_lock_script`
-  (`channel.rs:8426-8455`): the `blake160` of the x-only musig2 aggregate of the two funding keys, sorted, aggregated by the
+  (`channel.rs:8608-8637`): the `blake160` of the x-only musig2 aggregate of the two funding keys, sorted, aggregated by the
   same `aggregateXOnlyPubkey` the announcement uses. Either party's key may come first. The funding cell's lock is the
   network's funding lock template with these args.
 - `tenantChannelId(localTlcBasePubkey, remoteSettlementKey)` is fiber-lib's `derive_channel_id_from_tlc_keys`
-  (`channel.rs:5796-5804`): CKB's blake2b-256 (`ckbBlake2b`, fiber-lib's `blake2b_256`) of the two TLC base keys, sorted and
+  (`channel.rs:5914-5922`): CKB's blake2b-256 (`ckbBlake2b`, fiber-lib's `blake2b_256`) of the two TLC base keys, sorted and
   concatenated. The peer's is the opening context's `remote_settlement_key`. The id comes back as fiber's JSON writes it,
   `0x` and lowercase hex, written here rather than through `wire`, which `digest` does not depend on.
 

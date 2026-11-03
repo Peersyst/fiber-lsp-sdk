@@ -30,7 +30,8 @@ export type FiberChannel = {
     raw: Record<string, unknown>;
 };
 
-export type FiberChannelFilter = { peer?: string; onlyPending?: boolean };
+// Fiber refuses `onlyPending` and `includeClosed` together.
+export type FiberChannelFilter = { peer?: string; onlyPending?: boolean; includeClosed?: boolean };
 
 /**
  * A `SignatureRequired` status, its ids bare lowercase hex.
@@ -165,7 +166,7 @@ export class FiberNode {
     }
 
     async listChannels(filter: FiberChannelFilter = {}, token: string = this.token): Promise<FiberChannel[]> {
-        const params = { pubkey: filter.peer, only_pending: filter.onlyPending };
+        const params = { pubkey: filter.peer, only_pending: filter.onlyPending, include_closed: filter.includeClosed };
         const result = readJsonObject(await this.call("list_channels", [params], token), "list_channels");
         return readArray(result, "channels", "list_channels").map(readChannel);
     }

@@ -14,15 +14,19 @@ import { messageOf } from "../src/agent.utils";
 import type { AgentConfig, AgentNodeFetch, AgentState } from "../src/agent.types";
 import { readAgentState, writeAgentState } from "../src/agent-store";
 import { startControlServer } from "../src/control-server";
+import { FileSignerStorage } from "../src/file-storage";
 import { AgentJsonRpc } from "../src/json-rpc";
+import { NonceCapBypassStorage } from "../src/nonce-cap-bypass";
 import {
     DEVICE_ROOT_SIGNER,
     DEVICE_SEED_HEX,
     DEVICE_TENANT_ID,
     FakeNode,
     LSP_PUBKEY,
+    REGISTRATION_REQUEST_CONSUMED,
     REGISTRATION_SIGNATURE,
-    REGISTRY_NONCE,
+    REGISTRATION_SIGNED_AT,
+    RETRY_SIGNATURE,
 } from "./utils/fake-node";
 
 // 2027-01-15T08:00:00Z: the SDK allocates channel index 1_800_000_000 at this clock.
@@ -142,6 +146,39 @@ const CLOSE_BODY = {
 
 const WATCHTOWER_BODY = { type: "Watchtower", channel_id: CHANNEL_ID, destination: LSP_SHUTDOWN_SCRIPT, max_fee: 10000 };
 
+// `e2e/lsp` step 27b: node 1's invoice under preimage 0x33..33, 100000 plus a routing fee budget of 500.
+const OUTGOING_PREIMAGE = "0x3333333333333333333333333333333333333333333333333333333333333333";
+const OUTGOING_HASH = "0xdbddb41b1249f996f6ef6ef69499964db5b200dd8e82360b7de82448e36cc1e4";
+const OUTGOING_SHA256_HASH = "0xdeb0e38ced1e41de6f92e70e80c418d2d356afaaa99e26f5939dbc7d3ef4772a";
+
+const PAYMENT_BODY = {
+    type: "Payment",
+    channel_id: CHANNEL_ID,
+    terms: {
+        payment_hash: OUTGOING_HASH,
+        hash_algorithm: "ckb_hash",
+        inbound: false,
+        amount: 100500,
+        expires_at_ms: 1800003600000,
+        min_tlc_expiry_delta_ms: 60000,
+        max_tlc_expiry_ms: 1800608400000,
+    },
+};
+
+const FULFILLMENT_BODY = { type: "Fulfillment", channel_id: CHANNEL_ID, payment_hash: OUTGOING_HASH, preimage: OUTGOING_PREIMAGE };
+
+// The SDK's record keys of the outgoing hash, by its first 20 bytes.
+const OUTGOING_INTENT_KEY = "fiber-lsp-sdk:intent:dbddb41b1249f996f6ef6ef69499964db5b200dd";
+const OUTGOING_HOLD_INVOICE_KEY = "fiber-lsp-sdk:invoice:dbddb41b1249f996f6ef6ef69499964db5b200dd";
+
+const OUTGOING_INTENT = {
+    version: 1,
+    paymentHash: "dbddb41b1249f996f6ef6ef69499964db5b200dd8e82360b7de82448e36cc1e4",
+    maxShannons: "100500",
+    open: true,
+    channelIndexes: [],
+};
+
 type AgentDirs = { storeDir: string; statusFile: string; contractsDir: string };
 
 type AgentRun = {
@@ -176,12 +213,36 @@ function configOf(dirs: AgentDirs, intervalMs: number): AgentConfig {
         statusFile: dirs.statusFile,
         controlAddr: null,
         operatorToken: OPERATOR_TOKEN,
+        lspNodeId: LSP_PUBKEY,
         intervalMs,
         contractsDir: dirs.contractsDir,
+        nonceCapBypass: false,
     };
 }
 
-function runAgent(t: TestContext, config: AgentConfig, node: FakeNode): AgentRun {
+// Request ids 0x5a.., then 0x5b.., one byte value up per draw: the ones the fake node holds signatures of first.
+function requestIds(drawn: number[] = []): (length: number) => Uint8Array {
+    let next = 0x5a;
+    return (length) => {
+        drawn.push(length);
+        return new Uint8Array(length).fill(next++);
+    };
+}
+
+function sdkStore(dirs: AgentDirs): Record<string, string> {
+    const path = join(dirs.storeDir, "sdk-store.json");
+    return existsSync(path) ? (JSON.parse(readFileSync(path, "utf8")) as Record<string, string>) : {};
+}
+
+function writeSdkEntry(dirs: AgentDirs, key: string, value: unknown): void {
+    writeRawSdkEntry(dirs, key, JSON.stringify(value));
+}
+
+function writeRawSdkEntry(dirs: AgentDirs, key: string, raw: string): void {
+    writeFileSync(join(dirs.storeDir, "sdk-store.json"), JSON.stringify({ ...sdkStore(dirs), [key]: raw }));
+}
+
+function runAgent(t: TestContext, config: AgentConfig, node: FakeNode, randomBytes = requestIds()): AgentRun {
     const lines: string[] = [];
     const sleeps: number[] = [];
     const exits: number[] = [];
@@ -191,6 +252,7 @@ function runAgent(t: TestContext, config: AgentConfig, node: FakeNode): AgentRun
     const agent = new Agent(config, {
         fetch: node.fetch,
         now: () => NOW_MS,
+        randomBytes,
         sleep: async (ms) => {
             sleeps.push(ms);
         },
@@ -273,24 +335,25 @@ describe("Agent", () => {
             const node = new FakeNode();
             const run = runAgent(t, configOf(dirs, 20), node);
             await run.agent.start();
-            assert.deepEqual(node.calls.slice(0, 3), [
-                { method: "node_info", params: [], authorization: `Bearer ${OPERATOR_TOKEN}` },
-                {
-                    method: "lsp_get_tenant_registry_nonce",
-                    params: [{ root_signer_pubkey: DEVICE_ROOT_SIGNER }],
-                    authorization: `Bearer ${OPERATOR_TOKEN}`,
-                },
+            assert.deepEqual(node.calls.slice(0, 1), [
                 {
                     method: "lsp_register_tenant",
-                    params: [{ root_signer_pubkey: DEVICE_ROOT_SIGNER, nonce: REGISTRY_NONCE, signature: REGISTRATION_SIGNATURE }],
+                    params: [
+                        {
+                            root_signer_pubkey: DEVICE_ROOT_SIGNER,
+                            request_id: `0x${"5a".repeat(32)}`,
+                            signed_at: REGISTRATION_SIGNED_AT,
+                            signature: REGISTRATION_SIGNATURE,
+                        },
+                    ],
                     authorization: `Bearer ${OPERATOR_TOKEN}`,
                 },
             ]);
             assert.deepEqual(readAgentState(dirs.storeDir), {
                 tenantToken: "tenant-token-1",
-                lspPubkey: LSP_PUBKEY,
                 channels: {},
                 invoices: {},
+                payments: {},
                 closes: {},
                 watchtower: null,
             });
@@ -305,8 +368,7 @@ describe("Agent", () => {
             });
             // Several ticks of an idle device: the SDK asks nothing that would wake an evicted tenant.
             await delay(100);
-            assert.equal(node.calls.length, 3);
-            assert.equal(node.calls.filter((call) => call.authorization === `Bearer ${OPERATOR_TOKEN}`).length, 3);
+            assert.equal(node.calls.length, 1);
         });
 
         it("builds the facade over the devnet's contracts, the polled interval, nonce reuse allowed and no watchtower", async (t) => {
@@ -324,12 +386,39 @@ describe("Agent", () => {
                 millisecondsPerEpoch: 2000,
             });
             assert.equal(options.rpcUrl, RPC_URL);
-            assert.deepEqual(options.lspPubkey, bytes(LSP_PUBKEY));
             assert.equal(options.biscuitToken, undefined);
             assert.equal(options.pollIntervalMs, 250);
             assert.equal(options.nonceReuse, "allow");
             assert.equal(options.watchtower, undefined);
             assert.equal(options.now?.(), NOW_MS);
+        });
+
+        it("pins the LSP's key from --lsp-node-id, asking the node for none", async () => {
+            const node = new FakeNode();
+            const lspNodeId = "02bcbd0e0d811d13363af1e5998f56e74e6aab8a7aa44005e1ce7d696a4d3f10f6";
+            const built: FiberLspSdkOptions[] = [];
+            // The fake's signatures are to LSP_PUBKEY, so it refuses this registration and the first retry ends the run.
+            const agent: Agent = new Agent(
+                { ...configOf(freshDirs(), IDLE_INTERVAL_MS), lspNodeId },
+                {
+                    fetch: node.fetch,
+                    now: () => NOW_MS,
+                    randomBytes: requestIds(),
+                    sleep: async () => agent.shutdown(),
+                    exit: () => undefined,
+                    log: () => undefined,
+                    createSdk: (masterSeed, options) => {
+                        built.push(options);
+                        return new FiberLspSdk(masterSeed, options);
+                    },
+                },
+            );
+            await agent.start();
+            assert.deepEqual(built[0]?.lspPubkey, bytes(lspNodeId));
+            assert.deepEqual(
+                node.calls.map((call) => call.method),
+                ["lsp_register_tenant"],
+            );
         });
 
         it("restarts from its store with no operator call, under the same token", async (t) => {
@@ -347,30 +436,44 @@ describe("Agent", () => {
             assert.equal((readStatus(dirs) as { tenant_token: unknown }).tenant_token, "tenant-token-1");
         });
 
-        it("retries node_info every second until it answers, logging each failure", async (t) => {
+        it("retries the registration every second until it answers, under a fresh request id each time, logging each failure", async (t) => {
             const node = new FakeNode();
-            node.nodeInfoFailures = 2;
+            node.registrationFailures = 1;
             const run = runAgent(t, configOf(freshDirs(), IDLE_INTERVAL_MS), node);
             await run.agent.start();
-            assert.equal(node.callsOf("node_info").length, 3);
-            assert.equal(node.callsOf("lsp_register_tenant").length, 1);
-            assert.deepEqual(run.sleeps, [INITIALIZE_RETRY_MS, INITIALIZE_RETRY_MS]);
+            assert.deepEqual(
+                node.callsOf("lsp_register_tenant").map((call) => (call.params as [{ request_id: unknown; signature: unknown }])[0]),
+                [
+                    {
+                        root_signer_pubkey: DEVICE_ROOT_SIGNER,
+                        request_id: `0x${"5a".repeat(32)}`,
+                        signed_at: REGISTRATION_SIGNED_AT,
+                        signature: REGISTRATION_SIGNATURE,
+                    },
+                    {
+                        root_signer_pubkey: DEVICE_ROOT_SIGNER,
+                        request_id: `0x${"5b".repeat(32)}`,
+                        signed_at: REGISTRATION_SIGNED_AT,
+                        signature: RETRY_SIGNATURE,
+                    },
+                ],
+            );
+            assert.deepEqual(run.sleeps, [INITIALIZE_RETRY_MS]);
             assert.equal(INITIALIZE_RETRY_MS, 1000);
             const failures = entries(run).filter((entry) => entry.kind === "initialize_failed");
-            assert.deepEqual(failures, [
-                { ts: "2027-01-15T08:00:00.000Z", kind: "initialize_failed", error: "node is starting" },
-                { ts: "2027-01-15T08:00:00.000Z", kind: "initialize_failed", error: "node is starting" },
-            ]);
+            assert.deepEqual(failures, [{ ts: "2027-01-15T08:00:00.000Z", kind: "initialize_failed", error: "node is starting" }]);
         });
 
-        it("refuses a registration for another tenant, keeping the LSP's key and no token, and registers again", async (t) => {
+        it("refuses a registration for another tenant, keeping no token, and registers again under a fresh request id", async (t) => {
             const dirs = freshDirs();
             const node = new FakeNode();
             node.foreignRegistrations = 1;
             const run = runAgent(t, configOf(dirs, IDLE_INTERVAL_MS), node);
             await run.agent.start();
-            assert.equal(node.callsOf("node_info").length, 1);
-            assert.equal(node.callsOf("lsp_register_tenant").length, 2);
+            assert.deepEqual(
+                node.callsOf("lsp_register_tenant").map((call) => (call.params as [{ request_id: unknown }])[0].request_id),
+                [`0x${"5a".repeat(32)}`, `0x${"5b".repeat(32)}`],
+            );
             assert.equal(readAgentState(dirs.storeDir).tenantToken, "tenant-token-2");
             assert.deepEqual(
                 entries(run)
@@ -382,7 +485,30 @@ describe("Agent", () => {
             );
         });
 
-        it("keeps the LSP's key in its store before registering, and no token from a registration it refused", async () => {
+        it("logs fiber's refusal of a request id it already consumed and registers again under a fresh one", async (t) => {
+            const dirs = freshDirs();
+            const node = new FakeNode();
+            node.foreignRegistrations = 1;
+            const drawn = [0x5a, 0x5a, 0x5b];
+            const run = runAgent(t, configOf(dirs, IDLE_INTERVAL_MS), node, (length) => new Uint8Array(length).fill(drawn.shift() ?? 0));
+            await run.agent.start();
+            assert.deepEqual(
+                node.callsOf("lsp_register_tenant").map((call) => (call.params as [{ request_id: unknown }])[0].request_id),
+                [`0x${"5a".repeat(32)}`, `0x${"5a".repeat(32)}`, `0x${"5b".repeat(32)}`],
+            );
+            assert.equal(readAgentState(dirs.storeDir).tenantToken, "tenant-token-2");
+            assert.deepEqual(
+                entries(run)
+                    .filter((entry) => entry.kind === "initialize_failed")
+                    .map((entry) => entry.error),
+                [
+                    `lsp_register_tenant registered tenant 6666666666666666666666666666666666666666666666666666666666666666, the device is ${DEVICE_TENANT_ID}`,
+                    REGISTRATION_REQUEST_CONSUMED,
+                ],
+            );
+        });
+
+        it("keeps no token from a registration it refused", async () => {
             const dirs = freshDirs();
             const node = new FakeNode();
             node.foreignRegistrations = Number.POSITIVE_INFINITY;
@@ -390,6 +516,7 @@ describe("Agent", () => {
             const agent: Agent = new Agent(configOf(dirs, IDLE_INTERVAL_MS), {
                 fetch: node.fetch,
                 now: () => NOW_MS,
+                randomBytes: requestIds(),
                 sleep: async () => {
                     stored.push(readAgentState(dirs.storeDir));
                     agent.shutdown();
@@ -399,9 +526,32 @@ describe("Agent", () => {
                 createSdk: (masterSeed, options) => new FiberLspSdk(masterSeed, options),
             });
             await agent.start();
-            assert.deepEqual(stored, [
-                { tenantToken: null, lspPubkey: LSP_PUBKEY, channels: {}, invoices: {}, closes: {}, watchtower: null },
-            ]);
+            assert.deepEqual(stored, [{ tenantToken: null, channels: {}, invoices: {}, payments: {}, closes: {}, watchtower: null }]);
+        });
+
+        it("hands the SDK its file storage as is while the nonce-cap bypass is off, as by default", async (t) => {
+            const run = runAgent(t, configOf(freshDirs(), IDLE_INTERVAL_MS), new FakeNode());
+            await run.agent.start();
+            assert.ok(run.built[0]?.storage instanceof FileSignerStorage);
+        });
+
+        it("hands the SDK its file storage behind the bypass when it is on, reading a channel record's marks as its signed sessions", async (t) => {
+            const dirs = freshDirs();
+            const record = {
+                version: 1,
+                signedSessions: { "COMMITMENT:3": "aa".repeat(32) },
+                nonceReuse: { "COMMITMENT:3": { sessionCommitment: "cc".repeat(32), message: "bb".repeat(32) } },
+            };
+            writeSdkEntry(dirs, "fiber-lsp-sdk:channel:7", record);
+            const run = runAgent(t, { ...configOf(dirs, IDLE_INTERVAL_MS), nonceCapBypass: true }, new FakeNode());
+            await run.agent.start();
+            const storage = run.built[0]?.storage;
+            assert.ok(storage instanceof NonceCapBypassStorage);
+            assert.equal(
+                storage.get("fiber-lsp-sdk:channel:7"),
+                JSON.stringify({ version: 1, signedSessions: { "COMMITMENT:3": "cc".repeat(32) }, nonceReuse: {} }),
+            );
+            assert.equal(sdkStore(dirs)["fiber-lsp-sdk:channel:7"], JSON.stringify(record));
         });
 
         it("writes no status without a status file", async (t) => {
@@ -433,7 +583,7 @@ describe("Agent", () => {
             const run = runAgent(t, configOf(dirs, IDLE_INTERVAL_MS), node);
             await run.agent.start();
             assert.deepEqual(await run.agent.openChannel(OPEN_BODY), OPEN_RESULT);
-            const [call] = node.callsOf("open_tenant_channel");
+            const [call] = node.callsOf("open_channel_with_external_funding");
             assert.equal(call?.authorization, "Bearer tenant-token-1");
             assert.deepEqual(readAgentState(dirs.storeDir).channels, {
                 [CHANNEL_ID]: { localScript: USER_LOCK, remoteScript: LSP_SHUTDOWN_SCRIPT },
@@ -480,7 +630,7 @@ describe("Agent", () => {
                 run.agent.openChannel({ params: { ...OPEN_BODY.params, public: true } }),
                 "params.public must be false: the SDK opens private channels",
             );
-            assert.deepEqual(node.callsOf("open_tenant_channel"), []);
+            assert.deepEqual(node.callsOf("open_channel_with_external_funding"), []);
         });
 
         it("binds nothing when the result it kept names another channel than the SDK opened", async (t) => {
@@ -490,6 +640,7 @@ describe("Agent", () => {
             const agent: Agent = new Agent(configOf(dirs, IDLE_INTERVAL_MS), {
                 fetch: node.fetch,
                 now: () => NOW_MS,
+                randomBytes: requestIds(),
                 sleep: async () => undefined,
                 exit: () => undefined,
                 log: () => undefined,
@@ -504,7 +655,10 @@ describe("Agent", () => {
             await agent.start();
             await assert.rejects(agent.openChannel(OPEN_BODY), (error) => {
                 assert.ok(error instanceof Error && !(error instanceof AgentRequestError));
-                assert.equal(error.message, `open_tenant_channel's result names channel ${CHANNEL_ID}, the SDK opened ${OTHER_CHANNEL_ID}`);
+                assert.equal(
+                    error.message,
+                    `open_channel_with_external_funding's result names channel ${CHANNEL_ID}, the SDK opened ${OTHER_CHANNEL_ID}`,
+                );
                 return true;
             });
             assert.deepEqual(readAgentState(dirs.storeDir).channels, {});
@@ -518,7 +672,7 @@ describe("Agent", () => {
                 run.agent.openChannel({ params: { ...OPEN_BODY.params, funding_amount: "0x24e1602ff" } }),
                 "fundedShannons 9899999999 is below the 9900000000 the device's reserve takes over that close script",
             );
-            assert.deepEqual(node.callsOf("open_tenant_channel"), []);
+            assert.deepEqual(node.callsOf("open_channel_with_external_funding"), []);
         });
 
         it("answers a plain Error from prepareChannelOpen as a 400 with its message through the control port, logging it", async (t) => {
@@ -528,6 +682,7 @@ describe("Agent", () => {
             const agent: Agent = new Agent(configOf(dirs, IDLE_INTERVAL_MS), {
                 fetch: node.fetch,
                 now: () => NOW_MS,
+                randomBytes: requestIds(),
                 sleep: async () => undefined,
                 exit: () => undefined,
                 log: () => undefined,
@@ -563,7 +718,7 @@ describe("Agent", () => {
             const next = run.agent.openChannel(OPEN_BODY);
             await assertRefused(refused, "params.public must be false: the SDK opens private channels");
             assert.deepEqual(await next, OPEN_RESULT);
-            assert.equal(node.callsOf("open_tenant_channel").length, 1);
+            assert.equal(node.callsOf("open_channel_with_external_funding").length, 1);
         });
 
         it("runs one control request at a time, in the order they came", async (t) => {
@@ -572,13 +727,13 @@ describe("Agent", () => {
             node.openAnswer = { result: OPEN_RESULT };
             let release: () => void = () => undefined;
             const held = new Promise<void>((resolve) => (release = resolve));
-            node.beforeAnswer = (method) => (method === "open_tenant_channel" ? held : Promise.resolve());
+            node.beforeAnswer = (method) => (method === "open_channel_with_external_funding" ? held : Promise.resolve());
             const run = runAgent(t, configOf(dirs, IDLE_INTERVAL_MS), node);
             await run.agent.start();
             const opening = run.agent.openChannel(OPEN_BODY);
             // Run alongside the opening, it would find the channel unbound.
             const authorizing = run.agent.authorize(INVOICE_BODY);
-            await eventually("the opening", () => node.callsOf("open_tenant_channel").length === 1);
+            await eventually("the opening", () => node.callsOf("open_channel_with_external_funding").length === 1);
             release();
             assert.deepEqual(await opening, OPEN_RESULT);
             assert.deepEqual(await authorizing, { authorized: true });
@@ -588,6 +743,8 @@ describe("Agent", () => {
     describe("authorize", () => {
         for (const body of [
             { ...INVOICE_BODY, channel_id: OTHER_CHANNEL_ID },
+            { ...PAYMENT_BODY, channel_id: OTHER_CHANNEL_ID },
+            { ...FULFILLMENT_BODY, channel_id: OTHER_CHANNEL_ID },
             { ...RELEASE_BODY, channel_id: OTHER_CHANNEL_ID },
             { ...CLOSE_BODY, channel_id: OTHER_CHANNEL_ID },
             { ...WATCHTOWER_BODY, channel_id: OTHER_CHANNEL_ID },
@@ -602,7 +759,7 @@ describe("Agent", () => {
             const run = runAgent(t, configOf(freshDirs(), IDLE_INTERVAL_MS), new FakeNode());
             await assertRefused(
                 run.agent.authorize({ ...INVOICE_BODY, type: "invoice" }),
-                "type must be one of Invoice, ReleasePreimage, Close, Watchtower",
+                "type must be one of Invoice, Payment, Fulfillment, ReleasePreimage, Close, Watchtower",
             );
         });
 
@@ -615,26 +772,25 @@ describe("Agent", () => {
         });
 
         describe("Invoice", () => {
-            it("records each invoice under its payment hash, a repeat replacing it", async (t) => {
+            it("records each invoice under its payment hash, with its terms", async (t) => {
                 const dirs = freshDirs();
-                const first = await openedAgent(t, dirs);
-                first.agent.shutdown();
-                bindOtherChannel(dirs, null);
-                const run = runAgent(t, configOf(dirs, IDLE_INTERVAL_MS), new FakeNode());
-                await run.agent.start();
+                const run = await openedAgent(t, dirs);
                 await run.agent.authorize(INVOICE_BODY);
                 await run.agent.authorize({
                     ...INVOICE_BODY,
                     terms: { ...INVOICE_BODY.terms, payment_hash: SHA256_HASH, hash_algorithm: "sha256" },
                 });
-                await run.agent.authorize({ ...INVOICE_BODY, channel_id: OTHER_CHANNEL_ID });
                 assert.deepEqual(readAgentState(dirs.storeDir).invoices, {
                     [CKB_HASH]: {
                         type: "Invoice",
-                        channelId: OTHER_CHANNEL_ID,
+                        channelId: CHANNEL_ID,
                         preimage: PREIMAGE,
                         paymentHash: CKB_HASH,
                         hashAlgorithm: "ckb_hash",
+                        amountShannons: "1000000",
+                        expiresAtMs: "1800003600000",
+                        minTlcExpiryDeltaMs: "86400000",
+                        maxTlcExpiryMs: "1800604800000",
                     },
                     [SHA256_HASH]: {
                         type: "Invoice",
@@ -642,8 +798,55 @@ describe("Agent", () => {
                         preimage: PREIMAGE,
                         paymentHash: SHA256_HASH,
                         hashAlgorithm: "sha256",
+                        amountShannons: "1000000",
+                        expiresAtMs: "1800003600000",
+                        minTlcExpiryDeltaMs: "86400000",
+                        maxTlcExpiryMs: "1800604800000",
                     },
                 });
+            });
+
+            it("answers the same terms again with nothing written, as fiber's CommitmentState::authorize", async (t) => {
+                const dirs = freshDirs();
+                const run = await openedAgent(t, dirs);
+                await run.agent.authorize(INVOICE_BODY);
+                const state = readFileSync(join(dirs.storeDir, "agent.json"), "utf8");
+                assert.deepEqual(await run.agent.authorize(structuredClone(INVOICE_BODY)), { authorized: true });
+                assert.equal(readFileSync(join(dirs.storeDir, "agent.json"), "utf8"), state);
+            });
+
+            for (const [name, terms] of [
+                ["amount", { amount: 1000001 }],
+                ["expires_at_ms", { expires_at_ms: 1800003600001 }],
+                ["min_tlc_expiry_delta_ms", { min_tlc_expiry_delta_ms: 86400001 }],
+                ["max_tlc_expiry_ms", { max_tlc_expiry_ms: 1800604800001 }],
+            ] as const) {
+                it(`refuses the hash again under another ${name}, keeping the first`, async (t) => {
+                    const dirs = freshDirs();
+                    const run = await openedAgent(t, dirs);
+                    await run.agent.authorize(INVOICE_BODY);
+                    const state = readAgentState(dirs.storeDir);
+                    await assertRefused(
+                        run.agent.authorize({ ...INVOICE_BODY, terms: { ...INVOICE_BODY.terms, ...terms } }),
+                        "payment authorization cannot be replaced",
+                    );
+                    assert.deepEqual(readAgentState(dirs.storeDir), state);
+                });
+            }
+
+            it("refuses the hash again on another channel, keeping the first", async (t) => {
+                const dirs = freshDirs();
+                const first = await openedAgent(t, dirs);
+                await first.agent.authorize(INVOICE_BODY);
+                first.agent.shutdown();
+                bindOtherChannel(dirs, null);
+                const run = runAgent(t, configOf(dirs, IDLE_INTERVAL_MS), new FakeNode());
+                await run.agent.start();
+                await assertRefused(
+                    run.agent.authorize({ ...INVOICE_BODY, channel_id: OTHER_CHANNEL_ID }),
+                    "payment authorization cannot be replaced",
+                );
+                assert.equal(readAgentState(dirs.storeDir).invoices[CKB_HASH]?.channelId, CHANNEL_ID);
             });
 
             for (const [name, patch, message] of [
@@ -657,6 +860,264 @@ describe("Agent", () => {
                     assert.deepEqual(readAgentState(dirs.storeDir).invoices, {});
                 });
             }
+
+            it("refuses a hash a Payment authorized, as fiber's CommitmentState::authorize", async (t) => {
+                const dirs = freshDirs();
+                const run = await openedAgent(t, dirs);
+                await run.agent.authorize(PAYMENT_BODY);
+                await assertRefused(
+                    run.agent.authorize({
+                        ...INVOICE_BODY,
+                        preimage: OUTGOING_PREIMAGE,
+                        terms: { ...INVOICE_BODY.terms, payment_hash: OUTGOING_HASH },
+                    }),
+                    "payment authorization cannot be replaced",
+                );
+                assert.deepEqual(readAgentState(dirs.storeDir).invoices, {});
+            });
+            it("refuses a hash a Payment authorized on another channel, the SDK keeping one debit intent per hash", async (t) => {
+                const dirs = freshDirs();
+                const first = await openedAgent(t, dirs);
+                await first.agent.authorize(PAYMENT_BODY);
+                first.agent.shutdown();
+                bindOtherChannel(dirs, null);
+                const run = runAgent(t, configOf(dirs, IDLE_INTERVAL_MS), new FakeNode());
+                await run.agent.start();
+                await assertRefused(
+                    run.agent.authorize({
+                        ...INVOICE_BODY,
+                        channel_id: OTHER_CHANNEL_ID,
+                        preimage: OUTGOING_PREIMAGE,
+                        terms: { ...INVOICE_BODY.terms, payment_hash: OUTGOING_HASH },
+                    }),
+                    "payment authorization cannot be replaced",
+                );
+                assert.deepEqual(readAgentState(dirs.storeDir).invoices, {});
+            });
+        });
+
+        describe("Payment", () => {
+            it("records the payment and the SDK's open debit intent, the exact amount its budget", async (t) => {
+                const dirs = freshDirs();
+                const run = await openedAgent(t, dirs);
+                assert.deepEqual(await run.agent.authorize(PAYMENT_BODY), { authorized: true });
+                assert.deepEqual(readAgentState(dirs.storeDir).payments, {
+                    [OUTGOING_HASH]: {
+                        type: "Payment",
+                        channelId: CHANNEL_ID,
+                        paymentHash: OUTGOING_HASH,
+                        hashAlgorithm: "ckb_hash",
+                        amountShannons: "100500",
+                        expiresAtMs: "1800003600000",
+                        minTlcExpiryDeltaMs: "60000",
+                        maxTlcExpiryMs: "1800608400000",
+                    },
+                });
+                assert.deepEqual(JSON.parse(sdkStore(dirs)[OUTGOING_INTENT_KEY] ?? "null"), OUTGOING_INTENT);
+            });
+
+            it("answers the same terms again with nothing written", async (t) => {
+                const dirs = freshDirs();
+                const run = await openedAgent(t, dirs);
+                await run.agent.authorize(PAYMENT_BODY);
+                const state = readFileSync(join(dirs.storeDir, "agent.json"), "utf8");
+                const store = sdkStore(dirs);
+                assert.deepEqual(await run.agent.authorize(structuredClone(PAYMENT_BODY)), { authorized: true });
+                assert.equal(readFileSync(join(dirs.storeDir, "agent.json"), "utf8"), state);
+                assert.deepEqual(sdkStore(dirs), store);
+            });
+
+            for (const [name, terms] of [
+                ["amount", { amount: 100501 }],
+                ["hash_algorithm", { hash_algorithm: "sha256" }],
+                ["expires_at_ms", { expires_at_ms: 1800003600001 }],
+                ["min_tlc_expiry_delta_ms", { min_tlc_expiry_delta_ms: 60001 }],
+                ["max_tlc_expiry_ms", { max_tlc_expiry_ms: 1800608400001 }],
+            ] as const) {
+                it(`refuses the hash again under another ${name}, keeping the first`, async (t) => {
+                    const dirs = freshDirs();
+                    const run = await openedAgent(t, dirs);
+                    await run.agent.authorize(PAYMENT_BODY);
+                    const state = readAgentState(dirs.storeDir);
+                    await assertRefused(
+                        run.agent.authorize({ ...PAYMENT_BODY, terms: { ...PAYMENT_BODY.terms, ...terms } }),
+                        "payment authorization cannot be replaced",
+                    );
+                    assert.deepEqual(readAgentState(dirs.storeDir), state);
+                    assert.deepEqual(JSON.parse(sdkStore(dirs)[OUTGOING_INTENT_KEY] ?? "null"), OUTGOING_INTENT);
+                });
+            }
+
+            it("refuses the hash again on another channel, the SDK keeping one debit intent per hash", async (t) => {
+                const dirs = freshDirs();
+                const first = await openedAgent(t, dirs);
+                await first.agent.authorize(PAYMENT_BODY);
+                first.agent.shutdown();
+                bindOtherChannel(dirs, null);
+                const run = runAgent(t, configOf(dirs, IDLE_INTERVAL_MS), new FakeNode());
+                await run.agent.start();
+                await assertRefused(
+                    run.agent.authorize({ ...PAYMENT_BODY, channel_id: OTHER_CHANNEL_ID }),
+                    "payment authorization cannot be replaced",
+                );
+                assert.equal(readAgentState(dirs.storeDir).payments[OUTGOING_HASH]?.channelId, CHANNEL_ID);
+            });
+
+            it("refuses a hash an Invoice authorized", async (t) => {
+                const dirs = freshDirs();
+                const run = await openedAgent(t, dirs);
+                await run.agent.authorize(INVOICE_BODY);
+                await assertRefused(
+                    run.agent.authorize({ ...PAYMENT_BODY, terms: { ...PAYMENT_BODY.terms, payment_hash: CKB_HASH } }),
+                    "payment authorization cannot be replaced",
+                );
+                assert.deepEqual(readAgentState(dirs.storeDir).payments, {});
+            });
+
+            for (const [name, terms, message] of [
+                ["an incoming payment", { inbound: true }, "inbound authorization requires authorize_invoice and a matching preimage"],
+                ["an amount of 0", { amount: 0 }, "invalid payment amount or expiry bounds"],
+            ] as const) {
+                it(`refuses ${name}, recording nothing`, async (t) => {
+                    const dirs = freshDirs();
+                    const run = await openedAgent(t, dirs);
+                    await assertRefused(run.agent.authorize({ ...PAYMENT_BODY, terms: { ...PAYMENT_BODY.terms, ...terms } }), message);
+                    assert.deepEqual(readAgentState(dirs.storeDir).payments, {});
+                    assert.equal(sdkStore(dirs)[OUTGOING_INTENT_KEY], undefined);
+                });
+            }
+
+            it("refuses the hash of a hold invoice of the device, recording nothing", async (t) => {
+                const dirs = freshDirs();
+                const run = await openedAgent(t, dirs);
+                run.agent.shutdown();
+                writeSdkEntry(dirs, OUTGOING_HOLD_INVOICE_KEY, { version: 1, paymentHash: OUTGOING_INTENT.paymentHash });
+                const next = runAgent(t, configOf(dirs, IDLE_INTERVAL_MS), new FakeNode());
+                await next.agent.start();
+                await assertRefused(next.agent.authorize(PAYMENT_BODY), `${OUTGOING_HASH} is the hash of a hold invoice of this device`);
+                assert.deepEqual(readAgentState(dirs.storeDir).payments, {});
+                assert.equal(sdkStore(dirs)[OUTGOING_INTENT_KEY], undefined);
+            });
+
+            it("refuses a hash whose bound 20 bytes are a twin hold invoice's, recording nothing", async (t) => {
+                const dirs = freshDirs();
+                const run = await openedAgent(t, dirs);
+                run.agent.shutdown();
+                const twin = `${OUTGOING_INTENT.paymentHash.slice(0, 40)}${"00".repeat(12)}`;
+                writeSdkEntry(dirs, OUTGOING_HOLD_INVOICE_KEY, { version: 1, paymentHash: twin });
+                const next = runAgent(t, configOf(dirs, IDLE_INTERVAL_MS), new FakeNode());
+                await next.agent.start();
+                await assertRefused(
+                    next.agent.authorize(PAYMENT_BODY),
+                    `the 20 bytes of ${OUTGOING_HASH} a TLC's witness binds are another payment's`,
+                );
+                assert.deepEqual(readAgentState(dirs.storeDir).payments, {});
+                assert.equal(sdkStore(dirs)[OUTGOING_INTENT_KEY], undefined);
+            });
+
+            for (const [name, raw] of [
+                ["of another budget", JSON.stringify({ ...OUTGOING_INTENT, maxShannons: "100000" })],
+                ["closed", JSON.stringify({ ...OUTGOING_INTENT, open: false })],
+                ["already charged on a channel", JSON.stringify({ ...OUTGOING_INTENT, channelIndexes: [1800000000] })],
+                [
+                    "of a twin hash",
+                    JSON.stringify({ ...OUTGOING_INTENT, paymentHash: `${OUTGOING_INTENT.paymentHash.slice(0, 40)}${"00".repeat(12)}` }),
+                ],
+                ["of another version", JSON.stringify({ ...OUTGOING_INTENT, version: 2 })],
+                ["whose channel indexes are no array", JSON.stringify({ ...OUTGOING_INTENT, channelIndexes: "" })],
+                ["that is no JSON", "{"],
+                ["that is no object", "[]"],
+            ] as const) {
+                it(`refuses a hash the SDK holds a debit intent under, ${name}, leaving it`, async (t) => {
+                    const dirs = freshDirs();
+                    const run = await openedAgent(t, dirs);
+                    run.agent.shutdown();
+                    writeRawSdkEntry(dirs, OUTGOING_INTENT_KEY, raw);
+                    const next = runAgent(t, configOf(dirs, IDLE_INTERVAL_MS), new FakeNode());
+                    await next.agent.start();
+                    await assertRefused(
+                        next.agent.authorize(PAYMENT_BODY),
+                        `the SDK already holds a debit intent under the bound hash of ${OUTGOING_HASH}`,
+                    );
+                    assert.deepEqual(readAgentState(dirs.storeDir).payments, {});
+                    assert.equal(sdkStore(dirs)[OUTGOING_INTENT_KEY], raw);
+                });
+            }
+
+            it("takes the intent a crash left before agent.json recorded the payment as its own", async (t) => {
+                const dirs = freshDirs();
+                const run = await openedAgent(t, dirs);
+                run.agent.shutdown();
+                writeSdkEntry(dirs, OUTGOING_INTENT_KEY, OUTGOING_INTENT);
+                const next = runAgent(t, configOf(dirs, IDLE_INTERVAL_MS), new FakeNode());
+                await next.agent.start();
+                assert.deepEqual(await next.agent.authorize(PAYMENT_BODY), { authorized: true });
+                assert.equal(readAgentState(dirs.storeDir).payments[OUTGOING_HASH]?.amountShannons, "100500");
+            });
+        });
+
+        describe("Fulfillment", () => {
+            it("accepts the preimage of a payment the channel's Payment authorized, recording nothing", async (t) => {
+                const dirs = freshDirs();
+                const run = await openedAgent(t, dirs);
+                await run.agent.authorize(PAYMENT_BODY);
+                const state = readFileSync(join(dirs.storeDir, "agent.json"), "utf8");
+                const store = sdkStore(dirs);
+                assert.deepEqual(await run.agent.authorize(FULFILLMENT_BODY), { authorized: true });
+                assert.deepEqual(await run.agent.authorize(FULFILLMENT_BODY), { authorized: true });
+                assert.equal(readFileSync(join(dirs.storeDir, "agent.json"), "utf8"), state);
+                assert.deepEqual(sdkStore(dirs), store);
+            });
+
+            it("checks the preimage under the Payment's algorithm", async (t) => {
+                const run = await openedAgent(t, freshDirs());
+                await run.agent.authorize({
+                    ...PAYMENT_BODY,
+                    terms: { ...PAYMENT_BODY.terms, payment_hash: OUTGOING_SHA256_HASH, hash_algorithm: "sha256" },
+                });
+                assert.deepEqual(await run.agent.authorize({ ...FULFILLMENT_BODY, payment_hash: OUTGOING_SHA256_HASH }), {
+                    authorized: true,
+                });
+            });
+
+            it("accepts the preimage of an invoice the channel's Invoice authorized", async (t) => {
+                const run = await openedAgent(t, freshDirs());
+                await run.agent.authorize(INVOICE_BODY);
+                assert.deepEqual(await run.agent.authorize({ ...FULFILLMENT_BODY, payment_hash: CKB_HASH, preimage: PREIMAGE }), {
+                    authorized: true,
+                });
+            });
+
+            it("refuses a payment nothing authorized", async (t) => {
+                const run = await openedAgent(t, freshDirs());
+                await assertRefused(run.agent.authorize(FULFILLMENT_BODY), "unknown payment");
+            });
+
+            it("refuses a payment another channel's Payment authorized", async (t) => {
+                const dirs = freshDirs();
+                const first = await openedAgent(t, dirs);
+                await first.agent.authorize(PAYMENT_BODY);
+                first.agent.shutdown();
+                bindOtherChannel(dirs, null);
+                const run = runAgent(t, configOf(dirs, IDLE_INTERVAL_MS), new FakeNode());
+                await run.agent.start();
+                await assertRefused(run.agent.authorize({ ...FULFILLMENT_BODY, channel_id: OTHER_CHANNEL_ID }), "unknown payment");
+            });
+
+            it("refuses a preimage that does not hash to the payment hash", async (t) => {
+                const run = await openedAgent(t, freshDirs());
+                await run.agent.authorize(PAYMENT_BODY);
+                await assertRefused(
+                    run.agent.authorize({ ...FULFILLMENT_BODY, preimage: PREIMAGE }),
+                    "preimage does not match payment hash",
+                );
+            });
+
+            it("refuses a preimage of the payment hash under the other algorithm", async (t) => {
+                const run = await openedAgent(t, freshDirs());
+                await run.agent.authorize({ ...PAYMENT_BODY, terms: { ...PAYMENT_BODY.terms, hash_algorithm: "sha256" } });
+                await assertRefused(run.agent.authorize(FULFILLMENT_BODY), "preimage does not match payment hash");
+            });
         });
 
         describe("ReleasePreimage", () => {
@@ -720,6 +1181,10 @@ describe("Agent", () => {
                             preimage: PREIMAGE,
                             paymentHash: CKB_HASH,
                             hashAlgorithm: "ckb_hash",
+                            amountShannons: "1000000",
+                            expiresAtMs: "1800003600000",
+                            minTlcExpiryDeltaMs: "86400000",
+                            maxTlcExpiryMs: "1800604800000",
                         },
                     },
                 });
@@ -921,6 +1386,7 @@ describe("Agent", () => {
                 const agent: Agent = new Agent(configOf(dirs, IDLE_INTERVAL_MS), {
                     fetch: node.fetch,
                     now: () => NOW_MS,
+                    randomBytes: requestIds(),
                     sleep: async () => undefined,
                     exit: () => undefined,
                     log: () => undefined,
@@ -1059,27 +1525,26 @@ describe("Agent", () => {
 
         it("ends the retries of an initialization that never succeeded", async () => {
             const node = new FakeNode();
-            node.nodeInfoFailures = Number.POSITIVE_INFINITY;
+            node.registrationFailures = Number.POSITIVE_INFINITY;
             const exits: number[] = [];
             const agent: Agent = new Agent(configOf(freshDirs(), IDLE_INTERVAL_MS), {
                 fetch: node.fetch,
                 now: () => NOW_MS,
+                randomBytes: requestIds(),
                 sleep: async () => agent.shutdown(),
                 exit: (code) => exits.push(code),
                 log: () => undefined,
                 createSdk: (masterSeed, options) => new FiberLspSdk(masterSeed, options),
             });
             await agent.start();
-            assert.equal(node.callsOf("node_info").length, 1);
+            assert.equal(node.callsOf("lsp_register_tenant").length, 1);
             assert.deepEqual(exits, [0]);
         });
     });
 });
 
 describe("registerAgentTenant", () => {
-    const LSP_NODE_ID = "02b7ca5d4b3a7e8e5e47d16d9b0d4a8e3f1c2b3a4d5e6f708192a3b4c5d6e7f809";
     const ROOT_SIGNER_HEX = "03aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
-    const NONCE_HEX = "0101010101010101010101010101010101010101010101010101010101010101";
     const OTHER_TENANT_ID = "6666666666666666666666666666666666666666666666666666666666666666";
     const rootSignerPubkey = new Uint8Array(33).fill(0xaa);
     rootSignerPubkey[0] = 0x03;
@@ -1092,47 +1557,77 @@ describe("registerAgentTenant", () => {
         const params: unknown[] = [];
         const fetch: AgentNodeFetch = async (_url, init) => {
             const body = JSON.parse(init.body) as { method: string; params: unknown };
-            const { method } = body;
-            methods.push(method);
+            methods.push(body.method);
             params.push(body.params);
             tokens.push(String(init.headers.Authorization));
-            const result =
-                method === "lsp_get_tenant_registry_nonce"
-                    ? { lsp_node_id: LSP_NODE_ID, root_signer_pubkey: ROOT_SIGNER_HEX, nonce: `0x${NONCE_HEX}` }
-                    : { tenant: { tenant_id: registeredTenantId }, access_token: "tenant-token" };
+            const result = { tenant: { tenant_id: registeredTenantId, channels: [] }, access_token: "tenant-token" };
             return { status: 200, text: async () => JSON.stringify({ jsonrpc: "2.0", result, id: 1 }) };
         };
         return { fetch, methods, tokens, params };
     }
 
-    function deviceOf(tenantId: string): Parameters<typeof registerAgentTenant>[0] {
+    function deviceOf(tenantId: string, requests: unknown[] = []): Parameters<typeof registerAgentTenant>[0] {
         return {
-            rootSignerPubkey,
             tenantId,
-            signTenantRegistration: (challenge) => {
-                assert.deepEqual(challenge.nonce, new Uint8Array(32).fill(1));
-                return { rootSignerPubkey, nonce: challenge.nonce, signature: new Uint8Array(64).fill(0x44), tenantId };
+            signTenantRegistration: (request) => {
+                requests.push(request);
+                return { rootSignerPubkey, ...request, signature: new Uint8Array(64).fill(0x44), tenantId };
             },
         };
     }
 
-    it("asks for a nonce, registers the signed challenge under the operator's token and returns the tenant", async () => {
+    it("signs a fresh 32-byte request id at the clock's time and registers it under the operator's token", async () => {
         const { fetch, methods, tokens, params } = nodeFetch(OTHER_TENANT_ID);
-        const tenant = await registerAgentTenant(deviceOf(OTHER_TENANT_ID), new AgentJsonRpc(RPC_URL, fetch), OPERATOR_TOKEN);
+        const requests: unknown[] = [];
+        const drawn: number[] = [];
+        const tenant = await registerAgentTenant(deviceOf(OTHER_TENANT_ID, requests), new AgentJsonRpc(RPC_URL, fetch), OPERATOR_TOKEN, {
+            now: () => NOW_MS,
+            randomBytes: requestIds(drawn),
+        });
         assert.deepEqual(tenant, { tenantId: OTHER_TENANT_ID, accessToken: "tenant-token" });
-        assert.deepEqual(methods, ["lsp_get_tenant_registry_nonce", "lsp_register_tenant"]);
+        assert.deepEqual(drawn, [32]);
+        assert.deepEqual(requests, [{ requestId: new Uint8Array(32).fill(0x5a), signedAtMs: 1_800_000_000_000n }]);
+        assert.deepEqual(methods, ["lsp_register_tenant"]);
         assert.deepEqual(params, [
-            [{ root_signer_pubkey: ROOT_SIGNER_HEX }],
-            [{ root_signer_pubkey: ROOT_SIGNER_HEX, nonce: `0x${NONCE_HEX}`, signature: SIGNATURE_HEX }],
+            [
+                {
+                    root_signer_pubkey: ROOT_SIGNER_HEX,
+                    request_id: `0x${"5a".repeat(32)}`,
+                    signed_at: REGISTRATION_SIGNED_AT,
+                    signature: SIGNATURE_HEX,
+                },
+            ],
         ]);
-        assert.deepEqual(tokens, [`Bearer ${OPERATOR_TOKEN}`, `Bearer ${OPERATOR_TOKEN}`]);
+        assert.deepEqual(tokens, [`Bearer ${OPERATOR_TOKEN}`]);
+    });
+
+    it("draws a new request id and reads the clock again on every call", async () => {
+        const { fetch, params } = nodeFetch(OTHER_TENANT_ID);
+        const effects = { now: (): number => NOW_MS + params.length, randomBytes: requestIds() };
+        const rpc = new AgentJsonRpc(RPC_URL, fetch);
+        await registerAgentTenant(deviceOf(OTHER_TENANT_ID), rpc, OPERATOR_TOKEN, effects);
+        await registerAgentTenant(deviceOf(OTHER_TENANT_ID), rpc, OPERATOR_TOKEN, effects);
+        assert.deepEqual(
+            params.map((sent) => {
+                const [{ request_id: requestId, signed_at: signedAt }] = sent as [{ request_id: unknown; signed_at: unknown }];
+                return [requestId, signedAt];
+            }),
+            [
+                [`0x${"5a".repeat(32)}`, "0x1a3185c5000"],
+                [`0x${"5b".repeat(32)}`, "0x1a3185c5001"],
+            ],
+        );
     });
 
     it("refuses a registration for another tenant", async () => {
         const { fetch } = nodeFetch(OTHER_TENANT_ID);
-        await assert.rejects(registerAgentTenant(deviceOf(DEVICE_TENANT_ID), new AgentJsonRpc(RPC_URL, fetch), OPERATOR_TOKEN), {
-            message: `lsp_register_tenant registered tenant ${OTHER_TENANT_ID}, the device is ${DEVICE_TENANT_ID}`,
-        });
+        await assert.rejects(
+            registerAgentTenant(deviceOf(DEVICE_TENANT_ID), new AgentJsonRpc(RPC_URL, fetch), OPERATOR_TOKEN, {
+                now: () => NOW_MS,
+                randomBytes: requestIds(),
+            }),
+            { message: `lsp_register_tenant registered tenant ${OTHER_TENANT_ID}, the device is ${DEVICE_TENANT_ID}` },
+        );
     });
 });
 

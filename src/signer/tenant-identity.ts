@@ -1,43 +1,48 @@
 import { secp256k1 } from "@noble/curves/secp256k1.js";
-import { equalBytes } from "@noble/curves/utils.js";
+import { numberToBytesBE } from "@noble/curves/utils.js";
 import { bytesToHex, concatBytes, utf8ToBytes } from "@noble/hashes/utils.js";
 import {
     COMPACT_ECDSA_SIGNATURE_LENGTH,
-    COMPRESSED_POINT_LENGTH,
     HASH256_LENGTH,
+    UINT64_LENGTH,
+    UINT64_MAX,
     assertBytes,
     assertCompressedPoint,
+    assertUnsignedBigInt,
     ckbBlake2b,
     isPlainObject,
 } from "../common";
 import { blake2bHashWithSalt, deriveWalletIdentityKey, pubkeyOf } from "../derivation";
-import type { GetTenantRegistryNonceResult, RegisterTenantParams } from "../rpc";
+import type { RegisterTenantParams } from "../rpc";
 import { TENANT_ID_DOMAIN, TENANT_REGISTRY_PROTOCOL } from "./signer.constants";
+import type { TenantRegistryPayload } from "./signer.types";
 
 const TENANT_REGISTRY_PREFIX = utf8ToBytes(TENANT_REGISTRY_PROTOCOL);
 
 const TENANT_ID_SALT = utf8ToBytes(TENANT_ID_DOMAIN);
 
 /**
- * Builds the bytes fiber's `TenantRegistryPayload::canonical_bytes` writes for a registry nonce.
- * @param challenge The result of `lsp_get_tenant_registry_nonce`.
- * @returns The protocol prefix, the LSP's node id, the root signer and the nonce, concatenated.
+ * Builds the bytes fiber's `TenantRegistryPayload::canonical_bytes` writes, the signing time as a big-endian u64.
+ * @param payload The LSP's node id, the root signer, the request id and the signing time.
+ * @returns The protocol prefix and the four fields, concatenated.
  */
-export function buildTenantRegistryPayload(challenge: GetTenantRegistryNonceResult): Uint8Array {
-    if (!isPlainObject(challenge)) throw new TypeError("challenge must be an object");
-    assertCompressedPoint("challenge.lspNodeId", challenge.lspNodeId);
-    assertCompressedPoint("challenge.rootSignerPubkey", challenge.rootSignerPubkey);
-    assertBytes("challenge.nonce", challenge.nonce, HASH256_LENGTH);
-    return concatBytes(TENANT_REGISTRY_PREFIX, challenge.lspNodeId, challenge.rootSignerPubkey, challenge.nonce);
+export function buildTenantRegistryPayload(payload: TenantRegistryPayload): Uint8Array {
+    if (!isPlainObject(payload)) throw new TypeError("payload must be an object");
+    const { lspNodeId, rootSignerPubkey, requestId, signedAtMs } = payload;
+    assertCompressedPoint("lspNodeId", lspNodeId);
+    assertCompressedPoint("rootSignerPubkey", rootSignerPubkey);
+    assertBytes("requestId", requestId, HASH256_LENGTH);
+    assertUnsignedBigInt("signedAtMs", signedAtMs, UINT64_MAX);
+    return concatBytes(TENANT_REGISTRY_PREFIX, lspNodeId, rootSignerPubkey, requestId, numberToBytesBE(signedAtMs, UINT64_LENGTH));
 }
 
 /**
  * Computes fiber's `TenantRegistryPayload::digest`, `blake2b_hash_with_salt` with an empty salt.
- * @param challenge The result of `lsp_get_tenant_registry_nonce`.
+ * @param payload The LSP's node id, the root signer, the request id and the signing time.
  * @returns The 32-byte digest of the registry payload.
  */
-export function computeTenantRegistryDigest(challenge: GetTenantRegistryNonceResult): Uint8Array {
-    return ckbBlake2b(buildTenantRegistryPayload(challenge));
+export function computeTenantRegistryDigest(payload: TenantRegistryPayload): Uint8Array {
+    return ckbBlake2b(buildTenantRegistryPayload(payload));
 }
 
 export class TenantIdentity {
@@ -58,7 +63,7 @@ export class TenantIdentity {
     }
 
     /**
-     * The RootSigner's public key, the one the LSP issues registry nonces to.
+     * The RootSigner's public key, which a registration names and the tenant id derives from.
      * @returns A copy of the 33-byte compressed key.
      */
     get publicKey(): Uint8Array {
@@ -74,23 +79,25 @@ export class TenantIdentity {
     }
 
     /**
-     * Signs a registry nonce issued to this RootSigner, refusing one issued to another key.
-     * @param challenge The result of `lsp_get_tenant_registry_nonce`.
+     * Signs the registry payload of this RootSigner, as fiber's `begin_registration` does, for the LSP and request given.
+     * @param request The LSP's node id, the request id and the signing time in Unix milliseconds.
      * @returns The params of `lsp_register_tenant`, with the 64-byte compact ECDSA signature over the registry digest.
      */
-    signRegistration(challenge: GetTenantRegistryNonceResult): RegisterTenantParams {
-        if (!isPlainObject(challenge)) throw new TypeError("challenge must be an object");
-        assertBytes("challenge.rootSignerPubkey", challenge.rootSignerPubkey, COMPRESSED_POINT_LENGTH);
-        // Fiber's `begin_registration` (`fiber-lsp-sdk/src/session.rs:184-191`) refuses it too.
-        if (!equalBytes(challenge.rootSignerPubkey, this.#publicKey)) {
-            throw new TypeError(
-                "challenge.rootSignerPubkey must be this identity's public key: the nonce was issued to another RootSigner",
-            );
-        }
-        const digest = computeTenantRegistryDigest(challenge);
+    signRegistration(request: Omit<TenantRegistryPayload, "rootSignerPubkey">): RegisterTenantParams {
+        if (!isPlainObject(request)) throw new TypeError("request must be an object");
+        const { lspNodeId, requestId, signedAtMs } = request;
+        // Checked before the copy, which would read a number or a string as a length; the payload checks the rest.
+        assertBytes("requestId", requestId, HASH256_LENGTH);
+        const payload = { lspNodeId, rootSignerPubkey: this.#publicKey, requestId: new Uint8Array(requestId), signedAtMs };
+        const digest = computeTenantRegistryDigest(payload);
         // As rust-secp256k1's `sign_ecdsa`: no prehash, RFC 6979 without extra entropy, low-S, compact.
         const signature = secp256k1.sign(digest, this.#secretKey, { prehash: false, lowS: true, extraEntropy: false, format: "compact" });
         assertBytes("signature", signature, COMPACT_ECDSA_SIGNATURE_LENGTH);
-        return { rootSignerPubkey: this.#publicKey.slice(), nonce: Uint8Array.from(challenge.nonce), signature };
+        return {
+            rootSignerPubkey: this.#publicKey.slice(),
+            requestId: payload.requestId.slice(),
+            signedAtMs: payload.signedAtMs,
+            signature,
+        };
     }
 }

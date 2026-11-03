@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Usage: linked at <fiber-checkout>/target/debug/fiber-lsp-sdk-agent by install.sh.
+# Linked at <fiber-checkout>/target/debug/fiber-lsp-sdk-agent by install.sh.
 set -euo pipefail
 
 self="$(readlink -f "$0")"
@@ -10,4 +10,5 @@ if [[ ! -f "$main" ]]; then
     exit 1
 fi
 
-exec node "$main" "$@"
+# The suites run past fiber's third session on a slot only with the bypass (docs/e2e-agent.md).
+exec node "$main" --nonce-cap-bypass "$@"

@@ -2,9 +2,8 @@ import { hexToBytes } from "@noble/hashes/utils.js";
 import type { CellDep, DepType, TlcHashAlgorithm, Transaction } from "../../src/common";
 import type { InvoiceCurrency } from "../../src/invoice";
 import type {
-    GetTenantRegistryNonceParams,
-    GetTenantRegistryNonceResult,
     ListChannelsParams,
+    LspTenantChannel,
     LspTenantStatus,
     NewInvoiceParams,
     NewInvoiceResult,
@@ -37,7 +36,6 @@ import type {
     TenantChannelOpeningContext,
 } from "../../src/rpc";
 import {
-    encodeGetTenantRegistryNonceParams,
     encodeListChannelsParams,
     encodeNewInvoiceParams,
     encodeOpenChannelWithExternalFundingParams,
@@ -63,6 +61,7 @@ import type {
     GetInvoiceResultVector,
     InvoiceResultVector,
     ListChannelsParamsVector,
+    LspTenantChannelVector,
     LspTenantStatusVector,
     NewInvoiceParamsVector,
     OpenChannelParamsVector,
@@ -84,12 +83,11 @@ import type {
     SubmitSignedFundingTxResultVector,
     SubmitWatchtowerSignatureParamsVector,
     TenantChannelOpeningContextVector,
-    TenantRegistryNonceParamsVector,
-    TenantRegistryNonceResultVector,
     TransactionVector,
     WatchtowerSignatureRequiredVector,
     WatchtowerSigningStatusResultVector,
 } from "./rpc-vectors";
+import { isTenantOpenParams } from "./rpc-vectors";
 import { HASH_ALGORITHM_WIRE, wireHex } from "./wire-spellings";
 
 const HASH_ALGORITHMS = Object.fromEntries(Object.entries(HASH_ALGORITHM_WIRE).map(([sdk, wire]) => [wire, sdk])) as Record<
@@ -243,22 +241,11 @@ export function toRpcSubmissionResult(vector: SubmissionResultVector): RpcSubmis
     return vector.outcome as RpcSubmissionResult;
 }
 
-export function toGetTenantRegistryNonceParams(vector: TenantRegistryNonceParamsVector): GetTenantRegistryNonceParams {
-    return { rootSignerPubkey: hexToBytes(vector.root_signer_pubkey) };
-}
-
-export function toGetTenantRegistryNonceResult(vector: TenantRegistryNonceResultVector): GetTenantRegistryNonceResult {
-    return {
-        lspNodeId: hexToBytes(vector.lsp_node_id),
-        rootSignerPubkey: hexToBytes(vector.root_signer_pubkey),
-        nonce: hexToBytes(vector.nonce),
-    };
-}
-
 export function toRegisterTenantParams(vector: RegisterTenantParamsVector): RegisterTenantParams {
     return {
         rootSignerPubkey: hexToBytes(vector.root_signer_pubkey),
-        nonce: hexToBytes(vector.nonce),
+        requestId: hexToBytes(vector.request_id),
+        signedAtMs: BigInt(vector.signed_at),
         signature: hexToBytes(vector.signature),
     };
 }
@@ -268,10 +255,17 @@ export function toLspTenantStatus(vector: LspTenantStatusVector): LspTenantStatu
         tenantId: vector.tenant_id,
         rootSignerPubkey: vector.root_signer_pubkey === null ? null : hexToBytes(vector.root_signer_pubkey),
         invoicePubkey: hexToBytes(vector.invoice_pubkey),
-        privateChannelId: vector.private_channel_id === null ? null : wireHex(vector.private_channel_id),
+        channels: vector.channels.map(toLspTenantChannel),
         createdAtMs: BigInt(vector.created_at),
         runtimeStatus: vector.runtime_status as RpcTenantRuntimeStatus,
-        channelOnline: vector.channel_online,
+    };
+}
+
+function toLspTenantChannel(vector: LspTenantChannelVector): LspTenantChannel {
+    return {
+        channelId: wireHex(vector.channel_id),
+        fundingUdtTypeScript: toScriptOrNull(vector.funding_udt_type_script),
+        online: vector.online,
     };
 }
 
@@ -360,7 +354,9 @@ export function toRpcPayment(vector: PaymentVector): RpcPayment {
 // Total by type: a method without an encoder does not compile.
 export const RPC_PARAMS_ENCODERS: { [Method in RpcMethod]: (values: RpcVectorShapes[Method]["params"]) => RpcParamsWire } = {
     open_channel_with_external_funding: (values) =>
-        encodeOpenChannelWithExternalFundingParams(toOpenChannelWithExternalFundingParams(values)),
+        isTenantOpenParams(values)
+            ? encodeOpenTenantChannelParams(toOpenTenantChannelParams(values))
+            : encodeOpenChannelWithExternalFundingParams(toOpenChannelWithExternalFundingParams(values)),
     submit_signed_funding_tx: (values) => encodeSubmitSignedFundingTxParams(toSubmitSignedFundingTxParams(values)),
     abandon_channel: (values) => encodeRpcChannelIdParams(toRpcChannelIdParams(values)),
     list_channels: (values) => encodeListChannelsParams(toListChannelsParams(values)),
@@ -370,13 +366,11 @@ export const RPC_PARAMS_ENCODERS: { [Method in RpcMethod]: (values: RpcVectorSha
     cancel_invoice: (values) => encodeRpcPaymentHashParams(toRpcPaymentHashParams(values)),
     send_payment: (values) => encodeSendPaymentParams(toSendPaymentParams(values)),
     get_payment: (values) => encodeRpcPaymentHashParams(toRpcPaymentHashParams(values)),
-    open_tenant_channel: (values) => encodeOpenTenantChannelParams(toOpenTenantChannelParams(values)),
     shutdown_channel: (values) => encodeShutdownChannelParams(toShutdownChannelParams(values)),
     get_channel_signing_status: (values) => encodeRpcChannelIdParams(toRpcChannelIdParams(values)),
     submit_channel_signature: (values) => encodeSubmitChannelSignatureParams(toSubmitChannelSignatureParams(values)),
     get_watchtower_signing_status: (values) => encodeRpcChannelIdParams(toRpcChannelIdParams(values)),
     submit_watchtower_signature: (values) => encodeSubmitWatchtowerSignatureParams(toSubmitWatchtowerSignatureParams(values)),
-    lsp_get_tenant_registry_nonce: (values) => encodeGetTenantRegistryNonceParams(toGetTenantRegistryNonceParams(values)),
     lsp_register_tenant: (values) => encodeRegisterTenantParams(toRegisterTenantParams(values)),
 };
 

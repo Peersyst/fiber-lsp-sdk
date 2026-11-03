@@ -8,7 +8,7 @@ Guidance for AI coding agents working on this repository.
 device (a mobile wallet) holds the channel keys, derives all channel secrets from a host-provided master seed, produces musig2
 (BIP-327) partial signatures on request, and enforces a signing policy so it never blind-signs.
 
-Upstream reference: `nervosnetwork/fiber` @ `8db6a117`, the head of the hosted-LSP PR (nervosnetwork/fiber#1623), where the
+Upstream reference: `nervosnetwork/fiber` @ `d8dd6d28`, the head of the hosted-LSP PR (nervosnetwork/fiber#1623), where the
 key derivation is byte for byte the one of `b71a61c3` (v0.9.0-rc7). The key derivation scheme ports fiber's
 `InMemorySigner` derivation (`crates/fiber-types/src/channel.rs`) byte for byte; re-validate it against new fiber releases.
 
@@ -188,6 +188,7 @@ an upstream quirk, the reason a bound exists, an invariant a reader would otherw
 - The SDK-owned derivations are additionally pinned by hardcoded values in `test/tests/derivation/device-scheme.spec.ts`. They are
   the recoverability contract, not a snapshot to update: changing them strands existing channels.
 - Policy: test every refusal path and the idempotent already-signed path, not just the happy path.
-- `test/utils/nonce-cap-bypass.ts` lets the node double's flows run past Fiber's nonce stall by serving a third session
-  on a slot. It is test-only and never moves to `src/`; it is deleted, and the double moved to Fiber's new nonce
-  lifecycle, once Fiber's nonces are strict, before the release.
+- `test/utils/nonce-cap-bypass.ts` lets the node double's flows run past Fiber's nonce cap by serving a third session
+  on a slot. The e2e agent's `NonceCapBypassStorage` (`e2e/agent/src/nonce-cap-bypass.ts`, behind `--nonce-cap-bypass`,
+  off by default) defeats the cap too. Both are test-only and never move to `src/`; they are deleted, and the double moved
+  to Fiber's new nonce lifecycle, once Fiber's nonces are strict, before the release.

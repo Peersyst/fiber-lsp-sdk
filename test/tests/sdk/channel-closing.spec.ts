@@ -61,7 +61,7 @@ const FIRST_REFUSED_RATE = 189_393_942n;
 const CLOSE_CALL: SentCall = { method: "shutdown_channel", params: { channel_id: CHANNEL_ID, close_script: USER_LOCK_WIRE } };
 
 // Fiber's refusals of a close: a TLC of the device's out, a close already under way, and a channel whose close is confirmed,
-// whose actor has stopped (`fiber/channel.rs:2726-2767`, `fiber/network.rs:8076-8093`).
+// whose actor has stopped (`fiber/channel.rs:2805-2846`, `fiber/network.rs:8265-8282`).
 const PENDING_TLCS = "Invalid state: Unable to process shutdown command, as there are pending outbound tlcs";
 const SHUTTING_DOWN =
     "Invalid state: Trying to send shutdown message while in invalid state ShuttingDown(ShuttingDownFlags(OUR_SHUTDOWN_SENT | THEIR_SHUTDOWN_SENT))";

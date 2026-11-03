@@ -568,7 +568,7 @@ checksum = "5ad8c7269456fd609f700340399dca5fa160c4785c9623f87b6079e5a479f28b"
 [[package]]
 name = "fiber-json-types"
 version = "0.10.0-rc1"
-source = "git+https://github.com/nervosnetwork/fiber.git?rev=8db6a117#8db6a1175cc94b6f9386953fbd3e3ebbed2ff3f8"
+source = "git+https://github.com/nervosnetwork/fiber.git?rev=d8dd6d28#d8dd6d2874ab493caa77d6fe2f41a59020679311"
 dependencies = [
  "ckb-jsonrpc-types",
  "ckb-types",
@@ -585,7 +585,7 @@ dependencies = [
 [[package]]
 name = "fiber-lsp-sdk"
 version = "0.1.0"
-source = "git+https://github.com/nervosnetwork/fiber.git?rev=8db6a117#8db6a1175cc94b6f9386953fbd3e3ebbed2ff3f8"
+source = "git+https://github.com/nervosnetwork/fiber.git?rev=d8dd6d28#d8dd6d2874ab493caa77d6fe2f41a59020679311"
 dependencies = [
  "async-trait",
  "bincode",
@@ -645,7 +645,7 @@ dependencies = [
 [[package]]
 name = "fiber-types"
 version = "0.10.0-rc1"
-source = "git+https://github.com/nervosnetwork/fiber.git?rev=8db6a117#8db6a1175cc94b6f9386953fbd3e3ebbed2ff3f8"
+source = "git+https://github.com/nervosnetwork/fiber.git?rev=d8dd6d28#d8dd6d2874ab493caa77d6fe2f41a59020679311"
 dependencies = [
  "anyhow",
  "arcode",

@@ -163,7 +163,7 @@ retries are idempotent without persisting the signature itself. The three contex
 fiber's three nonce purposes, so two operations fiber keeps apart on one commitment number never share a nonce. A cooperative
 close has no context of its own: fiber signs it in the `COMMITMENT` slot of the local commitment number, the one a commitment
 of that number would use, and sign-once is what keeps the two from sharing it. A channel announcement is signed once, so its
-context has one slot, number 0, the only one fiber's `validate_nonce_slot` takes (`fiber-lsp-sdk/src/signer.rs:1586-1593`).
+context has one slot, number 0, the only one fiber's `validate_nonce_slot` takes (`fiber-lsp-sdk/src/signer.rs:1587-1594`).
 
 This module derives the nonce **seed**. The nonce itself (BIP-327 `nonceGen`) belongs to the signing engine.
 

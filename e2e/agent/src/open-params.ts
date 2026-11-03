@@ -1,6 +1,6 @@
 import { hexToBytes } from "@noble/hashes/utils.js";
 import type { CellDep, DepType, Script } from "@peersyst/fiber-lsp-sdk";
-import { HEX_BYTES_PATTERN, SCRIPT_CODE_HASH_PATTERN, SCRIPT_HASH_TYPES } from "./agent.constants";
+import { HEX_BYTES_PATTERN, SCRIPT_CODE_HASH_PATTERN, SCRIPT_HASH_TYPES, UINT64_MAX } from "./agent.constants";
 import { AgentRequestError } from "./agent.error";
 import type { OpenChannelRequest, ScriptJson } from "./agent.types";
 import { bareLowerHex, readJsonObject } from "./agent.utils";
@@ -9,7 +9,6 @@ const DEP_TYPES: readonly DepType[] = ["code", "dep_group"];
 
 const UINT_HEX = /^0x(0|[1-9a-fA-F][0-9a-fA-F]*)$/;
 const U128_MAX = (1n << 128n) - 1n;
-const U64_MAX = (1n << 64n) - 1n;
 const U32_MAX = 0xffffffffn;
 
 // What `prepareChannelOpen` sends: a driver asking for other terms would get a channel it did not ask for.
@@ -27,7 +26,7 @@ const REFUSED_OPTIONALS = [
 ];
 
 /**
- * Reads a CKB script in fiber's JSON, refusing a hash type the SDK cannot sign for and any key CKB's JSON does not have.
+ * Reads a CKB script in fiber's JSON, refusing unknown keys and hash types.
  * @param value The value read.
  * @param field Where it sits, for the refusal.
  * @returns The script, as sent.
@@ -161,7 +160,7 @@ export function readOpenChannelRequest(body: unknown, lspPubkeyHex: string): Ope
  * @param noun What the param is, for the refusal.
  */
 function assertOpenTerm(params: Record<string, unknown>, key: string, expected: bigint, noun: string): void {
-    if (isPresent(params, key) && readUintHex(params[key], U64_MAX, `params.${key}`) !== expected) {
+    if (isPresent(params, key) && readUintHex(params[key], UINT64_MAX, `params.${key}`) !== expected) {
         throw new AgentRequestError(`params.${key} must be 0x${expected.toString(16)}, the ${noun} the SDK opens with`);
     }
 }

@@ -41,6 +41,7 @@ import {
     SignerStore,
 } from "../../../src/policy";
 import { buildSessionCommitment } from "../../../src/policy/utils";
+import { recordAgentDebitIntent } from "../../../e2e/agent/src/debit-intent";
 import { AsyncInMemorySignerStorage, InMemorySignerStorage } from "../../mocks/policy";
 import { fundedShannonsOf } from "../../utils/channel-opening";
 import {
@@ -1744,6 +1745,23 @@ describe("debit intents", () => {
                 open: false,
                 channelIndexes: [CHANNEL_INDEX],
             });
+        });
+
+        // The e2e agent writes this record itself, beside the facade: a drift in its shape or its key fails here.
+        it("reads the open intent the e2e agent records, and refuses recording it again", async () => {
+            const storage = new InMemorySignerStorage();
+            recordAgentDebitIntent(storage, `0x${OFFERED_HASH}`, OFFERED_AMOUNT);
+            const { engine } = newEngine(storage);
+            await expect(engine.readDebitIntent(OFFERED_HASH)).resolves.toEqual<DebitIntentRecord>({
+                version: 1,
+                paymentHash: OFFERED_HASH,
+                maxShannons: OFFERED_AMOUNT,
+                open: true,
+                channelIndexes: [],
+            });
+            const error = await engine.recordDebitIntent(OFFERED_HASH, OFFERED_AMOUNT).catch((cause: unknown) => cause);
+            expect(error).toBeInstanceOf(DebitIntentError);
+            expect(error).toMatchObject({ code: "intent_open", message: `a debit intent for ${OFFERED_HASH} is already open` });
         });
 
         it("reads null under a hash no intent was recorded under", async () => {

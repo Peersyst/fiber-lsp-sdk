@@ -18,13 +18,7 @@ export type CosignSession = SignSession & {
 export type SignerDispatchOptions = {
     masterSeed: Uint8Array;
     commitmentLock: ScriptTemplate;
-    /**
-     * Fiber counts these into the commitment fee although the commitment tx carries none.
-     */
     fundingLockCellDepsCount: number;
-    /**
-     * Fiber's `MILLI_SECONDS_PER_EPOCH`, which a build sets: 4 h in release, 2 s in debug.
-     */
     millisecondsPerEpoch: number;
     policy: PolicyEngine;
 };
@@ -69,8 +63,8 @@ export type DispatchOutcome =
           status: "fresh" | "already-signed" | "reused";
           warnings: SigningWarning[];
           /**
-           * Fiber's `pending_tlc_signature_deadline` in ms since the epoch; `null` without a TLC, a pinned delay or readable pins.
-           * An upper bound: fiber also counts the TLCs not confirmed removed.
+           * Fiber's `pending_tlc_signature_deadline`, an upper bound (fiber also counts TLCs not confirmed removed); `null`
+           * without a TLC, a pinned delay or readable pins.
            */
           deadlineMs: bigint | null;
       }
@@ -109,4 +103,14 @@ export type PendingChannelOpen = {
     fundedShannons: string;
     localCloseScript: Script;
     material: ChannelOpenSignerMaterial;
+};
+
+/**
+ * Fiber's `TenantRegistryPayload` (`fiber-types/src/hosted_lsp.rs:74-85`), what the RootSigner signs to register with an LSP.
+ */
+export type TenantRegistryPayload = {
+    lspNodeId: Uint8Array;
+    rootSignerPubkey: Uint8Array;
+    requestId: Uint8Array;
+    signedAtMs: bigint;
 };

@@ -26,7 +26,7 @@ async function answerOf(faults: FaultyFetch, body: string): Promise<string> {
     return (await faults.fetch(URL, init(body))).text();
 }
 
-const OPEN = '{"jsonrpc":"2.0","method":"open_tenant_channel","params":[{"funding_amount":"0x1"}],"id":1}';
+const OPEN = '{"jsonrpc":"2.0","method":"open_channel_with_external_funding","params":[{"funding_amount":"0x1"}],"id":1}';
 
 const SUBMIT_A = '{"jsonrpc":"2.0","method":"submit_channel_signature","params":[{"channel_id":"0xaa"}],"id":1}';
 
@@ -50,7 +50,7 @@ describe("FaultyFetch", () => {
         assert.deepEqual(sent, [{ url: URL, body: OPEN }]);
         assert.deepEqual(
             faults.requests.map(({ url, method, params, fault }) => ({ url, method, params, fault })),
-            [{ url: URL, method: "open_tenant_channel", params: [{ funding_amount: "0x1" }], fault: null }],
+            [{ url: URL, method: "open_channel_with_external_funding", params: [{ funding_amount: "0x1" }], fault: null }],
         );
     });
 
@@ -58,7 +58,7 @@ describe("FaultyFetch", () => {
         const { fetch } = nodeAnswering(RESULT_ONE, RESULT_TWO);
         const faults = new FaultyFetch(fetch);
         const seen: unknown[] = [];
-        faults.rewriteResult("open_tenant_channel", (result, params) => {
+        faults.rewriteResult("open_channel_with_external_funding", (result, params) => {
             seen.push({ result, params });
             return REWRITTEN;
         });
@@ -74,7 +74,7 @@ describe("FaultyFetch", () => {
     it("rewrites as many matching answers as its times", async () => {
         const { fetch } = nodeAnswering(RESULT_ONE, RESULT_TWO, RESULT_THREE);
         const faults = new FaultyFetch(fetch);
-        faults.rewriteResult("open_tenant_channel", () => REWRITTEN, { times: 2 });
+        faults.rewriteResult("open_channel_with_external_funding", () => REWRITTEN, { times: 2 });
         for (let index = 0; index < 3; index += 1) await answerOf(faults, OPEN);
         assert.deepEqual(
             faults.requests.map(({ fault }) => fault),
@@ -95,7 +95,7 @@ describe("FaultyFetch", () => {
     it("hands an error answer over as it is, the rewrite left armed for the next answer", async () => {
         const { fetch } = nodeAnswering(ERROR_ANSWER, RESULT_TWO);
         const faults = new FaultyFetch(fetch);
-        faults.rewriteResult("open_tenant_channel", () => REWRITTEN);
+        faults.rewriteResult("open_channel_with_external_funding", () => REWRITTEN);
         assert.equal(await answerOf(faults, OPEN), ERROR_ANSWER);
         assert.deepEqual(JSON.parse(await answerOf(faults, OPEN)).result, REWRITTEN);
         assert.deepEqual(
@@ -155,7 +155,7 @@ describe("FaultyFetch", () => {
 
     it("stops counting a request it refuses", async () => {
         const faults = new FaultyFetch(nodeAnswering().fetch);
-        faults.refuse("open_tenant_channel");
+        faults.refuse("open_channel_with_external_funding");
         const pending = faults.fetch(URL, init(OPEN));
         await assert.rejects(pending);
         assert.equal(faults.inFlight, 0);
@@ -165,7 +165,7 @@ describe("FaultyFetch", () => {
         const { fetch, sent } = nodeAnswering(RESULT_ONE, RESULT_TWO);
         const faults = new FaultyFetch(fetch);
         faults.refuse("submit_channel_signature");
-        faults.rewriteResult("open_tenant_channel", () => REWRITTEN);
+        faults.rewriteResult("open_channel_with_external_funding", () => REWRITTEN);
         faults.clear();
         assert.equal(await answerOf(faults, SUBMIT_A), RESULT_ONE);
         assert.equal(await answerOf(faults, OPEN), RESULT_TWO);

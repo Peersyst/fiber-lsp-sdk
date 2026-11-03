@@ -31,11 +31,11 @@ export type RpcResultDecoder<Result> = (field: WireField) => Result;
 export type FiberRpcClientOptions = {
     url: string;
     /**
-     * Biscuit token, base64; omitted when the node's RPC has no auth.
+     * Biscuit token, unpadded base64url; omitted when the node's RPC has no auth.
      */
     token?: string;
     /**
-     * Defaults to the runtime's global `fetch`, which Node, the browsers and React Native all have.
+     * Defaults to the runtime's global `fetch`.
      */
     fetch?: IFetchLike;
 };
@@ -47,9 +47,19 @@ export type OpenChannelWithExternalFundingParamsWire = {
     shutdown_script: ScriptWire;
     funding_lock_script: ScriptWire;
     funding_lock_script_cell_deps?: CellDepWire[];
+    commitment_delay_epoch?: UintHexWire;
+    commitment_fee_rate?: UintHexWire;
+    external_channel_signer?: ChannelOpenSignerMaterialWire;
 };
 
-export type OpenChannelWithExternalFundingResultWire = { channel_id: HexWire; unsigned_funding_tx: TransactionWire };
+/**
+ * Fiber writes the opening context on a tenant's opening only.
+ */
+export type OpenChannelWithExternalFundingResultWire = {
+    channel_id: HexWire;
+    unsigned_funding_tx: TransactionWire;
+    opening_context?: TenantChannelOpeningContextWire;
+};
 
 export type SubmitSignedFundingTxParamsWire = { channel_id: HexWire; signed_funding_tx: TransactionWire };
 
@@ -131,10 +141,11 @@ export type ChannelOpenSignerMaterialWire = {
     channel_announcement_nonce?: HexWire;
 };
 
+/**
+ * The tenant's `open_channel_with_external_funding`: private, the external signer required, `pubkey` the LSP's node.
+ */
 export type OpenTenantChannelParamsWire = OpenChannelWithExternalFundingParamsWire & {
     public: false;
-    commitment_delay_epoch?: UintHexWire;
-    commitment_fee_rate?: UintHexWire;
     external_channel_signer: ChannelOpenSignerMaterialWire;
 };
 
@@ -149,8 +160,6 @@ export type TenantChannelOpeningContextWire = {
     local_reserved_ckb_amount: UintHexWire;
     remote_reserved_ckb_amount: UintHexWire;
 };
-
-export type OpenTenantChannelResultWire = OpenChannelWithExternalFundingResultWire & { opening_context: TenantChannelOpeningContextWire };
 
 export type ShutdownChannelParamsWire = { channel_id: HexWire; close_script?: ScriptWire; fee_rate?: UintHexWire; force?: boolean };
 
@@ -175,22 +184,24 @@ export type RpcSubmissionResultWire = { type: RpcSubmissionResult };
 
 export type SubmitWatchtowerSignatureParamsWire = { channel_id: HexWire; request_id: HexWire; signature: HexWire };
 
-export type GetTenantRegistryNonceParamsWire = { root_signer_pubkey: BareHexWire };
-
-export type GetTenantRegistryNonceResultWire = { lsp_node_id: BareHexWire; root_signer_pubkey: BareHexWire; nonce: HexWire };
-
-export type RegisterTenantParamsWire = { root_signer_pubkey: BareHexWire; nonce: HexWire; signature: BareHexWire };
+export type RegisterTenantParamsWire = {
+    root_signer_pubkey: BareHexWire;
+    request_id: HexWire;
+    signed_at: UintHexWire;
+    signature: BareHexWire;
+};
 
 export type RpcTenantRuntimeStatus = (typeof RPC_TENANT_RUNTIME_STATUSES)[number];
+
+export type LspTenantChannelWire = { channel_id: HexWire; funding_udt_type_script: ScriptWire | null; online: boolean };
 
 export type LspTenantStatusWire = {
     tenant_id: string;
     root_signer_pubkey: BareHexWire | null;
     invoice_pubkey: BareHexWire;
-    private_channel_id: HexWire | null;
+    channels: LspTenantChannelWire[];
     created_at: UintHexWire;
     runtime_status: RpcTenantRuntimeStatus;
-    channel_online: boolean;
 };
 
 export type RegisterTenantResultWire = { tenant: LspTenantStatusWire; access_token: string };
@@ -206,13 +217,11 @@ export type RpcParamsWireByMethod = {
     cancel_invoice: RpcPaymentHashParamsWire;
     send_payment: SendPaymentParamsWire;
     get_payment: RpcPaymentHashParamsWire;
-    open_tenant_channel: OpenTenantChannelParamsWire;
     shutdown_channel: ShutdownChannelParamsWire;
     get_channel_signing_status: RpcChannelIdParamsWire;
     submit_channel_signature: SubmitChannelSignatureParamsWire;
     get_watchtower_signing_status: RpcChannelIdParamsWire;
     submit_watchtower_signature: SubmitWatchtowerSignatureParamsWire;
-    lsp_get_tenant_registry_nonce: GetTenantRegistryNonceParamsWire;
     lsp_register_tenant: RegisterTenantParamsWire;
 };
 
@@ -347,6 +356,9 @@ export type ChannelOpenSignerMaterial = {
 };
 
 export type OpenTenantChannelParams = {
+    /**
+     * The LSP's public node: fiber refuses a tenant's opening to any other.
+     */
     peerPubkey: Uint8Array;
     /**
      * The total, reserved CKB included.
@@ -423,13 +435,16 @@ export type SubmitWatchtowerSignatureParams = {
     signature: Uint8Array;
 };
 
-export type GetTenantRegistryNonceParams = { rootSignerPubkey: Uint8Array };
-
-export type GetTenantRegistryNonceResult = { lspNodeId: Uint8Array; rootSignerPubkey: Uint8Array; nonce: Uint8Array };
-
 export type RegisterTenantParams = {
     rootSignerPubkey: Uint8Array;
-    nonce: Uint8Array;
+    /**
+     * Single use: the node refuses forever a root signer's request id it has seen.
+     */
+    requestId: Uint8Array;
+    /**
+     * Unix milliseconds; the node accepts from five minutes behind its clock to thirty seconds ahead.
+     */
+    signedAtMs: bigint;
     /**
      * Compact ECDSA, 64 bytes, over fiber's registry payload.
      */
@@ -438,15 +453,23 @@ export type RegisterTenantParams = {
 
 export type LspTenantStatus = {
     /**
-     * Fiber's hex of the 32-byte digest of the root signer's key, kept as the string the operator sees.
+     * Bare hex of the 32-byte digest of the root signer's key, as the operator sees it.
      */
     tenantId: string;
     rootSignerPubkey: Uint8Array | null;
     invoicePubkey: Uint8Array;
-    privateChannelId: string | null;
+    channels: LspTenantChannel[];
     createdAtMs: bigint;
     runtimeStatus: RpcTenantRuntimeStatus;
-    channelOnline: boolean;
+};
+
+export type LspTenantChannel = {
+    /**
+     * Wire hex.
+     */
+    channelId: string;
+    fundingUdtTypeScript: Script | null;
+    online: boolean;
 };
 
 export type RegisterTenantResult = { tenant: LspTenantStatus; accessToken: string };

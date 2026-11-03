@@ -28,6 +28,7 @@ import {
 } from "../../utils/tenant-flow";
 import type { InMemoryTenantNode, TenantNodeForceClose, TenantNodePayment } from "../../utils/tenant-node";
 import { writes } from "../../utils/stored-records";
+import { rejection } from "../../utils/rejection";
 
 const vectors = loadSigningVectors();
 
@@ -360,7 +361,7 @@ describe("the watchtower step over the tenant node", () => {
         expect((await recordOf(h.device)).watchtowerSpends).toEqual(appliedSpendsOf(h, "remote"));
     });
 
-    // Fiber creates the watch row at `RemoteTxComplete` (`event_handler.rs:41-67`), and answers "watched channel not found" before.
+    // Fiber creates the watch row at `RemoteTxComplete` (`event_handler.rs:41-65`), and answers "watched channel not found" before.
     it("reads nothing pending while the channel opens unwatched, then signs its spend once fiber watches it", async () => {
         const h = flow(APPROVED);
         await negotiateChannel(h);
@@ -380,7 +381,7 @@ describe("the watchtower step over the tenant node", () => {
         expect((await recordOf(h.device)).watchtowerSpends).toEqual(appliedSpendsOf(h, "remote"));
     });
 
-    // Fiber deletes the watch row of a channel closed cooperatively and never creates one after (`event_handler.rs:68-78`).
+    // Fiber deletes the watch row of a channel closed cooperatively and never creates one after (`event_handler.rs:66-76`).
     it("drops a channel closed cooperatively once the node no longer watches it, and then calls the node for nothing", async () => {
         const h = flow(APPROVED);
         await open(h);
@@ -455,7 +456,7 @@ describe("the watchtower step over the tenant node", () => {
         expect((await recordOf(restarted)).watchtowerSpends).toEqual(appliedSpendsOf(h, "local"));
     });
 
-    // Fiber keeps the request a rebuild supersedes pending, and serves the lowest id first (`fiber-types/src/watchtower.rs:160-162`).
+    // Fiber keeps the request a rebuild supersedes pending, and serves the lowest id first (`fiber-types/src/watchtower.rs:266-268`).
     describe("a spend fiber rebuilds for an unlock the device signed", () => {
         async function firstRequestPending(): Promise<{ h: TenantFlow; status: WireField }> {
             const h = flow(APPROVED);
@@ -636,13 +637,19 @@ describe("the watchtower step over the tenant node", () => {
             await rpc.getWatchtowerSigningStatus({ channelId: CHANNEL_ID });
             const [request] = h.node.watchtowerServed;
             if (request === undefined) throw new Error("the node built no spend");
-            await expect(
+            const refused = await rejection(
                 rpc.submitWatchtowerSignature({
                     channelId: CHANNEL_ID,
                     requestId: hexToBytes(request.requestId.slice(2)),
                     signature: new Uint8Array(65).fill(1),
                 }),
-            ).rejects.toEqual(new RpcError("submit_watchtower_signature", -32000, "TLC signing key not found for derivation index 9"));
+            );
+            expect(refused).toBeInstanceOf(RpcError);
+            expect(refused).toMatchObject({
+                method: "submit_watchtower_signature",
+                code: -32000,
+                message: "TLC signing key not found for derivation index 9",
+            });
             expect(spends(h)).toEqual(["Tlc@9 outbound TLC by timeout unanswered"]);
         });
 

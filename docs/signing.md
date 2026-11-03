@@ -31,7 +31,7 @@ the store as it was, byte for byte, and costs no write. The order is fiber's own
 | 12  | `next_material` for the slot's number plus one, on the four commitment and revocation steps  |                                                    |
 
 Step 3 comes once the channel resolves: every channel this device opens is a tenant channel, private by construction
-(`open_tenant_channel` requires `public: false`), so an announcement is never signed. Its construction stays in `digest`
+(the tenant form of `open_channel_with_external_funding` requires `public: false`), so an announcement is never signed. Its construction stays in `digest`
 for the vectors that pin it, and the engine still signs one, which the interop loop uses.
 
 At step 9 the gate also holds a revocation to its replacement: the last commitment signed in the revoked one's view must be
@@ -66,8 +66,8 @@ its own buffer, is the only secret the dispatch holds.
 
 A channel whose request fiber is still waiting on, in `ChannelReady` or in `ShuttingDown` without
 `WAITING_COMMITMENT_CONFIRMATION`, is force-closed once any unresolved TLC reaches its expiry less two thirds of the
-commitment delay (`pending_tlc_signature_deadline` and `tlc_expiry_delay`, `fiber-lib/src/fiber/channel.rs:6532-6553`
-and `:5894-5899`); nothing of it travels in the status. The dispatch computes it and reports it as `deadlineMs`, a
+commitment delay (`pending_tlc_signature_deadline` and `tlc_expiry_delay`, `fiber-lib/src/fiber/channel.rs:6639-6660`
+and `:6012-6017`); nothing of it travels in the status. The dispatch computes it and reports it as `deadlineMs`, a
 `bigint` of milliseconds since the epoch, on a signed outcome and on a refusal after decoding, and never acts on it:
 every request is answered when it is seen. It is `null` unless the request carries a settlement with at least one TLC,
 which only the two commitment transitions do, and the channel's delay is pinned; a refusal before decoding has none
@@ -104,11 +104,11 @@ list as it stands, never sorting it itself.
 
 | Transition                     | Order            | Fiber                                                                   |
 | ------------------------------ | ---------------- | ----------------------------------------------------------------------- |
-| `SendCommitmentSigned`         | ascending        | `order_things_for_musig2`, `fiber-lib/src/fiber/channel.rs:11028-11041` |
+| `SendCommitmentSigned`         | ascending        | `order_things_for_musig2`, `fiber-lib/src/fiber/channel.rs:11195-11208` |
 | `CompleteReceivedCommitment`   | ascending        | the same                                                                |
 | `SendClosingSigned`            | ascending        | the same                                                                |
 | `SignChannelAnnouncement`      | ascending        | the same                                                                |
-| `SendRevokeAndAck`             | `[peer, device]` | `get_musig2_agg_context(false)`, `:11119-11128`                         |
+| `SendRevokeAndAck`             | `[peer, device]` | `get_musig2_agg_context(false)`, `:11286-11295`                         |
 | `CompleteReceivedRevokeAndAck` | `[device, peer]` | `get_musig2_agg_context(true)`                                          |
 
 Ascending is fiber's `should_local_go_first_in_musig2`: the device first when its compressed key sorts first or equal,
@@ -122,7 +122,7 @@ with the peer's (BIP-327 `NonceAgg`) and requires the result to be the aggregate
 one the node can use against the deterministic nonce (below) and never to complete a signature.
 
 On `CompleteReceivedCommitment` and `CompleteReceivedRevokeAndAck` the request also carries the peer's partial signature,
-exactly there (fiber's `external_signing_peer_evidence`, `channel.rs:11054-11079`). The dispatch verifies it with
+exactly there (fiber's `external_signing_peer_evidence`, `channel.rs:11221-11246`). The dispatch verifies it with
 `Session.partialSigVerify`, under the key list, the aggregate and the message it computed, the two nonces placed by the
 position of their keys. The node verified it already; the device verifies so that it never completes a signature the peer
 did not produce, and so that the evidence it keeps (below) is a signature the revoked lock accepts. A type or range error
@@ -161,7 +161,7 @@ The checks of this step, each `malformed`:
   `SendCommitmentSigned` names the device's local number for both. The commitment it receives carries the remote number
   instead, which the gate keeps increasing per view.
 - **A revocation revokes the number one below its slot**, the args fiber builds at the counter minus one
-  (`channel.rs:7987`, `:10182`).
+  (`channel.rs:8172`, `:10352`).
 - **A revocation the device receives pays the device's close script**, the one pinned at registration; one it sends pays
   the peer's, which the device has no reason to fix.
 - **No output carries a type script**: every channel of the device is a CKB channel.
@@ -226,7 +226,7 @@ since all of it derives from the seed and the node checks each value against the
 
 - **At the open**, `prepareChannelOpen(channelIndex, fundedShannons, localCloseScript)` returns `buildChannelOpenMaterial`:
   the funding and TLC base public keys, the commitment points of numbers 1 and 2, and the nonces of `Commitment@0`,
-  `Commitment@1` and `Revocation@2`, the slots fiber installs them at (`channel.rs:5975-6005`), with the announcement nonce
+  `Commitment@1` and `Revocation@2`, the slots fiber installs them at (`channel.rs:6093-6123`), with the announcement nonce
   always `null`, which fiber requires of a private channel. Beside it, what the channel is registered with once the node
   names it: the index, the funded amount and a copy of the close script, both checked first against what fiber opens with
   ([policy.md](./policy.md)). The facade's opening sends the material as `external_channel_signer` ([sdk.md](./sdk.md)).
@@ -242,23 +242,25 @@ A tenant of the hosted LSP is one RootSigner, and the device's is `walletIdentit
 same tenant. `TenantIdentity` holds it in a private field, out of every property, enumeration and serialization, and
 gives out three things:
 
-- **`publicKey`**, the 33-byte compressed key the LSP issues registry nonces to.
+- **`publicKey`**, the 33-byte compressed key a registration names.
 - **`tenantId`**, fiber's `TenantId::from_root_signer_pubkey`: the lowercase hex of
   `blake2b_hash_with_salt(publicKey, "fiber-hosted-lsp-tenant-id/v1")`, the salt hashed before the data.
-- **`signRegistration(challenge)`**, which takes the result of `lsp_get_tenant_registry_nonce` as it comes and returns
-  the params of `lsp_register_tenant`. It signs fiber's `TenantRegistryPayload`: the bytes
-  `"fiber-hosted-lsp-tenant-registry/v1" ‖ lsp_node_id (33) ‖ root_signer_pubkey (33) ‖ nonce (32)`, their digest
+- **`signRegistration(request)`**, which takes the LSP's node id, a 32-byte request id and the signing time in Unix
+  milliseconds, and returns the params of `lsp_register_tenant`. It signs fiber's `TenantRegistryPayload`: the 141 bytes
+  `"fiber-hosted-lsp-tenant-registry/v2" ‖ lsp_node_id (33) ‖ root_signer_pubkey (33) ‖ request_id (32) ‖ signed_at (u64 BE)`, their digest
   `blake2b_hash_with_salt(bytes, [])` (the plain CKB blake2b-256), and a compact ECDSA signature of 64 bytes over it.
   The signature is RFC 6979 with low S and no added entropy, which is what rust-secp256k1's `sign_ecdsa` produces, so it
   matches fiber's own signer to the byte; noble signs the digest as given only with `prehash: false`.
 
-A nonce issued to another root signer is refused (`TypeError` naming `challenge.rootSignerPubkey`), as fiber's own
-`begin_registration` refuses it: signing it serves no one and hides a fault of the LSP or the host. The LSP's node id
-must be a point and the nonce 32 bytes. Which LSP the node id should be is the facade's to check against its options
-([sdk.md](./sdk.md), "The tenant's registration").
+The identity reads no clock and draws no randomness: the request id and the time are the host's. The LSP's node id must
+be a point, the request id 32 bytes and the time a u64. The node accepts a `signed_at` from five minutes behind its clock
+to thirty seconds ahead and refuses a request id it has seen (`fiber-types/src/hosted_lsp.rs:16-20` and `:115-124`,
+`fiber-lib/src/lsp/registry.rs:283-295`, at `d8dd6d28`), so a registration whose answer was lost is signed again under a
+fresh id. Which LSP the node id is comes from the facade's
+options ([sdk.md](./sdk.md), "The tenant's registration").
 
-The SDK signs and never calls: both registration methods need the operator's token ([rpc.md](./rpc.md)), which a phone
-does not hold, so the host's backend (or an agent) asks for the nonce, has the device sign it, registers, and hands the
+The SDK signs and never calls: the registration method needs the operator's token ([rpc.md](./rpc.md)), which a phone
+does not hold, so the host's backend (or an agent) has the device sign a registration, registers, and hands the
 tenant's token back to the device.
 
 The private field is ES2022 syntax the build emits as is; under React Native, Metro's Babel preset transpiles it, as it
@@ -301,8 +303,8 @@ status, `get_watchtower_signing_status`, and handed back through `submit_watchto
 
 ### The signature
 
-`signOnchain(keys, purpose, tx)` signs as fiber does (`sign_onchain_request`, `watchtower/signer.rs:95-147`, and the
-on-chain arm of its device SDK's `sign_content`, `fiber-lsp-sdk/src/signer.rs:1237-1252`): recoverable ECDSA over
+`signOnchain(keys, purpose, tx)` signs as fiber does (`sign_onchain_request`, `watchtower/signer.rs:102-154`, and the
+on-chain arm of its device SDK's `sign_content`, `fiber-lsp-sdk/src/signer.rs:1238-1253`): recoverable ECDSA over
 `computeTxMessage(tx)`, the message of every transaction fiber signs ([digest.md](./digest.md)), which leaves the
 witnesses out, so the 65 zero bytes the unlock holds in their place never reach it. It is RFC 6979 with low S and no
 added entropy over the message as given (`prehash: false`), which is rust-secp256k1's `sign_ecdsa_recoverable`, so it
@@ -339,7 +341,7 @@ between the claim and the record, is signed again, to the same bytes, and record
 ### The destination, and the trust it takes
 
 Fiber's watchtower pays every spend to the secp256k1 lock of the node it runs on, and takes the fee from that node's own
-cells (`watchtower/actor.rs:1303-1306`, `:1808-1826`); `create_watch_channel` has no member for another destination.
+cells (`watchtower/actor.rs:1383-1386`, `:1888-1906`); `create_watch_channel` has no member for another destination.
 Fiber's own device SDK plans the same answer the SDK gives: the wallet approves a destination and a fee bound, and signs
 only spends that pay them (`fiber-lsp-sdk/src/onchain.rs:45-59`). The facade takes them as its `watchtower` option
 ([sdk.md](./sdk.md)), and the policy holds every spend to them. Without the option every request is refused as
@@ -361,7 +363,7 @@ it check the hash of the transaction input 0 spends: the peer broadcasts its com
 no signature covers, so the device names the source by its content instead ([policy.md](./policy.md)).
 
 UDT channels, which the device does not open, and the punishment of a revoked commitment, which fiber's watchtower spends
-with the revocation signed in its musig2 round (`watchtower/actor.rs:331-394`), never reach this path.
+with the revocation signed in its musig2 round (`watchtower/actor.rs:345-408`), never reach this path.
 
 ## The interop loops
 
@@ -385,18 +387,18 @@ Those pins, like the vectors, are the idempotent re-delivery contract, not snaps
 ## The node double and the flows
 
 `InMemoryTenantNode` (`test/utils/tenant-node.ts`) is the node end of the tenant RPC. It answers the injected `fetch`
-for the thirteen methods the facade calls, `open_tenant_channel` and `submit_signed_funding_tx` (below), `list_channels`,
+for the thirteen methods the facade calls, `open_channel_with_external_funding` and `submit_signed_funding_tx` (below), `list_channels`,
 `get_channel_signing_status`, `submit_channel_signature`, `get_watchtower_signing_status`,
 `submit_watchtower_signature`, `new_invoice`, `get_invoice`, `settle_invoice`, `send_payment`, `get_payment` and
 `shutdown_channel`, in fiber's shapes, and holds what fiber holds: the
 counters L and R (`CommitmentNumbers`, both 0 before the open), the sites that issue a request off them, the points and
 nonces the device published, and the peer's musig2 half. It issues one request at a time and queues the movements that
 arrive while one is pending, as fiber buffers them. A submission first meets the conversions of fiber's RPC layer, ahead
-of the channel lookup (`rpc/channel.rs:840-847`): the partial signature as a scalar and the next nonces as musig2
-nonces. Then fiber's checks (`channel.rs:2208-2285`): `replay_or_pending`, which answers the exact receipt again
+of the channel lookup (`rpc/channel.rs:812-819`): the partial signature as a scalar and the next nonces as musig2
+nonces. Then fiber's checks (`channel.rs:2221-2300`): `replay_or_pending`, which answers the exact receipt again
 `AlreadyApplied`; the partial signature, verified against the nonce the device published for the slot; and
 `next_material`, required on the four advancing transitions and installed at the slot's number plus one
-(`channel.rs:6009-6139`). The content it sends is built with digest's own builders ([digest.md](./digest.md)), from
+(`channel.rs:6127-6257`). The content it sends is built with digest's own builders ([digest.md](./digest.md)), from
 device keys the test derives from the seed: a shortcut, since a real node holds only the public parts, with the same
 result. The double takes the keys of each channel index a test may open under, and a channel is built with the ones
 whose funding key its open's material carries. The channel opens through the RPC or through a method of the double, and
@@ -438,24 +440,27 @@ What the sequences show:
 - **A commitment's version is not always its slot.** For `SendCommitmentSigned` the two are equal; for
   `CompleteReceivedCommitment` the version is R, one below its slot when it follows a `CompleteReceivedRevokeAndAck` in
   the tenant's own round (`Commitment@3` carries version 2 in the send flow) and equal to it otherwise.
-- **After any round the tenant starts, the peer's next round stalls**, even under `allow`, under fiber's current nonce
-  lifecycle. The tenant's round leaves its `CompleteReceivedCommitment` on `Commitment@L` once its
+- **After any round the tenant starts, the peer's next round cannot complete**, even under `allow`, under fiber's
+  current nonce lifecycle. The tenant's round leaves its `CompleteReceivedCommitment` on `Commitment@L` once its
   `CompleteReceivedRevokeAndAck` moved L, and the peer's next round asks for its two commitments on that slot: a third
-  session. So the fulfil of a payment sent stalls, and so does a second payment received, after the first's fulfil:
-  `CompleteReceivedCommitment` at `Commitment@4` warning, `SendRevokeAndAck` at `Revocation@4` signed,
+  session. So the fulfil of a payment sent cannot complete, and neither can a second payment received, after the
+  first's fulfil: `CompleteReceivedCommitment` at `Commitment@4` warning, `SendRevokeAndAck` at `Revocation@4` signed,
   `SendCommitmentSigned` at `Commitment@4` refused as `policy_refusal`. The cap stays: three signatures under one
-  deterministic nonce solve for the funding key (above).
+  deterministic nonce solve for the funding key (above). Fiber force-closes the tenant's channel once its revocation
+  nonce ledger has stayed unbalanced for 30 s (`crates/fiber-lib/src/fiber/channel.rs:6760-6793`), some 31 s on the
+  devnet.
 
-### Past the stall, under a test-only bypass
+### Past the third session, under a test-only bypass
 
-To exercise what comes after the stall, four flows run past it: the payment sent completed and then a close, the second
-payment received completed, and a third payment sent after it. Before each third session the double calls
+To exercise what comes after the refused round, four flows run past it in the double, which alone stops there: the
+payment sent completed and then a close, the second payment received completed, and a third payment sent after it. Before each third session the double calls
 `forgetSecondSession` (`test/utils/nonce-cap-bypass.ts`), which drops the slot's entry from the stored record's
 `nonceReuse` log so the policy serves the third as a second session. With the cap out of the way every later step is
 signed or warned: the peer's view rule, the replacement rule, the lanes and the balance rule accept each round, so the
-third session on `Commitment@L` is the only obstacle in fiber's current lifecycle. The bypass lives in `test/` alone and
-never in `src/`, where the cap stays: three signatures under one nonce solve for the funding key. **It goes when Fiber's
-nonces are strict, before the release**: the helper is deleted and the double moves to Fiber's new nonce lifecycle, so
+third session on `Commitment@L` is the only obstacle in fiber's current lifecycle. The bypass lives in `test/` and in
+the e2e agent's own `NonceCapBypassStorage` (`e2e/agent/src/nonce-cap-bypass.ts`, behind `--nonce-cap-bypass`, off by
+default), never in `src/`, where the cap stays: three signatures under one nonce solve for the funding key. **They go
+when Fiber's nonces are strict, before the release**: the helpers are deleted and the double moves to Fiber's new nonce lifecycle, so
 the flows run the real sequence end to end with the cap in force.
 
 Three more flows cover the host's effects. With the app closed, the requests wait on the node, and once the poller
@@ -465,12 +470,13 @@ read the status, since otherwise the status already names the next request. When
 fails, the outcome is a fault and nothing is submitted; the node asks for the same revocation again, the device signs it
 and keeps the evidence, and the peer's next commitment is signed after it.
 
-The opening's sequence is asserted by fiber's own test (`fiber-lib/src/fiber/tests/external_signer_restart.rs:685-740`).
+The opening's sequence is asserted by fiber's own test (`fiber-lib/src/fiber/tests/external_signer_restart.rs:689-744`).
 The payments' are derived from fiber's counter rules, since no fiber test fixes them: R moves by one when the device's
-`revoke_and_ack` is sent (`channel.rs:6313`), L when the peer's is received (`channel.rs:6462`), and a `commitment_signed`
+`revoke_and_ack` is sent (`channel.rs:6420`), L when the peer's is received (`channel.rs:6569`), and a `commitment_signed`
 moves neither, which is where the shared slots come from. Fiber's devnet runs them in this order, with these outcomes
 ([e2e-agent.md](./e2e-agent.md), "Scenarios"): a payment received and its fulfil, and a payment sent up to the third session
-refused on its fulfil.
+refused on its fulfil, after which the node force-closes the tenant's channel once its revocation nonce ledger has stayed
+unbalanced for 30 s, some 31 s on the devnet.
 
 The controls each end refused, on two ticks, with no submission and the record unchanged:
 
@@ -495,17 +501,17 @@ while nothing is pending; and jsonrpsee's answers to a method the node does not 
 
 `forceClose(view, options)` puts a commitment on chain, the view's last or one before it, with the funding lock's cell deps
 fiber adds when it broadcasts, and the double turns into fiber's watchtower for it. `test/utils/tenant-watchtower.ts` ports
-its `build_settlement_tx` (`watchtower/actor.rs:1308-1840`): the unlock it picks on a cell, by the chain's median time and
+its `build_settlement_tx` (`watchtower/actor.rs:1388-1921`): the unlock it picks on a cell, by the chain's median time and
 the preimages it holds; the spend it builds, the remainder at output 0 unless no party is left and the node's output paid
 what the unlock releases and its own cell brings, less the fee; the request id, the blake2b of the molecule transaction
-(`watchtower/signer.rs:95`); and `verify_onchain_signature`. The double serves the lowest pending request id, as fiber's
+(`watchtower/signer.rs:102`); and `verify_onchain_signature`. The double serves the lowest pending request id, as fiber's
 `first_pending` does, and once it applies a signature the spend lands and the next one is built from its remainder. A
 submission meets fiber's checks: the length, the recovery id, the key recovered over fiber's message, a pending request,
 `AlreadyApplied` for the signature applied and a mismatch for another. Both methods answer "watched channel not found"
-before the watch row exists, which fiber creates at `RemoteTxComplete` (`event_handler.rs:41-67`), and once a cooperative
+before the watch row exists, which fiber creates at `RemoteTxComplete` (`event_handler.rs:41-65`), and once a cooperative
 close deletes it. Beside them, the peer can spend first, the median time can move on, the node can fund its spends from
 another of its cells, which rebuilds the spend waiting under a new request id and leaves the old one pending, as fiber does
-(`watchtower/actor.rs:2151-2155`), and a spend can be tampered with.
+(`watchtower/actor.rs:2237-2241`), and a spend can be tampered with.
 
 The flows, `test/tests/sdk/watchtower-step.flow.spec.ts`, run both steps as the facade polls them, under `allow` and the
 vectors' approval, over a channel with a TLC each way in flight: an inbound one whose preimage the node holds and an
@@ -548,11 +554,12 @@ call that asks for closed ones, and a cooperative close as `ShuttingDown` and th
 
 ### The opening over the double
 
-`open_tenant_channel` meets fiber's checks of the params (`rpc/channel.rs:1110-1124`): the LSP's own key as the peer,
-`public: false` and the signer material present. Then the tenant's single opening slot (`network.rs:3679-3790`): the
-identical command, nonces included, answers the result it froze; another answers "tenant already has a different channel
-opening", and the identical one once the channel is ready "tenant channel is already open". Absent, `null` and empty
-`funding_lock_script_cell_deps` compare alike, as fiber's conversion reads them (`rpc/channel.rs:1130-1136`). The open
+`open_channel_with_external_funding` in its tenant form meets fiber's checks of the params (`rpc/channel.rs:1082-1096`): the LSP's own key as the peer,
+`public: false` and the signer material present. Then the tenant's opening keyed by the signer's `tlc_base_key` (`network.rs:3778-3830`):
+the identical command, nonces included, answers the result it froze; another for the same signer answers "tenant already
+has a different channel opening for this signer", and the identical one once the channel is ready "tenant channel is
+already open". A fresh signer is a fresh opening, held beside the old one. Absent, `null` and empty
+`funding_lock_script_cell_deps` compare alike, as fiber's conversion reads them (`rpc/channel.rs:1102-1108`). The open
 never parks: within the call the double freezes the funding tx, output 0 the funding cell under the testnet funding lock
 over the two funding keys, then the tenant's change and the LSP's (`funding_tx.rs:552-600`), each input's witness the
 65-zero-byte placeholder, and the user lock's cell deps after the tx's own, each once (`:714-726`); and the opening
@@ -562,11 +569,11 @@ context, the tenant's reserve sized over the open's shutdown script, the LSP's b
 submitted" and a tx whose raw part differs from the frozen one fiber's mismatch, the witnesses alone being free, then
 resumes the open's commitments and shows the channel `ChannelReady` once both are signed. The listing is fiber's whole:
 the four balances, the closed channels to a call that asks for them, and to an `only_pending` call the opening while it
-opens and each failed one, made up as fiber makes it (`rpc/channel.rs:601-680`). Beside them, the next opening's answer
+opens and each failed one, made up as fiber makes it (`rpc/channel.rs:572-651`). Beside them, the next opening's answer
 can be tampered with (the delay, either reserve, the channel id, output 0's lock), the peer can send its commitment
 before the funding tx is signed, which leaves the channel `SigningCommitment` with `THEIR_COMMITMENT_SIGNED_SENT` as
-fiber's does (`channel.rs:2525-2550`), and the opening can expire as fiber's external funding timeout fires
-(`channel.rs:4374-4395`): `Closed` with `FUNDING_ABORTED`, its state deleted and listed among the pending ones alone. The
+fiber's does (`channel.rs:2604-2629`), and the opening can expire as fiber's external funding timeout fires
+(`channel.rs:4470-4491`): `Closed` with `FUNDING_ABORTED`, its state deleted and listed among the pending ones alone. The
 flows that run the facade's opening over it are [sdk.md](./sdk.md)'s.
 
 ## Where it lives
@@ -670,26 +677,39 @@ all four metrics, and the assertions were checked by breaking the code on purpos
 
 `test/tests/signer/tenant-identity.spec.ts` pins the identity against fiber's `tenant_registry` vector (the key, the
 tenant id, the payload, the digest and the signature to the byte) and against literal values of its own, refuses each
-field of the challenge (a foreign root signer, the other parity of its x, each wrong length, an LSP node id that is not a
-point, the absent ones), and checks that no property, enumeration or serialization reaches the secret:
+field of the request (each wrong length, an LSP node id that is not a point, a request id or a time of the wrong type or
+out of range, the absent ones), signs under its own key whatever root signer the request carries, and checks that no
+property, enumeration or serialization reaches the secret:
 
-| Mutation                                              | Tests that failed |
-| ----------------------------------------------------- | ----------------- |
-| The public key is handed out by reference             | 23                |
-| The answer carries the identity's key by reference    | 18                |
-| The payload omits the protocol prefix                 | 11                |
-| The payload puts the root signer before the LSP       | 11                |
-| The LSP's node id is not checked as a point           | 8                 |
-| The digest is prehashed again before signing          | 8                 |
-| The signature takes added entropy                     | 7                 |
-| The signature may be high-S                           | 6                 |
-| The nonce's length is not checked                     | 5                 |
-| A challenge that is not an object reaches the fields  | 4                 |
-| The tenant id is hashed without its salt              | 3                 |
-| A nonce issued to another root signer is signed       | 2                 |
-| The secret is a public property                       | 2                 |
-| The answer carries the challenge's nonce by reference | 2                 |
-| The nonce is copied with a Buffer's slice             | 1                 |
+| Mutation                                                  | Tests that failed |
+| --------------------------------------------------------- | ----------------- |
+| The public key is handed out by reference                 | 26                |
+| The payload omits the protocol prefix                     | 22                |
+| The payload puts the root signer before the LSP           | 22                |
+| The payload puts the signing time before the request id   | 22                |
+| The protocol prefix is v1's                               | 22                |
+| The signing time is written in 16 bytes                   | 22                |
+| The answer carries the identity's key by reference        | 21                |
+| The registry digest is salted with the tenant id's domain | 18                |
+| The signing time is written little-endian                 | 18                |
+| The digest is prehashed again before signing              | 15                |
+| The signature takes added entropy                         | 8                 |
+| The signing time is not checked                           | 7                 |
+| The signing time's bound is one past a u64                | 7                 |
+| The request id is not checked                             | 5                 |
+| A request that is not an object reaches the fields        | 4                 |
+| The LSP's node id is not checked as a point               | 3                 |
+| The tenant id is hashed without its salt                  | 3                 |
+| The answer carries the request id by reference            | 2                 |
+| The request id's length is not checked                    | 2                 |
+| The secret is a public property                           | 2                 |
+| The signature may be high-S                               | 2                 |
+| A payload that is not an object reaches the fields        | 1                 |
+| The answer rereads the request id from the request        | 1                 |
+| The answer rereads the signing time from the request      | 1                 |
+| The request id is copied with a Buffer's slice            | 1                 |
+| The root signer is not checked as a point                 | 1                 |
+| A root signer named in the request is signed for          | 1                 |
 
 Reading the pins before the channel resolves fails no test, and cannot: the reader resolves the name itself, with the same
 refusal, so the outcome is the same for every status.

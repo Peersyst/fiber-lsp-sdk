@@ -8,11 +8,26 @@ export const DEVICE_TENANT_ID = "671dd6462a060f9f121f33b41d13bc7799866b76068b0d4
 // The LSP's node id: the curve's generator.
 export const LSP_PUBKEY = "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798";
 
-export const REGISTRY_NONCE = "0x5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a";
+// The request ids a test's `randomBytes` draws, in order, and the signing time: the specs' clock, 2027-01-15T08:00:00Z.
+export const REGISTRATION_REQUEST_ID = new Uint8Array(32).fill(0x5a);
+export const RETRY_REQUEST_ID = new Uint8Array(32).fill(0x5b);
+export const REGISTRATION_SIGNED_AT = "0x1a3185c5000";
 
-// The device's RFC 6979 signature of the registry digest over that nonce, so the fake checks it without a curve.
+// The device's RFC 6979 signatures of fiber's v2 registry payload to LSP_PUBKEY at that time, one per request id, so the fake
+// checks them without a curve.
 export const REGISTRATION_SIGNATURE =
-    "7dc0bd212b90c22602b03d013149fec03696e3d03624c92f272461d9ac5cde5f34be000f7696b1004e4c7acf67e5e899b016db1c580736366e32f32f3149bd90";
+    "3d39f6af29b1ae89cd7db857f332e773f38eac1d376350dda30ac84ee35dbbee14cd0081a037b71308ee5dcd0059b2081c2ac154906ab89ef928ce74ebab5969";
+export const RETRY_SIGNATURE =
+    "c3ba88a735b78c61ef68cbae403c287cc1deea4c341803b6e04b613f1524feb33060048857d641ffb915cf1ee033f24992a1e3dc3260937157259877cb433f44";
+
+const SIGNATURES_BY_REQUEST_ID: Readonly<Record<string, string>> = {
+    [`0x${"5a".repeat(32)}`]: REGISTRATION_SIGNATURE,
+    [`0x${"5b".repeat(32)}`]: RETRY_SIGNATURE,
+};
+
+// As fiber's registry refuses a request id it has seen (d8dd6d28 `lsp/registry.rs:13`), under the code every refusal of
+// `lsp_register_tenant` carries (`rpc/utils.rs:21-30`).
+export const REGISTRATION_REQUEST_CONSUMED = "tenant registration request was already consumed";
 
 export type FakeNodeCall = { method: string; params: unknown; authorization: string | null };
 
@@ -29,12 +44,10 @@ function firstParam(params: unknown): Record<string, unknown> {
     return typeof first === "object" && first !== null ? (first as Record<string, unknown>) : {};
 }
 
-// Only what registration, an idle poll and the preimage releases call.
 export class FakeNode {
     readonly calls: FakeNodeCall[] = [];
 
-    // How many `node_info` calls fail before one answers.
-    nodeInfoFailures = 0;
+    registrationFailures = 0;
 
     // How many registrations answer another tenant's id before one answers the device's.
     foreignRegistrations = 0;
@@ -45,10 +58,11 @@ export class FakeNode {
 
     releaseError: string | null = null;
 
-    // Awaited before a call is answered, to hold it.
     beforeAnswer: (method: string) => Promise<void> = async () => undefined;
 
     private registrations = 0;
+
+    private readonly consumedRequestIds = new Set<string>();
 
     readonly fetch: AgentNodeFetch = async (_url, init) => {
         const request = JSON.parse(init.body) as { method: string; params: unknown; id: unknown };
@@ -64,23 +78,17 @@ export class FakeNode {
 
     private answer(method: string, params: unknown): FakeNodeAnswer {
         switch (method) {
-            case "node_info":
-                if (this.nodeInfoFailures > 0) {
-                    this.nodeInfoFailures--;
+            case "lsp_register_tenant":
+                if (this.registrationFailures > 0) {
+                    this.registrationFailures--;
                     return { error: { code: -32603, message: "node is starting" } };
                 }
-                return { result: { version: "0.9.0", pubkey: LSP_PUBKEY, addresses: [] } };
-            case "lsp_get_tenant_registry_nonce":
-                return {
-                    result: { lsp_node_id: LSP_PUBKEY, root_signer_pubkey: firstParam(params).root_signer_pubkey, nonce: REGISTRY_NONCE },
-                };
-            case "lsp_register_tenant":
                 return this.register(firstParam(params));
             case "list_channels":
                 return this.listChannelsFails
                     ? { error: { code: -32603, message: "list_channels is down" } }
                     : { result: { channels: [] } };
-            case "open_tenant_channel":
+            case "open_channel_with_external_funding":
                 return structuredClone(this.openAnswer);
             case "settle_invoice":
                 return this.releaseError === null ? { result: {} } : { error: { code: -32000, message: this.releaseError } };
@@ -92,16 +100,32 @@ export class FakeNode {
     }
 
     private register(params: Record<string, unknown>): FakeNodeAnswer {
-        const { root_signer_pubkey: rootSigner, nonce, signature } = params;
-        if (rootSigner !== DEVICE_ROOT_SIGNER || nonce !== REGISTRY_NONCE || signature !== REGISTRATION_SIGNATURE) {
-            return { error: { code: -32602, message: "invalid tenant registration" } };
+        const { root_signer_pubkey: rootSigner, request_id: requestId, signed_at: signedAt, signature } = params;
+        if (
+            Object.keys(params).length !== 4 ||
+            rootSigner !== DEVICE_ROOT_SIGNER ||
+            typeof requestId !== "string" ||
+            signedAt !== REGISTRATION_SIGNED_AT ||
+            signature !== SIGNATURES_BY_REQUEST_ID[requestId]
+        ) {
+            return { error: { code: -32000, message: "invalid tenant registration" } };
         }
+        if (this.consumedRequestIds.has(requestId)) return { error: { code: -32000, message: REGISTRATION_REQUEST_CONSUMED } };
+        this.consumedRequestIds.add(requestId);
         this.registrations++;
         let tenantId = DEVICE_TENANT_ID;
         if (this.foreignRegistrations > 0) {
             this.foreignRegistrations--;
             tenantId = "6666666666666666666666666666666666666666666666666666666666666666";
         }
-        return { result: { tenant: { tenant_id: tenantId }, access_token: `tenant-token-${this.registrations}` } };
+        const tenant = {
+            tenant_id: tenantId,
+            root_signer_pubkey: rootSigner,
+            invoice_pubkey: LSP_PUBKEY,
+            channels: [],
+            created_at: "0x1",
+            runtime_status: "active",
+        };
+        return { result: { tenant, access_token: `tenant-token-${this.registrations}` } };
     }
 }

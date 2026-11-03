@@ -92,7 +92,7 @@ test("two tenants on one LSP each sign their own channel and nothing of the othe
 
         const ownStatus = await node2.channelSigningStatus(b.channelId, deviceB.accessToken);
         assert.equal(typeof ownStatus.channel_id === "string" ? bareLowerHex(ownStatus.channel_id) : ownStatus.channel_id, b.channelId);
-        // Fiber looks the channel up in the token's tenant namespace alone: `channel {id:?} not found` (`lsp/service.rs:457`),
+        // Fiber looks the channel up in the token's tenant namespace alone: `channel {id:?} not found` (d8dd6d28 `lsp/service.rs:531`),
         // a `Hash256` written by its Debug as `Hash256(0x...)`.
         await assert.rejects(
             node2.channelSigningStatus(b.channelId, deviceA.accessToken),

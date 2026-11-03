@@ -15,7 +15,7 @@ const FUNDING_OUTPUT = `unsignedFundingTx.outputs[${FUNDING_OUTPUT_INDEX}]`;
 const FUNDING_OUTPUT_DATA = `unsignedFundingTx.outputsData[${FUNDING_OUTPUT_INDEX}]`;
 
 /**
- * Checks the node's answer to `open_tenant_channel` against what was asked, before anything of it is pinned.
+ * Checks the node's answer to the tenant's `open_channel_with_external_funding` against what was asked, before anything is pinned.
  * @param request What the device asked, with its own keys and the network's funding lock.
  * @param answer The node's answer.
  * @returns The terms and the funding cell's capacity the policy pins; a failed check throws `opening_rejected`.

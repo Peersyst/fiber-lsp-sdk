@@ -102,7 +102,7 @@ export class SignerDispatch {
     }
 
     /**
-     * Derives the public material `open_tenant_channel` carries.
+     * Derives the public material the tenant's `open_channel_with_external_funding` carries.
      * @param channelIndex The index the channel's keys derive from.
      * @param fundedShannons What the user pays in, reserve included, in decimal shannons.
      * @param localCloseScript The script the device's side of a close pays to.
