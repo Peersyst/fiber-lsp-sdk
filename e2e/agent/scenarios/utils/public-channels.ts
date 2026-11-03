@@ -1,5 +1,5 @@
 import type { DevnetEnv } from "./devnet-env";
-import { fiberNodes, mineUntil } from "./fiber-node";
+import { CHANNEL_CLOSED_STATE, CHANNEL_READY_STATE, fiberNodes, mineUntil } from "./fiber-node";
 import type { FiberChannel, FiberGraphChannel, FiberNode } from "./fiber-node";
 import { CHANNEL_FUNDING_SHANNONS } from "./scenario-device";
 import { GRAPH_TIMEOUT_MS, OPENING_TIMEOUT_MS, sleep, waitUntil } from "./wait";
@@ -9,9 +9,7 @@ const PUBLIC_CHANNEL_FUNDING_SHANNONS = BigInt(CHANNEL_FUNDING_SHANNONS);
 
 const CONNECT_SETTLE_MS = 1000;
 
-const READY_STATE = "ChannelReady";
-
-const GONE_STATES = new Set(["ShuttingDown", "Closed"]);
+const GONE_STATES = new Set(["ShuttingDown", CHANNEL_CLOSED_STATE]);
 
 type PublicChannelPair = { name: string; funder: FiberNode; funderPubkey: string; peerPubkey: string; peerAddr: string };
 
@@ -43,7 +41,7 @@ async function findOrOpen(pair: PublicChannelPair): Promise<void> {
 
 async function readyChannel(pair: PublicChannelPair): Promise<string | undefined> {
     const channels = await pair.funder.listChannels({ peer: pair.peerPubkey });
-    return channels.find((channel) => usable(channel, pair.peerPubkey) && channel.stateName === READY_STATE)?.channelId;
+    return channels.find((channel) => usable(channel, pair.peerPubkey) && channel.stateName === CHANNEL_READY_STATE)?.channelId;
 }
 
 function announces(graph: FiberGraphChannel[], pair: PublicChannelPair): boolean {

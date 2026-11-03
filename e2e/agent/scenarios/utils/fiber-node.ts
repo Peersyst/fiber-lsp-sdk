@@ -22,10 +22,15 @@ const MINING_ROUND_MS = 30_000;
 
 export type FiberNodeInfo = { pubkey: string; defaultFundingLockScript: ScriptJson; raw: Record<string, unknown> };
 
+export const CHANNEL_READY_STATE = "ChannelReady";
+
+export const CHANNEL_CLOSED_STATE = "Closed";
+
 export type FiberChannel = {
     channelId: string;
     peer: string;
     stateName: string;
+    stateFlags: string[];
     isPublic: boolean;
     raw: Record<string, unknown>;
 };
@@ -86,6 +91,12 @@ function readArray(object: Record<string, unknown>, key: string, where: string):
     return value;
 }
 
+function readStateFlags(state: Record<string, unknown>): string[] {
+    if (state.state_flags === undefined) return [];
+    const flags = readString(state, "state_flags", "list_channels channel.state");
+    return flags === "" ? [] : flags.split("|");
+}
+
 function readChannel(value: unknown): FiberChannel {
     const raw = readJsonObject(value, "list_channels channel");
     const state = readJsonObject(raw.state, "list_channels channel.state");
@@ -93,6 +104,7 @@ function readChannel(value: unknown): FiberChannel {
         channelId: readString(raw, "channel_id", "list_channels channel"),
         peer: readString(raw, "pubkey", "list_channels channel"),
         stateName: readString(state, "state_name", "list_channels channel.state"),
+        stateFlags: readStateFlags(state),
         isPublic: readBoolean(raw, "is_public", "list_channels channel"),
         raw,
     };
@@ -277,4 +289,16 @@ export async function mineUntil<T>(env: DevnetEnv, what: string, probe: () => Pr
             if (!(error instanceof WaitTimeoutError) || Date.now() >= deadline) throw error;
         }
     }
+}
+
+async function txPoolDrained(env: DevnetEnv): Promise<true | undefined> {
+    const info = readJsonObject(await jsonRpcCall(env.ckbRpcUrl, fetch, "tx_pool_info", [], NO_TOKEN), "tx_pool_info");
+    const pending = BigInt(readString(info, "pending", "tx_pool_info"));
+    const proposed = BigInt(readString(info, "proposed", "tx_pool_info"));
+    return pending === 0n && proposed === 0n ? true : undefined;
+}
+
+export async function mineUntilPoolDrained(env: DevnetEnv, timeoutMs: number): Promise<void> {
+    if ((await txPoolDrained(env)) === true) return;
+    await mineUntil(env, "CKB's tx pool to drain", () => txPoolDrained(env), timeoutMs);
 }
