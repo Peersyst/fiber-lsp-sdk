@@ -22,7 +22,8 @@ import { devnetNetwork } from "./devnet-network";
 import { FacadeGate } from "./facade-gate";
 import { FileSignerStorage, writeFileAtomically } from "./file-storage";
 import { AgentJsonRpc } from "./json-rpc";
-import { bareLowerHex, readJsonObject } from "./agent.utils";
+import type { AgentRegisteredTenant } from "./json-rpc";
+import { bareLowerHex, messageOf, readJsonObject } from "./agent.utils";
 import { readOpenChannelRequest, readScriptJson, sameScriptJson, scriptFromJson } from "./open-params";
 import { agentStatus } from "./status";
 import type { AgentStatusChannel } from "./status";
@@ -45,12 +46,23 @@ function sdkRefusal(error: unknown): unknown {
 }
 
 /**
- * Reads an error's message, whatever was thrown.
- * @param error What was thrown.
- * @returns Its message.
+ * Registers the device's tenant with the LSP and checks that the one registered is the device's.
+ * @param sdk The facade, or whatever of it the registration reads.
+ * @param rpc The client of the LSP's node.
+ * @param operatorToken The operator's token.
+ * @returns The tenant id and the tenant's access token.
  */
-function messageOf(error: unknown): string {
-    return error instanceof Error ? error.message : String(error);
+export async function registerAgentTenant(
+    sdk: Pick<FiberLspSdk, "rootSignerPubkey" | "tenantId" | "signTenantRegistration">,
+    rpc: AgentJsonRpc,
+    operatorToken: string,
+): Promise<AgentRegisteredTenant> {
+    const challenge = await rpc.getTenantRegistryNonce(bytesToHex(sdk.rootSignerPubkey), operatorToken);
+    const tenant = await rpc.registerTenant(sdk.signTenantRegistration(challenge), operatorToken);
+    if (tenant.tenantId !== sdk.tenantId) {
+        throw new Error(`lsp_register_tenant registered tenant ${tenant.tenantId}, the device is ${sdk.tenantId}`);
+    }
+    return tenant;
 }
 
 /**
@@ -215,11 +227,7 @@ export class Agent {
         const facade = this.buildFacade(this.state);
         const { sdk } = facade;
         if (this.state.tenantToken === null) {
-            const challenge = await this.rpc.getTenantRegistryNonce(bytesToHex(sdk.rootSignerPubkey), operatorToken);
-            const tenant = await this.rpc.registerTenant(sdk.signTenantRegistration(challenge), operatorToken);
-            if (tenant.tenantId !== sdk.tenantId) {
-                throw new Error(`lsp_register_tenant registered tenant ${tenant.tenantId}, the device is ${sdk.tenantId}`);
-            }
+            const tenant = await registerAgentTenant(sdk, this.rpc, operatorToken);
             this.persist({ ...this.state, tenantToken: tenant.accessToken });
             sdk.setBiscuitToken(tenant.accessToken);
         }

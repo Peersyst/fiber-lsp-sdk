@@ -1,6 +1,6 @@
 import { hexToBytes } from "@noble/hashes/utils.js";
 import type { CellDep, DepType, Script } from "@peersyst/fiber-lsp-sdk";
-import { SCRIPT_ARGS_PATTERN, SCRIPT_CODE_HASH_PATTERN, SCRIPT_HASH_TYPES } from "./agent.constants";
+import { HEX_BYTES_PATTERN, SCRIPT_CODE_HASH_PATTERN, SCRIPT_HASH_TYPES } from "./agent.constants";
 import { AgentRequestError } from "./agent.error";
 import type { OpenChannelRequest, ScriptJson } from "./agent.types";
 import { bareLowerHex, readJsonObject } from "./agent.utils";
@@ -45,7 +45,7 @@ export function readScriptJson(value: unknown, field: string): ScriptJson {
     if (typeof hashType !== "string" || !SCRIPT_HASH_TYPES.some((known) => known === hashType)) {
         throw new AgentRequestError(`${field}.hash_type must be one of ${SCRIPT_HASH_TYPES.join(", ")}`);
     }
-    if (typeof args !== "string" || !SCRIPT_ARGS_PATTERN.test(args)) throw new AgentRequestError(`${field}.args must be 0x hex bytes`);
+    if (typeof args !== "string" || !HEX_BYTES_PATTERN.test(args)) throw new AgentRequestError(`${field}.args must be 0x hex bytes`);
     return { code_hash: codeHash, hash_type: hashType, args };
 }
 

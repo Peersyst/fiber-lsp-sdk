@@ -10,7 +10,7 @@ import type {
     WatchtowerAuthorization,
 } from "./agent.types";
 import { writeFileAtomically } from "./file-storage";
-import { HASH_ALGORITHMS, SCRIPT_ARGS_PATTERN, SCRIPT_CODE_HASH_PATTERN, SCRIPT_HASH_TYPES } from "./agent.constants";
+import { HASH_ALGORITHMS, HEX_BYTES_PATTERN, SCRIPT_CODE_HASH_PATTERN, SCRIPT_HASH_TYPES } from "./agent.constants";
 
 export const MASTER_SEED_FILE = "master-seed";
 
@@ -99,7 +99,7 @@ function readScript(value: unknown, path: string): ScriptJson {
     return {
         code_hash: readPattern(at("code_hash"), `${path}.code_hash`, SCRIPT_CODE_HASH_PATTERN, "32 bytes of 0x-prefixed hex"),
         hash_type: readLiteral(at("hash_type"), `${path}.hash_type`, SCRIPT_HASH_TYPES),
-        args: readPattern(at("args"), `${path}.args`, SCRIPT_ARGS_PATTERN, "whole bytes of 0x-prefixed hex"),
+        args: readPattern(at("args"), `${path}.args`, HEX_BYTES_PATTERN, "whole bytes of 0x-prefixed hex"),
     };
 }
 

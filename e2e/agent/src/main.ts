@@ -3,6 +3,7 @@ import { FiberLspSdk } from "@peersyst/fiber-lsp-sdk";
 import { Agent } from "./agent";
 import type { AgentConfig, AgentEffects } from "./agent.types";
 import { agentLogger } from "./agent-log";
+import { messageOf } from "./agent.utils";
 import { parseAgentConfig } from "./config";
 import { startControlServer } from "./control-server";
 
@@ -12,7 +13,7 @@ import { startControlServer } from "./control-server";
  * @param code The exit code.
  */
 function fail(error: unknown, code: number): never {
-    process.stderr.write(`fiber-lsp-sdk-agent: ${error instanceof Error ? error.message : String(error)}\n`);
+    process.stderr.write(`fiber-lsp-sdk-agent: ${messageOf(error)}\n`);
     process.exit(code);
 }
 

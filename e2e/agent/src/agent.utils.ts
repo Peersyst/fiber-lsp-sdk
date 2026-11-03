@@ -12,6 +12,15 @@ export function readJsonObject(value: unknown, field: string): Record<string, un
 }
 
 /**
+ * Reads an error's message, whatever was thrown.
+ * @param error What was thrown.
+ * @returns Its message.
+ */
+export function messageOf(error: unknown): string {
+    return error instanceof Error ? error.message : String(error);
+}
+
+/**
  * Writes hex without its `0x`, lowercase.
  * @param hex The hex, with or without `0x`.
  * @returns The bare lowercase hex.

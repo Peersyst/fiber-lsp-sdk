@@ -8,11 +8,13 @@ import type { TestContext } from "node:test";
 import { setTimeout as delay } from "node:timers/promises";
 import { FiberLspSdk } from "@peersyst/fiber-lsp-sdk";
 import type { FiberLspSdkOptions } from "@peersyst/fiber-lsp-sdk";
-import { Agent, INITIALIZE_RETRY_MS } from "../src/agent";
+import { Agent, INITIALIZE_RETRY_MS, registerAgentTenant } from "../src/agent";
 import { AgentRequestError } from "../src/agent.error";
-import type { AgentConfig, AgentState } from "../src/agent.types";
+import { messageOf } from "../src/agent.utils";
+import type { AgentConfig, AgentNodeFetch, AgentState } from "../src/agent.types";
 import { readAgentState, writeAgentState } from "../src/agent-store";
 import { startControlServer } from "../src/control-server";
+import { AgentJsonRpc } from "../src/json-rpc";
 import {
     DEVICE_ROOT_SIGNER,
     DEVICE_SEED_HEX,
@@ -147,9 +149,8 @@ type AgentRun = {
     lines: string[];
     sleeps: number[];
     exits: number[];
-    // The options of every facade the agent built, in order.
     built: FiberLspSdkOptions[];
-    // The positions in `built` of the facades disconnected, in order.
+    // Indexes in `built` of the facades disconnected.
     disconnected: number[];
     facades: FiberLspSdk[];
 };
@@ -245,7 +246,6 @@ async function flush(): Promise<void> {
     await new Promise((resolve) => setImmediate(resolve));
 }
 
-// A channel the SDK never opened, with the watchtower approval it names, if any.
 function bindOtherChannel(dirs: AgentDirs, watchtowerDestination: typeof USER_LOCK | null): void {
     const state = readAgentState(dirs.storeDir);
     writeAgentState(dirs.storeDir, {
@@ -1073,5 +1073,77 @@ describe("Agent", () => {
             assert.equal(node.callsOf("node_info").length, 1);
             assert.deepEqual(exits, [0]);
         });
+    });
+});
+
+describe("registerAgentTenant", () => {
+    const LSP_NODE_ID = "02b7ca5d4b3a7e8e5e47d16d9b0d4a8e3f1c2b3a4d5e6f708192a3b4c5d6e7f809";
+    const ROOT_SIGNER_HEX = "03aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    const NONCE_HEX = "0101010101010101010101010101010101010101010101010101010101010101";
+    const OTHER_TENANT_ID = "6666666666666666666666666666666666666666666666666666666666666666";
+    const rootSignerPubkey = new Uint8Array(33).fill(0xaa);
+    rootSignerPubkey[0] = 0x03;
+
+    const SIGNATURE_HEX = "44".repeat(64);
+
+    function nodeFetch(registeredTenantId: string): { fetch: AgentNodeFetch; methods: string[]; tokens: string[]; params: unknown[] } {
+        const methods: string[] = [];
+        const tokens: string[] = [];
+        const params: unknown[] = [];
+        const fetch: AgentNodeFetch = async (_url, init) => {
+            const body = JSON.parse(init.body) as { method: string; params: unknown };
+            const { method } = body;
+            methods.push(method);
+            params.push(body.params);
+            tokens.push(String(init.headers.Authorization));
+            const result =
+                method === "lsp_get_tenant_registry_nonce"
+                    ? { lsp_node_id: LSP_NODE_ID, root_signer_pubkey: ROOT_SIGNER_HEX, nonce: `0x${NONCE_HEX}` }
+                    : { tenant: { tenant_id: registeredTenantId }, access_token: "tenant-token" };
+            return { status: 200, text: async () => JSON.stringify({ jsonrpc: "2.0", result, id: 1 }) };
+        };
+        return { fetch, methods, tokens, params };
+    }
+
+    function deviceOf(tenantId: string): Parameters<typeof registerAgentTenant>[0] {
+        return {
+            rootSignerPubkey,
+            tenantId,
+            signTenantRegistration: (challenge) => {
+                assert.deepEqual(challenge.nonce, new Uint8Array(32).fill(1));
+                return { rootSignerPubkey, nonce: challenge.nonce, signature: new Uint8Array(64).fill(0x44), tenantId };
+            },
+        };
+    }
+
+    it("asks for a nonce, registers the signed challenge under the operator's token and returns the tenant", async () => {
+        const { fetch, methods, tokens, params } = nodeFetch(OTHER_TENANT_ID);
+        const tenant = await registerAgentTenant(deviceOf(OTHER_TENANT_ID), new AgentJsonRpc(RPC_URL, fetch), OPERATOR_TOKEN);
+        assert.deepEqual(tenant, { tenantId: OTHER_TENANT_ID, accessToken: "tenant-token" });
+        assert.deepEqual(methods, ["lsp_get_tenant_registry_nonce", "lsp_register_tenant"]);
+        assert.deepEqual(params, [
+            [{ root_signer_pubkey: ROOT_SIGNER_HEX }],
+            [{ root_signer_pubkey: ROOT_SIGNER_HEX, nonce: `0x${NONCE_HEX}`, signature: SIGNATURE_HEX }],
+        ]);
+        assert.deepEqual(tokens, [`Bearer ${OPERATOR_TOKEN}`, `Bearer ${OPERATOR_TOKEN}`]);
+    });
+
+    it("refuses a registration for another tenant", async () => {
+        const { fetch } = nodeFetch(OTHER_TENANT_ID);
+        await assert.rejects(registerAgentTenant(deviceOf(DEVICE_TENANT_ID), new AgentJsonRpc(RPC_URL, fetch), OPERATOR_TOKEN), {
+            message: `lsp_register_tenant registered tenant ${OTHER_TENANT_ID}, the device is ${DEVICE_TENANT_ID}`,
+        });
+    });
+});
+
+describe("messageOf", () => {
+    it("reads an error's message, and writes anything else thrown as a string", () => {
+        assert.deepEqual([new TypeError("bad input"), "plain", 7, null, undefined].map(messageOf), [
+            "bad input",
+            "plain",
+            "7",
+            "null",
+            "undefined",
+        ]);
     });
 });

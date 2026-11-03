@@ -10,7 +10,8 @@
     "scripts": {
         "build": "tsc",
         "check-types": "tsc --noEmit",
-        "test": "tsc && node --test dist/test/*.spec.js"
+        "test": "tsc && node --test dist/test/*.spec.js",
+        "scenarios": "tsc && node --test --test-concurrency=1 dist/scenarios/*.scenario.js"
     },
     "dependencies": {
         "@noble/hashes": "2.2.0",

@@ -62,7 +62,8 @@ test/
 
 docs/             Long-form docs, indexed by docs/README.md
 interop/          Rust harness + generated cross-implementation vectors
-e2e/agent/        The device of fiber's e2e suites over the built SDK (private package, node:test specs, devnet wrapper)
+e2e/agent/        The device of fiber's e2e suites over the built SDK (private package, node:test specs, devnet wrapper),
+                  and the SDK's own scenarios on fiber's devnet (scenarios/)
 ```
 
 Inside a module: `<module>.constants.ts`, `<module>.types.ts`, `utils/`, `interfaces/`, and one file per cohesive unit of
@@ -79,6 +80,7 @@ pnpm test          # jest
 pnpm build         # tsup -> dist/ (index.js for require, index.mjs for import, one shared index.d.ts)
 pnpm format        # prettier
 pnpm --dir e2e/agent install && pnpm --dir e2e/agent test   # the e2e agent's specs (after pnpm build); docs/e2e-agent.md
+FIBER_CHECKOUT=<fiber-checkout> pnpm --dir e2e/agent scenarios   # the SDK's scenarios, on fiber's running devnet
 
 # Regenerate the cross-implementation vectors (needs a Rust toolchain; `pnpm test` does not)
 cargo run --release --manifest-path interop/rust/Cargo.toml -- gen-vectors interop/vectors/vectors.json
