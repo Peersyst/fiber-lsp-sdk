@@ -104,6 +104,20 @@ are read by the poller's five steps, below.
 `disconnect()` never throws: it stops the poller, abandoning the step in flight so nothing of it is acted on and no tick
 follows. The instance stays usable: the next `connect()` starts polling again.
 
+A trip to the background in the middle of a round has a budget once the round is under way. Two timers of fiber's
+force-close the tenant's channel. After the device's `commitment_signed`, the ack timer fires once 30 s later unless the
+device's `CompleteReceivedRevokeAndAck` has landed. After the device's `revoke_and_ack`, or the peer's while the device
+owes its own, fiber#1701's watchdog finds the revocation nonce ledger unbalanced and closes the channel at the first
+channel check past 30 s, every 3 s in a debug build and every 60 s in release (`fiber/channel.rs:6727-6753,6760-6807`,
+`fiber/network.rs:250-254`). So a round the peer starts is timed from the device's `revoke_and_ack` to its end, two
+gaps, and one the device starts from its `commitment_signed` to its end, three ([signing.md](./signing.md), "The node
+double and the flows"). Before that, answering the peer's `commitment_signed` or opening its own round, the device is
+bounded only by the TLC's safety deadline (below). On the devnet a device back 21 s after its revocation in a round the
+peer started finished the round, and one back 45 s after lost its channel, which left `ChannelReady` 32.6 to 33.6 s
+after the revocation and closed uncooperatively, the payment left unresolved. A device in the foreground at the default
+five-second poll signs one step per channel per tick, some 5 s apart, and the next one at once after a hold invoice's
+release, which polls again.
+
 ## Events
 
 `onEvent(listener)` subscribes to every event and returns the function that unsubscribes. Ten events exist:
@@ -339,8 +353,11 @@ device did not open is one it holds no keys for. For each, one at a time:
    it; `Applied` and `AlreadyApplied` are both success (fiber answers the first again while the request is still
    pending, the second once it completed), and `SIGNING` is emitted after the node took it, never before. A refusal is
    emitted as `SIGNING` at once, and nothing is submitted: the request stays pending, which is the right side to fail
-   on, since nothing was signed; while a TLC is pending on the channel, the node force-closes it once the earliest TLC
-   nears its expiry, and a request with none stays pending until it is answered.
+   on, since nothing was signed. A refused step inside a round's timed part leaves the channel to fiber's ack timer or
+   its revocation nonce watchdog, which force-close it 30 s later, or up to a check interval more (above, "`connect()`
+   and `disconnect()`"); any other refused step stays pending, and while a TLC is pending on the channel the node
+   force-closes it once the earliest TLC reaches its safety deadline, a request with none staying pending until it is
+   answered.
 
 A channel whose status read or submission fails, or whose dispatch faults (a store failure, a bug), is reported as a
 `poll_failed` naming it, and the step goes on to the next channel. Only an activity list that cannot be read fails the

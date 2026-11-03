@@ -113,8 +113,8 @@ session is answered as already signed, the same signature again, without the reu
 a repeat of an earlier one reads as a new session. The storage keeps what the SDK writes; every other key reads as stored.
 
 It is test-only: on any key that matters it gives the funding key away. It is off unless asked for, the wrapper in
-`devnet/` sets it so fiber's suites run to the end, and it goes once fiber's nonces are strict. The scenarios build their
-own facades without it.
+`devnet/` sets it so fiber's suites run to the end, and it goes once fiber's nonces are strict. A scenario asks for it
+per device (`ScenarioDevice.create(env, { nonceCapBypass: true })`), which only `served-third-session` does.
 
 ## Where it parts from fiber's agent
 
@@ -139,31 +139,48 @@ position, kept here rather than bent to the contract.
 
 ## Scenarios
 
-Fiber's suites drive the device through its control contract alone: they open, authorize and restart it. `e2e/agent/scenarios/`
-holds six scenarios of the SDK's own that the contract cannot express, `node:test` specs that build the facade in process
-over the same devnet under `nonceReuse: "allow"`, as the agent runs, each with a tenant and a channel of its own, and
-inject faults through the `fetch` it is given:
+Fiber's suites drive the device through its control contract alone: they open, authorize and restart it.
+`e2e/agent/scenarios/` holds eight scenarios of the SDK's own that the contract cannot express, `node:test` specs that
+build the facade in process over the same devnet under `nonceReuse: "allow"`, as the agent runs, each with a tenant and
+a channel of its own, and inject faults through the `fetch` it is given:
 
-| Scenario           | What it asserts                                                                                                                                                                                                                                                                            |
-| ------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `late-signer`      | A device disconnected while node 1 pays its invoice: the node holds the request and the payment stays `Inflight`; once it connects, the request is signed with its deadline reported and still ahead, and the invoice is paid                                                              |
-| `restart-pending`  | The first submission of the payment's first signature lost before it reaches the node: a new facade over the same store serves the same request with the same bytes, with no third session                                                                                                 |
-| `non-hosted-payer` | Node 3 pays the SDK's invoice through node 1 and the LSP, routed by the invoice's trampoline hint                                                                                                                                                                                          |
-| `two-tenants`      | Two devices paid at once: each signs and polls only its own channel, and one tenant's token reading the other's channel is refused (`channel ... not found`)                                                                                                                               |
-| `altered-opening`  | Three alterations of `open_channel_with_external_funding`'s answer (the LSP's close script grown past the reserve the node states, the funding output's capacity, the fee rate), each refused as `opening_rejected` with nothing signed or funded, then a clean opening on the same device |
-| `outbound-payment` | A payment sent by the device: its fulfil asks a third session on `Commitment@3`, which `nonceReuse: "allow"` refuses, fiber force-closes the channel from the tenant's side, and the payment stays `Inflight`                                                                              |
+| Scenario               | What it asserts                                                                                                                                                                                                                                                                                                                                    |
+| ---------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `late-signer`          | A device disconnected while node 1 pays its invoice: the node holds the request and the payment stays `Inflight`; once it connects, the request is signed with its deadline reported and still ahead, and the invoice is paid                                                                                                                      |
+| `restart-pending`      | The first submission of the payment's first signature lost before it reaches the node: a new facade over the same store serves the same request with the same bytes, with no third session                                                                                                                                                         |
+| `non-hosted-payer`     | Node 3 pays the SDK's invoice through node 1 and the LSP, routed by the invoice's trampoline hint                                                                                                                                                                                                                                                  |
+| `two-tenants`          | Two devices paid at once: each signs and polls only its own channel, and one tenant's token reading the other's channel is refused (`channel ... not found`)                                                                                                                                                                                       |
+| `altered-opening`      | Three alterations of `open_channel_with_external_funding`'s answer (the LSP's close script grown past the reserve the node states, the funding output's capacity, the fee rate), each refused as `opening_rejected` with nothing signed or funded, then a clean opening on the same device                                                         |
+| `outbound-payment`     | A payment sent by the device: its fulfil asks a third session on `Commitment@3`, which `nonceReuse: "allow"` refuses, fiber force-closes the channel from the tenant's side, and the payment stays `Inflight`                                                                                                                                      |
+| `served-third-session` | The same payment under the nonce-cap bypass and the default five-second poll: the third session on `Commitment@3` served as a second, `PAYMENT_SENT`, the payment `Success` and node 1's invoice `Paid`, the channel still `ChannelReady` 36 s later, then a payment received with the usual steps                                                 |
+| `backgrounded-round`   | A payment received, the device sent to the background as its `SendRevokeAndAck` lands: back after 21 s it finishes the round, the payment received and the channel ready; back after 45 s it finds the channel force-closed `UNCOOPERATIVE_LOCAL` by fiber#1701, the payer's payment `Inflight` and the invoice `Open`, with no `PAYMENT_RECEIVED` |
 
 The outbound scenario asserts the refusal on purpose, and runs without the bypass. Under `allow` a slot serves two
-sessions and never a third, and the peer's fulfil of a payment the device sent asks for a third on the commitment slot the
-device's own round left at the local number. On the devnet node 1's invoice is paid by then, so the LSP holds the
-preimage. The refused round leaves the channel's revocation nonce ledger unbalanced, and fiber force-closes a channel whose
-ledger stays so past its peer response timeout (fiber#1701: 30 s, checked every 3 s in a debug build, d8dd6d28
-`fiber/channel.rs:6787-6793`), some 31 s on the devnet (30.8 to 31.6 s measured): the scenario waits up to 60 s for the channel to leave `ChannelReady`, mines until the
-device reports `CHANNEL_CLOSED`, and asserts the close is `UNCOOPERATIVE_LOCAL` in the tenant's listing: only the tenant's
-side runs the check, the LSP's side having the tenant for an internal peer. The sent TLC then settles on chain, past a
-commitment delay the scenario never mines to, so the tenant's payment is `Inflight`, with no payment event. The scenario turns into a completed payment only once fiber's nonces are strict and `allow` is gone. Each
-channel otherwise takes a single received payment, since a second one after a fulfilled one asks the same third session
-([policy.md](./policy.md), "The known cost").
+sessions and never a third, and the peer's fulfil of a payment the device sent asks for a third on the commitment slot
+the device's own round left at the local number. On the devnet node 1's invoice is paid by then, so the LSP holds the
+preimage. The refused round leaves the channel's revocation nonce ledger unbalanced, and fiber force-closes a channel
+whose ledger stays so past its peer response timeout (fiber#1701: 30 s, checked every 3 s in a debug build, d8dd6d28
+`fiber/channel.rs:6787-6793`), some 31 s on the devnet (30.0 to 31.6 s measured): the scenario waits up to 60 s for the
+channel to leave `ChannelReady`, mines until the device reports `CHANNEL_CLOSED`, and asserts the close is
+`UNCOOPERATIVE_LOCAL` in the tenant's listing: only the tenant's side runs the check, the LSP's side having the tenant
+for an internal peer. The sent TLC then settles on chain, past a commitment delay the scenario never mines to, so the
+tenant's payment is `Inflight`, with no payment event. Under the bypass the same payment completes
+(`served-third-session`); `outbound-payment` turns into a completed payment only once fiber's nonces are strict and
+`allow` is gone. Each channel otherwise takes a single received payment, since a second one after a fulfilled one asks
+the same third session ([policy.md](./policy.md), "The known cost").
+
+`backgrounded-round` meets the same watchdog in the same gap with every session served, the device absent rather than
+refusing, in a round the peer starts: the window opens when the device's `SendRevokeAndAck` lands, since fiber then
+waits for its `commitment_signed`. The device disconnects from inside its event listener, so no tick runs after the
+revocation, and reconnects 21 s or 45 s after it. At 45 s the channel left `ChannelReady` 32.6 to 33.6 s after the
+revocation in six runs. At the default poll `served-third-session` signs one step per channel per tick, some 5.1 s
+apart, and two back to back where a hold invoice's release polls again at once: its payment sent took 36.3 s from first
+step to last and its payment received 31.2 s, each gap between two of the device's steps staying near one poll, far from
+fiber's 30 s.
+
+Every opening first mines until CKB's pool is empty. A force close leaves its settlement in the pool for a while, and an
+opening funded then was aborted (`FUNDING_ABORTED`, node 2 logging `invalid cell status: "unknown"` while signing the
+funding tx), so a scenario that follows `outbound-payment` would fail on the order alone.
 
 Fiber keeps an opening the device refused until its external funding times out (five minutes by default), but refuses
 another one only under the same channel signer ("tenant already has a different channel opening for this signer"). The
@@ -183,7 +200,7 @@ PATH="<sdk-checkout>/e2e/agent/devnet:$PATH" REMOVE_OLD_STATE=y ./tests/nodes/st
 FIBER_CHECKOUT=<fiber-checkout> pnpm --dir e2e/agent scenarios
 ```
 
-They run in series on one devnet, in about two and a half minutes.
+They run in series on one devnet, in about six minutes and a quarter.
 
 ## Tests
 

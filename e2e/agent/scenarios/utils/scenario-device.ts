@@ -1,3 +1,4 @@
+import assert from "node:assert/strict";
 import { randomBytes } from "node:crypto";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -10,13 +11,14 @@ import { HEX_BYTES_PATTERN, OPEN_CHANNEL_WITH_EXTERNAL_FUNDING_METHOD } from "..
 import { loadOrCreateMasterSeed } from "../../src/agent-store";
 import { OpenResultCapture, checkedOpenResult } from "../../src/capturing-fetch";
 import { FileSignerStorage } from "../../src/file-storage";
+import { NonceCapBypassStorage } from "../../src/nonce-cap-bypass";
 import { bareLowerHex, messageOf } from "../../src/agent.utils";
 import { AgentJsonRpc } from "../../src/json-rpc";
 import { scriptFromJson } from "../../src/open-params";
 import type { DevnetEnv } from "./devnet-env";
 import { FaultyFetch } from "./faulty-fetch";
-import { fiberNodes, mineUntil } from "./fiber-node";
-import type { FiberNodes } from "./fiber-node";
+import { CHANNEL_CLOSED_STATE, CHANNEL_READY_STATE, fiberNodes, mineUntil, mineUntilPoolDrained } from "./fiber-node";
+import type { FiberChannel, FiberNewInvoice, FiberNodes } from "./fiber-node";
 import { EVENT_TIMEOUT_MS, OPENING_TIMEOUT_MS, waitUntil } from "./wait";
 
 export const SCENARIO_POLL_INTERVAL_MS = 1000;
@@ -24,6 +26,10 @@ export const SCENARIO_POLL_INTERVAL_MS = 1000;
 // As fiber's hosted e2e funds a tenant channel and pays a tenant (`lsp-remote-signer-watchtower-preimage`, steps 04 and 14).
 export const CHANNEL_FUNDING_SHANNONS = "50000000000";
 export const INVOICE_AMOUNT_SHANNONS = "1000000";
+
+// As fiber's hosted tenant pays node 1 (`e2e/lsp`, steps 27 and 28).
+export const OUTBOUND_AMOUNT_SHANNONS = 100_000n;
+const OUTBOUND_INVOICE_EXPIRY_SECONDS = 3600;
 
 export type SdkEventOf<Type extends SdkEventType> = Extract<SdkEvent, { type: Type }>;
 
@@ -50,6 +56,25 @@ export const RECEIVED_STEPS: readonly SigningStep[] = [
     { transition: "SendRevokeAndAck", outcome: "warning" }, // R@3
 ];
 
+// docs/signing.md's payment sent under nonceReuse "allow": the send, then the peer's fulfil up to a third session on C@3.
+export const SENT_STEPS: readonly SigningStep[] = [
+    { transition: "SendCommitmentSigned", outcome: "signed" }, // C@2
+    { transition: "CompleteReceivedRevokeAndAck", outcome: "signed" }, // R@2
+    { transition: "CompleteReceivedCommitment", outcome: "signed" }, // C@3
+    { transition: "SendRevokeAndAck", outcome: "warning" }, // R@2
+    { transition: "CompleteReceivedCommitment", outcome: "warning" }, // C@3
+    { transition: "SendRevokeAndAck", outcome: "signed" }, // R@3
+    { transition: "SendCommitmentSigned", outcome: "refused" }, // C@3, a third session
+];
+
+// fiber#1701 force-closes a channel whose revocation nonce ledger stays unbalanced past PEER_CHANNEL_RESPONSE_TIMEOUT, on the
+// next CHECK_CHANNELS_INTERVAL of a debug build (d8dd6d28 `fiber/channel.rs:155,6787-6793`, `fiber/network.rs:252-254`).
+export const PEER_CHANNEL_RESPONSE_TIMEOUT_MS = 30_000;
+export const CHECK_CHANNELS_INTERVAL_MS = 3_000;
+
+// The other half is the probe's slack.
+const FORCE_CLOSE_WINDOW_MS = 2 * PEER_CHANNEL_RESPONSE_TIMEOUT_MS;
+
 // The opening under nonceReuse "allow": the device's commitment and the peer's, both on Commitment@1.
 export const OPEN_STEPS: readonly SigningStep[] = [
     { transition: "SendCommitmentSigned", outcome: "signed" },
@@ -62,6 +87,7 @@ export type ScenarioDeviceOptions = {
      */
     faults?: FaultyFetch;
     pollIntervalMs?: number;
+    nonceCapBypass?: boolean;
 };
 
 type EventWaiter = {
@@ -78,18 +104,43 @@ export function isSdkEvent<Type extends SdkEventType>(
     return (event): event is SdkEventOf<Type> => event.type === type && match(event as SdkEventOf<Type>);
 }
 
+function channelSigningRecords(events: readonly RecordedEvent[], channelId: string, outcome?: SigningEventOutcome): RecordedEvent[] {
+    return events.filter(
+        ({ event }) =>
+            event.type === "SIGNING" &&
+            bareLowerHex(event.channelId) === bareLowerHex(channelId) &&
+            (outcome === undefined || event.outcome === outcome),
+    );
+}
+
+export function isPaymentSent(paymentHashHex: string): (event: SdkEvent) => event is SdkEventOf<"PAYMENT_SENT"> {
+    return isSdkEvent("PAYMENT_SENT", (event) => bareLowerHex(event.paymentHashHex) === bareLowerHex(paymentHashHex));
+}
+
+export function isPaymentReceived(paymentHashHex: string): (event: SdkEvent) => event is SdkEventOf<"PAYMENT_RECEIVED"> {
+    return isSdkEvent("PAYMENT_RECEIVED", (event) => bareLowerHex(event.paymentHashHex) === bareLowerHex(paymentHashHex));
+}
+
+function isChannelClosed(channelId: string): (event: SdkEvent) => event is SdkEventOf<"CHANNEL_CLOSED"> {
+    return isSdkEvent("CHANNEL_CLOSED", (event) => bareLowerHex(event.channelId) === bareLowerHex(channelId));
+}
+
 // One step per request and outcome: the poller serves a pending request, or refuses it, again on every tick.
-export function signingSteps(events: readonly RecordedEvent[], channelId: string): SigningStep[] {
+function firstOfEachStep(records: readonly RecordedEvent[]): { at: number; step: SigningStep }[] {
     const seen = new Set<string>();
-    const steps: SigningStep[] = [];
-    for (const { event } of events) {
-        if (event.type !== "SIGNING" || bareLowerHex(event.channelId) !== bareLowerHex(channelId)) continue;
+    const steps: { at: number; step: SigningStep }[] = [];
+    for (const { at, event } of records) {
+        if (event.type !== "SIGNING") continue;
         const key = `${event.requestId ?? "none"}:${event.outcome}`;
         if (seen.has(key)) continue;
         seen.add(key);
-        steps.push({ transition: event.transition, outcome: event.outcome });
+        steps.push({ at, step: { transition: event.transition, outcome: event.outcome } });
     }
     return steps;
+}
+
+export function signingSteps(events: readonly RecordedEvent[], channelId: string): SigningStep[] {
+    return firstOfEachStep(channelSigningRecords(events, channelId)).map(({ step }) => step);
 }
 
 export function scenarioJson(value: unknown): string {
@@ -141,10 +192,11 @@ export class ScenarioDevice {
             // Pinned from the devnet's environment, never from the node the pin is meant to hold to.
             const lspPubkey = hexToBytes(bareLowerHex(env.node2Pubkey));
             const storePath = join(storeDir, SDK_STORE_FILE);
-            const build = (token?: string): FiberLspSdk =>
-                new FiberLspSdk(seed, {
+            const build = (token?: string): FiberLspSdk => {
+                const storage = new FileSignerStorage(storePath);
+                return new FiberLspSdk(seed, {
                     network: env.network,
-                    storage: new FileSignerStorage(storePath),
+                    storage: options.nonceCapBypass === true ? new NonceCapBypassStorage(storage) : storage,
                     rpcUrl: env.node2RpcUrl,
                     lspPubkey,
                     biscuitToken: token,
@@ -152,6 +204,7 @@ export class ScenarioDevice {
                     pollIntervalMs: options.pollIntervalMs ?? SCENARIO_POLL_INTERVAL_MS,
                     nonceReuse: "allow",
                 });
+            };
             const sdk = build();
             const tenant = await registerAgentTenant(sdk, registry, env.operatorToken, { now: Date.now, randomBytes });
             sdk.setBiscuitToken(tenant.accessToken);
@@ -203,19 +256,27 @@ export class ScenarioDevice {
     }
 
     waitForPaymentReceived(paymentHashHex: string, timeoutMs?: number): Promise<SdkEventOf<"PAYMENT_RECEIVED">> {
-        return this.waitForEvent(
-            isSdkEvent("PAYMENT_RECEIVED", (event) => bareLowerHex(event.paymentHashHex) === bareLowerHex(paymentHashHex)),
-            timeoutMs,
-        );
+        return this.waitForEvent(isPaymentReceived(paymentHashHex), timeoutMs);
     }
 
     signingRecords(channelId: string, outcome?: SigningEventOutcome): RecordedEvent[] {
-        return this.events.filter(
-            ({ event }) =>
-                event.type === "SIGNING" &&
-                bareLowerHex(event.channelId) === bareLowerHex(channelId) &&
-                (outcome === undefined || event.outcome === outcome),
-        );
+        return channelSigningRecords(this.events, channelId, outcome);
+    }
+
+    signingStepTimes(channelId: string, from: number): string {
+        const steps = firstOfEachStep(channelSigningRecords(this.events.slice(from), channelId));
+        const first = steps[0]?.at ?? 0;
+        return steps.map(({ at, step }) => `${step.transition ?? "none"}:${at - first}`).join(", ");
+    }
+
+    nodeOneInvoice(description: string): Promise<FiberNewInvoice> {
+        return this.nodes.node1.newInvoice({
+            amountShannons: OUTBOUND_AMOUNT_SHANNONS,
+            currency: this.env.network.invoiceCurrency,
+            description,
+            expirySeconds: OUTBOUND_INVOICE_EXPIRY_SECONDS,
+            allowTrampolineRouting: true,
+        });
     }
 
     waitForSigningSteps(channelId: string, from: number, count: number, timeoutMs: number = EVENT_TIMEOUT_MS): Promise<SigningStep[]> {
@@ -234,6 +295,10 @@ export class ScenarioDevice {
     async openFundedChannel(amountShannons: string, timeoutMs: number = OPENING_TIMEOUT_MS): Promise<string> {
         const { node1 } = this.nodes;
         const userLock = scriptFromJson((await node1.nodeInfo()).defaultFundingLockScript);
+        const deadline = Date.now() + timeoutMs;
+        // A force close's settlement still in the pool fails node 2's signing of the next funding (`invalid cell status:
+        // "unknown"`), which aborts it.
+        await mineUntilPoolDrained(this.env, timeoutMs);
         const sdk = this.current;
         let raw: Record<string, unknown> | null;
         let opening: SdkChannelOpening;
@@ -251,7 +316,7 @@ export class ScenarioDevice {
         // The signer only writes witnesses, which the tx hash the SDK pinned leaves out.
         const fundingTx: Transaction = { ...opening.unsignedFundingTx, witnesses: readWitnesses(signedTx) };
         await sdk.submitFundingTx(opening.channelId, fundingTx);
-        await this.mineUntilReady(opening.channelId, timeoutMs);
+        await this.mineUntilReady(opening.channelId, Math.max(0, deadline - Date.now()));
         return opening.channelId;
     }
 
@@ -277,16 +342,59 @@ export class ScenarioDevice {
         });
     }
 
+    async fiberChannel(channelId: string): Promise<FiberChannel | undefined> {
+        const channels = await this.nodes.node2.listChannels({ includeClosed: true }, this.accessToken);
+        return channels.find((channel) => bareLowerHex(channel.channelId) === bareLowerHex(channelId));
+    }
+
+    async waitForForceClose(channelId: string, timeoutMs: number = FORCE_CLOSE_WINDOW_MS): Promise<{ channel: FiberChannel; at: number }> {
+        const channel = await waitUntil(
+            `fiber#1701 to force-close ${channelId}`,
+            async () => {
+                const listed = await this.fiberChannel(channelId);
+                return listed !== undefined && listed.stateName !== CHANNEL_READY_STATE ? listed : undefined;
+            },
+            { timeoutMs },
+        );
+        return { channel, at: Date.now() };
+    }
+
+    async mineForceClose(channelId: string): Promise<FiberChannel> {
+        const closedEvent = isChannelClosed(channelId);
+        await mineUntil(
+            this.env,
+            `CHANNEL_CLOSED of ${channelId}`,
+            () => Promise.resolve(this.events.some(({ event }) => closedEvent(event)) ? true : undefined),
+            OPENING_TIMEOUT_MS,
+        );
+        const closed = await this.fiberChannel(channelId);
+        if (closed === undefined) assert.fail(`the tenant's listing lost the closed channel ${channelId}`);
+        assert.equal(closed.stateName, CHANNEL_CLOSED_STATE, "the tenant's channel once its close confirmed");
+        // Only the tenant's side runs #1701's check: the LSP's has the tenant for an internal peer, exempt (d8dd6d28
+        // `fiber/channel.rs:4638-4641,6760-6769`).
+        assert.ok(
+            closed.stateFlags.includes("UNCOOPERATIVE_LOCAL"),
+            `the tenant's side closed it uncooperatively, its flags are ${closed.stateFlags.join("|")}`,
+        );
+        return closed;
+    }
+
     describeEvents(): string {
         return scenarioJson(this.events.map(({ generation, event }) => ({ generation, ...event })));
     }
 
     private async mineUntilReady(channelId: string, timeoutMs: number): Promise<void> {
         const ready = isSdkEvent("CHANNEL_READY", (event) => event.channelId === channelId);
+        const closed = isChannelClosed(channelId);
         await mineUntil(
             this.env,
             `CHANNEL_READY of ${channelId}`,
-            () => Promise.resolve(this.events.some((recorded) => ready(recorded.event)) ? true : undefined),
+            () => {
+                if (this.events.some((recorded) => closed(recorded.event))) {
+                    throw new Error(`the opening of ${channelId} closed before it was ready; seen: ${this.describeEvents()}`);
+                }
+                return Promise.resolve(this.events.some((recorded) => ready(recorded.event)) ? true : undefined);
+            },
             timeoutMs,
         );
     }

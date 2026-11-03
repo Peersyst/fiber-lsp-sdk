@@ -472,11 +472,21 @@ and keeps the evidence, and the peer's next commitment is signed after it.
 
 The opening's sequence is asserted by fiber's own test (`fiber-lib/src/fiber/tests/external_signer_restart.rs:689-744`).
 The payments' are derived from fiber's counter rules, since no fiber test fixes them: R moves by one when the device's
-`revoke_and_ack` is sent (`channel.rs:6420`), L when the peer's is received (`channel.rs:6569`), and a `commitment_signed`
-moves neither, which is where the shared slots come from. Fiber's devnet runs them in this order, with these outcomes
-([e2e-agent.md](./e2e-agent.md), "Scenarios"): a payment received and its fulfil, and a payment sent up to the third session
-refused on its fulfil, after which the node force-closes the tenant's channel once its revocation nonce ledger has stayed
-unbalanced for 30 s, some 31 s on the devnet.
+`revoke_and_ack` is sent (`channel.rs:6420`), L when the peer's is received (`channel.rs:6569`), and a
+`commitment_signed` moves neither, which is where the shared slots come from. Fiber's devnet runs them in this order,
+with these outcomes ([e2e-agent.md](./e2e-agent.md), "Scenarios"): a payment received and its fulfil, and a payment sent
+up to the third session refused on its fulfil, after which the node force-closes the tenant's channel once its
+revocation nonce ledger has stayed unbalanced for 30 s, some 31 s on the devnet. Under the e2e bypass, the same payment
+sent completes: the third session on `Commitment@3` is served as a second (`warning`), the round ends with
+`CompleteReceivedRevokeAndAck` on `Revocation@3` warned, and a payment received after it repeats the received table's
+transitions and outcomes on the next slots. Fiber times part of each round: from the device's `SendCommitmentSigned` to
+its `CompleteReceivedRevokeAndAck` with the ack timer, a single 30 s timeout (`channel.rs:2154,6727-6753,6795-6807`),
+and from its `SendRevokeAndAck`, or the peer's `revoke_and_ack` it has not matched, to its next step with #1701's
+watchdog over the unbalanced revocation nonce ledger, checked every 3 s in a debug build and 60 s in release
+(`channel.rs:6760-6793`, `network.rs:250-254`). That is two gaps of a round the peer starts and three of one the device
+starts; the device's answer to the peer's `commitment_signed` before its `SendRevokeAndAck` is bounded by the TLC
+deadline alone. A device offline 21 s after its `SendRevokeAndAck` in a round the peer started keeps the channel, one
+offline 45 s loses it ([sdk.md](./sdk.md), "`connect()` and `disconnect()`").
 
 The controls each end refused, on two ticks, with no submission and the record unchanged:
 
