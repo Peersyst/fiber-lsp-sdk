@@ -20,7 +20,7 @@ describe("parseAgentConfig", () => {
             operatorToken: "operator",
             lspNodeId: LSP_NODE_ID,
             intervalMs: 200,
-            contractsDir: resolve("../deploy/contracts"),
+            network: { name: "devnet", contractsDir: resolve("../deploy/contracts") },
             nonceCapBypass: false,
         });
     });
@@ -40,6 +40,7 @@ describe("parseAgentConfig", () => {
             "--control-addr=127.0.0.1:21799",
             "--interval-ms",
             "50",
+            "--network=devnet",
             "--contracts-dir=/opt/contracts",
             "--ckb-rpc",
             "http://127.0.0.1:8114",
@@ -52,7 +53,7 @@ describe("parseAgentConfig", () => {
             operatorToken: "operator",
             lspNodeId: LSP_NODE_ID,
             intervalMs: 50,
-            contractsDir: "/opt/contracts",
+            network: { name: "devnet", contractsDir: "/opt/contracts" },
             nonceCapBypass: true,
         });
     });
@@ -67,6 +68,7 @@ describe("parseAgentConfig", () => {
             FIBER_LSP_SDK_AGENT_STATUS_FILE: "/tmp/status.json",
             FIBER_LSP_SDK_AGENT_CONTROL_ADDR: "127.0.0.1:21799",
             FIBER_LSP_SDK_AGENT_INTERVAL_MS: "50",
+            FIBER_LSP_SDK_AGENT_NETWORK: "testnet",
             FIBER_LSP_SDK_AGENT_NONCE_CAP_BYPASS: "true",
         };
         assert.deepEqual(parseAgentConfig([], env), {
@@ -77,7 +79,7 @@ describe("parseAgentConfig", () => {
             operatorToken: "operator",
             lspNodeId: LSP_NODE_ID,
             intervalMs: 50,
-            contractsDir: resolve("../deploy/contracts"),
+            network: { name: "testnet" },
             nonceCapBypass: true,
         });
     });
@@ -91,6 +93,7 @@ describe("parseAgentConfig", () => {
             FIBER_LSP_SDK_AGENT_STATUS_FILE: "/env/status.json",
             FIBER_LSP_SDK_AGENT_CONTROL_ADDR: "127.0.0.1:2",
             FIBER_LSP_SDK_AGENT_INTERVAL_MS: "3",
+            FIBER_LSP_SDK_AGENT_NETWORK: "testnet",
             FIBER_LSP_SDK_AGENT_NONCE_CAP_BYPASS: "false",
         };
         const argv = [
@@ -101,6 +104,8 @@ describe("parseAgentConfig", () => {
             "127.0.0.1:21799",
             "--interval-ms",
             "50",
+            "--network",
+            "devnet",
             "--nonce-cap-bypass",
         ];
         assert.deepEqual(parseAgentConfig(argv, env), {
@@ -111,7 +116,7 @@ describe("parseAgentConfig", () => {
             operatorToken: "operator",
             lspNodeId: LSP_NODE_ID,
             intervalMs: 50,
-            contractsDir: resolve("../deploy/contracts"),
+            network: { name: "devnet", contractsDir: resolve("../deploy/contracts") },
             nonceCapBypass: true,
         });
     });
@@ -121,12 +126,14 @@ describe("parseAgentConfig", () => {
             FIBER_LSP_SDK_AGENT_STATUS_FILE: "",
             FIBER_LSP_SDK_AGENT_CONTROL_ADDR: "",
             FIBER_LSP_SDK_AGENT_INTERVAL_MS: "",
+            FIBER_LSP_SDK_AGENT_NETWORK: "",
             FIBER_LSP_SDK_AGENT_NONCE_CAP_BYPASS: "",
         };
         const config = parseAgentConfig(REQUIRED, env);
         assert.equal(config.statusFile, null);
         assert.equal(config.controlAddr, null);
         assert.equal(config.intervalMs, 200);
+        assert.deepEqual(config.network, { name: "devnet", contractsDir: resolve("../deploy/contracts") });
         assert.equal(config.nonceCapBypass, false);
     });
 
@@ -136,10 +143,6 @@ describe("parseAgentConfig", () => {
         assert.equal(rpcUrl("http://node:8227"), "http://node:8227");
         assert.equal(rpcUrl("https://node:8227"), "https://node:8227");
         assert.equal(rpcUrl("node:8227"), "http://node:8227");
-    });
-
-    it("resolves a relative contracts dir against the working directory", () => {
-        assert.equal(parseAgentConfig([...REQUIRED, "--contracts-dir", "contracts"], NO_ENV).contractsDir, resolve("contracts"));
     });
 
     it("ignores --ckb-rpc, which it still accepts", () => {
@@ -335,6 +338,54 @@ describe("parseAgentConfig", () => {
             assert.throws(() => parseAgentConfig(REQUIRED, { FIBER_LSP_SDK_AGENT_INTERVAL_MS: "fast" }), {
                 message: '--interval-ms must be an integer between 1 and 2147483647, got "fast"',
             });
+        });
+    });
+
+    describe("--network", () => {
+        const network = (argv: readonly string[], env: Record<string, string> = NO_ENV) =>
+            parseAgentConfig([...REQUIRED, ...argv], env).network;
+
+        it("runs on the devnet over the contracts dir, resolved against the working directory", () => {
+            assert.deepEqual(network(["--network", "devnet"]), { name: "devnet", contractsDir: resolve("../deploy/contracts") });
+            assert.deepEqual(network(["--contracts-dir", "contracts"]), { name: "devnet", contractsDir: resolve("contracts") });
+            assert.deepEqual(network(["--network=devnet", "--contracts-dir=/opt/contracts"]), {
+                name: "devnet",
+                contractsDir: "/opt/contracts",
+            });
+        });
+
+        it("runs on testnet without a contracts dir, from the flag or the environment", () => {
+            assert.deepEqual(network(["--network", "testnet"]), { name: "testnet" });
+            assert.deepEqual(network(["--network=testnet"]), { name: "testnet" });
+            assert.deepEqual(network([], { FIBER_LSP_SDK_AGENT_NETWORK: "testnet" }), { name: "testnet" });
+        });
+
+        it("refuses --contracts-dir on testnet, before or after --network and with the network from the environment", () => {
+            const message = "--contracts-dir is the devnet's alone: testnet's contracts are the SDK's preset";
+            assert.throws(() => network(["--network", "testnet", "--contracts-dir", "/opt/contracts"]), { message });
+            assert.throws(() => network(["--contracts-dir=/opt/contracts", "--network=testnet"]), { message });
+            assert.throws(() => network(["--contracts-dir", "/opt/contracts"], { FIBER_LSP_SDK_AGENT_NETWORK: "testnet" }), { message });
+        });
+
+        it("refuses any other network, mainnet included, matching case and whitespace exactly", () => {
+            for (const value of ["mainnet", "Devnet", "TESTNET", " testnet", "testnet ", "dev", "devnet2", "testnet,devnet"]) {
+                assert.throws(() => network([`--network=${value}`]), {
+                    message: `--network must be devnet or testnet, got ${JSON.stringify(value)}`,
+                });
+            }
+        });
+
+        it("refuses another network from the environment", () => {
+            assert.throws(() => network([], { FIBER_LSP_SDK_AGENT_NETWORK: "mainnet" }), {
+                message: '--network must be devnet or testnet, got "mainnet"',
+            });
+        });
+
+        it("refuses an empty or missing value, and a second --network", () => {
+            assert.throws(() => network(["--network="]), { message: "--network requires a value" });
+            assert.throws(() => network(["--network"]), { message: "--network requires a value" });
+            assert.throws(() => network(["--network", "--nonce-cap-bypass"]), { message: "--network requires a value" });
+            assert.throws(() => network(["--network", "devnet", "--network=testnet"]), { message: "--network is given more than once" });
         });
     });
 });

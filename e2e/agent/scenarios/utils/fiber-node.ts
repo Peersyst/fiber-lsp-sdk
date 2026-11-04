@@ -1,24 +1,24 @@
 import type { AgentNodeFetch, ScriptJson } from "../../src/agent.types";
 import { bareLowerHex, readJsonObject } from "../../src/agent.utils";
-import { jsonRpcCall } from "../../src/json-rpc";
+import { jsonRpcCall, NO_BEARER_TOKEN } from "../../src/json-rpc";
 import { readScriptJson } from "../../src/open-params";
-import type { DevnetEnv } from "./devnet-env";
 import { GET_CHANNEL_SIGNING_STATUS_METHOD } from "./faulty-fetch";
+import type { ScenarioEnv } from "./scenario-env";
 import { EVENT_TIMEOUT_MS, sleep, waitUntil, WaitTimeoutError } from "./wait";
-
-// Nodes 1 and 3 run without Biscuit, so the Authorization header jsonRpcCall always writes is never read.
-const NO_TOKEN = "";
 
 // What fiber's hosted e2e pays a tenant with (`lsp-remote-signer-watchtower-preimage`, step 15).
 const DEFAULT_MAX_FEE_SHANNONS = 10_000n;
 const DEFAULT_TLC_EXPIRY_LIMIT_MS = 0x240c8400n;
 
-const DEFAULT_EPOCHS = 2;
+const DEVNET_EPOCHS_PER_ROUND = 2;
 
 // As fiber's e2e: the funding tx reaches the pool before the epochs that confirm it are mined.
 const FUNDING_SETTLE_MS = 3000;
 
 const MINING_ROUND_MS = 30_000;
+
+// Fiber's default page; a shorter one is the last.
+const GRAPH_PAGE_LIMIT = 500;
 
 export type FiberNodeInfo = { pubkey: string; defaultFundingLockScript: ScriptJson; raw: Record<string, unknown> };
 
@@ -150,7 +150,7 @@ function readGraphChannel(value: unknown): FiberGraphChannel {
 export class FiberNode {
     constructor(
         readonly url: string,
-        private readonly token: string = NO_TOKEN,
+        private readonly token: string = NO_BEARER_TOKEN,
         private readonly fetch: AgentNodeFetch = globalThis.fetch,
     ) {}
 
@@ -234,14 +234,16 @@ export class FiberNode {
     }
 
     async graphChannels(): Promise<FiberGraphChannel[]> {
-        const result = readJsonObject(await this.call("graph_channels", [{}]), "graph_channels");
-        return readArray(result, "channels", "graph_channels").map(readGraphChannel);
-    }
-
-    async signExternalFundingTx(unsignedFundingTx: Record<string, unknown>, privateKey: string): Promise<Record<string, unknown>> {
-        const params = { unsigned_funding_tx: unsignedFundingTx, private_key: privateKey };
-        const result = readJsonObject(await this.call("sign_external_funding_tx", [params]), "sign_external_funding_tx");
-        return readJsonObject(result.signed_funding_tx, "sign_external_funding_tx.signed_funding_tx");
+        const channels: FiberGraphChannel[] = [];
+        let after: string | undefined;
+        for (;;) {
+            const params = { limit: toHexQuantity(GRAPH_PAGE_LIMIT), after };
+            const result = readJsonObject(await this.call("graph_channels", [params]), "graph_channels");
+            const page = readArray(result, "channels", "graph_channels").map(readGraphChannel);
+            channels.push(...page);
+            if (page.length < GRAPH_PAGE_LIMIT) return channels;
+            after = readString(result, "last_cursor", "graph_channels");
+        }
     }
 
     async channelSigningStatus(channelId: string, token: string): Promise<Record<string, unknown>> {
@@ -265,7 +267,7 @@ export type FiberNodes = {
     node3: FiberNode;
 };
 
-export function fiberNodes(env: DevnetEnv): FiberNodes {
+export function fiberNodes(env: ScenarioEnv): FiberNodes {
     return {
         node1: new FiberNode(env.node1RpcUrl),
         node2: new FiberNode(env.node2RpcUrl, env.operatorToken),
@@ -273,11 +275,18 @@ export function fiberNodes(env: DevnetEnv): FiberNodes {
     };
 }
 
-export async function generateEpochs(env: DevnetEnv, epochs: number = DEFAULT_EPOCHS): Promise<void> {
-    await jsonRpcCall(env.ckbRpcUrl, fetch, "generate_epochs", [toHexQuantity(epochs)], NO_TOKEN);
+async function generateEpochs(env: ScenarioEnv): Promise<void> {
+    await jsonRpcCall(env.ckbRpcUrl, fetch, "generate_epochs", [toHexQuantity(DEVNET_EPOCHS_PER_ROUND)], NO_BEARER_TOKEN);
 }
 
-export async function mineUntil<T>(env: DevnetEnv, what: string, probe: () => Promise<T | undefined>, timeoutMs: number): Promise<T> {
+// Only the devnet mines on demand; testnet's blocks come on their own.
+export async function advanceChainUntil<T>(
+    env: ScenarioEnv,
+    what: string,
+    probe: () => Promise<T | undefined>,
+    timeoutMs: number,
+): Promise<T> {
+    if (env.chain.network === "testnet") return waitUntil(what, probe, { timeoutMs });
     const deadline = Date.now() + timeoutMs;
     await sleep(FUNDING_SETTLE_MS);
     for (;;) {
@@ -291,14 +300,17 @@ export async function mineUntil<T>(env: DevnetEnv, what: string, probe: () => Pr
     }
 }
 
-async function txPoolDrained(env: DevnetEnv): Promise<true | undefined> {
-    const info = readJsonObject(await jsonRpcCall(env.ckbRpcUrl, fetch, "tx_pool_info", [], NO_TOKEN), "tx_pool_info");
+async function txPoolDrained(env: ScenarioEnv): Promise<true | undefined> {
+    const info = readJsonObject(await jsonRpcCall(env.ckbRpcUrl, fetch, "tx_pool_info", [], NO_BEARER_TOKEN), "tx_pool_info");
     const pending = BigInt(readString(info, "pending", "tx_pool_info"));
     const proposed = BigInt(readString(info, "proposed", "tx_pool_info"));
     return pending === 0n && proposed === 0n ? true : undefined;
 }
 
-export async function mineUntilPoolDrained(env: DevnetEnv, timeoutMs: number): Promise<void> {
+// A force close's settlement still in the pool fails node 2's signing of the next funding (`invalid cell status: "unknown"`),
+// which aborts it. Testnet mines on its own, and its shared pool never reads empty.
+export async function settleChain(env: ScenarioEnv, timeoutMs: number): Promise<void> {
+    if (env.chain.network === "testnet") return;
     if ((await txPoolDrained(env)) === true) return;
-    await mineUntil(env, "CKB's tx pool to drain", () => txPoolDrained(env), timeoutMs);
+    await advanceChainUntil(env, "CKB's tx pool to drain", () => txPoolDrained(env), timeoutMs);
 }

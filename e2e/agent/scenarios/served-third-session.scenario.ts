@@ -2,16 +2,13 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { DEFAULT_POLL_INTERVAL_MS } from "@peersyst/fiber-lsp-sdk";
 import { bareLowerHex } from "../src/agent.utils";
-import { readDevnetEnv } from "./utils/devnet-env";
+import { readScenarioEnv, STILL_READY_SLACK_MS, watchdogLatestMs } from "./utils/scenario-env";
 import { ensurePublicChannels } from "./utils/public-channels";
 import { CHANNEL_READY_STATE } from "./utils/fiber-node";
 import {
-    CHANNEL_FUNDING_SHANNONS,
-    CHECK_CHANNELS_INTERVAL_MS,
     INVOICE_AMOUNT_SHANNONS,
     isPaymentSent,
     OPEN_STEPS,
-    PEER_CHANNEL_RESPONSE_TIMEOUT_MS,
     RECEIVED_STEPS,
     ScenarioDevice,
     SENT_STEPS,
@@ -26,16 +23,13 @@ const SERVED_SENT_STEPS: readonly SigningStep[] = [
     { transition: "CompleteReceivedRevokeAndAck", outcome: "warning" }, // R@3
 ];
 
-// Past #1701's window and the check after it.
-const WATCHDOG_WAIT_MS = PEER_CHANNEL_RESPONSE_TIMEOUT_MS + 2 * CHECK_CHANNELS_INTERVAL_MS;
-
 test("a payment the tenant sends completes once the third signing session on C@3 is served, and the channel stays ready", async (t) => {
-    const env = readDevnetEnv();
+    const env = readScenarioEnv();
     await ensurePublicChannels(env);
     const device = await ScenarioDevice.create(env, { nonceCapBypass: true, pollIntervalMs: DEFAULT_POLL_INTERVAL_MS });
     try {
         const { node1, node2 } = device.nodes;
-        const channelId = bareLowerHex(await device.openFundedChannel(CHANNEL_FUNDING_SHANNONS));
+        const channelId = bareLowerHex(await device.openFundedChannel());
         const sendFrom = device.events.length;
         assert.deepEqual(signingSteps(device.events.slice(0, sendFrom), channelId), OPEN_STEPS, "the opening's signing steps");
 
@@ -50,7 +44,7 @@ test("a payment the tenant sends completes once the third signing session on C@3
         assert.equal((await node2.getPayment(payment.paymentHashHex, device.accessToken)).status, "Success");
         assert.equal((await node1.getInvoice(invoice.paymentHash)).status, "Paid", "node 1's invoice");
 
-        await sleep(WATCHDOG_WAIT_MS);
+        await sleep(watchdogLatestMs(env.chain) + STILL_READY_SLACK_MS);
         assert.equal((await device.fiberChannel(channelId))?.stateName, CHANNEL_READY_STATE, "the channel past #1701's window");
         assert.deepEqual(signingSteps(device.events.slice(sendFrom), channelId), SERVED_SENT_STEPS, "no step after the payment sent");
 

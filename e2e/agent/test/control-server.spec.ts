@@ -223,7 +223,7 @@ describe("startControlServer", () => {
                     operatorToken: "operator-token",
                     lspNodeId: LSP_PUBKEY,
                     intervalMs: 60_000,
-                    contractsDir,
+                    network: { name: "devnet", contractsDir },
                     nonceCapBypass: false,
                 },
                 {

@@ -112,11 +112,11 @@ channel check past 30 s, every 3 s in a debug build and every 60 s in release (`
 `fiber/network.rs:250-254`). So a round the peer starts is timed from the device's `revoke_and_ack` to its end, two
 gaps, and one the device starts from its `commitment_signed` to its end, three ([signing.md](./signing.md), "The node
 double and the flows"). Before that, answering the peer's `commitment_signed` or opening its own round, the device is
-bounded only by the TLC's safety deadline (below). On the devnet a device back 21 s after its revocation in a round the
-peer started finished the round, and one back 45 s after lost its channel, which left `ChannelReady` 32.6 to 33.6 s
-after the revocation and closed uncooperatively, the payment left unresolved. A device in the foreground at the default
-five-second poll signs one step per channel per tick, some 5 s apart, and the next one at once after a hold invoice's
-release, which polls again.
+bounded only by the TLC's safety deadline (below). In a round the peer started, a device back 21 s after its
+revocation finished the round, and one back past the latest close (45 s on the devnet, 102 s against release nodes on
+testnet) lost its channel, closed uncooperatively with the payment left unresolved. A device in the foreground at the
+default five-second poll signs one step per channel per tick, and the next one at once after a hold invoice's release,
+which polls again.
 
 ## Events
 

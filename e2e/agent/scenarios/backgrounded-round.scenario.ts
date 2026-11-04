@@ -2,26 +2,27 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import type { TestContext } from "node:test";
 import { bareLowerHex } from "../src/agent.utils";
-import { readDevnetEnv } from "./utils/devnet-env";
+import { INSIDE_WINDOW_SLACK_MS, PAST_WINDOW_SLACK_MS, readScenarioEnv, watchdogLatestMs } from "./utils/scenario-env";
 import { ensurePublicChannels } from "./utils/public-channels";
 import { CHANNEL_READY_STATE } from "./utils/fiber-node";
 import {
-    CHANNEL_FUNDING_SHANNONS,
-    CHECK_CHANNELS_INTERVAL_MS,
     INVOICE_AMOUNT_SHANNONS,
     isPaymentReceived,
     isSdkEvent,
     OPEN_STEPS,
-    PEER_CHANNEL_RESPONSE_TIMEOUT_MS,
     RECEIVED_STEPS,
     ScenarioDevice,
     signingSteps,
 } from "./utils/scenario-device";
-import { OPENING_TIMEOUT_MS, PROBE_INTERVAL_MS, sleep, waitUntil } from "./utils/wait";
+import { PROBE_INTERVAL_MS, sleep, waitUntil } from "./utils/wait";
 
-// Either side of #1701's window.
-const WITHIN_WINDOW_MS = PEER_CHANNEL_RESPONSE_TIMEOUT_MS - 3 * CHECK_CHANNELS_INTERVAL_MS;
-const PAST_WINDOW_MS = PEER_CHANNEL_RESPONSE_TIMEOUT_MS + 5 * CHECK_CHANNELS_INTERVAL_MS;
+// Read before the tests, whose names carry the margins.
+const env = readScenarioEnv();
+
+// Either side of #1701's window: back in time for the rest of the round to land before the timeout, and back after the check
+// that follows it, whatever the build's tick.
+const WITHIN_WINDOW_MS = env.chain.peerChannelResponseTimeoutMs - INSIDE_WINDOW_SLACK_MS;
+const PAST_WINDOW_MS = watchdogLatestMs(env.chain) + PAST_WINDOW_SLACK_MS;
 
 // Up to the device's SendRevokeAndAck.
 const BEFORE_BACKGROUND_STEPS = RECEIVED_STEPS.slice(0, 2);
@@ -39,14 +40,13 @@ async function backgroundMidRound(
     offlineMs: number,
     during?: (round: BackgroundedRound) => Promise<void>,
 ): Promise<BackgroundedRound> {
-    const env = readDevnetEnv();
     await ensurePublicChannels(env);
     const device = await ScenarioDevice.create(env);
     t.after(async () => {
         t.diagnostic(`events: ${device.describeEvents()}`);
         await device.close();
     });
-    const channelId = bareLowerHex(await device.openFundedChannel(CHANNEL_FUNDING_SHANNONS));
+    const channelId = bareLowerHex(await device.openFundedChannel());
     const receiveFrom = device.events.length;
     assert.deepEqual(signingSteps(device.events.slice(0, receiveFrom), channelId), OPEN_STEPS, "the opening's signing steps");
 
@@ -65,7 +65,7 @@ async function backgroundMidRound(
     const invoice = await sdk.createInvoice(INVOICE_AMOUNT_SHANNONS, { description: "backgrounded round" });
     await device.nodes.node1.sendPayment(invoice.invoice);
     const at = await waitUntil("the device's revocation of the payment's round", () => Promise.resolve(backgroundedAt), {
-        timeoutMs: OPENING_TIMEOUT_MS,
+        timeoutMs: env.chain.openingTimeoutMs,
     });
     stopListening();
     await device.waitForSettled();
@@ -99,17 +99,20 @@ test(`a device back ${PAST_WINDOW_MS / 1000} s after its revocation finds its ch
         const leaving = await device.waitForForceClose(channelId, backgroundedAt + PAST_WINDOW_MS - Date.now() - PROBE_INTERVAL_MS);
         const leftAfterMs = leaving.at - backgroundedAt;
         t.diagnostic(`the channel left ChannelReady ${leftAfterMs} ms after the revocation: ${JSON.stringify(leaving.channel.raw.state)}`);
-        assert.ok(leftAfterMs > PEER_CHANNEL_RESPONSE_TIMEOUT_MS, `the channel left ChannelReady ${leftAfterMs} ms after the revocation`);
+        assert.ok(
+            leftAfterMs > env.chain.peerChannelResponseTimeoutMs,
+            `the channel left ChannelReady ${leftAfterMs} ms after the revocation`,
+        );
     });
     const { device, channelId, paymentHashHex, receiveFrom } = round;
-    await device.mineForceClose(channelId);
+    await device.confirmForceClose(channelId);
     const signedSince = signingSteps(device.events.slice(receiveFrom), channelId).filter(({ outcome }) => outcome !== "refused");
     assert.deepEqual(signedSince, BEFORE_BACKGROUND_STEPS, "nothing signed back in the foreground");
     const payer = await device.nodes.node1.getPayment(paymentHashHex);
     const invoice = await device.nodes.node2.getInvoice(paymentHashHex, device.accessToken);
     t.diagnostic(`the payment at the close: payer ${payer.status} (${payer.failedError ?? "no error"}), invoice ${invoice.status}`);
     // The peer's add applies only on the device's CompleteReceivedRevokeAndAck (d8dd6d28 `fiber/channel.rs:1337-1363,2580`), so
-    // the invoice never held it; the TLC returns on chain past its expiry, never mined to.
+    // the invoice never held it; the TLC returns on chain past its expiry, never reached.
     assert.deepEqual({ payer: payer.status, invoice: invoice.status }, { payer: "Inflight", invoice: "Open" });
     const received = isPaymentReceived(paymentHashHex);
     assert.ok(!device.events.some(({ event }) => received(event)), "no PAYMENT_RECEIVED for the payment the close left unresolved");

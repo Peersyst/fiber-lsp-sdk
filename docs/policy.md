@@ -214,7 +214,7 @@ The known cost: a round the device starts leaves its own completed commitment on
 `CompleteReceivedRevokeAndAck` moved L, and the peer's next round puts its two commitments on that same slot. That is a
 third message on one slot, which `allow` refuses, so after any round of the device's the peer's next round cannot complete: the
 fulfil of a payment the device sent, and a payment received after one it fulfilled. Fiber force-closes the channel once
-its revocation nonce ledger has stayed unbalanced for 30 s (`crates/fiber-lib/src/fiber/channel.rs:6760-6793`; some 31 s on the devnet), until it
+its revocation nonce ledger has stayed unbalanced for 30 s (`crates/fiber-lib/src/fiber/channel.rs:6760-6793`; some 30 to 33 s on the devnet), until it
 gives each message its own nonce ([signing.md](./signing.md) runs both sequences).
 
 ## The claim is written before anything is signed

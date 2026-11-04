@@ -4,7 +4,7 @@ import { SdkError } from "@peersyst/fiber-lsp-sdk";
 import type { Script } from "@peersyst/fiber-lsp-sdk";
 import { bareLowerHex, readJsonObject } from "../src/agent.utils";
 import { scriptFromJson } from "../src/open-params";
-import { readDevnetEnv } from "./utils/devnet-env";
+import { readScenarioEnv } from "./utils/scenario-env";
 import {
     channelIdParam,
     OPEN_CHANNEL_WITH_EXTERNAL_FUNDING_METHOD,
@@ -14,7 +14,7 @@ import {
 } from "./utils/faulty-fetch";
 import { fiberNodes, toHexQuantity } from "./utils/fiber-node";
 import { ensurePublicChannels } from "./utils/public-channels";
-import { CHANNEL_FUNDING_SHANNONS, OPEN_STEPS, ScenarioDevice, signingSteps } from "./utils/scenario-device";
+import { OPEN_STEPS, ScenarioDevice, signingSteps } from "./utils/scenario-device";
 
 // Takes the script's args past both commitment lock layouts' 57 and 58 bytes, so the peer's reserve over it moves too.
 const EXTRA_ARGS_HEX = "ab".repeat(64);
@@ -87,7 +87,7 @@ async function refuseAltered(device: ScenarioDevice, alteration: Alteration, use
         return alteration.alter(answer);
     });
     await assert.rejects(
-        device.sdk.prepareChannelOpen(CHANNEL_FUNDING_SHANNONS, userLock),
+        device.sdk.prepareChannelOpen(device.env.chain.tenantChannelShannons, userLock),
         (error: unknown) => error instanceof SdkError && error.code === "opening_rejected" && alteration.field.test(error.message),
         `${alteration.name}: the altered opening must be refused as opening_rejected naming ${alteration.field}`,
     );
@@ -122,7 +122,7 @@ function openingFundingKeys(device: ScenarioDevice): string[] {
 }
 
 test("an opening the node altered is refused before anything is signed, and a fresh index opens", async (t) => {
-    const env = readDevnetEnv();
+    const env = readScenarioEnv();
     await ensurePublicChannels(env);
     const device = await ScenarioDevice.create(env);
     try {
@@ -138,7 +138,7 @@ test("an opening the node altered is refused before anything is signed, and a fr
             t.diagnostic(`${alteration.name}: channel ${channelId} refused`);
         }
 
-        const channelId = bareLowerHex(await device.openFundedChannel(CHANNEL_FUNDING_SHANNONS));
+        const channelId = bareLowerHex(await device.openFundedChannel());
         assert.deepEqual(signingSteps(device.events, channelId), OPEN_STEPS, "the fresh opening's signing steps");
 
         assert.equal(refused.includes(channelId), false, "the fresh opening is none of the refused ones");

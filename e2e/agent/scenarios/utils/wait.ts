@@ -1,12 +1,6 @@
 import { setTimeout as delay } from "node:timers/promises";
 
-// An opening waits on the funding tx's confirmation and fiber's channel-ready exchange: minutes on a loaded devnet.
-export const OPENING_TIMEOUT_MS = 5 * 60_000;
-
 export const EVENT_TIMEOUT_MS = 2 * 60_000;
-
-// Gossip runs every second on the devnet, but an announcement waits on the funding tx's confirmations first.
-export const GRAPH_TIMEOUT_MS = 3 * 60_000;
 
 export const PROBE_INTERVAL_MS = 1000;
 

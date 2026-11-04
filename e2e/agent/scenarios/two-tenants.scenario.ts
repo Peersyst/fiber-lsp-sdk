@@ -1,17 +1,10 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { bareLowerHex } from "../src/agent.utils";
-import { readDevnetEnv } from "./utils/devnet-env";
+import { readScenarioEnv } from "./utils/scenario-env";
 import { channelIdParam, GET_CHANNEL_SIGNING_STATUS_METHOD, SUBMIT_CHANNEL_SIGNATURE_METHOD } from "./utils/faulty-fetch";
 import { ensurePublicChannels } from "./utils/public-channels";
-import {
-    CHANNEL_FUNDING_SHANNONS,
-    INVOICE_AMOUNT_SHANNONS,
-    OPEN_STEPS,
-    RECEIVED_STEPS,
-    ScenarioDevice,
-    signingSteps,
-} from "./utils/scenario-device";
+import { INVOICE_AMOUNT_SHANNONS, OPEN_STEPS, RECEIVED_STEPS, ScenarioDevice, signingSteps } from "./utils/scenario-device";
 
 type Tenant = { name: string; device: ScenarioDevice; channelId: string };
 
@@ -28,7 +21,7 @@ function wireChannels(device: ScenarioDevice, method: string): string[] {
 }
 
 test("two tenants on one LSP each sign their own channel and nothing of the other's", async (t) => {
-    const env = readDevnetEnv();
+    const env = readScenarioEnv();
     await ensurePublicChannels(env);
     const devices: ScenarioDevice[] = [];
     try {
@@ -42,12 +35,12 @@ test("two tenants on one LSP each sign their own channel and nothing of the othe
         const a: Tenant = {
             name: "A",
             device: deviceA,
-            channelId: bareLowerHex(await deviceA.openFundedChannel(CHANNEL_FUNDING_SHANNONS)),
+            channelId: bareLowerHex(await deviceA.openFundedChannel()),
         };
         const b: Tenant = {
             name: "B",
             device: deviceB,
-            channelId: bareLowerHex(await deviceB.openFundedChannel(CHANNEL_FUNDING_SHANNONS)),
+            channelId: bareLowerHex(await deviceB.openFundedChannel()),
         };
         assert.notEqual(a.channelId, b.channelId);
         const tenants = [a, b];

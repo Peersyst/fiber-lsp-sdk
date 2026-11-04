@@ -3,28 +3,30 @@ import { randomBytes } from "node:crypto";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { hexToBytes } from "@noble/hashes/utils.js";
+import { bytesToHex, hexToBytes } from "@noble/hashes/utils.js";
 import { FiberLspSdk } from "@peersyst/fiber-lsp-sdk";
 import type { SdkChannelOpening, SdkEvent, SdkEventType, SigningEventOutcome, Transaction } from "@peersyst/fiber-lsp-sdk";
 import { registerAgentTenant, SDK_STORE_FILE } from "../../src/agent";
-import { HEX_BYTES_PATTERN, OPEN_CHANNEL_WITH_EXTERNAL_FUNDING_METHOD } from "../../src/agent.constants";
+import { OPEN_CHANNEL_WITH_EXTERNAL_FUNDING_METHOD } from "../../src/agent.constants";
 import { loadOrCreateMasterSeed } from "../../src/agent-store";
 import { OpenResultCapture, checkedOpenResult } from "../../src/capturing-fetch";
 import { FileSignerStorage } from "../../src/file-storage";
 import { NonceCapBypassStorage } from "../../src/nonce-cap-bypass";
 import { bareLowerHex, messageOf } from "../../src/agent.utils";
+import { ckbTxHash, readCkbTxJson } from "../../src/ckb-tx";
 import { AgentJsonRpc } from "../../src/json-rpc";
 import { scriptFromJson } from "../../src/open-params";
-import type { DevnetEnv } from "./devnet-env";
+import { liveCellLockResolver, signSighashAllInputs } from "../../src/sighash-signer";
 import { FaultyFetch } from "./faulty-fetch";
-import { CHANNEL_CLOSED_STATE, CHANNEL_READY_STATE, fiberNodes, mineUntil, mineUntilPoolDrained } from "./fiber-node";
+import { advanceChainUntil, CHANNEL_CLOSED_STATE, CHANNEL_READY_STATE, fiberNodes, settleChain } from "./fiber-node";
 import type { FiberChannel, FiberNewInvoice, FiberNodes } from "./fiber-node";
-import { EVENT_TIMEOUT_MS, OPENING_TIMEOUT_MS, waitUntil } from "./wait";
+import { FORCE_CLOSE_SLACK_MS, watchdogLatestMs } from "./scenario-env";
+import type { ScenarioEnv } from "./scenario-env";
+import { EVENT_TIMEOUT_MS, waitUntil } from "./wait";
 
 export const SCENARIO_POLL_INTERVAL_MS = 1000;
 
-// As fiber's hosted e2e funds a tenant channel and pays a tenant (`lsp-remote-signer-watchtower-preimage`, steps 04 and 14).
-export const CHANNEL_FUNDING_SHANNONS = "50000000000";
+// As fiber's hosted e2e pays a tenant (`lsp-remote-signer-watchtower-preimage`, step 14).
 export const INVOICE_AMOUNT_SHANNONS = "1000000";
 
 // As fiber's hosted tenant pays node 1 (`e2e/lsp`, steps 27 and 28).
@@ -66,14 +68,6 @@ export const SENT_STEPS: readonly SigningStep[] = [
     { transition: "SendRevokeAndAck", outcome: "signed" }, // R@3
     { transition: "SendCommitmentSigned", outcome: "refused" }, // C@3, a third session
 ];
-
-// fiber#1701 force-closes a channel whose revocation nonce ledger stays unbalanced past PEER_CHANNEL_RESPONSE_TIMEOUT, on the
-// next CHECK_CHANNELS_INTERVAL of a debug build (d8dd6d28 `fiber/channel.rs:155,6787-6793`, `fiber/network.rs:252-254`).
-export const PEER_CHANNEL_RESPONSE_TIMEOUT_MS = 30_000;
-export const CHECK_CHANNELS_INTERVAL_MS = 3_000;
-
-// The other half is the probe's slack.
-const FORCE_CLOSE_WINDOW_MS = 2 * PEER_CHANNEL_RESPONSE_TIMEOUT_MS;
 
 // The opening under nonceReuse "allow": the device's commitment and the peer's, both on Commitment@1.
 export const OPEN_STEPS: readonly SigningStep[] = [
@@ -147,15 +141,9 @@ export function scenarioJson(value: unknown): string {
     return JSON.stringify(value, (_key, field: unknown) => (typeof field === "bigint" ? field.toString() : field));
 }
 
-function readWitnesses(signedTx: Record<string, unknown>): Uint8Array[] {
-    const { witnesses } = signedTx;
-    if (!Array.isArray(witnesses)) throw new Error("sign_external_funding_tx: signed_funding_tx.witnesses must be an array");
-    return witnesses.map((witness: unknown, index) => {
-        if (typeof witness !== "string" || !HEX_BYTES_PATTERN.test(witness)) {
-            throw new Error(`sign_external_funding_tx: signed_funding_tx.witnesses[${index}] must be 0x hex bytes`);
-        }
-        return hexToBytes(witness.slice(2));
-    });
+// On stderr, which the runner prints with the test, so a public chain's run leaves its txs to look up.
+function noteTx(kind: "funding" | "close", channelId: string, txHash: string): void {
+    process.stderr.write(`scenario ${kind} tx of ${channelId}: ${txHash}\n`);
 }
 
 export class ScenarioDevice {
@@ -169,7 +157,7 @@ export class ScenarioDevice {
 
     private constructor(
         private current: FiberLspSdk,
-        readonly env: DevnetEnv,
+        readonly env: ScenarioEnv,
         readonly nodes: FiberNodes,
         readonly faults: FaultyFetch,
         readonly tenantId: string,
@@ -181,7 +169,7 @@ export class ScenarioDevice {
         this.unsubscribe = this.listen(current);
     }
 
-    static async create(env: DevnetEnv, options: ScenarioDeviceOptions = {}): Promise<ScenarioDevice> {
+    static async create(env: ScenarioEnv, options: ScenarioDeviceOptions = {}): Promise<ScenarioDevice> {
         const storeDir = mkdtempSync(join(tmpdir(), "fiber-lsp-scenario-"));
         try {
             const nodes = fiberNodes(env);
@@ -189,13 +177,13 @@ export class ScenarioDevice {
             const capture = new OpenResultCapture(faults.fetch);
             const seed = loadOrCreateMasterSeed(storeDir);
             const registry = new AgentJsonRpc(env.node2RpcUrl, fetch);
-            // Pinned from the devnet's environment, never from the node the pin is meant to hold to.
+            // Pinned from the scenarios' environment, never from the node the pin is meant to hold to.
             const lspPubkey = hexToBytes(bareLowerHex(env.node2Pubkey));
             const storePath = join(storeDir, SDK_STORE_FILE);
             const build = (token?: string): FiberLspSdk => {
                 const storage = new FileSignerStorage(storePath);
                 return new FiberLspSdk(seed, {
-                    network: env.network,
+                    network: env.sdkNetwork,
                     storage: options.nonceCapBypass === true ? new NonceCapBypassStorage(storage) : storage,
                     rpcUrl: env.node2RpcUrl,
                     lspPubkey,
@@ -272,7 +260,7 @@ export class ScenarioDevice {
     nodeOneInvoice(description: string): Promise<FiberNewInvoice> {
         return this.nodes.node1.newInvoice({
             amountShannons: OUTBOUND_AMOUNT_SHANNONS,
-            currency: this.env.network.invoiceCurrency,
+            currency: this.env.chain.invoiceCurrency,
             description,
             expirySeconds: OUTBOUND_INVOICE_EXPIRY_SECONDS,
             allowTrampolineRouting: true,
@@ -292,31 +280,31 @@ export class ScenarioDevice {
         });
     }
 
-    async openFundedChannel(amountShannons: string, timeoutMs: number = OPENING_TIMEOUT_MS): Promise<string> {
+    async openFundedChannel(): Promise<string> {
         const { node1 } = this.nodes;
         const userLock = scriptFromJson((await node1.nodeInfo()).defaultFundingLockScript);
+        const timeoutMs = this.env.chain.openingTimeoutMs;
         const deadline = Date.now() + timeoutMs;
-        // A force close's settlement still in the pool fails node 2's signing of the next funding (`invalid cell status:
-        // "unknown"`), which aborts it.
-        await mineUntilPoolDrained(this.env, timeoutMs);
+        await settleChain(this.env, timeoutMs);
         const sdk = this.current;
         let raw: Record<string, unknown> | null;
         let opening: SdkChannelOpening;
         try {
-            opening = await sdk.prepareChannelOpen(amountShannons, userLock);
+            opening = await sdk.prepareChannelOpen(this.env.chain.tenantChannelShannons, userLock);
         } finally {
             raw = this.capture.take();
         }
-        const method = OPEN_CHANNEL_WITH_EXTERNAL_FUNDING_METHOD;
-        const unsignedTx = checkedOpenResult(raw, opening.channelId).unsigned_funding_tx;
-        if (typeof unsignedTx !== "object" || unsignedTx === null || Array.isArray(unsignedTx)) {
-            throw new Error(`${method}: unsigned_funding_tx must be an object`);
-        }
-        const signedTx = await node1.signExternalFundingTx(unsignedTx as Record<string, unknown>, this.env.fundingPrivkey);
+        const unsignedTx = readCkbTxJson(
+            checkedOpenResult(raw, opening.channelId).unsigned_funding_tx,
+            `${OPEN_CHANNEL_WITH_EXTERNAL_FUNDING_METHOD}.unsigned_funding_tx`,
+        );
+        const signedTx = await signSighashAllInputs(unsignedTx, this.env.fundingPrivkey, liveCellLockResolver(this.env.ckbRpcUrl, fetch));
         // The signer only writes witnesses, which the tx hash the SDK pinned leaves out.
-        const fundingTx: Transaction = { ...opening.unsignedFundingTx, witnesses: readWitnesses(signedTx) };
+        const witnesses = signedTx.witnesses.map((witness) => hexToBytes(witness.slice(2)));
+        const fundingTx: Transaction = { ...opening.unsignedFundingTx, witnesses };
         await sdk.submitFundingTx(opening.channelId, fundingTx);
-        await this.mineUntilReady(opening.channelId, Math.max(0, deadline - Date.now()));
+        noteTx("funding", opening.channelId, `0x${bytesToHex(ckbTxHash(unsignedTx))}`);
+        await this.untilReady(opening.channelId, Math.max(0, deadline - Date.now()));
         return opening.channelId;
     }
 
@@ -347,7 +335,10 @@ export class ScenarioDevice {
         return channels.find((channel) => bareLowerHex(channel.channelId) === bareLowerHex(channelId));
     }
 
-    async waitForForceClose(channelId: string, timeoutMs: number = FORCE_CLOSE_WINDOW_MS): Promise<{ channel: FiberChannel; at: number }> {
+    async waitForForceClose(
+        channelId: string,
+        timeoutMs: number = watchdogLatestMs(this.env.chain) + FORCE_CLOSE_SLACK_MS,
+    ): Promise<{ channel: FiberChannel; at: number }> {
         const channel = await waitUntil(
             `fiber#1701 to force-close ${channelId}`,
             async () => {
@@ -359,17 +350,20 @@ export class ScenarioDevice {
         return { channel, at: Date.now() };
     }
 
-    async mineForceClose(channelId: string): Promise<FiberChannel> {
+    // Up to the commitment's confirmation, never to its settlement past the commitment delay.
+    async confirmForceClose(channelId: string): Promise<FiberChannel> {
         const closedEvent = isChannelClosed(channelId);
-        await mineUntil(
+        await advanceChainUntil(
             this.env,
             `CHANNEL_CLOSED of ${channelId}`,
             () => Promise.resolve(this.events.some(({ event }) => closedEvent(event)) ? true : undefined),
-            OPENING_TIMEOUT_MS,
+            this.env.chain.openingTimeoutMs,
         );
         const closed = await this.fiberChannel(channelId);
         if (closed === undefined) assert.fail(`the tenant's listing lost the closed channel ${channelId}`);
         assert.equal(closed.stateName, CHANNEL_CLOSED_STATE, "the tenant's channel once its close confirmed");
+        const closeTx = closed.raw.shutdown_transaction_hash;
+        noteTx("close", channelId, typeof closeTx === "string" ? closeTx : "none listed");
         // Only the tenant's side runs #1701's check: the LSP's has the tenant for an internal peer, exempt (d8dd6d28
         // `fiber/channel.rs:4638-4641,6760-6769`).
         assert.ok(
@@ -383,10 +377,10 @@ export class ScenarioDevice {
         return scenarioJson(this.events.map(({ generation, event }) => ({ generation, ...event })));
     }
 
-    private async mineUntilReady(channelId: string, timeoutMs: number): Promise<void> {
+    private async untilReady(channelId: string, timeoutMs: number): Promise<void> {
         const ready = isSdkEvent("CHANNEL_READY", (event) => event.channelId === channelId);
         const closed = isChannelClosed(channelId);
-        await mineUntil(
+        await advanceChainUntil(
             this.env,
             `CHANNEL_READY of ${channelId}`,
             () => {

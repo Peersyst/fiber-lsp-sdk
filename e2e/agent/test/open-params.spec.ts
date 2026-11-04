@@ -132,11 +132,15 @@ describe("readOpenChannelRequest", () => {
                 readOpenChannelRequest(withParams({ funding_amount: `0x${"f".repeat(32)}` }), LSP_PUBKEY).amountShannons,
                 "340282366920938463463374607431768211455",
             );
-            assert.equal(readOpenChannelRequest(withParams({ funding_amount: "0xBA43B7400" }), LSP_PUBKEY).amountShannons, "50000000000");
+            assert.equal(readOpenChannelRequest(withParams({ funding_amount: "0xba43b7400" }), LSP_PUBKEY).amountShannons, "50000000000");
         });
 
         it("refuses one past u128", () => {
-            refuses(withParams({ funding_amount: `0x1${"0".repeat(32)}` }), "params.funding_amount");
+            refusesWith(withParams({ funding_amount: `0x1${"0".repeat(32)}` }), "params.funding_amount is out of range");
+        });
+
+        it("refuses an amount in uppercase hex, as CKB's JSON is written lowercase", () => {
+            refusesWith(withParams({ funding_amount: "0xBA43B7400" }), "params.funding_amount must be a hex integer");
         });
 
         it("refuses an absent or malformed amount", () => {
@@ -220,10 +224,6 @@ describe("readOpenChannelRequest", () => {
             assert.doesNotThrow(() => readOpenChannelRequest(withParams({ commitment_fee_rate: null }), LSP_PUBKEY));
         });
 
-        it("accepts 0x3e8 in either case", () => {
-            assert.doesNotThrow(() => readOpenChannelRequest(withParams({ commitment_fee_rate: "0x3E8" }), LSP_PUBKEY));
-        });
-
         it("refuses any rate but 0x3e8", () => {
             const other = "params.commitment_fee_rate must be 0x3e8, the rate the SDK opens with";
             refusesWith(withParams({ commitment_fee_rate: "0x3e9" }), other);
@@ -232,12 +232,13 @@ describe("readOpenChannelRequest", () => {
         });
 
         it("refuses a rate that is not a u64 in fiber's hex", () => {
-            const malformed = "params.commitment_fee_rate must be a 0x hex uint up to 0xffffffffffffffff";
+            const malformed = "params.commitment_fee_rate must be a hex integer";
             refusesWith(withParams({ commitment_fee_rate: "0x03e8" }), malformed);
             refusesWith(withParams({ commitment_fee_rate: "3e8" }), malformed);
             refusesWith(withParams({ commitment_fee_rate: "0x3eg" }), malformed);
+            refusesWith(withParams({ commitment_fee_rate: "0x3E8" }), malformed);
             refusesWith(withParams({ commitment_fee_rate: 1000 }), malformed);
-            refusesWith(withParams({ commitment_fee_rate: `0x1${"0".repeat(16)}` }), malformed);
+            refusesWith(withParams({ commitment_fee_rate: `0x1${"0".repeat(16)}` }), "params.commitment_fee_rate is out of range");
         });
     });
 
@@ -259,11 +260,11 @@ describe("readOpenChannelRequest", () => {
         });
 
         it("refuses a delay that is not a u64 in fiber's hex", () => {
-            const malformed = "params.commitment_delay_epoch must be a 0x hex uint up to 0xffffffffffffffff";
+            const malformed = "params.commitment_delay_epoch must be a hex integer";
             refusesWith(withParams({ commitment_delay_epoch: "0x010000000001" }), malformed);
             refusesWith(withParams({ commitment_delay_epoch: "10000000001" }), malformed);
             refusesWith(withParams({ commitment_delay_epoch: 0x10000000001 }), malformed);
-            refusesWith(withParams({ commitment_delay_epoch: `0x1${"0".repeat(16)}` }), malformed);
+            refusesWith(withParams({ commitment_delay_epoch: `0x1${"0".repeat(16)}` }), "params.commitment_delay_epoch is out of range");
         });
     });
 
@@ -343,6 +344,10 @@ describe("readOpenChannelRequest", () => {
             refuses(
                 withParams({ funding_lock_script_cell_deps: [{ ...CELL_DEP, out_point: { ...CELL_DEP.out_point, index: "0x01" } }] }),
                 `${at}.index`,
+            );
+            refusesWith(
+                withParams({ funding_lock_script_cell_deps: [{ ...CELL_DEP, out_point: { ...CELL_DEP.out_point, index: "0xA" } }] }),
+                `${at}.index must be a hex integer`,
             );
             refuses(
                 withParams({
