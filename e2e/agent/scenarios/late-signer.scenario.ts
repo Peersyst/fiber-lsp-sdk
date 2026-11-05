@@ -1,10 +1,9 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { bareLowerHex } from "../src/agent.utils";
-import { readDevnetEnv } from "./utils/devnet-env";
+import { readScenarioEnv } from "./utils/scenario-env";
 import { ensurePublicChannels } from "./utils/public-channels";
 import {
-    CHANNEL_FUNDING_SHANNONS,
     INVOICE_AMOUNT_SHANNONS,
     isSdkEvent,
     OPEN_STEPS,
@@ -19,12 +18,12 @@ import { EVENT_TIMEOUT_MS, sleep, waitUntil } from "./utils/wait";
 const OFFLINE_MS = 5 * SCENARIO_POLL_INTERVAL_MS;
 
 test("a signer that comes back late serves the payment the node held for it", async (t) => {
-    const env = readDevnetEnv();
+    const env = readScenarioEnv();
     await ensurePublicChannels(env);
     const device = await ScenarioDevice.create(env);
     try {
         const { node1, node2 } = device.nodes;
-        const channelId = await device.openFundedChannel(CHANNEL_FUNDING_SHANNONS);
+        const channelId = await device.openFundedChannel();
         const invoice = await device.sdk.createInvoice(INVOICE_AMOUNT_SHANNONS, { description: "late signer" });
         const paymentHash = bareLowerHex(invoice.paymentHashHex);
 

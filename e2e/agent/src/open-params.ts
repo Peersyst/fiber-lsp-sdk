@@ -1,15 +1,12 @@
 import { hexToBytes } from "@noble/hashes/utils.js";
-import type { CellDep, DepType, Script } from "@peersyst/fiber-lsp-sdk";
-import { HEX_BYTES_PATTERN, SCRIPT_CODE_HASH_PATTERN, SCRIPT_HASH_TYPES, UINT64_MAX } from "./agent.constants";
+import type { CellDep, Script } from "@peersyst/fiber-lsp-sdk";
+import { SCRIPT_HASH_TYPES, UINT64_MAX } from "./agent.constants";
 import { AgentRequestError } from "./agent.error";
 import type { OpenChannelRequest, ScriptJson } from "./agent.types";
-import { bareLowerHex, readJsonObject } from "./agent.utils";
+import { bareLowerHex, readExactJsonObject, readJsonList, readJsonObject } from "./agent.utils";
+import { readCkbBytes, readCkbCellDep, readCkbHash, readCkbQuantity } from "./ckb-json";
 
-const DEP_TYPES: readonly DepType[] = ["code", "dep_group"];
-
-const UINT_HEX = /^0x(0|[1-9a-fA-F][0-9a-fA-F]*)$/;
 const U128_MAX = (1n << 128n) - 1n;
-const U32_MAX = 0xffffffffn;
 
 // What `prepareChannelOpen` sends: a driver asking for other terms would get a channel it did not ask for.
 const COMMITMENT_FEE_RATE = 0x3e8n;
@@ -32,20 +29,13 @@ const REFUSED_OPTIONALS = [
  * @returns The script, as sent.
  */
 export function readScriptJson(value: unknown, field: string): ScriptJson {
-    const script = readJsonObject(value, field);
-    for (const key of Object.keys(script)) {
-        if (key !== "code_hash" && key !== "hash_type" && key !== "args")
-            throw new AgentRequestError(`${field}.${key} is not a script field`);
-    }
-    const { code_hash: codeHash, hash_type: hashType, args } = script;
-    if (typeof codeHash !== "string" || !SCRIPT_CODE_HASH_PATTERN.test(codeHash)) {
-        throw new AgentRequestError(`${field}.code_hash must be 32 bytes of 0x hex`);
-    }
+    const script = readExactJsonObject(value, ["code_hash", "hash_type", "args"], field);
+    const codeHash = readCkbHash(script.code_hash, `${field}.code_hash`);
+    const { hash_type: hashType } = script;
     if (typeof hashType !== "string" || !SCRIPT_HASH_TYPES.some((known) => known === hashType)) {
         throw new AgentRequestError(`${field}.hash_type must be one of ${SCRIPT_HASH_TYPES.join(", ")}`);
     }
-    if (typeof args !== "string" || !HEX_BYTES_PATTERN.test(args)) throw new AgentRequestError(`${field}.args must be 0x hex bytes`);
-    return { code_hash: codeHash, hash_type: hashType, args };
+    return { code_hash: codeHash, hash_type: hashType, args: readCkbBytes(script.args, `${field}.args`) };
 }
 
 /**
@@ -67,10 +57,7 @@ export function scriptFromJson(json: ScriptJson): Script {
  * @returns The value.
  */
 function readUintHex(value: unknown, max: bigint, field: string): bigint {
-    if (typeof value !== "string" || !UINT_HEX.test(value) || BigInt(value) > max) {
-        throw new AgentRequestError(`${field} must be a 0x hex uint up to 0x${max.toString(16)}`);
-    }
-    return BigInt(value);
+    return BigInt(readCkbQuantity(value, max, field));
 }
 
 /**
@@ -80,26 +67,10 @@ function readUintHex(value: unknown, max: bigint, field: string): bigint {
  * @returns The SDK's cell deps.
  */
 function readCellDeps(value: unknown, field: string): CellDep[] {
-    if (!Array.isArray(value)) throw new AgentRequestError(`${field} must be an array`);
-    return value.map((entry: unknown, position): CellDep => {
-        const at = `${field}[${position}]`;
-        const dep = readJsonObject(entry, at);
-        for (const key of Object.keys(dep)) {
-            if (key !== "out_point" && key !== "dep_type") throw new AgentRequestError(`${at}.${key} is not a cell dep field`);
-        }
-        const outPoint = readJsonObject(dep.out_point, `${at}.out_point`);
-        for (const key of Object.keys(outPoint)) {
-            if (key !== "tx_hash" && key !== "index") throw new AgentRequestError(`${at}.out_point.${key} is not an out point field`);
-        }
-        const { tx_hash: txHash } = outPoint;
-        if (typeof txHash !== "string" || !/^0x[0-9a-fA-F]{64}$/.test(txHash)) {
-            throw new AgentRequestError(`${at}.out_point.tx_hash must be 32 bytes of 0x hex`);
-        }
-        const index = Number(readUintHex(outPoint.index, U32_MAX, `${at}.out_point.index`));
-        const depType = DEP_TYPES.find((known) => known === dep.dep_type);
-        if (depType === undefined) throw new AgentRequestError(`${at}.dep_type must be one of ${DEP_TYPES.join(", ")}`);
-        return { outPoint: { txHash: hexToBytes(txHash.slice(2)), index }, depType };
-    });
+    return readJsonList(value, field, readCkbCellDep).map(({ out_point: outPoint, dep_type: depType }) => ({
+        outPoint: { txHash: hexToBytes(outPoint.tx_hash.slice(2)), index: Number(BigInt(outPoint.index)) },
+        depType,
+    }));
 }
 
 /**

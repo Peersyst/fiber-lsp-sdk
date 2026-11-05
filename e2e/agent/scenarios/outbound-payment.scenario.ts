@@ -1,25 +1,17 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { bareLowerHex } from "../src/agent.utils";
-import { readDevnetEnv } from "./utils/devnet-env";
+import { readScenarioEnv } from "./utils/scenario-env";
 import { ensurePublicChannels } from "./utils/public-channels";
-import {
-    CHANNEL_FUNDING_SHANNONS,
-    isSdkEvent,
-    OPEN_STEPS,
-    OUTBOUND_AMOUNT_SHANNONS,
-    ScenarioDevice,
-    SENT_STEPS,
-    signingSteps,
-} from "./utils/scenario-device";
+import { isSdkEvent, OPEN_STEPS, OUTBOUND_AMOUNT_SHANNONS, ScenarioDevice, SENT_STEPS, signingSteps } from "./utils/scenario-device";
 
 test("a payment the tenant sends asks a third signing session at C@3, and fiber#1701 force-closes the refused channel", async (t) => {
-    const env = readDevnetEnv();
+    const env = readScenarioEnv();
     await ensurePublicChannels(env);
     const device = await ScenarioDevice.create(env);
     try {
         const { node1, node2 } = device.nodes;
-        const channelId = bareLowerHex(await device.openFundedChannel(CHANNEL_FUNDING_SHANNONS));
+        const channelId = bareLowerHex(await device.openFundedChannel());
         const sendFrom = device.events.length;
         assert.deepEqual(signingSteps(device.events.slice(0, sendFrom), channelId), OPEN_STEPS, "the opening's signing steps");
 
@@ -47,9 +39,9 @@ test("a payment the tenant sends asks a third signing session at C@3, and fiber#
         t.diagnostic(
             `the channel left ChannelReady ${leaving.at - refusedAt} ms after the refusal: ${JSON.stringify(leaving.channel.raw.state)}`,
         );
-        await device.mineForceClose(channelId);
+        await device.confirmForceClose(channelId);
 
-        // The sent TLC now settles on chain, past the commitment delay this scenario never mines to: the payment is unresolved.
+        // The sent TLC settles on chain only past the commitment delay, which this scenario never reaches.
         const outcome = await node2.getPayment(payment.paymentHashHex, device.accessToken);
         assert.deepEqual({ status: outcome.status, failedError: outcome.failedError }, { status: "Inflight", failedError: null });
         const paymentEvents = device.events

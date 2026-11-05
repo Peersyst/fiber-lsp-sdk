@@ -10,10 +10,11 @@
     "scripts": {
         "build": "tsc",
         "check-types": "tsc --noEmit",
-        "test": "tsc && node --test dist/test/*.spec.js",
-        "scenarios": "tsc && node --test --test-concurrency=1 dist/scenarios/*.scenario.js"
+        "test": "rm -rf dist/test dist/scenarios && tsc && node --test dist/test/*.spec.js",
+        "scenarios": "rm -rf dist/test dist/scenarios && tsc && node --test --test-concurrency=1 dist/scenarios/*.scenario.js"
     },
     "dependencies": {
+        "@noble/curves": "2.2.0",
         "@noble/hashes": "2.2.0",
         "@peersyst/fiber-lsp-sdk": "link:../.."
     },

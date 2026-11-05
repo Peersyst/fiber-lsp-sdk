@@ -1,11 +1,7 @@
-import type { DevnetEnv } from "./devnet-env";
-import { CHANNEL_CLOSED_STATE, CHANNEL_READY_STATE, fiberNodes, mineUntil } from "./fiber-node";
+import { advanceChainUntil, CHANNEL_CLOSED_STATE, CHANNEL_READY_STATE, fiberNodes } from "./fiber-node";
 import type { FiberChannel, FiberGraphChannel, FiberNode } from "./fiber-node";
-import { CHANNEL_FUNDING_SHANNONS } from "./scenario-device";
-import { GRAPH_TIMEOUT_MS, OPENING_TIMEOUT_MS, sleep, waitUntil } from "./wait";
-
-// A tenant channel's 500 CKB; node 2 auto-accepts with as much of its own, the outbound liquidity.
-const PUBLIC_CHANNEL_FUNDING_SHANNONS = BigInt(CHANNEL_FUNDING_SHANNONS);
+import type { ScenarioEnv } from "./scenario-env";
+import { sleep, waitUntil } from "./wait";
 
 const CONNECT_SETTLE_MS = 1000;
 
@@ -31,17 +27,48 @@ function usable(channel: FiberChannel, peer: string): boolean {
     );
 }
 
-async function findOrOpen(pair: PublicChannelPair): Promise<void> {
+function createdAt(channel: FiberChannel): number {
+    const { created_at: value } = channel.raw;
+    if (typeof value !== "string") throw new Error(`list_channels: ${channel.channelId}'s created_at must be a hex string`);
+    return Number(BigInt(value));
+}
+
+// The time it opened one, null when one was usable.
+async function findOrOpen(pair: PublicChannelPair, fundingShannons: bigint): Promise<number | null> {
     await pair.funder.connectPeer(pair.peerAddr);
     await sleep(CONNECT_SETTLE_MS);
     const channels = await pair.funder.listChannels({ peer: pair.peerPubkey });
-    if (channels.some((channel) => usable(channel, pair.peerPubkey))) return;
-    await pair.funder.openChannel(pair.peerPubkey, PUBLIC_CHANNEL_FUNDING_SHANNONS, true);
+    if (channels.some((channel) => usable(channel, pair.peerPubkey))) return null;
+    const openedAt = Date.now();
+    await pair.funder.openChannel(pair.peerPubkey, fundingShannons, true);
+    return openedAt;
 }
 
-async function readyChannel(pair: PublicChannelPair): Promise<string | undefined> {
+// Throws on its own opening aborting, which no wait turns ready. Fiber deletes an aborted opening's state, so only the pending
+// listing shows it, with `is_public` always false (d8dd6d28 `fiber/network.rs:8576-8587`, `rpc/channel.rs:571-640`). Its
+// `created_at` is the funder's clock and openedAt this process's: one clock, as the nodes run here.
+async function readyChannel(pair: PublicChannelPair, openedAt: number | null): Promise<string | undefined> {
+    if (openedAt !== null) {
+        const pending = await pair.funder.listChannels({ peer: pair.peerPubkey, onlyPending: true });
+        const aborted = pending.find(
+            (channel) =>
+                samePubkey(channel.peer, pair.peerPubkey) &&
+                channel.stateName === CHANNEL_CLOSED_STATE &&
+                channel.stateFlags.includes("FUNDING_ABORTED") &&
+                createdAt(channel) >= openedAt,
+        );
+        if (aborted !== undefined)
+            throw new Error(`the opening of ${pair.name} aborted: ${JSON.stringify(aborted.raw.failure_detail ?? null)}`);
+    }
     const channels = await pair.funder.listChannels({ peer: pair.peerPubkey });
     return channels.find((channel) => usable(channel, pair.peerPubkey) && channel.stateName === CHANNEL_READY_STATE)?.channelId;
+}
+
+// One pair at a time: node 1 funds its own public channel and auto-accepts node 3's, which its pending funding could starve.
+async function ensureReady(env: ScenarioEnv, pair: PublicChannelPair): Promise<string> {
+    const openedAt = await findOrOpen(pair, BigInt(env.chain.publicChannelShannons));
+    const ready = (): Promise<string | undefined> => readyChannel(pair, openedAt);
+    return (await ready()) ?? (await advanceChainUntil(env, `${pair.name} to be ready`, ready, env.chain.openingTimeoutMs));
 }
 
 function announces(graph: FiberGraphChannel[], pair: PublicChannelPair): boolean {
@@ -54,7 +81,7 @@ function announces(graph: FiberGraphChannel[], pair: PublicChannelPair): boolean
 }
 
 // Both payers' graphs must announce the channels for trampoline routes to find them.
-export async function ensurePublicChannels(env: DevnetEnv, timeoutMs: number = OPENING_TIMEOUT_MS): Promise<PublicChannels> {
+export async function ensurePublicChannels(env: ScenarioEnv): Promise<PublicChannels> {
     const { node1, node3 } = fiberNodes(env);
     const node1ToLsp: PublicChannelPair = {
         name: "node 1 to the LSP",
@@ -71,13 +98,7 @@ export async function ensurePublicChannels(env: DevnetEnv, timeoutMs: number = O
         peerAddr: env.node1Addr,
     };
     const pairs = [node1ToLsp, node3ToNode1];
-    for (const pair of pairs) await findOrOpen(pair);
-    const readyIds = async (): Promise<PublicChannels | undefined> => {
-        const lspChannel = await readyChannel(node1ToLsp);
-        const node1Channel = await readyChannel(node3ToNode1);
-        return lspChannel === undefined || node1Channel === undefined ? undefined : { node1ToLsp: lspChannel, node3ToNode1: node1Channel };
-    };
-    const ids = (await readyIds()) ?? (await mineUntil(env, "the public channels to be ready", readyIds, timeoutMs));
+    const ids: PublicChannels = { node1ToLsp: await ensureReady(env, node1ToLsp), node3ToNode1: await ensureReady(env, node3ToNode1) };
     for (const payer of [node1, node3]) {
         await waitUntil(
             `${payer.url}'s graph to announce ${pairs.map((pair) => pair.name).join(" and ")}`,
@@ -85,7 +106,7 @@ export async function ensurePublicChannels(env: DevnetEnv, timeoutMs: number = O
                 const graph = await payer.graphChannels();
                 return pairs.every((pair) => announces(graph, pair)) ? true : undefined;
             },
-            { timeoutMs: GRAPH_TIMEOUT_MS },
+            { timeoutMs: env.chain.graphTimeoutMs },
         );
     }
     return ids;

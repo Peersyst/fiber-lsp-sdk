@@ -75,12 +75,17 @@ export function readJsonRpcRequest(body: string): { method: string | null; param
 }
 
 /**
+ * The token of a call to a node that reads none (a CKB RPC, a node without Biscuit): no Authorization is sent.
+ */
+export const NO_BEARER_TOKEN = "";
+
+/**
  * Sends one call and reads its result, throwing on any failure.
  * @param url The node's JSON-RPC endpoint.
  * @param fetch How the request is sent.
  * @param method The method.
  * @param params Its positional params.
- * @param token The Bearer token the call carries.
+ * @param token The Bearer token the call carries, or NO_BEARER_TOKEN for none.
  * @returns The result.
  */
 export async function jsonRpcCall(
@@ -95,7 +100,10 @@ export async function jsonRpcCall(
     try {
         response = await fetch(url, {
             method: "POST",
-            headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
+            headers:
+                token === NO_BEARER_TOKEN
+                    ? { "Content-Type": "application/json" }
+                    : { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
             body: JSON.stringify({ jsonrpc: "2.0", method, params, id: 1 }),
             signal: AbortSignal.timeout(AGENT_RPC_TIMEOUT_MS),
         });
@@ -169,7 +177,7 @@ export class AgentJsonRpc {
      * Sends one call to the bound node.
      * @param method The method.
      * @param params Its positional params.
-     * @param token The Bearer token the call carries.
+     * @param token The Bearer token the call carries, or NO_BEARER_TOKEN for none.
      * @returns The result.
      */
     private call(method: string, params: readonly unknown[], token: string): Promise<unknown> {

@@ -1,7 +1,7 @@
 import { join } from "node:path";
 import { hexToBytes } from "@noble/hashes/utils.js";
 import { RpcError, SdkError } from "@peersyst/fiber-lsp-sdk";
-import type { FiberLspSdk, ISignerStorage, SdkChannelOpening, SdkEvent, SdkNetworkConfig } from "@peersyst/fiber-lsp-sdk";
+import type { FiberLspSdk, ISignerStorage, SdkChannelOpening, SdkEvent, SdkNetwork } from "@peersyst/fiber-lsp-sdk";
 import { AgentRequestError } from "./agent.error";
 import type {
     AgentChannel,
@@ -108,7 +108,7 @@ export class Agent {
 
     private readonly sdkStorage: ISignerStorage;
 
-    private readonly network: SdkNetworkConfig;
+    private readonly network: SdkNetwork;
 
     private readonly rpc: AgentJsonRpc;
 
@@ -148,7 +148,7 @@ export class Agent {
         this.state = readAgentState(config.storeDir);
         this.storage = new FileSignerStorage(join(config.storeDir, SDK_STORE_FILE));
         this.sdkStorage = config.nonceCapBypass ? new NonceCapBypassStorage(this.storage) : this.storage;
-        this.network = devnetNetwork(config.contractsDir);
+        this.network = config.network.name === "devnet" ? devnetNetwork(config.network.contractsDir) : config.network.name;
         this.rpc = new AgentJsonRpc(config.rpcUrl, effects.fetch);
         this.capture = new OpenResultCapture(effects.fetch);
         this.log = agentLogger(effects.now, effects.log);

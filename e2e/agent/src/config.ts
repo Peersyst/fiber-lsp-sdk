@@ -1,5 +1,6 @@
 import { resolve } from "node:path";
-import type { AgentConfig, AgentControlAddr } from "./agent.types";
+import { AGENT_NETWORK_NAMES, MAX_TIMER_DELAY_MS } from "./agent.constants";
+import type { AgentConfig, AgentControlAddr, AgentNetwork, AgentNetworkName } from "./agent.types";
 
 type AgentFlag =
     | "rpc"
@@ -10,12 +11,14 @@ type AgentFlag =
     | "status-file"
     | "control-addr"
     | "interval-ms"
+    | "network"
     | "contracts-dir"
     | "ckb-rpc"
     | "nonce-cap-bypass";
 
-// Fiber's agent reads these from the environment too; `--contracts-dir` and `--ckb-rpc` it does not. `--interval-ms` and
-// `--nonce-cap-bypass` are this agent's alone. `--ws-rpc` is taken and left: fiber's agent subscribes there, this one polls.
+// Fiber's agent reads these from the environment too; `--contracts-dir` and `--ckb-rpc` it does not. `--interval-ms`,
+// `--network` and `--nonce-cap-bypass` are this agent's alone. `--ws-rpc` is taken and left: fiber's agent subscribes there,
+// this one polls.
 const FLAG_ENV_VARS: Readonly<Record<AgentFlag, string | null>> = {
     rpc: "FIBER_LSP_SDK_AGENT_RPC",
     "ws-rpc": "FIBER_LSP_SDK_AGENT_WS_RPC",
@@ -25,6 +28,7 @@ const FLAG_ENV_VARS: Readonly<Record<AgentFlag, string | null>> = {
     "status-file": "FIBER_LSP_SDK_AGENT_STATUS_FILE",
     "control-addr": "FIBER_LSP_SDK_AGENT_CONTROL_ADDR",
     "interval-ms": "FIBER_LSP_SDK_AGENT_INTERVAL_MS",
+    network: "FIBER_LSP_SDK_AGENT_NETWORK",
     "contracts-dir": null,
     "ckb-rpc": null,
     "nonce-cap-bypass": "FIBER_LSP_SDK_AGENT_NONCE_CAP_BYPASS",
@@ -36,10 +40,9 @@ const SWITCH_VALUES: Readonly<Record<string, boolean>> = { true: true, "1": true
 
 const DEFAULT_INTERVAL_MS = 200;
 
-const DEFAULT_CONTRACTS_DIR = "../deploy/contracts";
+const DEFAULT_AGENT_NETWORK: AgentNetworkName = "devnet";
 
-// The SDK's poll interval is a timer delay: at least 1 ms and within a signed 32-bit integer.
-const MAX_INTERVAL_MS = 2 ** 31 - 1;
+const DEFAULT_CONTRACTS_DIR = "../deploy/contracts";
 
 const MAX_PORT = 65_535;
 
@@ -132,6 +135,31 @@ function readSwitch(value: string | null, name: AgentFlag): boolean {
 }
 
 /**
+ * Tells whether a string names one of the networks the agent runs on.
+ * @param value The text.
+ * @returns Whether it is a network.
+ */
+export function isAgentNetworkName(value: string): value is AgentNetworkName {
+    return AGENT_NETWORK_NAMES.some((name) => name === value);
+}
+
+/**
+ * Reads the network: the devnet with its contracts folder, or testnet on the SDK's preset.
+ * @param value The setting's value, `null` when neither its flag nor its variable gives one.
+ * @param contractsDir The contracts folder given, `null` when none was.
+ * @returns The network.
+ */
+function readNetwork(value: string | null, contractsDir: string | null): AgentNetwork {
+    const name = value ?? DEFAULT_AGENT_NETWORK;
+    if (!isAgentNetworkName(name)) {
+        throw new Error(`--network must be ${AGENT_NETWORK_NAMES.join(" or ")}, got ${JSON.stringify(name)}`);
+    }
+    if (name === "devnet") return { name, contractsDir: resolve(contractsDir ?? DEFAULT_CONTRACTS_DIR) };
+    if (contractsDir !== null) throw new Error(`--contracts-dir is the devnet's alone: ${name}'s contracts are the SDK's preset`);
+    return { name };
+}
+
+/**
  * Reads a `host:port` address, an IPv6 host in brackets.
  * @param value The text.
  * @returns The address.
@@ -198,8 +226,8 @@ export function parseAgentConfig(argv: readonly string[], env: AgentEnv): AgentC
         controlAddr: controlAddr === null ? null : readControlAddr(controlAddr),
         operatorToken,
         lspNodeId,
-        intervalMs: intervalMs === null ? DEFAULT_INTERVAL_MS : readInteger("interval-ms", intervalMs, 1, MAX_INTERVAL_MS),
-        contractsDir: resolve(readSetting(flags, env, "contracts-dir") ?? DEFAULT_CONTRACTS_DIR),
+        intervalMs: intervalMs === null ? DEFAULT_INTERVAL_MS : readInteger("interval-ms", intervalMs, 1, MAX_TIMER_DELAY_MS),
+        network: readNetwork(readSetting(flags, env, "network"), readSetting(flags, env, "contracts-dir")),
         nonceCapBypass: readSwitch(readSetting(flags, env, "nonce-cap-bypass"), "nonce-cap-bypass"),
     };
 }

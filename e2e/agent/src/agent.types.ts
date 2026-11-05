@@ -14,6 +14,10 @@ export type AgentControlAddr = {
     port: number;
 };
 
+export type AgentNetworkName = "devnet" | "testnet";
+
+export type AgentNetwork = { name: "devnet"; contractsDir: string } | { name: "testnet" };
+
 export type AgentConfig = {
     rpcUrl: string;
     storeDir: string;
@@ -25,7 +29,7 @@ export type AgentConfig = {
      */
     lspNodeId: string;
     intervalMs: number;
-    contractsDir: string;
+    network: AgentNetwork;
     nonceCapBypass: boolean;
 };
 

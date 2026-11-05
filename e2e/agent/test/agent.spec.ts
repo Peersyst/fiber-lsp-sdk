@@ -215,7 +215,7 @@ function configOf(dirs: AgentDirs, intervalMs: number): AgentConfig {
         operatorToken: OPERATOR_TOKEN,
         lspNodeId: LSP_PUBKEY,
         intervalMs,
-        contractsDir: dirs.contractsDir,
+        network: { name: "devnet", contractsDir: dirs.contractsDir },
         nonceCapBypass: false,
     };
 }
@@ -391,6 +391,17 @@ describe("Agent", () => {
             assert.equal(options.nonceReuse, "allow");
             assert.equal(options.watchtower, undefined);
             assert.equal(options.now?.(), NOW_MS);
+        });
+
+        it("builds the facade over the SDK's testnet preset on testnet, reading no contracts", async (t) => {
+            const dirs = freshDirs();
+            rmSync(dirs.contractsDir, { recursive: true });
+            const run = runAgent(t, { ...configOf(dirs, 250), network: { name: "testnet" } }, new FakeNode());
+            await run.agent.start();
+            assert.deepEqual(
+                run.built.map((options) => options.network),
+                ["testnet"],
+            );
         });
 
         it("pins the LSP's key from --lsp-node-id, asking the node for none", async () => {

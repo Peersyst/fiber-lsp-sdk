@@ -3,18 +3,10 @@ import { test } from "node:test";
 import { bytesToHex } from "@noble/hashes/utils.js";
 import { decodeInvoice } from "@peersyst/fiber-lsp-sdk";
 import { bareLowerHex } from "../src/agent.utils";
-import { readDevnetEnv } from "./utils/devnet-env";
+import { readScenarioEnv } from "./utils/scenario-env";
 import type { FiberNode } from "./utils/fiber-node";
 import { ensurePublicChannels } from "./utils/public-channels";
-import {
-    CHANNEL_FUNDING_SHANNONS,
-    INVOICE_AMOUNT_SHANNONS,
-    OPEN_STEPS,
-    RECEIVED_STEPS,
-    ScenarioDevice,
-    scenarioJson,
-    signingSteps,
-} from "./utils/scenario-device";
+import { INVOICE_AMOUNT_SHANNONS, OPEN_STEPS, RECEIVED_STEPS, ScenarioDevice, scenarioJson, signingSteps } from "./utils/scenario-device";
 import { EVENT_TIMEOUT_MS, waitUntil } from "./utils/wait";
 
 type Node1Balances = { fromNode3: bigint; toLsp: bigint };
@@ -34,12 +26,12 @@ async function readNode1Balances(node1: FiberNode, node3Pubkey: string, lspPubke
 }
 
 test("a node the LSP does not host pays the device's invoice through node 1 and the LSP", async (t) => {
-    const env = readDevnetEnv();
+    const env = readScenarioEnv();
     await ensurePublicChannels(env);
     const device = await ScenarioDevice.create(env);
     try {
         const { node1, node2, node3 } = device.nodes;
-        const channelId = await device.openFundedChannel(CHANNEL_FUNDING_SHANNONS);
+        const channelId = await device.openFundedChannel();
         const invoice = await device.sdk.createInvoice(INVOICE_AMOUNT_SHANNONS, { description: "non-hosted payer" });
         const hints = decodeInvoice(invoice.invoice).attributes.flatMap((attribute) =>
             attribute.type === "trampolineRouteHint" ? [bytesToHex(attribute.nodeId)] : [],

@@ -1,19 +1,11 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { bareLowerHex } from "../src/agent.utils";
-import { readDevnetEnv } from "./utils/devnet-env";
+import { readScenarioEnv } from "./utils/scenario-env";
 import { requestParam, SUBMIT_CHANNEL_SIGNATURE_METHOD } from "./utils/faulty-fetch";
 import type { FaultyFetchRequest } from "./utils/faulty-fetch";
 import { ensurePublicChannels } from "./utils/public-channels";
-import {
-    CHANNEL_FUNDING_SHANNONS,
-    INVOICE_AMOUNT_SHANNONS,
-    isSdkEvent,
-    OPEN_STEPS,
-    RECEIVED_STEPS,
-    ScenarioDevice,
-    signingSteps,
-} from "./utils/scenario-device";
+import { INVOICE_AMOUNT_SHANNONS, isSdkEvent, OPEN_STEPS, RECEIVED_STEPS, ScenarioDevice, signingSteps } from "./utils/scenario-device";
 import { EVENT_TIMEOUT_MS, waitUntil } from "./utils/wait";
 
 type SubmittedSignature = { channelId: string; requestId: string; partialSignature: string; nextMaterial: unknown };
@@ -40,12 +32,12 @@ function submissionsOf(requests: readonly FaultyFetchRequest[], channelId: strin
 }
 
 test("a restarted device serves the request whose signature never reached the node", async (t) => {
-    const env = readDevnetEnv();
+    const env = readScenarioEnv();
     await ensurePublicChannels(env);
     const device = await ScenarioDevice.create(env);
     try {
         const { node1, node2 } = device.nodes;
-        const channelId = await device.openFundedChannel(CHANNEL_FUNDING_SHANNONS);
+        const channelId = await device.openFundedChannel();
         const evidenceBefore = await device.sdk.channelEvidence(channelId);
         // The opening's own signatures and submissions are left out of what the payment is checked against.
         const eventsFrom = device.events.length;

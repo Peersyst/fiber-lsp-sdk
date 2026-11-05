@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import type { AgentNodeFetch } from "../src/agent.types";
-import { AgentJsonRpc, jsonRpcCall, readJsonRpcRequest } from "../src/json-rpc";
+import { AgentJsonRpc, jsonRpcCall, NO_BEARER_TOKEN, readJsonRpcRequest } from "../src/json-rpc";
 
 const URL = "http://127.0.0.1:21714";
 
@@ -227,6 +227,15 @@ describe("jsonRpcCall", () => {
         const { fetch, requests } = fetchResult([1, "two", { three: null }]);
         assert.deepEqual(await jsonRpcCall(URL, fetch, "some_method", [7, "x"], "the-token"), [1, "two", { three: null }]);
         assertSent(requests, "the-token", '{"jsonrpc":"2.0","method":"some_method","params":[7,"x"],"id":1}');
+    });
+
+    it("sends no Authorization header without a token", async () => {
+        const { fetch, requests } = fetchResult(null);
+        assert.equal(await jsonRpcCall(URL, fetch, "some_method", [], NO_BEARER_TOKEN), null);
+        assert.deepEqual(
+            requests.map((request) => request.init.headers),
+            [{ "Content-Type": "application/json" }],
+        );
     });
 
     it("throws a JSON-RPC error with the node's message", async () => {

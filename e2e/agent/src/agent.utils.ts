@@ -12,6 +12,31 @@ export function readJsonObject(value: unknown, field: string): Record<string, un
 }
 
 /**
+ * Reads an object with no key outside the ones given.
+ * @param value The value.
+ * @param keys The keys it may have.
+ * @param field Where it sits.
+ * @returns The object.
+ */
+export function readExactJsonObject(value: unknown, keys: readonly string[], field: string): Record<string, unknown> {
+    const object = readJsonObject(value, field);
+    for (const key of Object.keys(object)) if (!keys.includes(key)) throw new AgentRequestError(`${field}.${key} is not a known field`);
+    return object;
+}
+
+/**
+ * Reads an array, each item with the reader given.
+ * @param value The value.
+ * @param field Where it sits.
+ * @param read The item's reader.
+ * @returns The items.
+ */
+export function readJsonList<T extends object | string>(value: unknown, field: string, read: (item: unknown, at: string) => T): T[] {
+    if (!Array.isArray(value)) throw new AgentRequestError(`${field} must be an array`);
+    return value.map((item: unknown, index) => read(item, `${field}[${index}]`));
+}
+
+/**
  * Reads an error's message, whatever was thrown.
  * @param error What was thrown.
  * @returns Its message.
