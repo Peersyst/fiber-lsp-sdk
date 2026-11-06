@@ -407,7 +407,9 @@ describe("prepareSdkChannelOpen", () => {
         const tick = async (h: Harness): Promise<void> => {
             const { rpc, store, activity, dispatch } = h.options;
             h.node.result({ channel_id: CHANNEL_ID, status: { type: "NoSignatureRequired" } });
-            await buildChannelSigningStep({ rpc, store, activity, dispatch, emit: () => undefined })({ abandoned: false });
+            await buildChannelSigningStep({ rpc, store, activity, dispatch, emit: () => undefined, pollNow: () => undefined })({
+                abandoned: false,
+            });
         };
         const fresh = harness();
         await tick(fresh);

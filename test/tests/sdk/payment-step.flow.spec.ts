@@ -181,7 +181,7 @@ async function opened(): Promise<PaymentFlow> {
     return h;
 }
 
-// Lets the tick `transfer`'s `pollNow` starts run out.
+// Lets the ticks `transfer` and its signatures ask for run out: the device's round ends signed.
 async function transferred(h: PaymentFlow, invoice: string, maxFeeShannons?: string): Promise<SdkPayment> {
     const sent = await h.sdk.transfer(invoice, maxFeeShannons === undefined ? undefined : { maxFeeShannons });
     await flush();
@@ -212,6 +212,11 @@ function signed(count: number): string[] {
     return Array.from({ length: count }, () => [...SIGNED_TICK, "get_payment"]).flat();
 }
 
+// Both rounds of a TLC: each ends on an idle tick, and the second's no longer reads the payment it ended.
+function bothRounds(): string[] {
+    return [...signed(4), ...IDLE_TICK, "get_payment", ...signed(4), ...IDLE_TICK];
+}
+
 function methods(h: PaymentFlow, from: number): string[] {
     return h.node.calls.slice(from).map((call) => call.method);
 }
@@ -237,11 +242,10 @@ async function watchedPayments(h: PaymentFlow): Promise<string[]> {
     return Object.keys((await new ActivityTracker(new SignerStore(h.storage)).read()).payments);
 }
 
-// Signs the device's round, has the peer fulfil and signs its round: the payment ends on the last signature's tick.
+// Past `transferred`: the peer fulfils and its round is signed, the payment ending on the last signature's tick.
 async function paidThrough(h: PaymentFlow): Promise<void> {
-    await tick(h, 3);
     h.node.fulfil(PAYMENT_HASH.slice(2), PREIMAGE);
-    await tick(h, 4);
+    await tick(h);
 }
 
 describe("payments over the tenant node", () => {
@@ -265,7 +269,7 @@ describe("payments over the tenant node", () => {
         expect(await intentOf(h)).toMatchObject({ maxShannons: BUDGET, open: true });
         await paidThrough(h);
         // The tick `pollNow` asks for signs the add; the step reads the payment on every tick until it ends.
-        expect(methods(h, from)).toEqual(["send_payment", ...signed(8)]);
+        expect(methods(h, from)).toEqual(["send_payment", ...bothRounds()]);
         expect(requests(h)).toEqual([...SEND_ROUND, ...FULFIL_ROUND]);
         expect(eventsOf(h)).toEqual([...SEND_SIGNINGS, ...FULFIL_SIGNINGS, "PAYMENT_SENT payment"]);
         expect(await paymentOf(h)).toMatchObject({ status: "Success", payment_preimage: `0x${PREIMAGE}`, fee: "0x4c4b40" });
@@ -289,6 +293,23 @@ describe("payments over the tenant node", () => {
         });
         expect(methods(h, again)).toEqual([]);
         expect(await watchedPayments(h)).toEqual([]);
+    });
+
+    it("signs a whole payment with the app open on the tick the call asks for and the one tick that finds the peer's fulfil", async () => {
+        const h = await opened();
+        const startedAtMs = h.timer.now;
+        await transferred(h, PAYEE_INVOICE_STRING);
+        expect(h.timer.now).toBe(startedAtMs);
+        expect(requests(h)).toEqual(SEND_ROUND);
+        expect(eventsOf(h)).toEqual(SEND_SIGNINGS);
+        await paidThrough(h);
+        expect(requests(h)).toEqual([...SEND_ROUND, ...FULFIL_ROUND]);
+        expect(eventsOf(h)).toEqual([...SEND_SIGNINGS, ...FULFIL_SIGNINGS, "PAYMENT_SENT payment"]);
+        // Nothing left to sign: the poller waits out its interval.
+        const settled = h.node.calls.length;
+        await flush();
+        expect(methods(h, settled)).toEqual([]);
+        expect(h.timer.pending).toBe(1);
     });
 
     it("throws the node's route failure for want of balance, watching nothing, and pays the same invoice once the balance is there", async () => {
@@ -352,10 +373,9 @@ describe("payments over the tenant node", () => {
         const h = await opened();
         const from = h.node.calls.length;
         await transferred(h, PAYEE_INVOICE_STRING);
-        await tick(h, 3);
         h.node.failOffered(PAYMENT_HASH.slice(2), "TemporaryNodeFailure");
-        await tick(h, 4);
-        expect(methods(h, from)).toEqual(["send_payment", ...signed(8)]);
+        await tick(h);
+        expect(methods(h, from)).toEqual(["send_payment", ...bothRounds()]);
         expect(requests(h)).toEqual([...SEND_ROUND, ...FULFIL_ROUND]);
         expect(eventsOf(h)).toEqual([...SEND_SIGNINGS, ...FULFIL_SIGNINGS, "PAYMENT_FAILED payment: TemporaryNodeFailure"]);
         expect(await intentOf(h)).toMatchObject({ maxShannons: BUDGET, open: false });
@@ -393,11 +413,10 @@ describe("payments over the tenant node", () => {
             message: `the device refuses the payment: the one under ${PAYMENT_HASH} is not reported yet`,
         });
         // The node ran the send: no tick was asked for, the next one signs the add.
-        await tick(h, 4);
+        await tick(h);
         expect(eventsOf(h)).toEqual(SEND_SIGNINGS);
-        h.node.fulfil(PAYMENT_HASH.slice(2), PREIMAGE);
-        await tick(h, 4);
-        expect(methods(h, from)).toEqual(["send_payment", ...signed(8)]);
+        await paidThrough(h);
+        expect(methods(h, from)).toEqual(["send_payment", ...bothRounds()]);
         expect(eventsOf(h)).toEqual([...SEND_SIGNINGS, ...FULFIL_SIGNINGS, "PAYMENT_SENT payment"]);
         expect(await intentOf(h)).toMatchObject({ open: false });
         expect(await watchedPayments(h)).toEqual([]);

@@ -12,6 +12,7 @@ export type ChannelSigningStepOptions = {
     activity: ActivityTracker;
     dispatch: SignerDispatch;
     emit: (event: SdkEvent) => void;
+    pollNow: () => void;
 };
 
 type SignedDispatchOutcome = Extract<DispatchOutcome, { kind: "signed" }>;
@@ -29,11 +30,13 @@ function deadlineFieldOf(deadlineMs: bigint | null): { deadlineMs?: number } {
 
 /**
  * Builds the poll step that answers the signing requests of every channel the device opened and has not seen closed.
- * @param options The node's client, the store, the activity list, the dispatch and the emitter.
+ * @param options The step's dependencies.
  * @returns The step; it rejects only when the activity list cannot be read.
  */
 export function buildChannelSigningStep(options: ChannelSigningStepOptions): PollStep {
-    const { rpc, store, activity, dispatch, emit } = options;
+    const { rpc, store, activity, dispatch, emit, pollNow } = options;
+    // Fiber answers `Applied` again while a request stays pending: hurrying each request once keeps the poller from spinning.
+    const hurried = new Set<string>();
 
     /**
      * Submits a signature, then announces it.
@@ -46,14 +49,20 @@ export function buildChannelSigningStep(options: ChannelSigningStepOptions): Pol
         const { requestId, partialSignature, nextMaterial, transition, deadlineMs } = outcome;
         // Both answers are success: `Applied` again while the request is pending, `AlreadyApplied` once it completed.
         await rpc.submitChannelSignature({ channelId, requestId, partialSignature, nextMaterial });
+        const requestIdHex = encodeSdkRequestId(requestId);
         deliverStepEvent(run, emit, {
             type: "SIGNING",
             channelId,
-            requestId: encodeSdkRequestId(requestId),
+            requestId: requestIdHex,
             transition,
             ...deadlineFieldOf(deadlineMs),
             outcome: outcome.warnings.length === 0 ? "signed" : "warning",
         });
+        const hurriedKey = `${channelId}:${requestIdHex}`;
+        if (run.abandoned || hurried.has(hurriedKey)) return;
+        hurried.add(hurriedKey);
+        // A round's next request is usually ready: it should not wait out an interval.
+        pollNow();
     };
 
     /**
