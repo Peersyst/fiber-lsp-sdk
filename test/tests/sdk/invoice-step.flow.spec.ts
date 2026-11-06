@@ -228,7 +228,7 @@ describe("hold invoices over the tenant node", () => {
         });
         const from = h.node.calls.length;
         h.node.receivePayment(PAYMENT);
-        await tick(h, 10);
+        await tick(h);
         expect(methods(h, from)).toEqual(
             [
                 signed("get_invoice"),
@@ -236,15 +236,14 @@ describe("hold invoices over the tenant node", () => {
                 signed("get_invoice"),
                 // The TLC is committed in both views: the node marks the invoice received, the device releases and settles.
                 signed("get_invoice", "settle_invoice"),
-                // The tick `pollNow` asks for, then each tick until the fulfil is applied settles again, harmlessly.
+                // Each tick until the fulfil is applied settles again, harmlessly.
                 signed("get_invoice", "settle_invoice"),
                 signed("get_invoice", "settle_invoice"),
                 // Paid on the peer's commitment_signed, the node's revoke_and_ack still to sign: the device stops watching.
                 signed("get_invoice"),
                 // The revoke_and_ack is signed with no invoice left to read.
                 signed(),
-                idle(),
-                idle(),
+                // The last signature's tick finds nothing.
                 idle(),
             ].flat(),
         );
@@ -272,7 +271,7 @@ describe("hold invoices over the tenant node", () => {
         h.storage.map.set(key, JSON.stringify({ ...record, invoiceIndex: OTHER_INVOICE_INDEX }));
         const from = h.node.calls.length;
         h.node.receivePayment(PAYMENT);
-        await tick(h, 5);
+        await tick(h);
         expect(methods(h, from)).toEqual(
             [signed("get_invoice"), signed("get_invoice"), signed("get_invoice"), signed("get_invoice"), idle("get_invoice")].flat(),
         );
@@ -335,7 +334,7 @@ describe("hold invoices over the tenant node", () => {
         const off = h.sdk.onEvent((event) => {
             if (event.type === "SIGNING" && event.transition === "CompleteReceivedRevokeAndAck") h.sdk.disconnect();
         });
-        await tick(h, 4);
+        await tick(h);
         off();
         expect(eventsOf(h)).toEqual(ADD_SIGNINGS);
         expect(await invoiceOf(h)).toMatchObject({ status: "Received" });
@@ -352,7 +351,7 @@ describe("hold invoices over the tenant node", () => {
         h.clock.nowMs = FAILED_BY_NODE_MS;
         h.node.failHeldTlc(PAYMENT.paymentHash);
         const failing = h.node.calls.length;
-        await tick(h, 5);
+        await tick(h);
         expect(methods(h, failing)).toEqual(
             [
                 signed("get_invoice"),
@@ -383,13 +382,22 @@ describe("hold invoices over the tenant node", () => {
         const off = h.sdk.onEvent((event) => {
             if (event.type === "SIGNING" && event.transition === "CompleteReceivedRevokeAndAck") h.sdk.disconnect();
         });
-        await tick(h, 4);
+        await tick(h);
         off();
         h.clock.nowMs = TOO_CLOSE_MS;
         const from = h.node.calls.length;
         await connect(h);
-        // Released at once, where the release build's margin waits; the tick `pollNow` asks for signs the fulfil.
-        expect(methods(h, from)).toEqual([idle("get_invoice", "settle_invoice"), signed("get_invoice", "settle_invoice")].flat());
+        // Released at once, where the release build's margin waits.
+        expect(methods(h, from)).toEqual(
+            [
+                idle("get_invoice", "settle_invoice"),
+                signed("get_invoice", "settle_invoice"),
+                signed("get_invoice", "settle_invoice"),
+                signed("get_invoice"),
+                signed(),
+                idle(),
+            ].flat(),
+        );
     });
 
     it("announces an open invoice expired once the node reports it expired, then stops watching it", async () => {
@@ -413,15 +421,16 @@ describe("hold invoices over the tenant node", () => {
         await h.sdk.createInvoice(AMOUNT);
         const from = h.node.calls.length;
         h.node.receivePayment(PAYMENT);
-        await tick(h, 10);
+        await tick(h, 2);
         expect(methods(h, from)).toEqual(
             [
                 signed("get_invoice"),
                 signed("get_invoice"),
                 signed("get_invoice"),
-                // Marked released; the settlement is lost on its way.
+                // Marked released; the settlement is lost, and the signature's tick settles again.
                 signed("get_invoice"),
                 idle("get_invoice", "settle_invoice"),
+                // Settling again asks for no tick: the fulfil waits for the interval's.
                 signed("get_invoice", "settle_invoice"),
                 signed("get_invoice", "settle_invoice"),
                 // Paid before the node's revoke_and_ack, which the next tick signs.
@@ -448,13 +457,13 @@ describe("hold invoices over the tenant node", () => {
         h.node.dropNextAnswer("settle_invoice");
         const from = h.node.calls.length;
         h.node.receivePayment(PAYMENT);
-        await tick(h, 9);
+        await tick(h);
         expect(methods(h, from)).toEqual(
             [
                 signed("get_invoice"),
                 signed("get_invoice"),
                 signed("get_invoice"),
-                // The node takes the preimage and starts the fulfil; its answer is lost, so no tick is asked for.
+                // The node takes the preimage and starts the fulfil; its answer is lost, and the signature's tick settles again.
                 signed("get_invoice", "settle_invoice"),
                 signed("get_invoice", "settle_invoice"),
                 signed("get_invoice", "settle_invoice"),
@@ -480,16 +489,22 @@ describe("hold invoices over the tenant node", () => {
         const h = await opened(losingNext("settle_invoice"));
         await h.sdk.createInvoice(AMOUNT);
         h.node.receivePayment(PAYMENT);
-        await tick(h, 4);
+        // The app sleeps on the lost settlement, before the signature's tick settles again.
+        const off = h.sdk.onEvent((event) => {
+            if (event.type === "ERROR") h.sdk.disconnect();
+        });
+        await tick(h);
+        off();
         expect(eventsOf(h).slice(4, 6)).toEqual([
             "PAYMENT_PENDING invoice",
             `ERROR poll_failed: the invoice poll of ${PAYMENT_HASH} failed: settle_invoice: the request failed`,
         ]);
-        // The app sleeps until the node's maintenance fails the TLC.
+        // It sleeps until the node's maintenance fails the TLC.
         h.clock.nowMs = FAILED_BY_NODE_MS;
         h.node.failHeldTlc(PAYMENT.paymentHash);
         const from = h.node.calls.length;
-        await tick(h, 2);
+        await connect(h);
+        await tick(h);
         // The device settles again and the node takes the preimage, but its TLC is already failing back.
         expect(methods(h, from)).toEqual([idle("get_invoice", "settle_invoice"), idle("get_invoice", "settle_invoice")].flat());
         expect(requests(h)).toEqual([...ADD_ROUND, "SendCommitmentSigned Commitment@3 unanswered"]);

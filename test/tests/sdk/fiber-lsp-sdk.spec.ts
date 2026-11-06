@@ -215,6 +215,13 @@ async function tickOver(h: SigningHarness, status: unknown, submits: boolean, wa
     h.node.result({ channels: [{ channel_id: SIGNING_CHANNEL_ID, state: READY }] }).result({ channel_id: SIGNING_CHANNEL_ID, status });
     if (submits) h.node.result({ type: "Applied" });
     h.node.result({ channel_id: SIGNING_CHANNEL_ID, status: watchtowerStatus });
+    // The tick the signature asks for finds nothing.
+    if (submits) {
+        h.node
+            .result({ channels: [{ channel_id: SIGNING_CHANNEL_ID, state: READY }] })
+            .result({ channel_id: SIGNING_CHANNEL_ID, status: IDLE })
+            .result({ channel_id: SIGNING_CHANNEL_ID, status: IDLE });
+    }
     h.sdk.connect();
     await flush();
     h.sdk.disconnect();
@@ -555,11 +562,11 @@ describe("FiberLspSdk", () => {
     });
 
     describe("construction defaults", () => {
-        it("defaults the poll interval to five seconds", async () => {
+        it("defaults the poll interval to two seconds", async () => {
             const h = harness({ pollIntervalMs: undefined });
             h.sdk.connect();
             await flush();
-            expect(DEFAULT_POLL_INTERVAL_MS).toBe(5_000);
+            expect(DEFAULT_POLL_INTERVAL_MS).toBe(2_000);
             expect(h.timer.delays).toContain(DEFAULT_POLL_INTERVAL_MS);
         });
 
@@ -695,6 +702,9 @@ describe("FiberLspSdk", () => {
                 signingStatusCall(SIGNING_CHANNEL_ID),
                 signatureSubmissionCall(signing, sent),
                 watchtowerStatusCall(SIGNING_CHANNEL_ID),
+                LIST_CHANNELS_WITH_CLOSED_CALL,
+                signingStatusCall(SIGNING_CHANNEL_ID),
+                watchtowerStatusCall(SIGNING_CHANNEL_ID),
             ]);
             expect(h.events).toStrictEqual([withSigningDeadline(signedEventOf(signing, sent))]);
         });
@@ -777,6 +787,9 @@ describe("FiberLspSdk", () => {
                 "list_channels",
                 "get_channel_signing_status",
                 "submit_channel_signature",
+                "get_watchtower_signing_status",
+                "list_channels",
+                "get_channel_signing_status",
                 "get_watchtower_signing_status",
             ]);
             expect(h.events).toStrictEqual([

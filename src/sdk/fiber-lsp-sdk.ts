@@ -90,9 +90,14 @@ export class FiberLspSdk {
         const preimages = new HoldInvoicePreimages(masterSeed);
         const sending = new Set<string>();
         const reading = new Set<string>();
+        /**
+         * Asks the poller for a tick at once.
+         * @returns Nothing.
+         */
+        const pollNow = (): void => this.context.poller.pollNow();
         const steps = [
             buildChannelStep({ rpc, activity, openings, emit }),
-            buildChannelSigningStep({ rpc, store, activity, dispatch, emit }),
+            buildChannelSigningStep({ rpc, store, activity, dispatch, emit, pollNow }),
             buildWatchtowerSigningStep({ rpc, store, policy, dispatch, activity, channels, emit }),
             buildInvoiceStep({
                 rpc,
@@ -102,7 +107,7 @@ export class FiberLspSdk {
                 millisecondsPerEpoch: network.millisecondsPerEpoch,
                 now,
                 emit,
-                pollNow: () => this.context.poller.pollNow(),
+                pollNow,
             }),
             buildPaymentStep({ rpc, policy, activity, sending, reading, emit }),
         ];

@@ -29,10 +29,9 @@ export const SDK_NETWORK_PRESETS = {
 } as const satisfies Record<SdkNetworkName, SdkNetworkConfig>;
 
 /**
- * Unmeasured against a node: a tick is one `list_channels`, one read per payment and invoice in flight, one signing status
- * per registered channel and one submit per signature.
+ * A tick is one `list_channels`, one read per payment and invoice in flight, one signing status per channel and one submit per signature.
  */
-export const DEFAULT_POLL_INTERVAL_MS = 5_000;
+export const DEFAULT_POLL_INTERVAL_MS = 2_000;
 
 /**
  * The default `fetch` has no timeout, so a hung request would hold every later tick.
