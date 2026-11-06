@@ -8,7 +8,7 @@ blind-signs.
 ## Key properties
 
 - **Runs anywhere**: framework-agnostic TypeScript, shipped as both ESM and CommonJS. The same code runs unmodified in Node,
-  browsers, and React Native (Hermes).
+  browsers, and React Native (Hermes, bundled by Metro with no configuration: [react-native.md](./docs/react-native.md)).
 - **No I/O of its own**: the SDK performs no platform calls. The host injects every external effect: an `ISignerStorage` (key-value
   persistence), `fetch` and a timer, the last two defaulting to the runtime's own; the clock defaults to `Date.now`.
 - **Minimal, audited dependency surface**: the only runtime dependencies are `@noble/curves`, `@noble/hashes`, `@scure/bip32`, and
@@ -88,6 +88,8 @@ Full index in [docs/README.md](./docs/README.md). The load-bearing ones:
   `disconnect`, the events and the errors, the time index a wipe cannot reset, the channel opening and the listing, a
   payment received on a hold invoice, a payment sent with `transfer`, and the poller with its channel, signing,
   watchtower, invoice and payment steps.
+- [Running in React Native](./docs/react-native.md): what the package needs, the storage and the `fetch` the app provides, and
+  the poller in the background.
 - [Cross-implementation harness](./interop/README.md): how the vectors are generated and re-validated against a new fiber
   release.
 - [The device agent for fiber's e2e suites](./docs/e2e-agent.md): the SDK behind the control contract of fiber's own test

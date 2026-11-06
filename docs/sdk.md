@@ -29,6 +29,8 @@ platform's, so it needs no reading. No source of randomness is injected: nothing
 `ITimer` belongs to `common`; `IFetchLike` is the rpc client's; the two storage interfaces are the store's ([persistence.md](./persistence.md)). The facade publishes all
 of them, since it is the first thing that lets a host construct any of the modules behind them.
 
+What a React Native app adds to them is in [react-native.md](./react-native.md).
+
 ## The options
 
 | Option           | What it is                                                                                                                      |
@@ -582,6 +584,10 @@ funded and the fee, comes back to the user, and that the fee is one the user acc
 before it signs. It returns the tx with its witnesses signed and nothing else changed: a tx changed anywhere but its
 witnesses is refused at submission, since the funding cell is pinned by the tx's hash. What it throws comes through as itself, with
 the opening kept, so the identical call resumes it.
+
+A signer built on ccc has one conversion that fails silently: `Transaction` spells a cell dep's type `dep_group`, ccc spells
+it `depGroup`, and ccc's codec writes any other string as byte 0, a `code` dep, with no error, so a signer that passes the
+SDK's spelling through signs another transaction.
 
 ### The submission
 
