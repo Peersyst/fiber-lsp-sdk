@@ -58,8 +58,8 @@ export class HoldInvoiceError extends Error {
     readonly code: HoldInvoiceErrorCode;
 
     /**
-     * Creates the error, for a step the host retries later.
-     * @param code What in the recorded state holds the step back.
+     * Creates a refusal of a hold invoice's release or cancel.
+     * @param code What in the recorded state refused it.
      * @param message Reason, safe to log.
      */
     constructor(code: HoldInvoiceErrorCode, message: string) {

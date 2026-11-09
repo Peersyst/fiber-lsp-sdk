@@ -96,7 +96,7 @@ async function connect(h: OpeningFlow): Promise<void> {
     await flush();
 }
 
-const signFundingInputs: SdkSignFundingInputs = (unsigned) => Promise.resolve(signed(unsigned));
+const signFundingInputs: SdkSignFundingInputs = (unsigned) => Promise.resolve(signedWitnesses(unsigned));
 
 function signingInto(handed: Transaction[]): SdkSignFundingInputs {
     return (unsigned) => {
@@ -105,8 +105,12 @@ function signingInto(handed: Transaction[]): SdkSignFundingInputs {
     };
 }
 
+function signedWitnesses(unsigned: Transaction): Uint8Array[] {
+    return unsigned.witnesses.map(() => SIGNED_WITNESS);
+}
+
 function signed(unsigned: Transaction): Transaction {
-    return { ...unsigned, witnesses: unsigned.witnesses.map(() => SIGNED_WITNESS) };
+    return { ...unsigned, witnesses: signedWitnesses(unsigned) };
 }
 
 function eventsOf(h: OpeningFlow): string[] {
@@ -133,6 +137,10 @@ function requests(h: OpeningFlow): string[] {
 
 function openCalls(h: OpeningFlow): unknown[] {
     return h.node.calls.filter((call) => call.method === "open_channel_with_external_funding").map((call) => call.params);
+}
+
+function submissionsOf(h: OpeningFlow): unknown[] {
+    return h.node.calls.filter((call) => call.method === "submit_signed_funding_tx").map((call) => call.params);
 }
 
 async function refusalOf(h: OpeningFlow, method: string, params: unknown): Promise<unknown> {
@@ -476,6 +484,50 @@ describe("the channel opening over the tenant node", () => {
             code: -32000,
             message: "tenant channel is already open",
         });
+    });
+
+    it("submits the funding tx the node froze under the witnesses the signer resolves, and nothing else of the signer's", async () => {
+        const h = flow();
+        await connect(h);
+        const handed: Transaction[] = [];
+        await h.sdk.openChannel(FUNDED, USER_LOCK, signingInto(handed));
+        const [unsigned] = handed;
+        if (unsigned === undefined) throw new Error("the host was handed no tx");
+        expect(unsigned.witnesses).toHaveLength(2);
+        expect(submissionsOf(h)).toEqual([
+            {
+                channel_id: OPENING_CHANNEL_ID,
+                signed_funding_tx: encodeTransaction("signedFundingTx", { ...unsigned, witnesses: [SIGNED_WITNESS, SIGNED_WITNESS] }),
+            },
+        ]);
+        await tick(h, 3);
+        expect(eventsOf(h)).toEqual([
+            "SIGNING SendCommitmentSigned signed",
+            "SIGNING CompleteReceivedCommitment warning",
+            "CHANNEL_READY opening",
+        ]);
+    });
+
+    it("hands the signer a copy: what it changes of the tx it was handed never reaches the node", async () => {
+        const reference = flow();
+        await reference.sdk.openChannel(FUNDED, USER_LOCK, signFundingInputs);
+        const h = flow();
+        await connect(h);
+        await h.sdk.openChannel(FUNDED, USER_LOCK, (unsigned) => {
+            const witnesses = signedWitnesses(unsigned);
+            unsigned.outputs.length = 0;
+            unsigned.cellDeps.length = 0;
+            unsigned.headerDeps.push(new Uint8Array(32).fill(0x7e));
+            return Promise.resolve(witnesses);
+        });
+        expect(submissionsOf(h)).toHaveLength(1);
+        expect(submissionsOf(h)).toEqual(submissionsOf(reference));
+        await tick(h, 3);
+        expect(eventsOf(h)).toEqual([
+            "SIGNING SendCommitmentSigned signed",
+            "SIGNING CompleteReceivedCommitment warning",
+            "CHANNEL_READY opening",
+        ]);
     });
 
     it("hands the node the user lock's cell deps, which it adds to the funding tx unless the tx carries them already", async () => {

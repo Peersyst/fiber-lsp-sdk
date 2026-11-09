@@ -312,14 +312,11 @@ type NodeInvoice = {
     invoice: Invoice;
     // What `new_invoice` answered.
     address: string;
-    // `Expired` is an `Open` one past its expiry, never stored (`rpc/invoice.rs:449-455`), and the facade never calls
-    // `cancel_invoice` (a tenant's since `rpc/tenant.rs:61-85`).
-    status: "Open" | "Received" | "Paid";
+    // `Expired` is an `Open` one past its expiry, never stored (`rpc/invoice.rs:449-455`).
+    status: "Open" | "Received" | "Paid" | "Cancelled";
     // What `settle_invoice` stored.
     preimage: Uint8Array | null;
 };
-
-type NodeInvoiceStatus = Exclude<RpcInvoiceStatus, "Cancelled">;
 
 // Fiber's `NewInvoiceParams` (`fiber-json-types/src/invoice.rs:121-157`), the members the SDK never sends included.
 type NodeNewInvoiceParamsWire = NewInvoiceParamsWire &
@@ -1044,6 +1041,14 @@ export class InMemoryTenantNode {
         this.channelState = { state_name: "Closed", state_flags: `${side}|WAITING_ONCHAIN_SETTLEMENT` };
     }
 
+    confirmForceClose(options: TenantNodeForceClose): void {
+        const { state_name: name, state_flags: flags } = this.channelState;
+        if (name !== "ShuttingDown" || flags !== "WAITING_COMMITMENT_CONFIRMATION") {
+            throw new Error("the double confirms a force close only once shutdown_channel with force asked for it");
+        }
+        this.forceClose("local", options);
+    }
+
     // The peer's own watchtower spends the cell first, as fiber's would from its side, once what the device signed has landed.
     peerSpend(): void {
         const closed = this.requireForceClosed();
@@ -1163,6 +1168,8 @@ export class InMemoryTenantNode {
                 return this.getInvoice(params);
             case "settle_invoice":
                 return this.settleInvoice(params);
+            case "cancel_invoice":
+                return this.cancelInvoice(params);
             case "send_payment":
                 return this.sendPaymentByRpc(params);
             case "get_payment":
@@ -1663,7 +1670,7 @@ export class InMemoryTenantNode {
         });
     }
 
-    private invoiceStatusOf(entry: NodeInvoice): NodeInvoiceStatus {
+    private invoiceStatusOf(entry: NodeInvoice): RpcInvoiceStatus {
         return entry.status === "Open" && isInvoiceExpired(entry.invoice, BigInt(this.now())) ? "Expired" : entry.status;
     }
 
@@ -1792,6 +1799,8 @@ export class InMemoryTenantNode {
         switch (this.invoiceStatusOf(entry)) {
             case "Open":
                 return failed("Invoice is still open");
+            case "Cancelled":
+                return failed("Invoice is already cancelled");
             case "Expired":
                 return failed("Invoice is already expired");
             case "Paid":
@@ -1803,6 +1812,34 @@ export class InMemoryTenantNode {
         const held = this.tlcs.find((tlc) => tlc.held && bytesToHex(tlc.paymentHash) === key);
         if (held !== undefined) this.fulfilHeld(held, entry);
         return { result: {} };
+    }
+
+    // `cancel_invoice` (`rpc/invoice.rs:469-506`, `fiber/network.rs:5010-5045`): the row looked up first, then the status checks in
+    // order (`fiber/network.rs:5021-5032`), which count an `Open` one past its expiry as `Expired` and cancel it. The cancel stores its
+    // status, then the held TLC set fails back whole (`settle_tlc_set_command.rs:134-146`, `:272`, `:336-339`); the answer is the invoice.
+    private cancelInvoice(params: unknown): RpcAnswer {
+        const paymentHash = readParams<RpcPaymentHashParamsWire, Uint8Array>(params, (at) =>
+            decodeHexBytes(at("payment_hash"), PAYMENT_HASH_LENGTH),
+        );
+        if (paymentHash instanceof WireError) return invalidParams(params, paymentHash);
+        const key = bytesToHex(paymentHash);
+        const entry = this.invoices.get(key);
+        if (entry === undefined) return failed("invoice not found");
+        switch (this.invoiceStatusOf(entry)) {
+            case "Paid":
+                return failed("invoice can not be canceled, current status: Paid");
+            case "Cancelled":
+                return failed("invoice can not be canceled, current status: Cancelled");
+            case "Received":
+                if (entry.preimage !== null) return failed("invoice can not be canceled because payment preimage already exists");
+                break;
+            case "Open":
+            case "Expired":
+                break;
+        }
+        entry.status = "Cancelled";
+        for (const held of this.tlcs.filter((tlc) => tlc.held && bytesToHex(tlc.paymentHash) === key)) this.removeTlc(held, false);
+        return { result: { invoice_address: entry.address, invoice: invoiceJson(entry.invoice), status: entry.status } };
     }
 
     // `send_payment` on a tenant's path (`rpc/payment.rs:240-304`): the payment data checked by the network actor
@@ -1968,6 +2005,28 @@ export class InMemoryTenantNode {
         return { result: paymentWire(payment) };
     }
 
+    // The force branch of `handle_shutdown_command` (`fiber/channel.rs:2760-2804`), or of the network actor's for a channel with no
+    // actor (`fiber/network.rs:8186-8250`): the channel's latest commitment is broadcast and the state waits for its confirmation,
+    // which `confirmForceClose` stands for. The refusals text the state in debug form; the network actor's wraps
+    // it in `Error::ChannelError` (`fiber/network.rs:8208-8217`, `errors.rs:52-53`), the channel actor's does not.
+    private forceShutdown(channelId: string): RpcAnswer {
+        if (!this.isChannel(channelId)) return failed(`Channel not found error: Hash256(${channelId})`);
+        if (!this.mayForceShutdown()) {
+            const prefix = this.hasActor(channelId) ? "" : "Failed to processing channel: ";
+            return failed(`${prefix}Invalid state: Handling force shutdown command invalid state ${stateDebugOf(this.channelState)}`);
+        }
+        if (this.signedCommitments.local.length === 0) throw new Error("the device signed no local commitment for the node to broadcast");
+        this.channelState = { state_name: "ShuttingDown", state_flags: "WAITING_COMMITMENT_CONFIRMATION" };
+        return { result: null };
+    }
+
+    // Fiber also takes an `AwaitingChannelReady` once the node's channel_ready is sent and a commitment signed
+    // (`fiber/channel.rs:2761-2786`), a state the double never holds.
+    private mayForceShutdown(): boolean {
+        const { state_name: name } = this.channelState;
+        return name === "ChannelReady" || name === "ShuttingDown";
+    }
+
     // `shutdown_channel` (`rpc/channel.rs:690-722`, a tenant's as any node's at `:289-299`): the network actor's lookup
     // (`fiber/network.rs:8265-8282`), then `handle_shutdown_command`'s checks in order (`fiber/channel.rs:2805-2846`) but the
     // peer's being offline. The peer answers at once (`:11937-11958`).
@@ -1983,7 +2042,7 @@ export class InMemoryTenantNode {
             if (request.closeScript !== null || request.feeRate !== null) {
                 return failed("close_script and fee_rate should not be set when force is true");
             }
-            throw new Error("the double serves no force close by shutdown_channel: the forceClose move stands for it");
+            return this.forceShutdown(request.channelId);
         }
         // The id in `Hash256`'s debug form (`errors.rs:38`).
         if (!this.hasActor(request.channelId)) return failed(`Channel not found error: Hash256(${request.channelId})`);

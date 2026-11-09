@@ -18,11 +18,12 @@ import { HoldInvoicePreimages, SignerDispatch, TenantIdentity } from "../signer"
 import { ActivityTracker } from "./activity";
 import { DeviceChannelList } from "./device-channels";
 import { IndexAllocator } from "./allocator";
-import { closeSdkChannel } from "./channel-closing";
+import { closeSdkChannel, forceCloseSdkChannel } from "./channel-closing";
 import { readSdkChannelEvidence } from "./channel-evidence";
 import { listSdkChannels } from "./channel-listing";
 import { openSdkChannel, prepareSdkChannelOpen, submitSdkFundingTx } from "./channel-opening";
 import { buildChannelStep } from "./channel-step";
+import { cancelSdkInvoice } from "./invoice-cancelling";
 import { createSdkInvoice } from "./invoice-creation";
 import { buildInvoiceStep } from "./invoice-step";
 import { transferSdkPayment } from "./payment-sending";
@@ -47,6 +48,7 @@ import type {
     SdkTenantRegistration,
     SdkTenantRegistrationRequest,
     SdkTransferOptions,
+    SdkWatchtowerOptions,
 } from "./sdk.types";
 import { resolveSdkNetwork, runtimeTimer } from "./utils";
 import { buildWatchtowerSigningStep } from "./watchtower-step";
@@ -172,6 +174,15 @@ export class FiberLspSdk {
     }
 
     /**
+     * Replaces the host's watchtower approval, then asks for a tick: fiber keeps a refused spend pending.
+     * @param approval The destination and the fee ceiling; a refused approval leaves the previous one in force.
+     */
+    setWatchtowerApproval(approval: SdkWatchtowerOptions): void {
+        this.context.policy.setWatchtowerApproval(approval);
+        this.context.poller.pollNow();
+    }
+
+    /**
      * Reads what the device keeps of a channel: its revocations, each view's last commitment and the watchtower's signatures.
      * @param channelId The channel, under any name the node gave it.
      * @returns A copy of the evidence.
@@ -205,7 +216,7 @@ export class FiberLspSdk {
      * Opens a channel to the LSP in one call, the host's signer signing the funding inputs in between.
      * @param amountShannons What the user pays in, reserve included, in decimal shannons.
      * @param userLock The lock that funds the channel and that the device's side of a close pays to.
-     * @param signFundingInputs The host's signer, which checks what the inputs pay before signing them.
+     * @param signFundingInputs The host's signer, which checks what the inputs pay before signing them and resolves the witnesses.
      * @param userLockCellDeps The cell deps the node needs to spend the user's lock, when the chain's defaults lack them.
      * @returns The channel id, once the node took the signed tx.
      */
@@ -229,6 +240,15 @@ export class FiberLspSdk {
     }
 
     /**
+     * Asks the node to force-close a channel, which needs no record of it on this device.
+     * @param channelId The channel id, as the node holds it.
+     * @returns Settles once the node took the request; only a watched channel then tells `CHANNEL_CLOSED`.
+     */
+    forceCloseChannel(channelId: string): Promise<void> {
+        return forceCloseSdkChannel(this.context, channelId);
+    }
+
+    /**
      * Lists the node's channels, closed ones included, as a wallet shows them.
      * @returns The channels, each telling whether this device registered it.
      */
@@ -244,6 +264,15 @@ export class FiberLspSdk {
      */
     createInvoice(amountShannons: string, options?: SdkInvoiceOptions): Promise<SdkInvoice> {
         return createSdkInvoice(this.context, amountShannons, options);
+    }
+
+    /**
+     * Cancels a hold invoice of this device, whose preimage is then never released; `PAYMENT_CANCELLED` tells when a watched one ended.
+     * @param paymentHashHex The payment hash, `0x`-prefixed lowercase hex, as the events carry it.
+     * @returns Settles once the node took the request.
+     */
+    cancelInvoice(paymentHashHex: string): Promise<void> {
+        return cancelSdkInvoice(this.context, paymentHashHex);
     }
 
     /**

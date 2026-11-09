@@ -4,7 +4,7 @@ import type { ChannelSigningTransition } from "../../../src/protocol";
 import { FiberRpcClient, RpcError, RpcResponseError, RpcTransportError } from "../../../src/rpc";
 import type { SdkEvent } from "../../../src/sdk";
 import { ActivityTracker, SdkError, buildChannelSigningStep } from "../../../src/sdk";
-import type { DispatchOutcome, SignerDispatch } from "../../../src/signer";
+import type { DispatchOutcome, SignerDispatch, SignerRefusal } from "../../../src/signer";
 import { ScriptedNode } from "../../mocks/rpc";
 import { asRecord } from "../../utils/json-shape";
 import { resignPeerHalf } from "../../utils/peer-musig";
@@ -55,6 +55,7 @@ type Harness = {
     events: SdkEvent[];
     pollNow: jest.Mock<void, []>;
     step: (run: { abandoned: boolean }) => Promise<void>;
+    rebuiltStep: () => (run: { abandoned: boolean }) => Promise<void>;
 };
 
 async function harness(
@@ -69,18 +70,19 @@ async function harness(
     const node = new ScriptedNode();
     const events: SdkEvent[] = [];
     const pollNow = jest.fn<void, []>();
-    const step = buildChannelSigningStep({
-        rpc: new FiberRpcClient({ url: URL, fetch: node.fetch }),
-        store: channel.store,
-        activity,
-        dispatch: channel.dispatch,
-        emit: (event) => {
-            events.push(event);
-            onEmit(event);
-        },
-        pollNow,
-    });
-    return { channel, activity, node, events, pollNow, step };
+    const rebuiltStep = (): ((run: { abandoned: boolean }) => Promise<void>) =>
+        buildChannelSigningStep({
+            rpc: new FiberRpcClient({ url: URL, fetch: node.fetch }),
+            store: channel.store,
+            activity,
+            dispatch: channel.dispatch,
+            emit: (event) => {
+                events.push(event);
+                onEmit(event);
+            },
+            pollNow,
+        });
+    return { channel, activity, node, events, pollNow, step: rebuiltStep(), rebuiltStep };
 }
 
 // The channels the device opened and has not seen closed, in the order it opened them.
@@ -261,15 +263,181 @@ describe("buildChannelSigningStep", () => {
                 },
             ]);
         });
+    });
 
-        it("emits the refusal again on every tick the request stays pending", async () => {
+    describe("a refusal that stays pending", () => {
+        const REQUEST_ID_BYTES = new Uint8Array(32).fill(0x7a);
+        const REQUEST_ID = `0x${"7a".repeat(32)}`;
+        const OTHER_REQUEST_ID_BYTES = new Uint8Array(32).fill(0x7b);
+        const OTHER_REQUEST_ID = `0x${"7b".repeat(32)}`;
+        const POLICY_REFUSAL = { code: "policy_refusal", message: "refused by policy" } as const;
+        const MALFORMED = { code: "malformed", message: "unreadable" } as const;
+
+        function refusedOutcome(requestId: Uint8Array, error: SignerRefusal): DispatchOutcome {
+            return { kind: "refused", requestId, transition: "SendCommitmentSigned", error, deadlineMs: null };
+        }
+
+        function refusedEvent(channelId: string, requestId: string, error: SignerRefusal): SdkEvent {
+            return { type: "SIGNING", channelId, requestId, transition: "SendCommitmentSigned", outcome: "refused", error };
+        }
+
+        function refusing(h: Harness, ...outcomes: DispatchOutcome[]): void {
+            const spy = jest.spyOn(h.channel.dispatch, "handle");
+            for (const outcome of outcomes) spy.mockResolvedValueOnce(outcome);
+        }
+
+        function idleAnswers(h: Harness, count: number): void {
+            for (let answer = 0; answer < count; answer++) h.node.result(statusResult(IDLE));
+        }
+
+        it("is told once over several ticks of the same request", async () => {
             const kase = caseOf("SignChannelAnnouncement");
             const h = await harness("SignChannelAnnouncement");
-            for (let tick = 0; tick < 2; tick++) {
+            for (let tick = 0; tick < 3; tick++) {
                 h.node.result(statusResult(kase.result.status));
                 await h.step(live());
             }
-            expect(h.events.map((event) => (event.type === "SIGNING" ? event.outcome : event.type))).toEqual(["refused", "refused"]);
+            expect(h.node.calls()).toEqual([signingStatusCall(CHANNEL_ID), signingStatusCall(CHANNEL_ID), signingStatusCall(CHANNEL_ID)]);
+            expect(h.events).toHaveLength(1);
+        });
+
+        it("is told again under another code", async () => {
+            const h = await harness("SendCommitmentSigned");
+            refusing(
+                h,
+                refusedOutcome(REQUEST_ID_BYTES, POLICY_REFUSAL),
+                refusedOutcome(REQUEST_ID_BYTES, POLICY_REFUSAL),
+                refusedOutcome(REQUEST_ID_BYTES, MALFORMED),
+                refusedOutcome(REQUEST_ID_BYTES, MALFORMED),
+            );
+            idleAnswers(h, 4);
+            for (let tick = 0; tick < 4; tick++) await h.step(live());
+            expect(h.events).toStrictEqual([
+                refusedEvent(CHANNEL_ID, REQUEST_ID, POLICY_REFUSAL),
+                refusedEvent(CHANNEL_ID, REQUEST_ID, MALFORMED),
+            ]);
+        });
+
+        it("is told once under the same code, whatever its message", async () => {
+            const h = await harness("SendCommitmentSigned");
+            refusing(
+                h,
+                refusedOutcome(REQUEST_ID_BYTES, POLICY_REFUSAL),
+                refusedOutcome(REQUEST_ID_BYTES, { code: "policy_refusal", message: "refused by policy, in other words" }),
+            );
+            idleAnswers(h, 2);
+            await h.step(live());
+            await h.step(live());
+            expect(h.events).toStrictEqual([refusedEvent(CHANNEL_ID, REQUEST_ID, POLICY_REFUSAL)]);
+        });
+
+        it("is not told again when a code that was told comes back", async () => {
+            const h = await harness("SendCommitmentSigned");
+            refusing(
+                h,
+                refusedOutcome(REQUEST_ID_BYTES, POLICY_REFUSAL),
+                refusedOutcome(REQUEST_ID_BYTES, MALFORMED),
+                refusedOutcome(REQUEST_ID_BYTES, POLICY_REFUSAL),
+            );
+            idleAnswers(h, 3);
+            for (let tick = 0; tick < 3; tick++) await h.step(live());
+            expect(h.events).toStrictEqual([
+                refusedEvent(CHANNEL_ID, REQUEST_ID, POLICY_REFUSAL),
+                refusedEvent(CHANNEL_ID, REQUEST_ID, MALFORMED),
+            ]);
+        });
+
+        it("is told for another request of the channel", async () => {
+            const h = await harness("SendCommitmentSigned");
+            refusing(h, refusedOutcome(REQUEST_ID_BYTES, POLICY_REFUSAL), refusedOutcome(OTHER_REQUEST_ID_BYTES, POLICY_REFUSAL));
+            idleAnswers(h, 2);
+            await h.step(live());
+            await h.step(live());
+            expect(h.events).toStrictEqual([
+                refusedEvent(CHANNEL_ID, REQUEST_ID, POLICY_REFUSAL),
+                refusedEvent(CHANNEL_ID, OTHER_REQUEST_ID, POLICY_REFUSAL),
+            ]);
+        });
+
+        it("is told for the same request id on another channel", async () => {
+            const h = await harness("SendCommitmentSigned");
+            await watching(h, [CHANNEL_ID, OTHER_ID]);
+            refusing(h, refusedOutcome(REQUEST_ID_BYTES, POLICY_REFUSAL), refusedOutcome(REQUEST_ID_BYTES, POLICY_REFUSAL));
+            h.node.result(statusResult(IDLE)).result(statusResult(IDLE, OTHER_ID));
+            await h.step(live());
+            expect(h.events).toStrictEqual([
+                refusedEvent(CHANNEL_ID, REQUEST_ID, POLICY_REFUSAL),
+                refusedEvent(OTHER_ID, REQUEST_ID, POLICY_REFUSAL),
+            ]);
+        });
+
+        it("is told again by a new instance of the step", async () => {
+            const kase = caseOf("SignChannelAnnouncement");
+            const h = await harness("SignChannelAnnouncement");
+            h.node
+                .result(statusResult(kase.result.status))
+                .result(statusResult(kase.result.status))
+                .result(statusResult(kase.result.status));
+            await h.step(live());
+            await h.step(live());
+            await h.rebuiltStep()(live());
+            expect(h.events).toHaveLength(2);
+        });
+
+        it("is told on every tick when the status names no request", async () => {
+            const kase = caseOf("SendCommitmentSigned");
+            const h = await harness("SendCommitmentSigned");
+            const malformed = withField(kase.result.status, "transition", "SignEverything");
+            h.node.result(statusResult(malformed)).result(statusResult(malformed)).result(statusResult(malformed));
+            for (let tick = 0; tick < 3; tick++) await h.step(live());
+            expect(h.events).toHaveLength(3);
+            expect(h.events[2]).toMatchObject({ type: "SIGNING", requestId: null, outcome: "refused", error: { code: "malformed" } });
+        });
+
+        it("is told on every tick when the status is another channel's", async () => {
+            const kase = caseOf("SendCommitmentSigned");
+            const h = await harness("SendCommitmentSigned");
+            h.node.result(statusResult(kase.result.status, OTHER_ID)).result(statusResult(kase.result.status, OTHER_ID));
+            await h.step(live());
+            await h.step(live());
+            expect(h.events).toHaveLength(2);
+        });
+
+        it("stays to be told when an abandoned run dropped it, and is told once by the next run", async () => {
+            const kase = caseOf("SignChannelAnnouncement");
+            const h = await harness("SignChannelAnnouncement");
+            const run = live();
+            abandonAfterHandle(h.channel.dispatch, run);
+            h.node
+                .result(statusResult(kase.result.status))
+                .result(statusResult(kase.result.status))
+                .result(statusResult(kase.result.status));
+            await h.step(run);
+            expect(h.events).toEqual([]);
+            await h.step(live());
+            await h.step(live());
+            expect(h.events).toHaveLength(1);
+        });
+
+        it("counts as told when the host's listener stops the poll on hearing it", async () => {
+            const kase = caseOf("SignChannelAnnouncement");
+            const run = live();
+            const h = await harness("SignChannelAnnouncement", {}, () => (run.abandoned = true));
+            h.node.result(statusResult(kase.result.status)).result(statusResult(kase.result.status));
+            await h.step(run);
+            await h.step(live());
+            expect(h.events).toHaveLength(1);
+        });
+
+        it("counts as told when the host's listener throws on hearing it", async () => {
+            const kase = caseOf("SignChannelAnnouncement");
+            const h = await harness("SignChannelAnnouncement", {}, () => {
+                throw new Error("listener broke");
+            });
+            h.node.result(statusResult(kase.result.status)).result(statusResult(kase.result.status));
+            await h.step(live());
+            await h.step(live());
+            expect(h.events).toHaveLength(1);
         });
     });
 

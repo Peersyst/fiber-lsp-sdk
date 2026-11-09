@@ -252,6 +252,11 @@ gives out three things:
   The signature is RFC 6979 with low S and no added entropy, which is what rust-secp256k1's `sign_ecdsa` produces, so it
   matches fiber's own signer to the byte; noble signs the digest as given only with `prehash: false`.
 
+`deriveTenantId(masterSeed)` is the tenant id alone, for a host that needs it before it builds the SDK: a pure function that
+builds the identity, returns its `tenantId` and keeps nothing, so the seed enters it as it enters the constructor and only the
+public id leaves. The seed is checked as the constructor checks it (32 bytes of a `Uint8Array`, a `TypeError` naming
+`masterSeed`) and is left as it was given.
+
 The identity reads no clock and draws no randomness: the request id and the time are the host's. The LSP's node id must
 be a point, the request id 32 bytes and the time a u64. The node accepts a `signed_at` from five minutes behind its clock
 to thirty seconds ahead and refuses a request id it has seen (`fiber-types/src/hosted_lsp.rs:16-20` and `:115-124`,
@@ -416,7 +421,7 @@ answered `signed`, or `warning` as a second session on its slot:
 
 - **The open**: `CompleteReceivedCommitment` and `SendCommitmentSigned`, both at `Commitment@1`: the first of the two
   is signed and the second is a warning. Fiber may issue them in either order, and the flows run both; fiber's devnet
-  issues `SendCommitmentSigned` first. Under `refuse` the second is refused as `policy_refusal`, on every tick.
+  issues `SendCommitmentSigned` first. Under `refuse` the second is refused as `policy_refusal`: the device refuses it on every tick, and `SIGNING` reports it once.
 - **A payment received**, the peer's round: `CompleteReceivedCommitment` at `Commitment@2` signed, `SendRevokeAndAck` at
   `Revocation@2` signed, `SendCommitmentSigned` at `Commitment@2` warning, `CompleteReceivedRevokeAndAck` at
   `Revocation@2` warning. Then the tenant's round to fulfil it: `SendCommitmentSigned` at `Commitment@3` signed,
@@ -427,7 +432,7 @@ answered `signed`, or `warning` as a second session on its slot:
   at `Revocation@2` signed, `CompleteReceivedCommitment` at `Commitment@3` (version 2) signed, `SendRevokeAndAck` at
   `Revocation@2` warning. Then the peer's round to fulfil it: `CompleteReceivedCommitment` at `Commitment@3` warning,
   `SendRevokeAndAck` at `Revocation@3` signed, and `SendCommitmentSigned` at `Commitment@3` refused as `policy_refusal`,
-  a third session on one slot, on every tick, with nothing written.
+  a third session on one slot, which the device refuses on every tick with nothing written, and `SIGNING` reports once.
 - **The cooperative close**: `SendClosingSigned` at `Commitment@L`, with no `next_material`. After the open it signs
   `Commitment@2`; after a full payment received it lands on `Commitment@4`, which the device's own last commitment
   (`CompleteReceivedCommitment`, version 3) already took, so it is a second session, served with a warning under
@@ -589,20 +594,20 @@ flows that run the facade's opening over it are [sdk.md](./sdk.md)'s.
 
 ## Where it lives
 
-| File                                      | Contents                                                                                                                      |
-| ----------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------- |
-| `src/signer/signer-dispatch.ts`           | The twelve steps, the four outcomes, the deadline of two, and the opening; `handleWatchtower` and its four outcomes           |
-| `src/signer/musig2-engine.ts`             | The public keys, points and nonces, the nonce sum, the partial signature, the peer's half verified, the aggregate             |
-| `src/signer/signer-material.ts`           | The opening block and the next material                                                                                       |
-| `src/signer/signing-deadline.ts`          | `tlcExpiryDelay` and `pendingTlcSignatureDeadline`: fiber's deadline for a pending request, its f64 arithmetic and casts      |
-| `src/signer/hold-invoice-preimages.ts`    | `HoldInvoicePreimages`: the seed's copy, each invoice's preimage and payment hash, the algorithm                              |
-| `src/signer/tenant-identity.ts`           | The RootSigner: its public key, the tenant id, the registry payload, its digest and the registration signature                |
-| `src/signer/onchain-signature.ts`         | `signOnchain`: the watchtower's recoverable signature under the key its purpose names                                         |
-| `src/signer/signer.constants.ts`          | The key order per transition, fiber's two tenant domains                                                                      |
-| `src/signer/utils/key-order.utils.ts`     | The order of the two funding keys, and the peer's key read out of a request held to it                                        |
-| `src/signer/utils/signing-terms.utils.ts` | The message from the plaintext, and the operation built from the content, the pins and the network                            |
-| `src/signer/signer.types.ts`              | The options, the cosigned session, the prepared operation, the two outcomes and the pending open                              |
-| `src/common/utils/musig.utils.ts`         | The musig2 shapes `policy` and `protocol` hold a session to as well: the nonce halves, an aggregate's half, two distinct keys |
+| File                                      | Contents                                                                                                                                            |
+| ----------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `src/signer/signer-dispatch.ts`           | The twelve steps, the four outcomes, the deadline of two, and the opening; `handleWatchtower` and its four outcomes                                 |
+| `src/signer/musig2-engine.ts`             | The public keys, points and nonces, the nonce sum, the partial signature, the peer's half verified, the aggregate                                   |
+| `src/signer/signer-material.ts`           | The opening block and the next material                                                                                                             |
+| `src/signer/signing-deadline.ts`          | `tlcExpiryDelay` and `pendingTlcSignatureDeadline`: fiber's deadline for a pending request, its f64 arithmetic and casts                            |
+| `src/signer/hold-invoice-preimages.ts`    | `HoldInvoicePreimages`: the seed's copy, each invoice's preimage and payment hash, the algorithm                                                    |
+| `src/signer/tenant-identity.ts`           | The RootSigner: its public key, the tenant id (and `deriveTenantId`, the id alone), the registry payload, its digest and the registration signature |
+| `src/signer/onchain-signature.ts`         | `signOnchain`: the watchtower's recoverable signature under the key its purpose names                                                               |
+| `src/signer/signer.constants.ts`          | The key order per transition, fiber's two tenant domains                                                                                            |
+| `src/signer/utils/key-order.utils.ts`     | The order of the two funding keys, and the peer's key read out of a request held to it                                                              |
+| `src/signer/utils/signing-terms.utils.ts` | The message from the plaintext, and the operation built from the content, the pins and the network                                                  |
+| `src/signer/signer.types.ts`              | The options, the cosigned session, the prepared operation, the two outcomes and the pending open                                                    |
+| `src/common/utils/musig.utils.ts`         | The musig2 shapes `policy` and `protocol` hold a session to as well: the nonce halves, an aggregate's half, two distinct keys                       |
 
 ## What the tests guarantee
 
@@ -690,7 +695,9 @@ all four metrics, and the assertions were checked by breaking the code on purpos
 tenant id, the payload, the digest and the signature to the byte) and against literal values of its own, refuses each
 field of the request (each wrong length, an LSP node id that is not a point, a request id or a time of the wrong type or
 out of range, the absent ones), signs under its own key whatever root signer the request carries, and checks that no
-property, enumeration or serialization reaches the secret:
+property, enumeration or serialization reaches the secret. `deriveTenantId` is pinned to the identity's tenant id for the same
+seed, to literal ids of its own, one per seed, and to fiber's id for the vector's master seed; it leaves the seed as it was given
+and refuses each wrong seed (31 and 33 bytes, hex, absent, `null`) with the constructor's message:
 
 | Mutation                                                  | Tests that failed |
 | --------------------------------------------------------- | ----------------- |

@@ -142,11 +142,12 @@ async function expectRefused(h: TenantFlow, served: string, refusal: string): Pr
     const before = await recordOf(h.device);
     const sent = h.node.calls.length;
     h.device.storage.ops.length = 0;
+    const told = signings(h).length;
     await tick(h.device, 2);
     expect(writes(h.device.storage)).toEqual([]);
     expect(h.node.calls.slice(sent).map((call) => call.method)).toEqual(ticks(UNSIGNED_TICK, 2));
     expect(requests(h).at(-1)).toBe(`${served} unanswered`);
-    expect(signings(h).slice(-2)).toEqual([`${served} ${refusal}`, `${served} ${refusal}`]);
+    expect(signings(h).slice(told)).toEqual([`${served} ${refusal}`]);
     expect(await recordOf(h.device)).toEqual(before);
 }
 
@@ -276,7 +277,6 @@ describe("the signing step over the tenant node", () => {
                 "CompleteReceivedCommitment Commitment@4 warning",
                 "SendRevokeAndAck Revocation@4 signed",
                 "SendCommitmentSigned Commitment@4 refused policy_refusal",
-                "SendCommitmentSigned Commitment@4 refused policy_refusal",
             ]);
             expect(h.node.counters).toEqual({ local: 4, remote: 5 });
             expect(before.lastSignedCommitmentNumbers).toEqual({ "COMMITMENT:local": 4, "REVOKE:local": 3, "REVOKE:remote": 4 });
@@ -348,7 +348,6 @@ describe("the signing step over the tenant node", () => {
                 "SendRevokeAndAck Revocation@2 warning",
                 "CompleteReceivedCommitment Commitment@3 warning",
                 "SendRevokeAndAck Revocation@3 signed",
-                "SendCommitmentSigned Commitment@3 refused policy_refusal",
                 "SendCommitmentSigned Commitment@3 refused policy_refusal",
             ]);
             expect(refusalOf(h)).toBe("slot COMMITMENT:3 has already served two signing sessions, the most one nonce can");
@@ -724,12 +723,33 @@ describe("the signing step over the tenant node", () => {
             expect(signings(h)).toEqual([
                 "CompleteReceivedCommitment Commitment@1 signed",
                 "SendCommitmentSigned Commitment@1 refused policy_refusal",
-                "SendCommitmentSigned Commitment@1 refused policy_refusal",
             ]);
             expect(h.node.counters).toEqual({ local: 1, remote: 1 });
             const record = await recordOf(h.device);
             expect(signedCommitmentsOf(record)).toEqual({ local: { commitmentNumber: 1, txHash: messageOf(h, 0) } });
             expect(record.nonceReuse).toEqual({});
+        });
+
+        it("tells a refusal once however many ticks the node keeps the request pending, and again to a device that restarts", async () => {
+            const h = flow("refuse");
+            await openChannel(h, "CompleteReceivedCommitment");
+            await start(h.device);
+            await tick(h.device, 6);
+            expect(methods(h)).toEqual([...SIGNED_TICK, ...ticks(UNSIGNED_TICK, 6)]);
+            expect(requests(h)).toEqual([
+                "CompleteReceivedCommitment Commitment@1 Applied",
+                "SendCommitmentSigned Commitment@1 unanswered",
+            ]);
+            expect(signings(h)).toEqual([
+                "CompleteReceivedCommitment Commitment@1 signed",
+                "SendCommitmentSigned Commitment@1 refused policy_refusal",
+            ]);
+            h.device.poller.stop();
+            const restarted = device(h.node, "refuse", h.device.storage);
+            await start(restarted);
+            await tick(restarted, 3);
+            expect(signings(h, restarted)).toEqual(["SendCommitmentSigned Commitment@1 refused policy_refusal"]);
+            expect(signings(h)).toHaveLength(2);
         });
 
         it("refuses an aggregate that sums another nonce than the device's at the slot", async () => {

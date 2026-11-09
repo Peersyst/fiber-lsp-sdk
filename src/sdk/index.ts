@@ -7,6 +7,7 @@ export * from "./channel-opening";
 export * from "./channel-step";
 export * from "./device-channels";
 export * from "./fiber-lsp-sdk";
+export * from "./invoice-cancelling";
 export * from "./invoice-creation";
 export * from "./invoice-step";
 export * from "./payment-sending";

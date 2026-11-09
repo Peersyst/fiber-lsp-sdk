@@ -178,7 +178,7 @@ user mnemonic                       (the SDK never sees it)
       │
       └── bip39Seed (64 bytes) ─────────────────────────── goes in and out of deriveMasterSeed, never retained
             │
-            └── masterSeed = BIP32 m/1017'/309'/{a}'  ───── enters once, through the constructor   [a = account]
+            └── masterSeed = BIP32 m/1017'/309'/{a}'  ───── enters through the constructor and the pure deriveTenantId, which keeps nothing and returns only the public id   [a = account]
                   │
                   ├── walletIdentityKey = ckbBlake2b(masterSeed ‖ "wallet identity")
                   │      └─ the tenant's RootSigner: the key the LSP knows the wallet by

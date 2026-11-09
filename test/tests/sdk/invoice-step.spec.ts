@@ -491,7 +491,7 @@ describe("buildInvoiceStep", () => {
     });
 
     describe("a release that waits", () => {
-        it.each<HoldInvoiceErrorCode>(["not_held", "expiry_too_close", "offered_in_flight"])(
+        it.each<HoldInvoiceErrorCode>(["not_held", "expiry_too_close", "offered_in_flight", "cancelled"])(
             "emits nothing more on %s, settles nothing and tries again on the next tick",
             async (code) => {
                 const h = harness();
@@ -782,25 +782,42 @@ describe("buildInvoiceStep", () => {
     });
 
     describe("an invoice fiber ended unpaid", () => {
-        it.each(["Expired", "Cancelled"])("emits PAYMENT_EXPIRED for %s, then stops watching it", async (status) => {
+        it.each([
+            ["Expired", "PAYMENT_EXPIRED"],
+            ["Cancelled", "PAYMENT_CANCELLED"],
+        ])("reads %s as %s, then stops watching it", async (status, type) => {
             const h = harness();
             await watching(h, HASH, INDEX);
             const mark = jest.spyOn(h.policy, "markHoldInvoiceReleased");
             h.node.result(invoiceResult(HASH, status));
             await h.step(live());
             expect(h.node.calls()).toEqual([getInvoiceCall(HASH)]);
-            expect(h.events).toStrictEqual([{ type: "PAYMENT_EXPIRED", paymentHashHex: `0x${HASH}` }]);
+            expect(h.events).toStrictEqual([{ type, paymentHashHex: `0x${HASH}` }]);
             expect(mark).not.toHaveBeenCalled();
             expect(await invoicesOf(h)).toStrictEqual({});
         });
 
-        it("emits PAYMENT_EXPIRED for one announced pending", async () => {
+        it.each([
+            ["Expired", "PAYMENT_EXPIRED"],
+            ["Cancelled", "PAYMENT_CANCELLED"],
+        ])("reads %s as %s for one announced pending", async (status, type) => {
             const h = harness();
             await watching(h, HASH, INDEX);
-            h.node.result(invoiceResult(HASH, "Received")).result(invoiceResult(HASH, "Cancelled"));
+            h.node.result(invoiceResult(HASH, "Received")).result(invoiceResult(HASH, status));
             await h.step(live());
             await h.step(live());
-            expect(h.events.map((event) => event.type)).toEqual(["PAYMENT_PENDING", "PAYMENT_EXPIRED"]);
+            expect(h.events.map((event) => event.type)).toEqual(["PAYMENT_PENDING", type]);
+        });
+
+        it("emits PAYMENT_CANCELLED for one the device marked cancelled, cancelling nothing more", async () => {
+            const h = harness();
+            await watching(h, HASH, INDEX);
+            await h.policy.markHoldInvoiceCancelled(HASH);
+            h.node.result(invoiceResult(HASH, "Cancelled"));
+            await h.step(live());
+            expect(h.node.calls()).toEqual([getInvoiceCall(HASH)]);
+            expect(h.events).toStrictEqual([{ type: "PAYMENT_CANCELLED", paymentHashHex: `0x${HASH}` }]);
+            expect(await invoicesOf(h)).toStrictEqual({});
         });
 
         it.each([
@@ -831,6 +848,180 @@ describe("buildInvoiceStep", () => {
             await h.step(live());
             expect(h.node.calls()).toEqual([getInvoiceCall(HASH), getInvoiceCall(HASH), settleCall(HASH, PREIMAGE)]);
             expect(h.events.map((event) => event.type)).toEqual(["ERROR", "PAYMENT_PENDING"]);
+        });
+    });
+
+    describe("a received invoice marked cancelled", () => {
+        function cancelCall(paymentHash: string): SentCall {
+            return { method: "cancel_invoice", params: { payment_hash: `0x${paymentHash}` } };
+        }
+
+        async function watchingCancelled(h: Harness): Promise<void> {
+            await watching(h, HASH, INDEX);
+            await h.policy.markHoldInvoiceCancelled(HASH);
+        }
+
+        function crossingCancel(h: Harness): void {
+            const read = h.policy.readHoldInvoice.bind(h.policy);
+            jest.spyOn(h.policy, "readHoldInvoice").mockImplementationOnce(async (paymentHash) => {
+                const record = await read(paymentHash);
+                await h.policy.markHoldInvoiceCancelled(paymentHash);
+                return record;
+            });
+        }
+
+        it("cancels it again, releasing nothing and settling nothing", async () => {
+            const h = harness();
+            await watchingCancelled(h);
+            const mark = jest.spyOn(h.policy, "markHoldInvoiceReleased");
+            h.node.result(invoiceResult(HASH, "Received")).result(invoiceResult(HASH, "Cancelled"));
+            await h.step(live());
+            expect(h.node.calls()).toEqual([getInvoiceCall(HASH), cancelCall(HASH)]);
+            expect(h.events).toStrictEqual([{ type: "PAYMENT_PENDING", paymentHashHex: `0x${HASH}` }]);
+            expect(mark).not.toHaveBeenCalled();
+            expect(h.pollNow).not.toHaveBeenCalled();
+            expect(await releasedOf(h, HASH)).toBe(false);
+            expect(await invoicesOf(h)).toStrictEqual({ [HASH]: { status: "Received" } });
+        });
+
+        it("reports the end on the next tick, once fiber answers it cancelled", async () => {
+            const h = harness();
+            await watchingCancelled(h);
+            h.node
+                .result(invoiceResult(HASH, "Received"))
+                .result(invoiceResult(HASH, "Cancelled"))
+                .result(invoiceResult(HASH, "Cancelled"));
+            await h.step(live());
+            await h.step(live());
+            expect(h.node.calls()).toEqual([getInvoiceCall(HASH), cancelCall(HASH), getInvoiceCall(HASH)]);
+            expect(h.events.map((event) => event.type)).toEqual(["PAYMENT_PENDING", "PAYMENT_CANCELLED"]);
+            expect(await invoicesOf(h)).toStrictEqual({});
+        });
+
+        it("takes fiber's already cancelled as the cancel done", async () => {
+            const h = harness();
+            await watchingCancelled(h);
+            h.node.result(invoiceResult(HASH, "Received")).error(-32000, "invoice can not be canceled, current status: Cancelled");
+            await h.step(live());
+            expect(h.events).toStrictEqual([{ type: "PAYMENT_PENDING", paymentHashHex: `0x${HASH}` }]);
+        });
+
+        it("reports a cancel the node refuses as poll_failed naming the invoice, and cancels again on the next tick", async () => {
+            const h = harness();
+            await watchingCancelled(h);
+            h.node
+                .result(invoiceResult(HASH, "Received"))
+                .error(-32000, "invoice can not be canceled, current status: Paid")
+                .result(invoiceResult(HASH, "Received"))
+                .result(invoiceResult(HASH, "Cancelled"));
+            await h.step(live());
+            await h.step(live());
+            expect(h.node.calls()).toEqual([getInvoiceCall(HASH), cancelCall(HASH), getInvoiceCall(HASH), cancelCall(HASH)]);
+            expect(summarized(h.events)).toStrictEqual([
+                { type: "PAYMENT_PENDING", paymentHashHex: `0x${HASH}` },
+                pollFailedEvent(
+                    `the invoice poll of 0x${HASH} failed: invoice can not be canceled, current status: Paid`,
+                    expect.any(RpcError),
+                ),
+            ]);
+        });
+
+        it("cancels it whatever preimage its index derives, deriving none", async () => {
+            const h = harness();
+            await watching(h, HASH, OTHER_INDEX);
+            await h.policy.markHoldInvoiceCancelled(HASH);
+            const preimage = jest.spyOn(HoldInvoicePreimages.prototype, "preimage");
+            const paymentHash = jest.spyOn(HoldInvoicePreimages.prototype, "paymentHash");
+            h.node.result(invoiceResult(HASH, "Received")).result(invoiceResult(HASH, "Cancelled"));
+            await h.step(live());
+            expect(preimage).not.toHaveBeenCalled();
+            expect(paymentHash).not.toHaveBeenCalled();
+            preimage.mockRestore();
+            paymentHash.mockRestore();
+            expect(h.node.calls()).toEqual([getInvoiceCall(HASH), cancelCall(HASH)]);
+            expect(h.events.map((event) => event.type)).toEqual(["PAYMENT_PENDING"]);
+        });
+
+        it("ends it cancelled rather than expired, even past its expiry with no TLC of it left", async () => {
+            const h = harness();
+            await watchingCancelled(h);
+            h.clock.nowMs = EXPIRES_AT_MS + 1;
+            h.node
+                .result(invoiceResult(HASH, "Received"))
+                .result(invoiceResult(HASH, "Cancelled"))
+                .result(invoiceResult(HASH, "Cancelled"));
+            await h.step(live());
+            expect(h.events.map((event) => event.type)).toEqual(["PAYMENT_PENDING"]);
+            expect(await invoicesOf(h)).toStrictEqual({ [HASH]: { status: "Received" } });
+            await h.step(live());
+            expect(h.events.map((event) => event.type)).toEqual(["PAYMENT_PENDING", "PAYMENT_CANCELLED"]);
+            expect(await invoicesOf(h)).toStrictEqual({});
+        });
+
+        it("repairs the settlement of a record both released and cancelled, sending no cancel", async () => {
+            const h = harness();
+            h.storage.map.set(
+                `fiber-lsp-sdk:invoice:${HASH.slice(0, 40)}`,
+                JSON.stringify({
+                    version: 1,
+                    paymentHash: HASH,
+                    amountShannons: AMOUNT,
+                    hashAlgorithm: "ckb-hash",
+                    invoiceIndex: INDEX,
+                    released: true,
+                    cancelled: true,
+                    channelIndexes: [],
+                }),
+            );
+            await h.activity.watch("invoice", HASH);
+            h.node.result(invoiceResult(HASH, "Received")).result({});
+            await h.step(live());
+            expect(h.node.calls()).toEqual([getInvoiceCall(HASH), settleCall(HASH, PREIMAGE)]);
+            expect(h.events).toStrictEqual([{ type: "PAYMENT_PENDING", paymentHashHex: `0x${HASH}` }]);
+        });
+
+        it("cancels nothing once abandoned while the record is read", async () => {
+            const h = harness();
+            const run = live();
+            await watchingCancelled(h);
+            const read = h.policy.readHoldInvoice.bind(h.policy);
+            jest.spyOn(h.policy, "readHoldInvoice").mockImplementationOnce(async (paymentHash) => {
+                const record = await read(paymentHash);
+                run.abandoned = true;
+                return record;
+            });
+            h.node.result(invoiceResult(HASH, "Received"));
+            await h.step(run);
+            expect(h.node.calls()).toEqual([getInvoiceCall(HASH)]);
+        });
+
+        it("keeps watching a cancel crossing the release past its expiry with no TLC left, and repeats it next", async () => {
+            const h = harness();
+            await watching(h, HASH, INDEX);
+            crossingCancel(h);
+            h.clock.nowMs = EXPIRES_AT_MS + 1;
+            h.node.result(invoiceResult(HASH, "Received")).result(invoiceResult(HASH, "Received")).result(invoiceResult(HASH, "Cancelled"));
+            await h.step(live());
+            expect(h.node.calls()).toEqual([getInvoiceCall(HASH)]);
+            expect(h.events).toStrictEqual([{ type: "PAYMENT_PENDING", paymentHashHex: `0x${HASH}` }]);
+            expect(await invoicesOf(h)).toStrictEqual({ [HASH]: { status: "Received" } });
+            await h.step(live());
+            expect(h.node.calls()).toEqual([getInvoiceCall(HASH), getInvoiceCall(HASH), cancelCall(HASH)]);
+            expect(h.events).toStrictEqual([{ type: "PAYMENT_PENDING", paymentHashHex: `0x${HASH}` }]);
+        });
+
+        it("waits out a cancel that crossed the release, and repeats the cancel on the next tick", async () => {
+            const h = harness();
+            await watching(h, HASH, INDEX);
+            crossingCancel(h);
+            h.node.result(invoiceResult(HASH, "Received")).result(invoiceResult(HASH, "Received")).result(invoiceResult(HASH, "Cancelled"));
+            await h.step(live());
+            expect(h.node.calls()).toEqual([getInvoiceCall(HASH)]);
+            expect(h.events).toStrictEqual([{ type: "PAYMENT_PENDING", paymentHashHex: `0x${HASH}` }]);
+            expect(await releasedOf(h, HASH)).toBe(false);
+            expect(h.pollNow).not.toHaveBeenCalled();
+            await h.step(live());
+            expect(h.node.calls()).toEqual([getInvoiceCall(HASH), getInvoiceCall(HASH), cancelCall(HASH)]);
         });
     });
 
@@ -1021,6 +1212,7 @@ describe("buildInvoiceStep", () => {
         it.each<[string, string, (h: Harness, paymentHash: string, invoiceIndex: number) => Promise<void>]>([
             ["PAYMENT_RECEIVED", "Paid", watchingReleased],
             ["PAYMENT_EXPIRED", "Expired", watching],
+            ["PAYMENT_CANCELLED", "Cancelled", watching],
         ])("keeps watching once abandoned by %s, and emits it again on the next tick", async (type, status, watch) => {
             const run = live();
             const h = harness(() => (run.abandoned = true));

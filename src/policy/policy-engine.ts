@@ -21,6 +21,7 @@ import {
     assertString,
     assertUnsignedBigInt,
     assertUnsignedInteger,
+    copyScript,
     isPlainObject,
 } from "../common";
 import type { FiberChannelKeys } from "../derivation";
@@ -48,7 +49,14 @@ import {
     PAYMENT_RECORD_VERSION,
     POLICY_VIEWS,
 } from "./policy.constants";
-import { ChannelPinError, ChannelRegistrationError, DebitIntentError, refusePolicyRequest, withPolicyRefusal } from "./policy.error";
+import {
+    ChannelPinError,
+    ChannelRegistrationError,
+    DebitIntentError,
+    HoldInvoiceError,
+    refusePolicyRequest,
+    withPolicyRefusal,
+} from "./policy.error";
 import type {
     BalanceRuleContext,
     ChannelPins,
@@ -86,7 +94,7 @@ export class PolicyEngine {
 
     private readonly nonceReuse: NonceReuseMode;
 
-    private readonly watchtower: WatchtowerApproval | null;
+    private watchtower: WatchtowerApproval | null;
 
     /**
      * Creates the gate over a store.
@@ -100,7 +108,15 @@ export class PolicyEngine {
         assertOneOf("options.nonceReuse", nonceReuse, NONCE_REUSE_MODES);
         this.store = store;
         this.nonceReuse = nonceReuse;
-        this.watchtower = options.watchtower === undefined ? null : readWatchtowerApproval(options.watchtower);
+        this.watchtower = options.watchtower === undefined ? null : readWatchtowerApproval(options.watchtower, "options.watchtower");
+    }
+
+    /**
+     * Replaces the host's watchtower approval, with the constructor option's checks and copy.
+     * @param approval The destination and the fee ceiling; a refused approval leaves the previous one in force.
+     */
+    setWatchtowerApproval(approval: WatchtowerApproval): void {
+        this.watchtower = readWatchtowerApproval(approval, "approval");
     }
 
     /**
@@ -228,23 +244,32 @@ export class PolicyEngine {
         channelId: string,
         request: WatchtowerSpendRequest,
     ): Promise<WatchtowerSpendVerdict> {
-        const approval = this.watchtower;
-        if (approval === null) {
-            refusePolicyRequest(
-                "policy_refusal",
-                "watchtower option: the host approved no destination, so the device signs no watchtower spend",
-            );
-        }
+        this.requireWatchtowerApproval();
         withPolicyRefusal("malformed", () => assertNonEmptyString("channelId", channelId));
         const channelIndex = await this.requireChannelIndex(channelId);
         let verdict: WatchtowerSpendVerdict = { status: "fresh" };
         // Outside the balance lane: the rules read the channel's record alone.
         await this.updateRegisteredRecord(channelId, channelIndex, (current) => {
-            const decision = decideWatchtowerSpend(keys, current, approval, request);
+            // Read past every wait, so a `setWatchtowerApproval` landing during them governs this spend.
+            const decision = decideWatchtowerSpend(keys, current, this.requireWatchtowerApproval(), request);
             verdict = decision.verdict;
             return decision.record;
         });
         return verdict;
+    }
+
+    /**
+     * Reads the host's approval, refusing the spend while it gave none.
+     * @returns The approval in force.
+     */
+    private requireWatchtowerApproval(): WatchtowerApproval {
+        if (this.watchtower === null) {
+            refusePolicyRequest(
+                "policy_refusal",
+                "watchtower option: the host approved no destination, so the device signs no watchtower spend",
+            );
+        }
+        return this.watchtower;
     }
 
     /**
@@ -523,6 +548,12 @@ export class PolicyEngine {
             const current = await this.requireHoldInvoice(paymentHashHex);
             // Released once, released for good: the commitments signed since rely on it.
             if (current.released) return;
+            if (current.cancelled === true) {
+                throw new HoldInvoiceError(
+                    "cancelled",
+                    `the hold invoice ${paymentHashHex} is cancelled, so its preimage is never released`,
+                );
+            }
             const channels = await this.readListedChannels(current);
             // Read last, so no wait for the lock or the storage ages it.
             const nowMs = now();
@@ -531,6 +562,33 @@ export class PolicyEngine {
             await this.store.updateHoldInvoiceRecord(boundPaymentHashOf(paymentHashHex), (latest) => {
                 if (latest === null) throw vanishedPaymentRecord();
                 return { ...latest, released: true };
+            });
+        });
+    }
+
+    /**
+     * Marks a hold invoice cancelled, before the node is asked; its preimage is then never released.
+     * @param paymentHashHex The payment hash, 32 bytes of lowercase hex.
+     */
+    async markHoldInvoiceCancelled(paymentHashHex: string): Promise<void> {
+        assertHexBytes("paymentHashHex", paymentHashHex, PAYMENT_HASH_LENGTH);
+        await this.store.withBalanceLock(async () => {
+            const key = boundPaymentHashOf(paymentHashHex);
+            const current = await this.store.getHoldInvoiceRecord(key);
+            if (current === null) {
+                throw new HoldInvoiceError(
+                    "not_recorded",
+                    `no hold invoice was recorded for ${paymentHashHex}, so there is none to cancel`,
+                );
+            }
+            assertSameHash(current, paymentHashHex);
+            if (current.released) {
+                throw new HoldInvoiceError("released", `the hold invoice ${paymentHashHex} is released, so it is never cancelled`);
+            }
+            if (current.cancelled === true) return;
+            await this.store.updateHoldInvoiceRecord(key, (latest) => {
+                if (latest === null) throw vanishedPaymentRecord();
+                return { ...latest, cancelled: true };
             });
         });
     }
@@ -1098,18 +1156,19 @@ function assertUint64Shannons(name: string, value: string): void {
 
 /**
  * Reads the host's watchtower approval into a copy.
- * @param value The option.
+ * @param value The approval, as the host gave it.
+ * @param label The prefix of an error's message.
  * @returns The approval.
  */
-function readWatchtowerApproval(value: unknown): WatchtowerApproval {
-    if (!isPlainObject(value)) throw new TypeError("options.watchtower must be an object");
+function readWatchtowerApproval(value: unknown, label: string): WatchtowerApproval {
+    if (!isPlainObject(value)) throw new TypeError(`${label} must be an object`);
     const { destination, maxFeeShannons } = value;
-    assertScript("options.watchtower.destination", destination);
-    assertString("options.watchtower.maxFeeShannons", maxFeeShannons);
+    assertScript(`${label}.destination`, destination);
+    assertString(`${label}.maxFeeShannons`, maxFeeShannons);
     // A fee is capacity, so a cell's u64 bounds it.
-    assertUint64Shannons("options.watchtower.maxFeeShannons", maxFeeShannons);
+    assertUint64Shannons(`${label}.maxFeeShannons`, maxFeeShannons);
     return {
-        destination: { codeHash: destination.codeHash.slice(), hashType: destination.hashType, args: destination.args.slice() },
+        destination: copyScript(destination),
         maxFeeShannons,
     };
 }

@@ -26,7 +26,8 @@ key derivation is byte for byte the one of `b71a61c3` (v0.9.0-rc7). The key deri
   API the SDK actually uses. Dev dependencies stay pinned exactly.
 - **Determinism**: every derivation (channel seeds, keys, nonces) is a deterministic function of the master seed. The derivation
   scheme is versioned and additive-only: changing it breaks recoverability of existing channels.
-- **Secrets**: the master seed enters once via the constructor and stays in SDK memory. No API returns a private key, except
+- **Secrets**: the master seed enters once via the constructor and stays in SDK memory (`deriveTenantId` also reads it, keeps
+  nothing and returns only the public id). No API returns a private key, except
   `deriveMasterSeed`, a pure function that returns to the host the seed the host itself will pass back in. No SDK instance
   ever holds anything above the master seed.
 - **Signing safety**: deterministic nonces + persisted sign-once store; never sign two different messages for the same

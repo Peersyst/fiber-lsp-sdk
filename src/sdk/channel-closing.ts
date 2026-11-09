@@ -27,6 +27,16 @@ export async function closeSdkChannel(context: SdkChannelClosingContext, channel
 }
 
 /**
+ * Asks the node to force-close a channel, which needs no record of it on this device.
+ * @param context The node's client and the poller.
+ * @param channelId The channel id, as the node holds it.
+ */
+export async function forceCloseSdkChannel(context: Pick<SdkContext, "rpc" | "poller">, channelId: string): Promise<void> {
+    await context.rpc.shutdownChannel({ channelId, force: true });
+    context.poller.pollNow();
+}
+
+/**
  * Asserts the channel id and the options, reading the fee rate once.
  * @param channelId The channel.
  * @param options The host's options, if any.

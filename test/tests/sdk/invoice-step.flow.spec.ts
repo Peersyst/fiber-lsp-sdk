@@ -1,8 +1,11 @@
-import { hexToBytes } from "@noble/hashes/utils.js";
+import { bytesToHex, hexToBytes } from "@noble/hashes/utils.js";
+import { deriveHoldInvoicePreimage } from "../../../src/derivation";
 import { COMMITMENT_LOCK_TESTNET, FUNDING_LOCK_TESTNET } from "../../../src/digest";
 import { decodeInvoice } from "../../../src/invoice";
 import type { IFetchLike } from "../../../src/rpc";
+import { RpcTransportError } from "../../../src/rpc";
 import type { FiberLspSdkOptions, SdkChannelInfo, SdkEvent } from "../../../src/sdk";
+import type { HoldInvoicePolicyRecord } from "../../../src/policy";
 import { PolicyEngine, SignerStore } from "../../../src/policy";
 import { FiberLspSdk, SdkError } from "../../../src/sdk";
 import { TimerMock } from "../../mocks/common";
@@ -140,7 +143,7 @@ async function opened(fetchOf?: FetchOf, network?: FiberLspSdkOptions["network"]
     const h = flow(fetchOf, network);
     await connect(h);
     // The double compares the funding tx's raw data alone, which the host's witnesses leave as it is.
-    await h.sdk.openChannel(FUNDED, CHANNEL.localCloseScript, (unsigned) => Promise.resolve(unsigned));
+    await h.sdk.openChannel(FUNDED, CHANNEL.localCloseScript, (unsigned) => Promise.resolve(unsigned.witnesses));
     await tick(h, 3);
     expect(eventsOf(h)).toEqual(["SIGNING SendCommitmentSigned signed", "SIGNING CompleteReceivedCommitment warning", "CHANNEL_READY"]);
     h.events.length = 0;
@@ -159,6 +162,10 @@ function losingNext(method: string): FetchOf {
     };
 }
 
+function holdRecordOf(h: InvoiceFlow): Promise<HoldInvoicePolicyRecord> {
+    return new PolicyEngine(new SignerStore(h.storage)).readHoldInvoice(PAYMENT_HASH.slice(2));
+}
+
 function eventsOf(h: InvoiceFlow): string[] {
     return h.events.map((event) => {
         switch (event.type) {
@@ -167,6 +174,7 @@ function eventsOf(h: InvoiceFlow): string[] {
             case "PAYMENT_PENDING":
             case "PAYMENT_RECEIVED":
             case "PAYMENT_EXPIRED":
+            case "PAYMENT_CANCELLED":
                 return `${event.type} ${event.paymentHashHex === PAYMENT_HASH ? "invoice" : event.paymentHashHex}`;
             case "ERROR":
                 return `ERROR ${event.error.code}: ${event.error.message}`;
@@ -281,7 +289,7 @@ describe("hold invoices over the tenant node", () => {
             `ERROR poll_failed: the invoice poll of ${PAYMENT_HASH} failed: the invoice index recorded for ${PAYMENT_HASH} derives the preimage of ${OTHER_PAYMENT_HASH}`,
             `ERROR poll_failed: the invoice poll of ${PAYMENT_HASH} failed: the invoice index recorded for ${PAYMENT_HASH} derives the preimage of ${OTHER_PAYMENT_HASH}`,
         ]);
-        expect((await new PolicyEngine(new SignerStore(h.storage)).readHoldInvoice(PAYMENT_HASH.slice(2))).released).toBe(false);
+        expect((await holdRecordOf(h)).released).toBe(false);
         expect(await invoiceOf(h)).toMatchObject({ status: "Received" });
     });
 
@@ -508,15 +516,92 @@ describe("hold invoices over the tenant node", () => {
         // The device settles again and the node takes the preimage, but its TLC is already failing back.
         expect(methods(h, from)).toEqual([idle("get_invoice", "settle_invoice"), idle("get_invoice", "settle_invoice")].flat());
         expect(requests(h)).toEqual([...ADD_ROUND, "SendCommitmentSigned Commitment@3 unanswered"]);
-        expect(eventsOf(h).slice(6)).toEqual([
-            "SIGNING SendCommitmentSigned refused policy_refusal",
-            "SIGNING SendCommitmentSigned refused policy_refusal",
-        ]);
+        expect(eventsOf(h).slice(6)).toEqual(["SIGNING SendCommitmentSigned refused policy_refusal"]);
         const refused = h.events.at(-1);
         if (refused?.type !== "SIGNING" || refused.outcome !== "refused") throw new Error("the last event is no refusal");
         // The balance rule counts a released TLC as the device's.
         expect(refused.error.message).toBe("the remote commitment lowers the holdings by 250000000 shannons, which no offered TLC took");
         expect(await invoiceOf(h)).toMatchObject({ status: "Received" });
+    });
+
+    it("cancels an open invoice: the node stores it cancelled and PAYMENT_CANCELLED ends it, never PAYMENT_EXPIRED", async () => {
+        const h = await opened();
+        await h.sdk.createInvoice(AMOUNT);
+        const from = h.node.calls.length;
+        await h.sdk.cancelInvoice(PAYMENT_HASH);
+        await flush();
+        expect(h.node.calls[from]).toEqual({ method: "cancel_invoice", params: { payment_hash: PAYMENT_HASH } });
+        expect((await holdRecordOf(h)).cancelled).toBe(true);
+        expect(eventsOf(h)).toEqual(["PAYMENT_CANCELLED invoice"]);
+        expect(await invoiceOf(h)).toMatchObject({ status: "Cancelled" });
+        // Forgotten once told: past the expiry the step tells nothing.
+        h.clock.nowMs = INVOICE_EXPIRED_MS;
+        await tick(h, 2);
+        expect(eventsOf(h)).toEqual(["PAYMENT_CANCELLED invoice"]);
+        expect(await invoiceOf(h)).toMatchObject({ status: "Cancelled" });
+        expect(h.node.calls.some((call) => call.method === "settle_invoice")).toBe(false);
+    });
+
+    it("cancels an invoice whose TLC the node holds: the device signs the TLC's removal, and the preimage never reaches the node", async () => {
+        const h = await opened();
+        await h.sdk.createInvoice(AMOUNT);
+        h.node.receivePayment(PAYMENT);
+        // Disconnected before it reads the invoice: the TLC is held, the preimage kept.
+        const off = h.sdk.onEvent((event) => {
+            if (event.type === "SIGNING" && event.transition === "CompleteReceivedRevokeAndAck") h.sdk.disconnect();
+        });
+        await tick(h);
+        off();
+        expect(eventsOf(h)).toEqual(ADD_SIGNINGS);
+        expect(await invoiceOf(h)).toMatchObject({ status: "Received" });
+        await h.sdk.cancelInvoice(PAYMENT_HASH);
+        expect(await invoiceOf(h)).toMatchObject({ status: "Cancelled" });
+        // The node fails the held TLC back through a round of its own, which waits for the device.
+        expect(requests(h)).toEqual([...ADD_ROUND, "SendCommitmentSigned Commitment@3 unanswered"]);
+        const from = h.node.calls.length;
+        await connect(h);
+        await tick(h, 4);
+        expect(methods(h, from).includes("settle_invoice")).toBe(false);
+        expect(requests(h)).toEqual([...ADD_ROUND, ...REMOVE_ROUND]);
+        // The step reads Cancelled on the tick that signs the removal's first request.
+        expect(eventsOf(h).slice(4)).toEqual([REMOVE_SIGNINGS[0], "PAYMENT_CANCELLED invoice", ...REMOVE_SIGNINGS.slice(1)]);
+        expect(h.node.calls.some((call) => call.method === "settle_invoice")).toBe(false);
+        expect((await holdRecordOf(h)).released).toBe(false);
+        // The TLC went back to its payer: both balances are the open's.
+        expect(await h.sdk.listChannels()).toEqual([LISTED]);
+    });
+
+    it("repairs a cancel the node never heard once the invoice is received: the step asks again, and the held TLC fails back", async () => {
+        const h = await opened(losingNext("cancel_invoice"));
+        await h.sdk.createInvoice(AMOUNT);
+        const error = await rejection(h.sdk.cancelInvoice(PAYMENT_HASH));
+        expect(error).toBeInstanceOf(RpcTransportError);
+        expect((await holdRecordOf(h)).cancelled).toBe(true);
+        expect(await invoiceOf(h)).toMatchObject({ status: "Open" });
+        h.node.receivePayment(PAYMENT);
+        const from = h.node.calls.length;
+        await tick(h, 8);
+        expect(methods(h, from).filter((method) => method === "cancel_invoice")).toEqual(["cancel_invoice"]);
+        expect(methods(h, from).includes("settle_invoice")).toBe(false);
+        expect(await invoiceOf(h)).toMatchObject({ status: "Cancelled" });
+        expect(requests(h)).toEqual([...ADD_ROUND, ...REMOVE_ROUND]);
+        expect(eventsOf(h).filter((event) => event.startsWith("PAYMENT"))).toEqual([
+            "PAYMENT_PENDING invoice",
+            "PAYMENT_CANCELLED invoice",
+        ]);
+        expect((await holdRecordOf(h)).released).toBe(false);
+        expect(await h.sdk.listChannels()).toEqual([LISTED]);
+    });
+
+    it("ends a cancel whose answer was lost as cancelled: the node took it, and the step reads it", async () => {
+        const h = await opened();
+        await h.sdk.createInvoice(AMOUNT);
+        h.node.dropNextAnswer("cancel_invoice");
+        const error = await rejection(h.sdk.cancelInvoice(PAYMENT_HASH));
+        expect(error).toBeInstanceOf(RpcTransportError);
+        expect(await invoiceOf(h)).toMatchObject({ status: "Cancelled" });
+        await tick(h);
+        expect(eventsOf(h)).toEqual(["PAYMENT_CANCELLED invoice"]);
     });
 
     it.each<[string, TenantNodeInvoiceTamper, string]>([
@@ -556,5 +641,92 @@ describe("hold invoices over the tenant node", () => {
         await connect(h);
         await tick(h);
         expect(methods(h, from)).toEqual([]);
+    });
+});
+
+describe("the tenant node's cancel_invoice", () => {
+    function cancelAnswer(h: InvoiceFlow, paymentHash: string = PAYMENT_HASH): Promise<unknown> {
+        return post(h.node, { jsonrpc: "2.0", id: 1, method: "cancel_invoice", params: [{ payment_hash: paymentHash }] });
+    }
+
+    function refused(message: string): unknown {
+        return { jsonrpc: "2.0", id: 1, error: { code: -32000, message } };
+    }
+
+    it("answers the invoice cancelled, and refuses a second cancel with fiber's text", async () => {
+        const h = await opened();
+        const created = await h.sdk.createInvoice(AMOUNT);
+        expect(await cancelAnswer(h)).toEqual({
+            jsonrpc: "2.0",
+            id: 1,
+            result: { invoice_address: created.invoice, invoice: expect.anything(), status: "Cancelled" },
+        });
+        expect(await invoiceOf(h)).toMatchObject({ status: "Cancelled" });
+        expect(await cancelAnswer(h)).toEqual(refused("invoice can not be canceled, current status: Cancelled"));
+    });
+
+    it("finds no invoice of a hash the node never built", async () => {
+        const h = await opened();
+        expect(await cancelAnswer(h, OTHER_PAYMENT_HASH)).toEqual(refused("invoice not found"));
+    });
+
+    it("cancels an open invoice past its expiry, which the node reads as expired, and stores it cancelled", async () => {
+        const h = await opened();
+        await h.sdk.createInvoice(AMOUNT);
+        h.clock.nowMs = INVOICE_EXPIRED_MS;
+        expect(await invoiceOf(h)).toMatchObject({ status: "Expired" });
+        expect(await cancelAnswer(h)).toMatchObject({ result: { status: "Cancelled" } });
+        expect(await invoiceOf(h)).toMatchObject({ status: "Cancelled" });
+    });
+
+    it("refuses to cancel a paid invoice", async () => {
+        const h = await opened();
+        await h.sdk.createInvoice(AMOUNT);
+        h.node.receivePayment(PAYMENT);
+        await tick(h, 9);
+        expect(await invoiceOf(h)).toMatchObject({ status: "Paid" });
+        expect(await cancelAnswer(h)).toEqual(refused("invoice can not be canceled, current status: Paid"));
+    });
+
+    it("refuses to cancel a received invoice whose preimage the node holds, keeping it received", async () => {
+        const h = await opened();
+        await h.sdk.createInvoice(AMOUNT);
+        h.node.dropNextAnswer("settle_invoice");
+        h.node.receivePayment(PAYMENT);
+        // Disconnected on the lost answer: the node holds the preimage and the TLC is fulfilling.
+        const off = h.sdk.onEvent((event) => {
+            if (event.type === "ERROR") h.sdk.disconnect();
+        });
+        await tick(h);
+        off();
+        expect(await invoiceOf(h)).toMatchObject({ status: "Received" });
+        expect(await cancelAnswer(h)).toEqual(refused("invoice can not be canceled because payment preimage already exists"));
+        expect(await invoiceOf(h)).toMatchObject({ status: "Received" });
+    });
+
+    it("fails a TLC that arrives for a cancelled invoice back, the invoice staying cancelled", async () => {
+        const h = await opened();
+        await h.sdk.createInvoice(AMOUNT);
+        await cancelAnswer(h);
+        h.node.receivePayment(PAYMENT);
+        await tick(h, 9);
+        expect(await invoiceOf(h)).toMatchObject({ status: "Cancelled" });
+        expect(h.node.calls.some((call) => call.method === "settle_invoice")).toBe(false);
+        expect(await h.sdk.listChannels()).toEqual([LISTED]);
+    });
+
+    it("refuses to settle a cancelled invoice with fiber's text", async () => {
+        const h = await opened();
+        await h.sdk.createInvoice(AMOUNT);
+        await cancelAnswer(h);
+        const preimage = bytesToHex(deriveHoldInvoicePreimage(MASTER_SEED, INVOICE_INDEX));
+        expect(
+            await post(h.node, {
+                jsonrpc: "2.0",
+                id: 1,
+                method: "settle_invoice",
+                params: [{ payment_hash: PAYMENT_HASH, payment_preimage: `0x${preimage}` }],
+            }),
+        ).toEqual(refused("Invoice is already cancelled"));
     });
 });

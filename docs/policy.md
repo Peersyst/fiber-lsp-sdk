@@ -515,7 +515,7 @@ inside the balance lane:
 
 1. The record is read by the whole hash; none, or a twin's under the bound bytes, is a `TypeError`. A record already
    released is answered at once, nothing judged and the clock not read: released once, released for good, since the
-   commitments signed since rely on it.
+   commitments signed since rely on it. One marked cancelled is refused as `cancelled` ([below](#cancelled-and-released-exclude-each-other)).
 2. The record of every channel the invoice lists is read; a listed channel with no record throws.
 3. The clock is read once, after the records and before the judgment, so no wait for the lane or the storage ages the
    reading; one that is not a whole number of milliseconds up to `Number.MAX_SAFE_INTEGER` is a `RangeError`.
@@ -534,8 +534,8 @@ inside the balance lane:
      within a u64.
 5. Only then is the record marked released.
 
-The four codes are `HoldInvoiceError`s, refusals the caller waits out or reports, in that order: the algorithm, the offered
-TLC, the amount, the expiry. Each channel counts at its weaker view for the reason the balance rule counts every other
+Four of the codes are `HoldInvoiceError`s the judgment gives, refusals the caller waits out or reports, in that order: the
+algorithm, the offered TLC, the amount, the expiry; `cancelled`, ahead of them, is the mark's. Each channel counts at its weaker view for the reason the balance rule counts every other
 channel at its worst: the node aggregates both partial signatures of every channel, so it may broadcast either
 commitment of each, and the sum of the weaker views is what it holds whichever it broadcasts. The expiry is held to a
 margin because the preimage, once out, is worth something only if the fulfil it starts is signed before fiber fails the
@@ -543,6 +543,26 @@ TLC on its own (`channel.rs:3559-3592`); the margin is the facade's to compute, 
 pace ([sdk.md](./sdk.md)), and comes in as a function, since `policy` does not import `signer`. The release judges the
 latest commitment of each view, as the balance rule does, and rests on the same premise
 ([What this layer deliberately does not do](#what-this-layer-deliberately-does-not-do)).
+
+### Cancelled and released exclude each other
+
+A cancelled invoice is never released, and a released one is never cancelled. Without the rule a cancel that crosses the
+release could leave both: the preimage out and the node's invoice `Cancelled`, which no later tick could put right.
+`markHoldInvoiceCancelled(paymentHashHex)` marks the record `cancelled`, in the balance lane like the release, and the
+facade calls it before it asks the node to cancel ([sdk.md](./sdk.md), "Cancelling an invoice"), so from the mark on the
+release is refused. Both run in the balance lane, one after the other, so each finds the other's mark. The hash is checked, then, inside
+the lane, the record is read by its whole hash:
+
+- None recorded is a `HoldInvoiceError` with `not_recorded`; a twin's, under the bound bytes, a `TypeError`.
+- A released one is a `HoldInvoiceError` with `released`: released once, released for good.
+- One already marked writes nothing and returns, so a repeat is idempotent, and so is a retry after a node call that failed.
+- Otherwise the record is written with `cancelled: true`, re-read first inside the update, a record that vanished meanwhile a
+  `TypeError`.
+
+`markHoldInvoiceReleased` refuses a cancelled record with `cancelled`, and the mark is never taken back: a cancel the node
+never took stays marked, so the preimage stays in the device and the facade repeats the cancel. `readHoldInvoice` returns
+the field when it is set. The three codes, `not_recorded`, `released` and `cancelled`, join the four of the judgment in
+`HoldInvoiceError`; the first two are the cancel's, the last the release's.
 
 Two reads serve the facade's invoice step. `readHoldInvoice(paymentHashHex)` hands the record back by its whole hash, a
 `TypeError` when none was recorded under it, a twin's included. `listsHoldInvoiceTlc(paymentHashHex)` tells whether the last commitment of either view
@@ -580,7 +600,9 @@ in its own lane, outside the balance lane, and a refusal writes nothing.
 spend pays, and `maxFeeShannons`, decimal shannons within a u64, how far below what an unlock releases the destination may
 be paid. The spend cannot show its fee, since the node's cells that pay it are not the device's to read, so the fee is
 bounded from the device's side. Each field is checked at construction, a `TypeError` naming it
-(`options.watchtower.destination`), and the approval is copied. Without one, every request is `policy_refusal`, ahead of
+(`options.watchtower.destination`), and the approval is copied. `setWatchtowerApproval(approval)` replaces it later with
+the same checks and copy, naming each field `approval.destination` and `approval.maxFeeShannons`; a refused approval
+leaves the previous one in force, and the approval is in memory, so the host sets it again at each start. Without one, every request is `policy_refusal`, ahead of
 the channel's lookup, and the funds stay where they would be with no watchtower ([signing.md](./signing.md), on the trust
 the destination takes).
 
@@ -737,21 +759,21 @@ the difference to the fee. It can never redirect it: every output but the remain
 
 ## Where it lives
 
-| File                                     | Contents                                                                                                                                                                                                                           |
-| ---------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `src/policy/policy-engine.ts`            | The six checks, sign-once and reuse, the claim, channel registration, the host's pins, the evidence, intents and hold invoices; the watchtower's approval, its claim, the signature recorded and the mark of a spend fiber applied |
-| `src/policy/watchtower-spend.ts`         | The watchtower's rules, pure: the structure, the source, the key, the remainder, the destination, the repeat and the claim                                                                                                         |
-| `src/policy/channel-opening.ts`          | What a channel opens with: the funded amount and close script checked, the registration's pins, and the reserve over either side's close script                                                                                    |
-| `src/policy/channel-pins.ts`             | Check 5's pins, pure: what each operation and the host's terms state, in the pins' forms, and the first conflict                                                                                                                   |
-| `src/policy/hold-invoice-release.ts`     | The hold invoice's release, pure: the invoice's TLCs a view lists, the algorithm, the offered TLC, the amount held and the expiry against the margin                                                                               |
-| `src/policy/capacity-bounds.ts`          | Check 5's bounds, pure: the commitment fee and what a commitment pays out                                                                                                                                                          |
-| `src/policy/balance-rule.ts`             | Check 6 itself, pure: the opening, the three steps over two snapshots, and the close with its fee bound                                                                                                                            |
-| `src/policy/policy.constants.ts`         | The keyspace prefixes and the balance lane, the pins by who fixes them, the reuse modes and the lanes, the record versions, the watchtower's two bounds                                                                            |
-| `src/policy/policy.error.ts`             | `PolicyRefusalError`, carrying the wire error code, and `withPolicyRefusal`; the host's `DebitIntentError`, `HoldInvoiceError`, `ChannelPinError` and `ChannelRegistrationError`                                                   |
-| `src/policy/utils/payment-hash.utils.ts` | The bound payment hash a payment record is keyed by, and whether a TLC under that key is the record's                                                                                                                              |
-| `src/policy/utils/slot.utils.ts`         | Operation and counter to slot and lane, where the shared close slot and the fixed announcement live                                                                                                                                |
-| `src/policy/utils/session.utils.ts`      | The session commitment and the shape a signable session must have                                                                                                                                                                  |
-| `src/policy/signer-store.ts`             | The persistence underneath ([persistence.md](./persistence.md))                                                                                                                                                                    |
+| File                                     | Contents                                                                                                                                                                                                                                                                      |
+| ---------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `src/policy/policy-engine.ts`            | The six checks, sign-once and reuse, the claim, channel registration, the host's pins, the evidence, intents and hold invoices, cancelled or released; the watchtower's approval and its replacement, its claim, the signature recorded and the mark of a spend fiber applied |
+| `src/policy/watchtower-spend.ts`         | The watchtower's rules, pure: the structure, the source, the key, the remainder, the destination, the repeat and the claim                                                                                                                                                    |
+| `src/policy/channel-opening.ts`          | What a channel opens with: the funded amount and close script checked, the registration's pins, and the reserve over either side's close script                                                                                                                               |
+| `src/policy/channel-pins.ts`             | Check 5's pins, pure: what each operation and the host's terms state, in the pins' forms, and the first conflict                                                                                                                                                              |
+| `src/policy/hold-invoice-release.ts`     | The hold invoice's release, pure: the invoice's TLCs a view lists, the algorithm, the offered TLC, the amount held and the expiry against the margin                                                                                                                          |
+| `src/policy/capacity-bounds.ts`          | Check 5's bounds, pure: the commitment fee and what a commitment pays out                                                                                                                                                                                                     |
+| `src/policy/balance-rule.ts`             | Check 6 itself, pure: the opening, the three steps over two snapshots, and the close with its fee bound                                                                                                                                                                       |
+| `src/policy/policy.constants.ts`         | The keyspace prefixes and the balance lane, the pins by who fixes them, the reuse modes and the lanes, the record versions, the watchtower's two bounds                                                                                                                       |
+| `src/policy/policy.error.ts`             | `PolicyRefusalError`, carrying the wire error code, and `withPolicyRefusal`; the host's `DebitIntentError`, `HoldInvoiceError`, `ChannelPinError` and `ChannelRegistrationError`                                                                                              |
+| `src/policy/utils/payment-hash.utils.ts` | The bound payment hash a payment record is keyed by, and whether a TLC under that key is the record's                                                                                                                                                                         |
+| `src/policy/utils/slot.utils.ts`         | Operation and counter to slot and lane, where the shared close slot and the fixed announcement live                                                                                                                                                                           |
+| `src/policy/utils/session.utils.ts`      | The session commitment and the shape a signable session must have                                                                                                                                                                                                             |
+| `src/policy/signer-store.ts`             | The persistence underneath ([persistence.md](./persistence.md))                                                                                                                                                                                                               |
 
 ## What the tests guarantee
 
@@ -1466,3 +1488,34 @@ states no peer's:
 | A close states no peer's close script                      | 6                 |
 | The record guard takes any peer's close script             | 4                 |
 | A close states the peer's close script before the device's | 2                 |
+
+`policy-engine.spec.ts` pins the cancel: a recorded invoice marked once, the record written once with nothing else
+touched, and a repeat writing nothing; an invoice never recorded refused as `not_recorded` and a released one as `released`
+(it stays released), a twin's record refused and a record that vanishes between the read and the write a `TypeError`, all
+writing nothing, one refusal per argument; the release of a cancelled invoice refused as `cancelled` before any other
+judgment, with no channel read, no clock and no margin, and a released one kept released with no throw and no write, a record with both flags included (released wins); and of
+two crossing marks, whichever comes first the only one that wins, in both interleavings forced inside the balance lane (the
+release held while its judgment runs and the cancel asked, and the cancel held and the release asked), each leaving one mark
+and never both. `setWatchtowerApproval` is pinned by a spend refused for
+want of an approval signed once one is set, the old destination refused and the new one let through after a replacement,
+a fee of 0 and a fee at a u64's maximum taken, one refusal per field naming the setter's own `approval`, a refused
+approval leaving the previous one, a copy the host cannot change afterwards, and the approval read inside the record's lane, so
+a replacement made while a spend waits for it is the one that judges. `utils/validate.utils.spec.ts` takes a
+record whose `cancelled` is `true`, absent or `undefined` and refuses any other value.
+
+The hold invoice's cancel (`markHoldInvoiceCancelled`, the `cancelled` refusal of the release, the record guard's field)
+and `setWatchtowerApproval`, broken the same way (`test/tests/policy`, statements, branches, functions and lines at 100%):
+
+| Mutation                                            | Tests that failed |
+| --------------------------------------------------- | ----------------- |
+| The new approval is neither checked nor copied      | 14                |
+| The setter's refusals name the constructor's option | 13                |
+| The cancel writes nothing                           | 5                 |
+| A malformed cancelled flag loads                    | 4                 |
+| A cancelled invoice is released                     | 3                 |
+| The setter does nothing                             | 3                 |
+| A released invoice is cancelled                     | 2                 |
+| A twin's record is cancelled                        | 2                 |
+| A record that vanished is written anyway            | 1                 |
+| A repeated cancel writes again                      | 1                 |
+| An unrecorded invoice is not refused as such        | 1                 |

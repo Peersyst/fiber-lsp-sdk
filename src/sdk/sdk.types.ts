@@ -90,7 +90,7 @@ export type FiberLspSdkOptions = {
      */
     nonceReuse?: NonceReuseMode;
     /**
-     * Without it, every spend the node's watchtower asks the device to sign is refused.
+     * Without it, and until `setWatchtowerApproval` gives one, every watchtower spend is refused.
      */
     watchtower?: SdkWatchtowerOptions;
 };
@@ -137,9 +137,13 @@ type SdkEventPayloads = {
     PAYMENT_PENDING: { paymentHashHex: string };
     PAYMENT_RECEIVED: { paymentHashHex: string };
     /**
-     * Ended unpaid, its preimage never released: fiber expired or cancelled it, or it is past its expiry with no TLC of it left.
+     * Ended unpaid, its preimage never released: fiber expired it, or it is past its expiry with no TLC of it left.
      */
     PAYMENT_EXPIRED: { paymentHashHex: string };
+    /**
+     * Ended unpaid, its preimage never released: fiber cancelled it, whoever asked.
+     */
+    PAYMENT_CANCELLED: { paymentHashHex: string };
     SIGNING: SigningEventPayload;
     WATCHTOWER_SIGNING: WatchtowerSigningEventPayload;
     ERROR: { error: SdkError };
@@ -238,9 +242,9 @@ export type SdkChannelOpening = {
 };
 
 /**
- * The host's signer, which resolves the inputs and so is the one to check what they pay before signing.
+ * The host's signer: it resolves the inputs, so it checks what they pay before signing, and answers the funding tx's witnesses.
  */
-export type SdkSignFundingInputs = (unsignedFundingTx: Transaction) => Promise<Transaction>;
+export type SdkSignFundingInputs = (unsignedFundingTx: Transaction) => Promise<Uint8Array[]>;
 
 export type SdkOpeningRequest = {
     /**

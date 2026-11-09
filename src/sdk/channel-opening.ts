@@ -97,8 +97,9 @@ export async function openSdkChannel(
     assertFunction("signFundingInputs", signFundingInputs);
     assertUserLockCellDeps(userLockCellDeps);
     const opening = await openWithNode(options, copyOpeningArguments(amountShannons, userLock, userLockCellDeps));
-    const signedTx = await signFundingInputs(opening.unsignedFundingTx);
-    await submitSdkFundingTx(options, opening.channelId, signedTx);
+    const witnesses = await signFundingInputs(copyTransaction(opening.unsignedFundingTx));
+    assertFundingWitnesses("signFundingInputs result", witnesses);
+    await submitSdkFundingTx(options, opening.channelId, { ...opening.unsignedFundingTx, witnesses });
     return opening.channelId;
 }
 
@@ -290,12 +291,21 @@ async function dropOpening(options: SdkChannelOpeningOptions, opening: PendingOp
  */
 function hashSignedFundingTx(signedTx: Transaction): Uint8Array {
     if (!isPlainObject(signedTx)) throw new TypeError("signedTx must be an object");
-    const witnesses: unknown = signedTx.witnesses;
-    if (!Array.isArray(witnesses)) throw new TypeError("signedTx.witnesses must be an array");
-    witnesses.forEach((witness: unknown, index) => assertAnyBytes(`signedTx.witnesses[${index}]`, witness));
+    assertFundingWitnesses("signedTx.witnesses", signedTx.witnesses);
     try {
         return computeTxHash(signedTx);
     } catch (error) {
         throw new TypeError(describeSdkFailure("signedTx is not a transaction", error), { cause: error });
     }
+}
+
+/**
+ * Asserts a funding tx's witnesses are a list of byte strings; CKB judges them, after `openChannel` resolved.
+ * @param label What holds them, the prefix of an error's message.
+ * @param witnesses The witnesses.
+ */
+function assertFundingWitnesses(label: string, witnesses: unknown): asserts witnesses is Uint8Array[] {
+    if (!Array.isArray(witnesses)) throw new TypeError(`${label} must be an array`);
+    // Not `forEach`, which skips a list's holes.
+    for (let index = 0; index < witnesses.length; index++) assertAnyBytes(`${label}[${index}]`, witnesses[index] as unknown);
 }

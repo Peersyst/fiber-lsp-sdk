@@ -101,3 +101,12 @@ export class TenantIdentity {
         };
     }
 }
+
+/**
+ * Derives the tenant id of a master seed, which a host may need before it builds the SDK.
+ * @param masterSeed The master seed.
+ * @returns The 64-character lowercase hex tenant id.
+ */
+export function deriveTenantId(masterSeed: Uint8Array): string {
+    return new TenantIdentity(masterSeed).tenantId;
+}

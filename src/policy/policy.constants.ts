@@ -30,7 +30,15 @@ export const POLICY_VIEWS = ["remote", "local"] as const;
 
 export const DEBIT_INTENT_ERROR_CODES = ["intent_open", "intent_charged", "own_invoice", "hash_twin"] as const;
 
-export const HOLD_INVOICE_ERROR_CODES = ["offered_in_flight", "algorithm_mismatch", "not_held", "expiry_too_close"] as const;
+export const HOLD_INVOICE_ERROR_CODES = [
+    "offered_in_flight",
+    "algorithm_mismatch",
+    "not_held",
+    "expiry_too_close",
+    "not_recorded",
+    "released",
+    "cancelled",
+] as const;
 
 /**
  * Pinned to the first value stated; the terms are the host's, and the other pins are fixed at registration.

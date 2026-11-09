@@ -284,6 +284,10 @@ export type HoldInvoicePolicyRecord = {
     invoiceIndex: number;
     released: boolean;
     /**
+     * Set before the node is asked to cancel; a cancelled invoice is never released, nor a released one cancelled.
+     */
+    cancelled?: true;
+    /**
      * Channels that have shown a TLC under the hash, filed before the claim that shows it.
      */
     channelIndexes: number[];

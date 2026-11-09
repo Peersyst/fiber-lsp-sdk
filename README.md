@@ -22,25 +22,25 @@ These properties reflect the current specification and may evolve with it while 
 
 ## Modules
 
-| Module                           | Responsibility                                                                                                                                                                                                                                               |
-| -------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| [`derivation`](./src/derivation) | Fiber key scheme port + SDK-owned derivations (channel seed, wallet identity key, hold invoice preimage, nonce seed)                                                                                                                                         |
-| [`digest`](./src/digest)         | Rebuilds the four messages fiber signs, so the device never blind-signs; reads a watchtower spend's tx hash and settlement unlock; an opening's funding lock and channel id                                                                                  |
-| [`invoice`](./src/invoice)       | Fiber's invoice string, read and written bit for bit, so the device knows what it pays and what it asked for                                                                                                                                                 |
-| [`signer`](./src/signer)         | The entry of a signing request: the checks before the claim, the musig2 engine, the public material, the tenant identity, the hold invoice preimages, the watchtower's signature                                                                             |
-| [`policy`](./src/policy)         | Policy engine + persisted per-channel records, and the watchtower's rules                                                                                                                                                                                    |
-| [`wire`](./src/wire)             | How fiber writes values in JSON, the readers that refuse anything else, and the writers that produce it                                                                                                                                                      |
-| [`protocol`](./src/protocol)     | Fiber's two signing statuses read strictly: the transition, its slot, the plaintext, the peer's evidence; the watchtower's spend                                                                                                                             |
-| [`rpc`](./src/rpc)               | Typed fiber JSON-RPC client (Biscuit-authed)                                                                                                                                                                                                                 |
-| [`sdk`](./src/sdk)               | Public facade wiring the above: `FiberLspSdk`, its lifecycle, events and errors, the time index, the registration, the evidence, the channel opening and listing, the hold invoices, the payments sent, the cooperative close, the poller and its five steps |
+| Module                           | Responsibility                                                                                                                                                                                                                                                                               |
+| -------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| [`derivation`](./src/derivation) | Fiber key scheme port + SDK-owned derivations (channel seed, wallet identity key, hold invoice preimage, nonce seed)                                                                                                                                                                         |
+| [`digest`](./src/digest)         | Rebuilds the four messages fiber signs, so the device never blind-signs; reads a watchtower spend's tx hash and settlement unlock; an opening's funding lock and channel id                                                                                                                  |
+| [`invoice`](./src/invoice)       | Fiber's invoice string, read and written bit for bit, so the device knows what it pays and what it asked for                                                                                                                                                                                 |
+| [`signer`](./src/signer)         | The entry of a signing request: the checks before the claim, the musig2 engine, the public material, the tenant identity, the hold invoice preimages, the watchtower's signature                                                                                                             |
+| [`policy`](./src/policy)         | Policy engine + persisted per-channel records, and the watchtower's rules                                                                                                                                                                                                                    |
+| [`wire`](./src/wire)             | How fiber writes values in JSON, the readers that refuse anything else, and the writers that produce it                                                                                                                                                                                      |
+| [`protocol`](./src/protocol)     | Fiber's two signing statuses read strictly: the transition, its slot, the plaintext, the peer's evidence; the watchtower's spend                                                                                                                                                             |
+| [`rpc`](./src/rpc)               | Typed fiber JSON-RPC client (Biscuit-authed)                                                                                                                                                                                                                                                 |
+| [`sdk`](./src/sdk)               | Public facade wiring the above: `FiberLspSdk`, its lifecycle, events and errors, the time index, the registration, the evidence, the channel opening and listing, the hold invoices and their cancel, the payments sent, the cooperative and the forced close, the poller and its five steps |
 
 `derivation`, `digest`, `invoice`, `signer`, `policy`, `wire`, `protocol` and `rpc` are implemented; `sdk` has its core,
 construction, `connect`/`disconnect`, the events, the tenant's registration and token, a channel's evidence, and the
 channel opening, checked against what was asked before anything is signed, with the listing of the node's channels,
 and the hold invoices, each string checked against what was asked and each preimage released only once the device's
-channels hold the payment, and the payments sent, each invoice checked before its budget is approved and each outcome
+channels hold the payment, with the cancel of an invoice not settled, and the payments sent, each invoice checked before its budget is approved and each outcome
 read back from the node, and the cooperative close, refused before the node is asked when its fee would exceed the bound the
-device signs under. The public API is not settled yet. The upstream reference is the head of Fiber's hosted-LSP PR (nervosnetwork/fiber#1623, `d8dd6d28`), whose polled
+device signs under, and the forced close the host asks for. The public API is not settled yet. The upstream reference is the head of Fiber's hosted-LSP PR (nervosnetwork/fiber#1623, `d8dd6d28`), whose polled
 signing protocol the modules under the facade are being aligned to: `digest` and `policy` know both commitment-lock
 layouts, `rpc` writes the tenant API's forms, `invoice` reads the trampoline route hint every tenant invoice carries,
 and `signer` answers the node's signing status, which the facade's poller reads and answers on every tick, and the
@@ -48,7 +48,7 @@ watchtower's requests to spend a force-closed commitment, signed only toward a d
 fiber's watchtower pays the LSP node's own lock, so approving it is trusting the LSP after a force close:
 [signing.md](./docs/signing.md)); `signer` also holds the tenant identity that signs the registration, which the facade
 exposes. A test double of the tenant's node runs fiber's tenant opening, its sequences of signing requests, its
-watchtower's spends, its hold invoices, its payments sent and its cooperative closes through that poller, and shows that under Fiber's current nonces a channel still stops at the settlement of a payment
+watchtower's spends, its hold invoices, its invoice cancels, its payments sent, its cooperative closes and its forced closes through that poller, and shows that under Fiber's current nonces a channel still stops at the settlement of a payment
 it sends and at its second payment received, even with `nonceReuse: "allow"` ([policy.md](./docs/policy.md), "The known
 cost"); fiber's devnet shows the first, where the node force-closes the tenant's channel some 30 to 33 s after the refused
 session ([e2e-agent.md](./docs/e2e-agent.md), "Scenarios").
@@ -174,13 +174,14 @@ reserve included. The SDK checks and pins the node's answer before the host sign
 
 ```js
 const channelId = await sdk.openChannel(amountShannons, userLock, async (unsignedFundingTx) => {
-  return wallet.signInputs(unsignedFundingTx); // the host's signer checks what the inputs pay before it signs them
+  // the host's signer checks what the inputs pay before it signs them, and resolves the witnesses alone: Uint8Array[]
+  return wallet.signWitnesses(unsignedFundingTx);
 });
 // userLockCellDeps, the last argument of both forms, only for a lock whose cell deps are not among the chain's genesis scripts
 
 // or in two steps, the host signing in between
 const opening = await sdk.prepareChannelOpen(amountShannons, userLock); // channelId, unsignedFundingTx, openingContext
-await sdk.submitFundingTx(opening.channelId, await wallet.signInputs(opening.unsignedFundingTx));
+await sdk.submitFundingTx(opening.channelId, await wallet.signInputs(opening.unsignedFundingTx)); // here the whole signed tx
 
 sdk.onEvent((event) => {
   if (event.type === "CHANNEL_READY") show(event.channelId);
@@ -206,8 +207,14 @@ sdk.onEvent((event) => {
   if (event.type === "PAYMENT_PENDING") showHeld(event.paymentHashHex); // held on the node, not yet settled
   if (event.type === "PAYMENT_RECEIVED") showPaid(event.paymentHashHex);
   if (event.type === "PAYMENT_EXPIRED") showUnpaid(event.paymentHashHex); // ended unpaid, the preimage never released
+  if (event.type === "PAYMENT_CANCELLED") showCancelled(event.paymentHashHex); // cancelled, by whoever asked; never released
 });
+
+await sdk.cancelInvoice(paymentHashHex); // an invoice never to be paid: marked first, so its preimage is never released
 ```
+
+`cancelInvoice` refuses an invoice this device never recorded (`unknown_invoice`) and one whose preimage it already
+released (`invoice_released`); asking again, or for one already cancelled, is not an error.
 
 ### Sending a payment
 
@@ -242,6 +249,27 @@ await sdk.closeChannel(channelId); // or { feeRate: 2000n }, in shannons per 100
 
 A close the peer starts is signed under the same checks. A `feeRate` whose fee would exceed what the device signs for
 is refused (`close_fee_too_high`) before the node is asked.
+
+`forceCloseChannel` asks for a force close instead. The device signs nothing for it, so it needs no record of the channel,
+and the node closes it; but a channel with no record is not watched, tells no `CHANNEL_CLOSED`, and nothing signs the
+watchtower's spend, so the device's balance stays on the commitment's cell until a device holding the channel's record
+signs. Where there is a record, the watchtower's spend that follows is signed toward the approval the host gives, which it
+may replace at any time:
+
+```js
+await sdk.forceCloseChannel(channelId);
+sdk.setWatchtowerApproval({ destination, maxFeeShannons: "100000" }); // in memory, like the option: set it again at each start
+```
+
+### The tenant id before the SDK
+
+A host that keys its storage by the tenant id needs it before it has a store; `deriveTenantId` gives it from the seed alone:
+
+```js
+import { deriveTenantId } from "@peersyst/fiber-lsp-sdk";
+
+const tenantId = deriveTenantId(masterSeed); // 64 lowercase hex characters, the id `sdk.tenantId` has
+```
 
 ### Reading a channel's evidence
 
