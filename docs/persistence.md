@@ -5,7 +5,10 @@ What the device persists, and the guarantees `SignerStore` gives the policy engi
 ## Keyspace
 
 The host injects an `ISignerStorage` (or its async form): a string-keyed, string-valued store the SDK never introspects. All
-keys carry the `fiber-lsp-sdk:` namespace, because the host may back that storage with a store it also uses for its own keys.
+keys carry the `fiber-lsp-sdk:` namespace, because the host may back that storage with a store it also uses for its own keys. The
+namespace is the SDK's alone, not a master seed's: one storage (or one key prefix of a shared store) serves a single master
+seed, and two accounts never share it, since `opening`, `activity` and `device-channels` are single keys a second seed would
+overwrite or read as its own.
 
 | Key                                 | Value                                                                            |
 | ----------------------------------- | -------------------------------------------------------------------------------- |
@@ -292,3 +295,10 @@ reporting one below the truth gets a slot served twice under a session of its ch
 the funding key ([policy.md](./policy.md)). Once the storage is gone the device holds nothing of its own to check that number
 against. Until that is settled, re-registering a channel this device has already signed for is a decision the host takes on
 its own: `registerChannel` will build a record with an empty registry, and every check downstream trusts it.
+
+**A storage that comes back older is not the safe side.** Coming back empty is: every channel reads as unregistered and
+nothing is signed. Coming back with an earlier state and its aliases intact is not: the registry then reads slots it has
+already served as free, and the next request for one signs a second message under the same deterministic nonce, the
+condition that recovers the funding key ([policy.md](./policy.md)). So the storage never goes back, whatever it is built on: a
+file or an IndexedDB database restored from a backup, or an app's data restored by the OS's own backup, is exactly an older
+state, and the host keeps the storage out of those backups or never restores one over a live device.
