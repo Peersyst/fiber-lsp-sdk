@@ -108,7 +108,17 @@ export function tenantDevice(node: InMemoryTenantNode, options: TenantDeviceOpti
     const rpc = new FiberRpcClient({ url: TENANT_NODE_URL, fetch: node.fetch });
     const activity = new ActivityTracker(store);
     const channels = new DeviceChannelList(store);
-    const steps: PollStep[] = [buildChannelSigningStep({ rpc, store, activity, dispatch, emit })];
+    const steps: PollStep[] = [
+        buildChannelSigningStep({
+            rpc,
+            store,
+            activity,
+            dispatch,
+            emit,
+            // These flows walk a round tick by tick.
+            pollNow: () => undefined,
+        }),
+    ];
     if (options.channelStep === true) steps.unshift(buildChannelStep({ rpc, activity, openings: new PendingOpeningStore(store), emit }));
     if (options.watchtower) steps.push(buildWatchtowerSigningStep({ rpc, store, policy, dispatch, activity, channels, emit }));
     const poller = new ActivityPoller({ timer, intervalMs: INTERVAL_MS, stepTimeoutMs: STEP_TIMEOUT_MS, steps, emit });

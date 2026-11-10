@@ -4,7 +4,7 @@ import type { ChannelSigningTransition } from "../../../src/protocol";
 import { FiberRpcClient, RpcError, RpcResponseError, RpcTransportError } from "../../../src/rpc";
 import type { SdkEvent } from "../../../src/sdk";
 import { ActivityTracker, SdkError, buildChannelSigningStep } from "../../../src/sdk";
-import type { SignerDispatch } from "../../../src/signer";
+import type { DispatchOutcome, SignerDispatch } from "../../../src/signer";
 import { ScriptedNode } from "../../mocks/rpc";
 import { asRecord } from "../../utils/json-shape";
 import { resignPeerHalf } from "../../utils/peer-musig";
@@ -53,6 +53,7 @@ type Harness = {
     activity: ActivityTracker;
     node: ScriptedNode;
     events: SdkEvent[];
+    pollNow: jest.Mock<void, []>;
     step: (run: { abandoned: boolean }) => Promise<void>;
 };
 
@@ -67,6 +68,7 @@ async function harness(
     await activity.watch("channel", CHANNEL_ID);
     const node = new ScriptedNode();
     const events: SdkEvent[] = [];
+    const pollNow = jest.fn<void, []>();
     const step = buildChannelSigningStep({
         rpc: new FiberRpcClient({ url: URL, fetch: node.fetch }),
         store: channel.store,
@@ -76,8 +78,9 @@ async function harness(
             events.push(event);
             onEmit(event);
         },
+        pollNow,
     });
-    return { channel, activity, node, events, step };
+    return { channel, activity, node, events, pollNow, step };
 }
 
 // The channels the device opened and has not seen closed, in the order it opened them.
@@ -88,6 +91,12 @@ async function watching(h: Harness, channelIds: readonly string[]): Promise<void
 
 function caseOf(transition: ChannelSigningTransition): SigningCaseVector {
     return signingCaseOf(vectors, transition);
+}
+
+async function signedOutcomeOf(h: Harness, kase: SigningCaseVector): Promise<Extract<DispatchOutcome, { kind: "signed" }>> {
+    const outcome = await h.channel.dispatch.handle(CHANNEL_ID, signingStatusField(kase));
+    if (outcome.kind !== "signed") throw new Error(`the dispatch's outcome was ${outcome.kind}`);
+    return outcome;
 }
 
 function statusResult(status: unknown, channelId = CHANNEL_ID): unknown {
@@ -648,6 +657,109 @@ describe("buildChannelSigningStep", () => {
             h.node.onCall("get_channel_signing_status", () => (run.abandoned = true)).result(statusResult(IDLE, OTHER_ID));
             await h.step(run);
             expect(h.node.calls()).toEqual([signingStatusCall(OTHER_ID)]);
+        });
+    });
+
+    describe("the tick after a signature", () => {
+        it("asks for one once the node took the signature and the event went out", async () => {
+            const kase = caseOf("SendRevokeAndAck");
+            const seenAtEvent: number[] = [];
+            const h: Harness = await harness("SendRevokeAndAck", {}, () => seenAtEvent.push(h.pollNow.mock.calls.length));
+            h.node.onCall("submit_channel_signature", () => expect(h.pollNow).not.toHaveBeenCalled());
+            h.node.result(statusResult(kase.result.status)).result(APPLIED);
+            await h.step(live());
+            expect(seenAtEvent).toEqual([0]);
+            expect(h.pollNow).toHaveBeenCalledTimes(1);
+        });
+
+        it("asks for one on a warned second session", async () => {
+            const h = await harness("SendCommitmentSigned", { nonceReuse: "allow" });
+            await stageSecondSession(vectors, h.channel);
+            h.node.result(statusResult(caseOf("SendCommitmentSigned").result.status)).result(APPLIED);
+            await h.step(live());
+            expect(h.pollNow).toHaveBeenCalledTimes(1);
+            h.node.result(statusResult(secondSessionStatus(vectors).value)).result(APPLIED);
+            await h.step(live());
+            expect(h.events[1]).toMatchObject({ type: "SIGNING", outcome: "warning" });
+            expect(h.pollNow).toHaveBeenCalledTimes(2);
+        });
+
+        it("asks for none when the same request is served again, leaving it to the interval", async () => {
+            const kase = caseOf("SendCommitmentSigned");
+            const h = await harness("SendCommitmentSigned");
+            h.node.result(statusResult(kase.result.status)).result(APPLIED);
+            h.node.result(statusResult(kase.result.status)).result(APPLIED);
+            await h.step(live());
+            await h.step(live());
+            expect(h.events).toHaveLength(2);
+            expect(h.pollNow).toHaveBeenCalledTimes(1);
+        });
+
+        it("asks for one per request, even when an earlier request comes back between others", async () => {
+            const kase = caseOf("SendCommitmentSigned");
+            const h = await harness("SendCommitmentSigned");
+            const signed = await signedOutcomeOf(h, kase);
+            jest.spyOn(h.channel.dispatch, "handle")
+                .mockResolvedValueOnce(signed)
+                .mockResolvedValueOnce({ ...signed, requestId: new Uint8Array(32).fill(0x7c) })
+                .mockResolvedValueOnce(signed);
+            for (let round = 0; round < 3; round += 1) h.node.result(statusResult(kase.result.status)).result(APPLIED);
+            await h.step(live());
+            await h.step(live());
+            await h.step(live());
+            expect(h.pollNow).toHaveBeenCalledTimes(2);
+        });
+
+        it("keeps each channel's last request apart", async () => {
+            const kase = caseOf("SendCommitmentSigned");
+            const h = await harness("SendCommitmentSigned");
+            await watching(h, [OTHER_ID, CHANNEL_ID]);
+            const signed = await signedOutcomeOf(h, kase);
+            jest.spyOn(h.channel.dispatch, "handle").mockResolvedValue(signed);
+            h.node.result(statusResult(kase.result.status, OTHER_ID)).result(APPLIED);
+            h.node.result(statusResult(kase.result.status)).result(APPLIED);
+            await h.step(live());
+            expect(h.pollNow).toHaveBeenCalledTimes(2);
+        });
+
+        it("asks for none when nothing is pending", async () => {
+            const h = await harness("SendCommitmentSigned");
+            h.node.result(statusResult(IDLE));
+            await h.step(live());
+            expect(h.pollNow).not.toHaveBeenCalled();
+        });
+
+        it("asks for none on a refusal", async () => {
+            const kase = caseOf("SendCommitmentSigned");
+            const h = await harness("SendCommitmentSigned");
+            h.node.result(statusResult(withField(kase.result.status, "transition", "SignEverything")));
+            await h.step(live());
+            expect(h.events).toHaveLength(1);
+            expect(h.events[0]).toMatchObject({ type: "SIGNING", outcome: "refused" });
+            expect(h.pollNow).not.toHaveBeenCalled();
+        });
+
+        it("asks for none when the submission fails, and one when it is sent again", async () => {
+            const kase = caseOf("SendCommitmentSigned");
+            const h = await harness("SendCommitmentSigned");
+            h.node.result(statusResult(kase.result.status)).reject(new TypeError("Network request failed"));
+            await h.step(live());
+            expect(h.pollNow).not.toHaveBeenCalled();
+            h.node.result(statusResult(kase.result.status)).result(APPLIED);
+            await h.step(live());
+            expect(h.pollNow).toHaveBeenCalledTimes(1);
+        });
+
+        it("asks for none once abandoned during the submission", async () => {
+            const kase = caseOf("SendCommitmentSigned");
+            const h = await harness("SendCommitmentSigned");
+            const run = { abandoned: false };
+            h.node.onCall("submit_channel_signature", () => {
+                run.abandoned = true;
+            });
+            h.node.result(statusResult(kase.result.status)).result(APPLIED);
+            await h.step(run);
+            expect(h.pollNow).not.toHaveBeenCalled();
         });
     });
 

@@ -39,7 +39,7 @@ What a React Native app adds to them is in [react-native.md](./react-native.md).
 | `rpcUrl`         | The node's JSON-RPC address                                                                                                     |
 | `biscuitToken`   | The RPC's Biscuit token; omitted when the node's RPC has no auth on, or until the tenant registers                              |
 | `lspPubkey`      | The LSP node's key, the peer every channel opens to, as a compressed point on the curve; copied                                 |
-| `pollIntervalMs` | How often the node is asked about what is watched; five seconds by default, at least one millisecond                            |
+| `pollIntervalMs` | How often the node is asked about what is watched; two seconds by default, at least one millisecond                             |
 | `nonceReuse`     | `"refuse"` by default, or `"allow"`: whether a slot already served may serve a second session, never a third                    |
 | `watchtower`     | `{ destination, maxFeeShannons }`, what the watchtower's spends may pay; omitted, every spend is refused                        |
 
@@ -300,8 +300,9 @@ it. The call itself cannot be stopped and may still answer, so each step is hand
 at the deadline or on a `stop()`: a step reads it before every `emit` and every `mark`, and an answer that outlived its
 run acts on nothing. `stop()` cancels the armed tick and abandons the step in flight, whose tick ends at once, runs no
 further step and arms nothing; a `start()` right after begins a fresh tick rather than wait on the stopped one. An extra
-tick can be asked for at once, which the invoice step does after a `settle_invoice` rather than wait out the interval,
-`transfer` does once the node took its `send_payment`, and `closeChannel` once it took its `shutdown_channel`; asked
+tick can be asked for at once, which the signing step does after a signature the node took and the invoice step after a
+`settle_invoice`, rather than wait out the interval, `transfer` does once the node took its `send_payment`, and
+`closeChannel` once it took its `shutdown_channel`; asked
 during a tick, it queues exactly one more, and a host cancel that throws does not stop it. A timer
 whose cancel does nothing cannot fire a stale tick, since the slot that holds the armed tick ignores a callback armed
 before the last clear. A host timer that throws when arming is reported as a `poll_failed` too, and ends the loop until
@@ -365,7 +366,9 @@ A channel whose status read or submission fails, or whose dispatch faults (a sto
 `poll_failed` naming it, and the step goes on to the next channel. Only an activity list that cannot be read fails the
 step, which the poller reports as any other. A request is answered within one interval of
 being posted, against a deadline, when there is one, of TLC expiries; the step reports it on `SIGNING` and never waits
-on it or hurries for it. A call that
+on it or hurries for it. A signature the node took asks for another tick at once, since a round's next request is usually
+ready by then, so a round costs its round trips and not an interval per signature; a request the node serves again after
+that waits out the interval, so a node that never advances cannot spin the poller. A call that
 never answers holds the whole step until its deadline, and the next tick starts from the same channel: the channels
 after it wait as long, which with the SDK's one channel at a time is no channel at all.
 
@@ -2295,3 +2298,14 @@ drops the channel, and that a force-closed channel is polled by the watchtower s
 | A removal of a channel not listed still writes                                    | 1                 |
 | An id not in fiber's form is removed                                              | 1                 |
 | The watchtower step reads the activity before the device's list                   | 1                 |
+
+The signing step's tick after a signature (`signing-step.ts`), broken the same way (`test/tests/sdk`, its flow specs included,
+100% on the four metrics):
+
+| Mutation                                                    | Tests that failed |
+| ----------------------------------------------------------- | ----------------- |
+| A signature asks for no tick                                | 23                |
+| A request served again asks for another tick                | 2                 |
+| A request hurried is not remembered                         | 2                 |
+| A signature abandoned during its submission asks for a tick | 1                 |
+| The default poll interval is not two seconds                | 1                 |

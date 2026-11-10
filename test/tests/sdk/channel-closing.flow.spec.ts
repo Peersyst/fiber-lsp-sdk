@@ -136,10 +136,20 @@ async function opened(): Promise<ClosingFlow> {
     return h;
 }
 
-// Lets the tick `closeChannel`'s `pollNow` starts run out.
+// Lets the ticks `closeChannel` and its signature ask for run out.
 async function askClose(h: ClosingFlow, feeRate?: bigint): Promise<void> {
     await h.sdk.closeChannel(OPENING_CHANNEL_ID, feeRate === undefined ? undefined : { feeRate });
     await flush();
+}
+
+// Disconnects on the add's commitment: the peer's revoke_and_ack, which commits the TLC, stays unsigned.
+async function transferredThenAsleep(h: ClosingFlow): Promise<void> {
+    const off = h.sdk.onEvent((event) => {
+        if (event.type === "SIGNING" && event.transition === "SendCommitmentSigned") h.sdk.disconnect();
+    });
+    await h.sdk.transfer(LSP_INVOICE_STRING);
+    await flush();
+    off();
 }
 
 function eventsOf(h: ClosingFlow): string[] {
@@ -200,17 +210,14 @@ describe("the cooperative close over the tenant node", () => {
             method: "shutdown_channel",
             params: { channel_id: OPENING_CHANNEL_ID, close_script: USER_LOCK_WIRE },
         });
-        expect(methods(h, from)).toEqual(["shutdown_channel", ...CLOSE_TICK]);
+        expect(methods(h, from)).toEqual(["shutdown_channel", ...CLOSE_TICK, ...CLOSED_TICK]);
         expect(requests(h)).toEqual(["SendClosingSigned Commitment@2 Applied"]);
-        expect(eventsOf(h)).toEqual(["SIGNING SendClosingSigned signed"]);
+        expect(eventsOf(h)).toEqual(["SIGNING SendClosingSigned signed", "CHANNEL_CLOSED opening"]);
         // 1000 shannons per kilobyte over the close's 528 bytes, from the device's share alone: the peer's answer states a rate of 0.
         expect(closeOutputsOf(h)).toEqual([
             { capacityShannons: 28_500_000_000n, lock: PEER_LOCK },
             { capacityShannons: 71_999_999_472n, lock: USER_LOCK },
         ]);
-        await tick(h);
-        expect(methods(h, from)).toEqual(["shutdown_channel", ...CLOSE_TICK, ...CLOSED_TICK]);
-        expect(eventsOf(h)).toEqual(["SIGNING SendClosingSigned signed", "CHANNEL_CLOSED opening"]);
         expect(await h.sdk.listChannels()).toEqual([{ ...LISTED, state: "closed" }]);
         expect(await watchedChannels(h)).toEqual([]);
         // Nothing left to poll: the device calls the node for nothing, so the LSP may evict it.
@@ -228,13 +235,11 @@ describe("the cooperative close over the tenant node", () => {
             method: "shutdown_channel",
             params: { channel_id: OPENING_CHANNEL_ID, close_script: USER_LOCK_WIRE, fee_rate: "0x7d0" },
         });
-        expect(eventsOf(h)).toEqual(["SIGNING SendClosingSigned signed"]);
+        expect(eventsOf(h)).toEqual(["SIGNING SendClosingSigned signed", "CHANNEL_CLOSED opening"]);
         expect(closeOutputsOf(h)).toEqual([
             { capacityShannons: 28_500_000_000n, lock: PEER_LOCK },
             { capacityShannons: 71_999_998_944n, lock: USER_LOCK },
         ]);
-        await tick(h);
-        expect(eventsOf(h)).toEqual(["SIGNING SendClosingSigned signed", "CHANNEL_CLOSED opening"]);
     });
 
     it("refuses a fee rate whose fee the policy would not sign as close_fee_too_high, calling nothing, and signs the highest it lets through", async () => {
@@ -261,14 +266,12 @@ describe("the cooperative close over the tenant node", () => {
             { capacityShannons: 28_500_000_000n, lock: PEER_LOCK },
             { capacityShannons: 71_900_000_000n, lock: USER_LOCK },
         ]);
-        expect(eventsOf(h)).toEqual(["SIGNING SendClosingSigned signed"]);
+        expect(eventsOf(h)).toEqual(["SIGNING SendClosingSigned signed", "CHANNEL_CLOSED opening"]);
     });
 
     it("throws fiber's refusal unwrapped while the outbound TLC is not committed, keeping the watch the opening set", async () => {
         const h = await opened();
-        await h.sdk.transfer(LSP_INVOICE_STRING);
-        // The tick `transfer` asks for signs the add's commitment; the peer's revoke_and_ack, which commits the TLC, is not signed yet.
-        await flush();
+        await transferredThenAsleep(h);
         expect(requests(h)).toEqual(["SendCommitmentSigned Commitment@2 Applied", "CompleteReceivedRevokeAndAck Revocation@2 unanswered"]);
         const from = h.node.calls.length;
         const error = await rejection(h.sdk.closeChannel(OPENING_CHANNEL_ID));
@@ -520,8 +523,7 @@ describe("the tenant node's peerShutdown", () => {
 
     it("throws on a shutdown while the device's add is still announced, which the double does not model", async () => {
         const h = await opened();
-        await h.sdk.transfer(LSP_INVOICE_STRING);
-        await flush();
+        await transferredThenAsleep(h);
         expect(() => h.node.peerShutdown()).toThrow(new Error("the double shuts down only once no TLC's add is still announced"));
     });
 
