@@ -54,6 +54,7 @@ import {
 } from "../../utils/digest-inputs";
 import { caseOf, loadInteropVectors } from "../../utils/interop-vectors";
 import { SHUTDOWN_NONCE_NUMBER, revocationCounter, revocationNonceNumber } from "../../utils/nonce-numbers";
+import { rejection } from "../../utils/rejection";
 
 const vectors = loadInteropVectors();
 const digest = vectors.digest;
@@ -1865,6 +1866,7 @@ describe("hold invoices", () => {
         await engine.recordHoldInvoice(RECEIVED_HASH, RECEIVED_AMOUNT, "sha256", INVOICE_INDEX);
         await expect(engine.recordHoldInvoice(twin, RECEIVED_AMOUNT, "ckb-hash", INVOICE_INDEX)).rejects.toThrow(error);
         await expect(engine.markHoldInvoiceReleased(twin, RELEASE_TIMING)).rejects.toThrow(error);
+        await expect(engine.markHoldInvoiceCancelled(twin)).rejects.toThrow(error);
         await expect(engine.readHoldInvoice(twin)).rejects.toThrow(error);
         await expect(engine.listsHoldInvoiceTlc(twin)).rejects.toThrow(error);
     });
@@ -2177,6 +2179,218 @@ describe("hold invoices", () => {
             await holdReceived(engine);
             await engine.markHoldInvoiceReleased(RECEIVED_HASH, { now: () => 0, releaseMarginMs: () => 600000n });
             await expect(store.getHoldInvoiceRecord(RECEIVED_HASH.slice(0, 40))).resolves.toMatchObject({ released: true });
+        });
+    });
+
+    describe("markHoldInvoiceCancelled", () => {
+        const INVOICE_KEY = `fiber-lsp-sdk:invoice:${RECEIVED_HASH.slice(0, 40)}`;
+
+        it("marks a recorded invoice cancelled, writing the record once and touching nothing else", async () => {
+            const { engine, store, storage } = newEngine();
+            await engine.recordHoldInvoice(RECEIVED_HASH, RECEIVED_AMOUNT, "sha256", INVOICE_INDEX);
+            storage.ops.length = 0;
+            await engine.markHoldInvoiceCancelled(RECEIVED_HASH);
+            await expect(store.getHoldInvoiceRecord(RECEIVED_HASH.slice(0, 40))).resolves.toEqual<HoldInvoicePolicyRecord>({
+                version: 1,
+                paymentHash: RECEIVED_HASH,
+                amountShannons: RECEIVED_AMOUNT,
+                hashAlgorithm: "sha256",
+                invoiceIndex: INVOICE_INDEX,
+                released: false,
+                cancelled: true,
+                channelIndexes: [],
+            });
+            expect(storage.ops.filter((operation) => operation.startsWith("set"))).toEqual([`set ${INVOICE_KEY}`]);
+        });
+
+        it("marks again with no second write: a retry after a lost answer is idempotent", async () => {
+            const { engine, storage } = newEngine();
+            await engine.recordHoldInvoice(RECEIVED_HASH, RECEIVED_AMOUNT, "sha256", INVOICE_INDEX);
+            await engine.markHoldInvoiceCancelled(RECEIVED_HASH);
+            const stored = new Map(storage.map);
+            storage.ops.length = 0;
+            await expect(engine.markHoldInvoiceCancelled(RECEIVED_HASH)).resolves.toBeUndefined();
+            expect(storage.ops).toEqual([`get ${INVOICE_KEY}`]);
+            expect(storage.map).toEqual(stored);
+        });
+
+        it("refuses a hash no invoice was recorded under with not_recorded, writing nothing", async () => {
+            const { engine, storage } = newEngine();
+            const error = await engine.markHoldInvoiceCancelled(RECEIVED_HASH).catch((cause: unknown) => cause);
+            expect(error).toBeInstanceOf(HoldInvoiceError);
+            expect(error).toMatchObject({
+                code: "not_recorded",
+                message: `no hold invoice was recorded for ${RECEIVED_HASH}, so there is none to cancel`,
+            });
+            expect(storage.map.size).toBe(0);
+            expect(storage.ops.filter((operation) => operation.startsWith("set"))).toEqual([]);
+        });
+
+        it("refuses a released invoice with released, which stays released", async () => {
+            const { engine, store, storage } = await openedEngine();
+            await engine.recordHoldInvoice(RECEIVED_HASH, RECEIVED_AMOUNT, "sha256", INVOICE_INDEX);
+            await holdReceived(engine);
+            await engine.markHoldInvoiceReleased(RECEIVED_HASH, RELEASE_TIMING);
+            const stored = new Map(storage.map);
+            const error = await engine.markHoldInvoiceCancelled(RECEIVED_HASH).catch((cause: unknown) => cause);
+            expect(error).toBeInstanceOf(HoldInvoiceError);
+            expect(error).toMatchObject({
+                code: "released",
+                message: `the hold invoice ${RECEIVED_HASH} is released, so it is never cancelled`,
+            });
+            expect(storage.map).toEqual(stored);
+            const record = await store.getHoldInvoiceRecord(RECEIVED_HASH.slice(0, 40));
+            expect(record).toMatchObject({ released: true });
+            expect(record).not.toHaveProperty("cancelled");
+        });
+
+        it("refuses a record whose stored hash is another's, writing nothing", async () => {
+            const { engine, storage } = newEngine();
+            const twin = RECEIVED_HASH.slice(0, 40) + "00".repeat(12);
+            await engine.recordHoldInvoice(RECEIVED_HASH, RECEIVED_AMOUNT, "sha256", INVOICE_INDEX);
+            const stored = new Map(storage.map);
+            await expect(engine.markHoldInvoiceCancelled(twin)).rejects.toThrow(
+                new TypeError(`${twin} shares its bound 20 bytes with a recorded payment, ${RECEIVED_HASH}`),
+            );
+            expect(storage.map).toEqual(stored);
+        });
+
+        it("throws, writing nothing, when the record vanishes between the read and the write", async () => {
+            const { engine, store, storage } = newEngine();
+            await engine.recordHoldInvoice(RECEIVED_HASH, RECEIVED_AMOUNT, "sha256", INVOICE_INDEX);
+            const read = store.getHoldInvoiceRecord.bind(store);
+            jest.spyOn(store, "getHoldInvoiceRecord").mockImplementationOnce(async (key) => {
+                const record = await read(key);
+                storage.map.delete(INVOICE_KEY);
+                return record;
+            });
+            await expect(engine.markHoldInvoiceCancelled(RECEIVED_HASH)).rejects.toThrow(
+                new TypeError("a payment record disappeared inside the balance lane"),
+            );
+            expect(storage.map.size).toBe(0);
+        });
+
+        it.each([
+            ["no hash", undefined],
+            ["a hash of 31 bytes", RECEIVED_HASH.slice(2)],
+            ["an uppercase hash", RECEIVED_HASH.toUpperCase()],
+        ])("rejects %s before touching the storage", async (_, hash) => {
+            const { engine, storage } = newEngine();
+            await engine.recordHoldInvoice(RECEIVED_HASH, RECEIVED_AMOUNT, "sha256", INVOICE_INDEX);
+            storage.ops.length = 0;
+            await expect(engine.markHoldInvoiceCancelled(hash as string)).rejects.toThrow(
+                new TypeError("paymentHashHex must be 32 bytes of lowercase hex"),
+            );
+            expect(storage.ops).toEqual([]);
+        });
+    });
+
+    describe("a cancelled invoice and its release", () => {
+        it("refuses the release of a cancelled invoice its channels hold, with cancelled, writing nothing", async () => {
+            const { engine, store, storage } = await openedEngine();
+            await engine.recordHoldInvoice(RECEIVED_HASH, RECEIVED_AMOUNT, "sha256", INVOICE_INDEX);
+            await holdReceived(engine);
+            await engine.markHoldInvoiceCancelled(RECEIVED_HASH);
+            const stored = new Map(storage.map);
+            const error = await engine.markHoldInvoiceReleased(RECEIVED_HASH, RELEASE_TIMING).catch((cause: unknown) => cause);
+            expect(error).toBeInstanceOf(HoldInvoiceError);
+            expect(error).toMatchObject({
+                code: "cancelled",
+                message: `the hold invoice ${RECEIVED_HASH} is cancelled, so its preimage is never released`,
+            });
+            expect(storage.map).toEqual(stored);
+            await expect(store.getHoldInvoiceRecord(RECEIVED_HASH.slice(0, 40))).resolves.toMatchObject({
+                released: false,
+                cancelled: true,
+            });
+        });
+
+        it("refuses with cancelled before any other judgement: no channel read, no clock, no margin", async () => {
+            const { engine, storage } = await openedEngine();
+            await engine.recordHoldInvoice(RECEIVED_HASH, RECEIVED_AMOUNT, "sha256", INVOICE_INDEX);
+            await engine.markHoldInvoiceCancelled(RECEIVED_HASH);
+            storage.ops.length = 0;
+            const now = jest.fn(() => 1749990000000);
+            const releaseMarginMs = jest.fn(() => 600000n);
+            // No channel shows the invoice, which `not_held` would say were it judged first.
+            await expect(engine.markHoldInvoiceReleased(RECEIVED_HASH, { now, releaseMarginMs })).rejects.toMatchObject({
+                code: "cancelled",
+            });
+            expect(storage.ops).toEqual([`get fiber-lsp-sdk:invoice:${RECEIVED_HASH.slice(0, 40)}`]);
+            expect(now).not.toHaveBeenCalled();
+            expect(releaseMarginMs).not.toHaveBeenCalled();
+        });
+
+        it("refuses with cancelled reading no channel even when a channel shows the invoice", async () => {
+            const { engine, storage } = await openedEngine();
+            await engine.recordHoldInvoice(RECEIVED_HASH, RECEIVED_AMOUNT, "sha256", INVOICE_INDEX);
+            await holdReceived(engine);
+            await engine.markHoldInvoiceCancelled(RECEIVED_HASH);
+            storage.ops.length = 0;
+            await expect(engine.markHoldInvoiceReleased(RECEIVED_HASH, RELEASE_TIMING)).rejects.toMatchObject({ code: "cancelled" });
+            expect(storage.ops).toEqual([`get fiber-lsp-sdk:invoice:${RECEIVED_HASH.slice(0, 40)}`]);
+        });
+
+        it("keeps a released invoice released, with no throw and no write, whatever else its record says", async () => {
+            const { engine, store, storage } = await openedEngine();
+            await engine.recordHoldInvoice(RECEIVED_HASH, RECEIVED_AMOUNT, "sha256", INVOICE_INDEX);
+            await holdReceived(engine);
+            await engine.markHoldInvoiceReleased(RECEIVED_HASH, RELEASE_TIMING);
+            await store.updateHoldInvoiceRecord(RECEIVED_HASH.slice(0, 40), (current) => {
+                if (current === null) throw new Error("the record vanished");
+                return { ...current, cancelled: true };
+            });
+            storage.ops.length = 0;
+            await expect(engine.markHoldInvoiceReleased(RECEIVED_HASH, RELEASE_TIMING)).resolves.toBeUndefined();
+            expect(storage.ops).toEqual([`get fiber-lsp-sdk:invoice:${RECEIVED_HASH.slice(0, 40)}`]);
+        });
+
+        it("rejects a markHoldInvoiceCancelled on a record both released and cancelled with released", async () => {
+            const { engine, store } = await openedEngine();
+            await engine.recordHoldInvoice(RECEIVED_HASH, RECEIVED_AMOUNT, "sha256", INVOICE_INDEX);
+            await holdReceived(engine);
+            await engine.markHoldInvoiceReleased(RECEIVED_HASH, RELEASE_TIMING);
+            await store.updateHoldInvoiceRecord(RECEIVED_HASH.slice(0, 40), (current) => {
+                if (current === null) throw new Error("the record vanished");
+                return { ...current, cancelled: true };
+            });
+            await expect(engine.markHoldInvoiceCancelled(RECEIVED_HASH)).rejects.toMatchObject({ code: "released" });
+        });
+
+        it("makes a cancel started inside the release's lane wait for it, and refuses it with released", async () => {
+            const { engine, store } = await openedEngine();
+            await engine.recordHoldInvoice(RECEIVED_HASH, RECEIVED_AMOUNT, "sha256", INVOICE_INDEX);
+            await holdReceived(engine);
+            let crossing: Promise<unknown> | undefined;
+            await engine.markHoldInvoiceReleased(RECEIVED_HASH, {
+                ...RELEASE_TIMING,
+                now: () => {
+                    crossing = rejection(engine.markHoldInvoiceCancelled(RECEIVED_HASH));
+                    return RELEASE_TIMING.now();
+                },
+            });
+            expect(await crossing).toMatchObject({ code: "released" });
+            const record = await store.getHoldInvoiceRecord(RECEIVED_HASH.slice(0, 40));
+            expect(record).toMatchObject({ released: true });
+            expect(record).not.toHaveProperty("cancelled");
+        });
+
+        it("makes a release started inside the cancel's lane wait for it, and refuses it with cancelled", async () => {
+            const { engine, store } = await openedEngine();
+            await engine.recordHoldInvoice(RECEIVED_HASH, RECEIVED_AMOUNT, "sha256", INVOICE_INDEX);
+            await holdReceived(engine);
+            const read = store.getHoldInvoiceRecord.bind(store);
+            let crossing: Promise<unknown> | undefined;
+            jest.spyOn(store, "getHoldInvoiceRecord").mockImplementationOnce((key) => {
+                crossing = rejection(engine.markHoldInvoiceReleased(RECEIVED_HASH, RELEASE_TIMING));
+                return read(key);
+            });
+            await engine.markHoldInvoiceCancelled(RECEIVED_HASH);
+            expect(await crossing).toMatchObject({ code: "cancelled" });
+            await expect(store.getHoldInvoiceRecord(RECEIVED_HASH.slice(0, 40))).resolves.toMatchObject({
+                released: false,
+                cancelled: true,
+            });
         });
     });
 
@@ -5208,6 +5422,146 @@ async function watchtowerEngine(options: PolicyEngineOptions = { watchtower: WAT
     await context.engine.checkAndClaim(KEYS, commitmentRequest("ckb, no tlcs, for remote"));
     return context;
 }
+
+describe("setWatchtowerApproval", () => {
+    const { destination } = WATCHTOWER_APPROVAL;
+    const OTHER_APPROVAL: WatchtowerApproval = {
+        destination: { codeHash: hexToBytes("aa".repeat(32)), hashType: "data1", args: hexToBytes("bb".repeat(20)) },
+        maxFeeShannons: "100000",
+    };
+
+    function spendPaidTo(lock: Script): WatchtowerSpendRequest {
+        const request = ownSettlementSpend();
+        const [remainder, paid] = request.transaction.outputs as [CellOutput, CellOutput];
+        return { ...request, transaction: { ...request.transaction, outputs: [remainder, { ...paid, lock }] } };
+    }
+
+    it("lets a spend refused for want of an approval be signed once one is set", async () => {
+        const { engine } = await watchtowerEngine({});
+        const refusal = await refusalOf(engine.checkWatchtowerSpend(KEYS, CHANNEL_ID, ownSettlementSpend()));
+        expect(refusal.message).toBe("watchtower option: the host approved no destination, so the device signs no watchtower spend");
+        engine.setWatchtowerApproval(WATCHTOWER_APPROVAL);
+        await expect(engine.checkWatchtowerSpend(KEYS, CHANNEL_ID, ownSettlementSpend())).resolves.toEqual({ status: "fresh" });
+    });
+
+    it("replaces the approval: the old destination is refused, the new one passes", async () => {
+        const { engine } = await watchtowerEngine();
+        engine.setWatchtowerApproval(OTHER_APPROVAL);
+        expect((await refusalOf(engine.checkWatchtowerSpend(KEYS, CHANNEL_ID, ownSettlementSpend()))).code).toBe("policy_refusal");
+        await expect(engine.checkWatchtowerSpend(KEYS, CHANNEL_ID, spendPaidTo(OTHER_APPROVAL.destination))).resolves.toEqual({
+            status: "fresh",
+        });
+    });
+
+    it("holds a spend to an approval replaced while its record was being read", async () => {
+        const storage = new AsyncInMemorySignerStorage();
+        const { engine } = await registeredEngine(storage, { watchtower: WATCHTOWER_APPROVAL });
+        await engine.checkAndClaim(KEYS, commitmentRequest("ckb, no tlcs, for remote"));
+        const recordKey = `fiber-lsp-sdk:channel:${CHANNEL_INDEX}`;
+        const get = storage.get.bind(storage);
+        let releaseRead = (): void => undefined;
+        const held = new Promise<void>((resolve) => (releaseRead = resolve));
+        let readStarted = (): void => undefined;
+        const started = new Promise<void>((resolve) => (readStarted = resolve));
+        jest.spyOn(storage, "get").mockImplementation(async (key) => {
+            if (key === recordKey) {
+                readStarted();
+                await held;
+            }
+            return get(key);
+        });
+        const check = refusalOf(engine.checkWatchtowerSpend(KEYS, CHANNEL_ID, ownSettlementSpend()));
+        await started;
+        engine.setWatchtowerApproval(OTHER_APPROVAL);
+        releaseRead();
+        expect((await check).code).toBe("policy_refusal");
+    });
+
+    it("takes a fee of zero and a fee at u64's maximum", () => {
+        const { engine } = newEngine();
+        expect(() => engine.setWatchtowerApproval({ ...WATCHTOWER_APPROVAL, maxFeeShannons: "0" })).not.toThrow();
+        expect(() => engine.setWatchtowerApproval({ ...WATCHTOWER_APPROVAL, maxFeeShannons: "18446744073709551615" })).not.toThrow();
+    });
+
+    it.each<[string, unknown, Error]>([
+        ["no approval", undefined, new TypeError("approval must be an object")],
+        ["a null approval", null, new TypeError("approval must be an object")],
+        ["an approval that is an array", [], new TypeError("approval must be an object")],
+        ["no destination", { ...WATCHTOWER_APPROVAL, destination: undefined }, new TypeError("approval.destination must be an object")],
+        [
+            "a destination with a short code hash",
+            { ...WATCHTOWER_APPROVAL, destination: { ...destination, codeHash: new Uint8Array(31) } },
+            new TypeError("approval.destination.codeHash must be 32 bytes, got 31"),
+        ],
+        [
+            "a destination without a code hash",
+            { ...WATCHTOWER_APPROVAL, destination: { ...destination, codeHash: undefined } },
+            new TypeError("approval.destination.codeHash must be a Uint8Array"),
+        ],
+        [
+            "a destination of an unknown hash type",
+            { ...WATCHTOWER_APPROVAL, destination: { ...destination, hashType: "data3" } },
+            new TypeError("approval.destination.hashType must be one of data, type, data1, data2"),
+        ],
+        [
+            "a destination without a hash type",
+            { ...WATCHTOWER_APPROVAL, destination: { ...destination, hashType: undefined } },
+            new TypeError("approval.destination.hashType must be one of data, type, data1, data2"),
+        ],
+        [
+            "a destination without args",
+            { ...WATCHTOWER_APPROVAL, destination: { ...destination, args: undefined } },
+            new TypeError("approval.destination.args must be a Uint8Array"),
+        ],
+        ["no fee", { ...WATCHTOWER_APPROVAL, maxFeeShannons: undefined }, new TypeError("approval.maxFeeShannons must be a string")],
+        ["a numeric fee", { ...WATCHTOWER_APPROVAL, maxFeeShannons: 100000 }, new TypeError("approval.maxFeeShannons must be a string")],
+        [
+            "a fee in hex",
+            { ...WATCHTOWER_APPROVAL, maxFeeShannons: "0x1" },
+            new TypeError("approval.maxFeeShannons must be an amount in decimal shannons"),
+        ],
+        [
+            "a fee above u64",
+            { ...WATCHTOWER_APPROVAL, maxFeeShannons: "18446744073709551616" },
+            new RangeError("approval.maxFeeShannons must be at most 18446744073709551615, the most a CKB cell's capacity holds"),
+        ],
+    ])("refuses %s, leaving the previous approval in force", async (_, approval, error) => {
+        const { engine } = await watchtowerEngine();
+        expect(() => engine.setWatchtowerApproval(approval as never)).toThrow(error);
+        await expect(engine.checkWatchtowerSpend(KEYS, CHANNEL_ID, ownSettlementSpend())).resolves.toEqual({ status: "fresh" });
+    });
+
+    it("keeps a copy, so the host changing its object later changes nothing", async () => {
+        const { engine } = await watchtowerEngine({});
+        const approval = structuredClone(WATCHTOWER_APPROVAL);
+        engine.setWatchtowerApproval(approval);
+        approval.destination.args.fill(0);
+        approval.destination.codeHash.fill(0);
+        approval.maxFeeShannons = "0";
+        await expect(engine.checkWatchtowerSpend(KEYS, CHANNEL_ID, ownSettlementSpend())).resolves.toEqual({ status: "fresh" });
+    });
+
+    it("keeps a copy of a Buffer's bytes too, whose slice is a view of the host's memory", async () => {
+        const { engine } = await watchtowerEngine({});
+        const codeHash = Buffer.from(destination.codeHash);
+        const args = Buffer.from(destination.args);
+        engine.setWatchtowerApproval({ ...WATCHTOWER_APPROVAL, destination: { codeHash, hashType: destination.hashType, args } });
+        codeHash.fill(0);
+        args.fill(0);
+        await expect(engine.checkWatchtowerSpend(KEYS, CHANNEL_ID, ownSettlementSpend())).resolves.toEqual({ status: "fresh" });
+    });
+
+    it("keeps a copy of the constructor option's Buffers as well", async () => {
+        const codeHash = Buffer.from(destination.codeHash);
+        const args = Buffer.from(destination.args);
+        const { engine } = await watchtowerEngine({
+            watchtower: { ...WATCHTOWER_APPROVAL, destination: { codeHash, hashType: destination.hashType, args } },
+        });
+        codeHash.fill(0);
+        args.fill(0);
+        await expect(engine.checkWatchtowerSpend(KEYS, CHANNEL_ID, ownSettlementSpend())).resolves.toEqual({ status: "fresh" });
+    });
+});
 
 describe("checkWatchtowerSpend", () => {
     it("claims the spend of the commitment cell the device signed, before anything is signed", async () => {

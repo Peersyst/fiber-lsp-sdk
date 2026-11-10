@@ -19,6 +19,7 @@ import {
 } from "../../../src/sdk";
 import type { ChannelSigningTransition } from "../../../src/protocol";
 import type { IFetchLike } from "../../../src/rpc";
+import { RPC_CALL_FAILED_CODE } from "../../../src/rpc";
 import type { SignerRefusal } from "../../../src/signer";
 import { FetchMock, ScriptedNode } from "../../mocks/rpc";
 import { InMemorySignerStorage } from "../../mocks/policy";
@@ -170,6 +171,21 @@ function harness(overrides: Partial<FiberLspSdkOptions> = {}, seed: Uint8Array =
     const errors = (): SdkError[] => events.flatMap((event) => (event.type === "ERROR" ? [event.error] : []));
     const polls = (): number => timer.delays.filter((delay) => delay === POLL_INTERVAL_MS).length;
     return { sdk, timer, storage, fetch, events, errors, polls };
+}
+
+function idleHarness(): { sdk: FiberLspSdk; node: ScriptedNode; storage: InMemorySignerStorage } {
+    const storage = new InMemorySignerStorage();
+    const node = new ScriptedNode();
+    const sdk = new FiberLspSdk(OPENING_SEED, {
+        network: "testnet",
+        storage,
+        rpcUrl: RPC_URL,
+        lspPubkey: hexToBytes(OPENING_LSP_PUBKEY),
+        fetch: node.fetch,
+        timer: new TimerMock(),
+        now: () => NOW_MS,
+    });
+    return { sdk, node, storage };
 }
 
 function contextOf(sdk: FiberLspSdk): SdkContext {
@@ -1128,10 +1144,9 @@ describe("FiberLspSdk", () => {
             return { sdk, node, storage, events };
         }
 
-        const signed = async (tx: Transaction): Promise<Transaction> => ({
-            ...tx,
-            witnesses: [hexToBytes(OPENING_SIGNED_WITNESS.slice(2))],
-        });
+        const signedWitnesses = async (): Promise<Uint8Array[]> => [hexToBytes(OPENING_SIGNED_WITNESS.slice(2))];
+
+        const signed = async (tx: Transaction): Promise<Transaction> => ({ ...tx, witnesses: await signedWitnesses() });
 
         it("asks the node for a channel to the LSP under the clock's index, and hands back what the node froze", async () => {
             const h = await openingHarness();
@@ -1219,8 +1234,9 @@ describe("FiberLspSdk", () => {
         it("opens in one call through the host's signer", async () => {
             const h = await openingHarness();
             h.node.result(OPENING_ANSWER).result(OPENING_SUBMIT_ANSWER);
-            await expect(h.sdk.openChannel(OPENING_AMOUNT, OPENING_USER_LOCK, signed)).resolves.toBe(OPENING_CHANNEL_ID);
+            await expect(h.sdk.openChannel(OPENING_AMOUNT, OPENING_USER_LOCK, signedWitnesses)).resolves.toBe(OPENING_CHANNEL_ID);
             expect(h.node.calls().map((call) => call.method)).toEqual(["open_channel_with_external_funding", "submit_signed_funding_tx"]);
+            expect(h.node.calls().at(-1)).toEqual(OPENING_SUBMIT_CALL);
         });
 
         it("passes the user lock's cell deps to the node from both entry points", async () => {
@@ -1231,7 +1247,7 @@ describe("FiberLspSdk", () => {
             await rejection(prepared.sdk.prepareChannelOpen(OPENING_AMOUNT, OPENING_USER_LOCK, deps));
             const opened = await openingHarness();
             opened.node.reject(new Error("offline"));
-            await rejection(opened.sdk.openChannel(OPENING_AMOUNT, OPENING_USER_LOCK, signed, deps));
+            await rejection(opened.sdk.openChannel(OPENING_AMOUNT, OPENING_USER_LOCK, signedWitnesses, deps));
             for (const h of [prepared, opened]) {
                 expect(h.node.calls()).toEqual([
                     {
@@ -1245,7 +1261,7 @@ describe("FiberLspSdk", () => {
         it("refuses an open with cell deps that are not a list, writing and sending nothing", async () => {
             const h = await openingHarness();
             const deps = { outPoint: { txHash: new Uint8Array(32).fill(0x25), index: 2 }, depType: "code" };
-            await expect(h.sdk.openChannel(OPENING_AMOUNT, OPENING_USER_LOCK, signed, deps as never)).rejects.toEqual(
+            await expect(h.sdk.openChannel(OPENING_AMOUNT, OPENING_USER_LOCK, signedWitnesses, deps as never)).rejects.toEqual(
                 new TypeError("userLockCellDeps must be an array"),
             );
             expect(h.storage.ops).toEqual([]);
@@ -1663,6 +1679,159 @@ describe("FiberLspSdk", () => {
                     params: { channel_id: OPENING_CHANNEL_ID, close_script: OPENING_USER_LOCK_WIRE, fee_rate: "0xb49ec16" },
                 },
             ]);
+        });
+    });
+
+    describe("forceCloseChannel()", () => {
+        it("asks the node to force the close with no record of the channel, and asks for a tick", async () => {
+            const { sdk, node, storage } = idleHarness();
+            const pollNow = jest.spyOn(contextOf(sdk).poller, "pollNow");
+            node.result(null);
+            await expect(sdk.forceCloseChannel(OPENING_CHANNEL_ID)).resolves.toBeUndefined();
+            expect(node.calls()).toEqual([{ method: "shutdown_channel", params: { channel_id: OPENING_CHANNEL_ID, force: true } }]);
+            expect(storage.ops).toEqual([]);
+            expect(pollNow).toHaveBeenCalledTimes(1);
+        });
+
+        it("lets the node's refusal through, asking for no tick", async () => {
+            const { sdk, node } = idleHarness();
+            const pollNow = jest.spyOn(contextOf(sdk).poller, "pollNow");
+            node.error(RPC_CALL_FAILED_CODE, "Channel not found error");
+            expect(await rejection(sdk.forceCloseChannel(OPENING_CHANNEL_ID))).toMatchObject({
+                code: RPC_CALL_FAILED_CODE,
+                message: "Channel not found error",
+            });
+            expect(pollNow).not.toHaveBeenCalled();
+        });
+
+        it.each<[string, unknown]>([
+            ["no channel id", undefined],
+            ["a null channel id", null],
+            ["a channel id without the prefix", OPENING_CHANNEL_ID.slice(2)],
+            ["a channel id one byte short", OPENING_CHANNEL_ID.slice(0, -2)],
+            ["a channel id in upper case", OPENING_CHANNEL_ID.toUpperCase()],
+        ])("refuses %s, calling nothing", async (_, channelId) => {
+            const { sdk, node, storage } = idleHarness();
+            await expect(sdk.forceCloseChannel(channelId as string)).rejects.toEqual(
+                new TypeError("channelId must be 32 bytes of 0x-prefixed lowercase hex"),
+            );
+            expect(node.calls()).toEqual([]);
+            expect(storage.ops).toEqual([]);
+        });
+    });
+
+    describe("cancelInvoice()", () => {
+        const INVOICE_HASH = "a374e42b6c28035e0c317346d635cc2a93a9b7920e88bd5b0abc96dc23bffc2f";
+        const INVOICE_INDEX = 1_790_812_800_000;
+        const CANCEL_CALL = { method: "cancel_invoice", params: { payment_hash: `0x${INVOICE_HASH}` } };
+
+        it("marks the invoice cancelled, asks the node to cancel it, and asks for a tick", async () => {
+            const { sdk, node } = idleHarness();
+            const { policy, poller } = contextOf(sdk);
+            await policy.recordHoldInvoice(INVOICE_HASH, "2250000000", "ckb-hash", INVOICE_INDEX);
+            const pollNow = jest.spyOn(poller, "pollNow");
+            node.result({ invoice_address: "fibt1", status: "Cancelled" });
+            await expect(sdk.cancelInvoice(`0x${INVOICE_HASH}`)).resolves.toBeUndefined();
+            expect(node.calls()).toEqual([CANCEL_CALL]);
+            expect((await policy.readHoldInvoice(INVOICE_HASH)).cancelled).toBe(true);
+            expect(pollNow).toHaveBeenCalledTimes(1);
+        });
+
+        it("refuses an invoice this device never recorded as unknown_invoice, calling the node for nothing", async () => {
+            const { sdk, node } = idleHarness();
+            expect(await rejection(sdk.cancelInvoice(`0x${INVOICE_HASH}`))).toMatchObject({ code: "unknown_invoice" });
+            expect(node.calls()).toEqual([]);
+        });
+
+        it.each<[string, unknown]>([
+            ["no payment hash", undefined],
+            ["a null payment hash", null],
+            ["a payment hash without the prefix", INVOICE_HASH],
+            ["a payment hash one byte short", `0x${INVOICE_HASH.slice(0, -2)}`],
+            ["a payment hash in upper case", `0x${INVOICE_HASH.toUpperCase()}`],
+        ])("refuses %s, calling nothing", async (_, paymentHashHex) => {
+            const { sdk, node, storage } = idleHarness();
+            await expect(sdk.cancelInvoice(paymentHashHex as string)).rejects.toEqual(
+                new TypeError("paymentHashHex must be 32 bytes of 0x-prefixed lowercase hex"),
+            );
+            expect(node.calls()).toEqual([]);
+            expect(storage.ops).toEqual([]);
+        });
+    });
+
+    describe("setWatchtowerApproval()", () => {
+        const spend = watchtowerSpendOf(signing, "own commitment: settlement");
+        const spendStatus = watchtowerStatusField(spend).value;
+        const judged = {
+            code: "policy_refusal",
+            message:
+                "watchtower source: input 0, spent with a zero since, is no cell descending from a signed commitment: no commitment has been signed",
+        } as const;
+        const refused = {
+            code: "policy_refusal",
+            message: "watchtower option: the host approved no destination, so the device signs no watchtower spend",
+        } as const;
+
+        function watchtowerEventOf(error: SignerRefusal): SdkEvent {
+            return {
+                type: "WATCHTOWER_SIGNING",
+                channelId: SIGNING_CHANNEL_ID,
+                requestId: spend.request_id,
+                purpose: { kind: "settlement" },
+                outcome: "refused",
+                error,
+            };
+        }
+
+        it("judges a spend by the approval set after construction", async () => {
+            const h = await signingHarness({});
+            await tickOver(h, IDLE, false, spendStatus);
+            h.sdk.setWatchtowerApproval(APPROVAL);
+            await tickOver(h, IDLE, false, spendStatus);
+            expect(h.events).toStrictEqual([watchtowerEventOf(refused), watchtowerEventOf(judged)]);
+        });
+
+        it("hands the policy the new approval over one given at construction", async () => {
+            const h = await signingHarness({ watchtower: { ...APPROVAL, maxFeeShannons: "1" } });
+            const setApproval = jest.spyOn(contextOf(h.sdk).policy, "setWatchtowerApproval");
+            h.sdk.setWatchtowerApproval(APPROVAL);
+            expect(setApproval).toHaveBeenCalledTimes(1);
+            expect(setApproval).toHaveBeenCalledWith(APPROVAL);
+        });
+
+        it("asks for a tick, since fiber keeps the refused spend pending", () => {
+            const { sdk } = idleHarness();
+            const pollNow = jest.spyOn(contextOf(sdk).poller, "pollNow");
+            sdk.setWatchtowerApproval(APPROVAL);
+            expect(pollNow).toHaveBeenCalledTimes(1);
+        });
+
+        it.each<[string, unknown, Error]>([
+            ["no approval", undefined, new TypeError("approval must be an object")],
+            ["a null approval", null, new TypeError("approval must be an object")],
+            ["an approval in an array", [APPROVAL], new TypeError("approval must be an object")],
+            [
+                "an approval without a destination",
+                { ...APPROVAL, destination: undefined },
+                new TypeError("approval.destination must be an object"),
+            ],
+            [
+                "an approval without a fee",
+                { ...APPROVAL, maxFeeShannons: undefined },
+                new TypeError("approval.maxFeeShannons must be a string"),
+            ],
+            [
+                "an approval with a fee in hex",
+                { ...APPROVAL, maxFeeShannons: "0x1" },
+                new TypeError("approval.maxFeeShannons must be an amount in decimal shannons"),
+            ],
+        ])("refuses %s, leaving the previous one and asking for no tick", async (_, approval, error) => {
+            const h = await signingHarness({ watchtower: APPROVAL });
+            const pollNow = jest.spyOn(contextOf(h.sdk).poller, "pollNow");
+            expect(() => h.sdk.setWatchtowerApproval(approval as never)).toThrow(error);
+            expect(pollNow).not.toHaveBeenCalled();
+            await tickOver(h, IDLE, false, spendStatus);
+            expect(h.events).toStrictEqual([watchtowerEventOf(judged)]);
         });
     });
 

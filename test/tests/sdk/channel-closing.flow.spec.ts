@@ -4,7 +4,7 @@ import type { UnsignedInvoice } from "../../../src/invoice";
 import { encodeInvoice } from "../../../src/invoice";
 import { SignerStore } from "../../../src/policy";
 import { RpcError, RpcTransportError } from "../../../src/rpc";
-import type { SdkChannelInfo, SdkEvent } from "../../../src/sdk";
+import type { SdkChannelInfo, SdkEvent, SdkWatchtowerOptions } from "../../../src/sdk";
 import { ActivityTracker, FiberLspSdk, SdkError } from "../../../src/sdk";
 import { TimerMock } from "../../mocks/common";
 import { InMemorySignerStorage } from "../../mocks/policy";
@@ -12,14 +12,26 @@ import { flush } from "../../utils/flush";
 import { signInvoice } from "../../utils/invoice-signing";
 import { forgetSecondSession } from "../../utils/nonce-cap-bypass";
 import { rejection } from "../../utils/rejection";
-import { loadSigningVectors } from "../../utils/signing-vectors";
+import { loadSigningVectors, toCkbCellDep, watchtowerApprovalOf } from "../../utils/signing-vectors";
 import { writes } from "../../utils/stored-records";
 import { FUNDED, LSP_PUBKEY, TENANT_NODE_URL, tenantNode, tick } from "../../utils/tenant-flow";
-import type { InMemoryTenantNode } from "../../utils/tenant-node";
+import type { InMemoryTenantNode, TenantNodeForceClose } from "../../utils/tenant-node";
 
 const vectors = loadSigningVectors();
 
 const MASTER_SEED = hexToBytes(vectors.device.master_seed);
+
+const APPROVAL = watchtowerApprovalOf(vectors);
+
+// The node's lock is the destination the host approves: fiber's watchtower pays the node it runs on.
+const FORCE_CLOSE: TenantNodeForceClose = {
+    fundingCellDeps: vectors.watchtower.funding_cell_deps.map(toCkbCellDep),
+    settlementCellDeps: vectors.watchtower.settlement_cell_deps.map(toCkbCellDep),
+    nodeLock: APPROVAL.destination,
+    medianTimeMs: "1760600000000",
+    preimages: [],
+    commitmentsBack: 0,
+};
 
 // Past the allocation floor: the channel takes index 1_791_367_200.
 const NOW_MS = 1_791_367_200_000;
@@ -104,7 +116,7 @@ const CLOSED_TICK = ["list_channels", "get_watchtower_signing_status"];
 type ClosingFlow = { node: InMemoryTenantNode; sdk: FiberLspSdk; storage: InMemorySignerStorage; timer: TimerMock; events: SdkEvent[] };
 
 // Fiber's nonce lifecycle signs the open's two commitments on one slot, and a payment's fulfil a third time.
-function flow(): ClosingFlow {
+function flow(watchtower?: SdkWatchtowerOptions): ClosingFlow {
     const node = tenantNode([OPENING_INDEX], () => NOW_MS);
     const timer = new TimerMock();
     const storage = new InMemorySignerStorage();
@@ -117,6 +129,7 @@ function flow(): ClosingFlow {
         timer,
         now: () => NOW_MS,
         nonceReuse: "allow",
+        ...(watchtower === undefined ? {} : { watchtower }),
     });
     node.bypassNonceCap((slot) => forgetSecondSession(storage, OPENING_INDEX, slot));
     const events: SdkEvent[] = [];
@@ -124,12 +137,12 @@ function flow(): ClosingFlow {
     return { node, sdk, storage, timer, events };
 }
 
-async function opened(): Promise<ClosingFlow> {
-    const h = flow();
+async function opened(watchtower?: SdkWatchtowerOptions): Promise<ClosingFlow> {
+    const h = flow(watchtower);
     h.sdk.connect();
     await flush();
     // The double compares the funding tx's raw data alone, which the host's witnesses leave as it is.
-    await h.sdk.openChannel(FUNDED, USER_LOCK, (unsigned) => Promise.resolve(unsigned));
+    await h.sdk.openChannel(FUNDED, USER_LOCK, (unsigned) => Promise.resolve(unsigned.witnesses));
     await tick(h, 3);
     expect(eventsOf(h)).toEqual(["SIGNING SendCommitmentSigned signed", "SIGNING CompleteReceivedCommitment warning", "CHANNEL_READY"]);
     h.events.length = 0;
@@ -157,6 +170,8 @@ function eventsOf(h: ClosingFlow): string[] {
         switch (event.type) {
             case "SIGNING":
                 return `SIGNING ${event.transition ?? "unread"} ${event.outcome === "refused" ? `refused ${event.error.code}` : event.outcome}`;
+            case "WATCHTOWER_SIGNING":
+                return `WATCHTOWER_SIGNING ${event.outcome === "refused" ? `refused ${event.error.code}` : event.outcome}`;
             case "CHANNEL_CLOSED":
                 return `CHANNEL_CLOSED ${event.channelId === OPENING_CHANNEL_ID ? "opening" : event.channelId}`;
             case "PAYMENT_SENT":
@@ -368,10 +383,7 @@ describe("the cooperative close over the tenant node", () => {
         h.node.peerShutdown({ closeScript: OTHER_PEER_LOCK });
         await tick(h, 2);
         expect(requests(h)).toEqual(["SendClosingSigned Commitment@2 unanswered"]);
-        expect(eventsOf(h)).toEqual([
-            "SIGNING SendClosingSigned refused policy_refusal",
-            "SIGNING SendClosingSigned refused policy_refusal",
-        ]);
+        expect(eventsOf(h)).toEqual(["SIGNING SendClosingSigned refused policy_refusal"]);
         const [refusal] = h.events;
         expect(refusal).toMatchObject({
             error: {
@@ -466,7 +478,92 @@ describe("the cooperative close over the tenant node", () => {
     });
 });
 
-// What the SDK never sends, posted to the node as fiber's RPC would take it.
+describe("the forced close over the tenant node", () => {
+    it("asks the node alone, signs nothing, and tells CHANNEL_CLOSED once the commitment is confirmed, the watchtower settling after", async () => {
+        const h = await opened(APPROVAL);
+        const from = h.node.calls.length;
+        await h.sdk.forceCloseChannel(OPENING_CHANNEL_ID);
+        await flush();
+        expect(h.node.calls[from]).toEqual({ method: "shutdown_channel", params: { channel_id: OPENING_CHANNEL_ID, force: true } });
+        // The call asks a tick, and the node has no request for the device.
+        expect(methods(h, from)).toEqual([
+            "shutdown_channel",
+            "list_channels",
+            "get_channel_signing_status",
+            "get_watchtower_signing_status",
+        ]);
+        expect(await h.sdk.listChannels()).toEqual([{ ...LISTED, state: "closing" }]);
+        expect(eventsOf(h)).toEqual([]);
+        h.node.confirmForceClose(FORCE_CLOSE);
+        await tick(h, 3);
+        expect(eventsOf(h)).toEqual(["CHANNEL_CLOSED opening", "WATCHTOWER_SIGNING signed"]);
+        expect(requests(h)).toEqual([]);
+        expect(h.node.onchain.map((tx) => `${tx.by} ${tx.what}`)).toEqual(["node local commitment", "node settlement"]);
+        expect(await h.sdk.listChannels()).toEqual([{ ...LISTED, state: "closed" }]);
+    });
+
+    it("settles after the host approves the watchtower's destination later: the same facade signs the spend the node kept waiting", async () => {
+        const h = await opened();
+        await h.sdk.forceCloseChannel(OPENING_CHANNEL_ID);
+        h.node.confirmForceClose(FORCE_CLOSE);
+        await tick(h);
+        expect(eventsOf(h)).toEqual(["CHANNEL_CLOSED opening", "WATCHTOWER_SIGNING refused policy_refusal"]);
+        expect(h.node.onchain.map((tx) => `${tx.by} ${tx.what}`)).toEqual(["node local commitment"]);
+        h.sdk.setWatchtowerApproval(APPROVAL);
+        await flush();
+        expect(eventsOf(h)).toEqual(["CHANNEL_CLOSED opening", "WATCHTOWER_SIGNING refused policy_refusal", "WATCHTOWER_SIGNING signed"]);
+        // The node's watchtower applies the signature at its next check.
+        await tick(h);
+        expect(h.node.onchain.map((tx) => `${tx.by} ${tx.what}`)).toEqual(["node local commitment", "node settlement"]);
+    });
+
+    it("force closes a channel this device holds no record of: the node confirms it, and no CHANNEL_CLOSED comes since nothing watches it", async () => {
+        const h = await opened();
+        const lostTimer = new TimerMock();
+        const lost = new FiberLspSdk(MASTER_SEED, {
+            network: "testnet",
+            storage: new InMemorySignerStorage(),
+            rpcUrl: TENANT_NODE_URL,
+            lspPubkey: LSP_PUBKEY,
+            fetch: h.node.fetch,
+            timer: lostTimer,
+            now: () => NOW_MS,
+            nonceReuse: "allow",
+        });
+        const events: SdkEvent[] = [];
+        lost.onEvent((event) => events.push(event));
+        expect(await lost.listChannels()).toEqual([{ ...LISTED, state: "ready", hasRecord: false }]);
+        const from = h.node.calls.length;
+        await lost.forceCloseChannel(OPENING_CHANNEL_ID);
+        await flush();
+        expect(methods(h, from)).toEqual(["shutdown_channel"]);
+        expect(h.node.calls.at(-1)).toEqual({ method: "shutdown_channel", params: { channel_id: OPENING_CHANNEL_ID, force: true } });
+        h.node.confirmForceClose(FORCE_CLOSE);
+        lost.connect();
+        await tick({ timer: lostTimer }, 3);
+        expect(methods(h, from)).toEqual(["shutdown_channel"]);
+        expect(await lost.listChannels()).toEqual([{ ...LISTED, state: "closed", hasRecord: false }]);
+        expect(events).toEqual([]);
+    });
+
+    it("throws fiber's refusal of a force close of a channel already closed, calling nothing more", async () => {
+        const h = await opened();
+        h.node.peerShutdown();
+        await tick(h, 2);
+        const from = h.node.calls.length;
+        const error = await rejection(h.sdk.forceCloseChannel(OPENING_CHANNEL_ID));
+        expect(error).toBeInstanceOf(RpcError);
+        expect(error).toMatchObject({
+            method: "shutdown_channel",
+            code: -32000,
+            message:
+                "Failed to processing channel: Invalid state: Handling force shutdown command invalid state Closed(CloseFlags(COOPERATIVE))",
+        });
+        await flush();
+        expect(methods(h, from)).toEqual(["shutdown_channel"]);
+    });
+});
+
 describe("the tenant node's shutdown_channel", () => {
     it.each<[string, Record<string, unknown>, string]>([
         [
@@ -495,10 +592,63 @@ describe("the tenant node's shutdown_channel", () => {
         expect(await h.sdk.listChannels()).toEqual([{ ...LISTED, state: "ready" }]);
     });
 
-    it("serves no force close, which the forceClose move stands for", async () => {
+    it("force closes the channel the node holds, which then waits for its commitment's confirmation", async () => {
         const h = await opened();
-        await expect(postShutdown(h, { force: true })).rejects.toThrow(
-            new Error("the double serves no force close by shutdown_channel: the forceClose move stands for it"),
+        expect(await postShutdown(h, { force: true })).toEqual({ jsonrpc: "2.0", id: 1, result: null });
+        expect(await h.sdk.listChannels()).toEqual([{ ...LISTED, state: "closing" }]);
+        // Fiber accepts it again while the channel is shutting down.
+        expect(await postShutdown(h, { force: true })).toEqual({ jsonrpc: "2.0", id: 1, result: null });
+    });
+
+    it("force closes a channel whose cooperative close is in progress, the wait for the commitment taking its place", async () => {
+        const h = await opened();
+        h.node.peerShutdown();
+        expect(await postShutdown(h, { force: true })).toEqual({ jsonrpc: "2.0", id: 1, result: null });
+        h.node.confirmForceClose(FORCE_CLOSE);
+        await tick(h, 2);
+        expect(await h.sdk.listChannels()).toEqual([{ ...LISTED, state: "closed" }]);
+    });
+
+    it("refuses to force close a closed channel with fiber's invalid state, in either way it closed", async () => {
+        const cooperative = await opened();
+        cooperative.node.peerShutdown();
+        await tick(cooperative, 2);
+        expect(await postShutdown(cooperative, { force: true })).toEqual({
+            jsonrpc: "2.0",
+            id: 1,
+            error: {
+                code: -32000,
+                message:
+                    "Failed to processing channel: Invalid state: Handling force shutdown command invalid state Closed(CloseFlags(COOPERATIVE))",
+            },
+        });
+        const forced = await opened();
+        await postShutdown(forced, { force: true });
+        forced.node.confirmForceClose(FORCE_CLOSE);
+        expect(await postShutdown(forced, { force: true })).toEqual({
+            jsonrpc: "2.0",
+            id: 1,
+            error: {
+                code: -32000,
+                message:
+                    "Invalid state: Handling force shutdown command invalid state Closed(CloseFlags(UNCOOPERATIVE_LOCAL | WAITING_ONCHAIN_SETTLEMENT))",
+            },
+        });
+    });
+
+    it("refuses to force close a channel the node does not hold", async () => {
+        const h = await opened();
+        expect(await postShutdown(h, { force: true, channel_id: `0x${"2e".repeat(32)}` })).toEqual({
+            jsonrpc: "2.0",
+            id: 1,
+            error: { code: -32000, message: `Channel not found error: Hash256(0x${"2e".repeat(32)})` },
+        });
+    });
+
+    it("confirms a force close only once the node was asked for one", async () => {
+        const h = await opened();
+        expect(() => h.node.confirmForceClose(FORCE_CLOSE)).toThrow(
+            new Error("the double confirms a force close only once shutdown_channel with force asked for it"),
         );
     });
 });

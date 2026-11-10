@@ -174,7 +174,7 @@ async function opened(): Promise<PaymentFlow> {
     h.sdk.connect();
     await flush();
     // The double compares the funding tx's raw data alone, which the host's witnesses leave as it is.
-    await h.sdk.openChannel(FUNDED, CHANNEL.localCloseScript, (unsigned) => Promise.resolve(unsigned));
+    await h.sdk.openChannel(FUNDED, CHANNEL.localCloseScript, (unsigned) => Promise.resolve(unsigned.witnesses));
     await tick(h, 3);
     expect(eventsOf(h)).toEqual(["SIGNING SendCommitmentSigned signed", "SIGNING CompleteReceivedCommitment warning", "CHANNEL_READY"]);
     h.events.length = 0;
@@ -450,11 +450,7 @@ describe("payments over the tenant node", () => {
         await tick(h, 2);
         expect(methods(h, from)).toEqual(["send_payment", ...[1, 2, 3].flatMap(() => [...IDLE_TICK, "get_payment"])]);
         expect(requests(h)).toEqual(["SendCommitmentSigned Commitment@2 unanswered"]);
-        expect(eventsOf(h)).toEqual([
-            "SIGNING SendCommitmentSigned refused policy_refusal",
-            "SIGNING SendCommitmentSigned refused policy_refusal",
-            "SIGNING SendCommitmentSigned refused policy_refusal",
-        ]);
+        expect(eventsOf(h)).toEqual(["SIGNING SendCommitmentSigned refused policy_refusal"]);
         const refused = h.events.at(-1);
         if (refused?.type !== "SIGNING" || refused.outcome !== "refused") throw new Error("the last event is no refusal");
         expect(refused.error.message).toBe(

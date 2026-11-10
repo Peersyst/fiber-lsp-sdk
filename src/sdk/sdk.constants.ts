@@ -80,6 +80,7 @@ export const SDK_EVENT_TYPES = [
     "PAYMENT_PENDING",
     "PAYMENT_RECEIVED",
     "PAYMENT_EXPIRED",
+    "PAYMENT_CANCELLED",
     "SIGNING",
     "WATCHTOWER_SIGNING",
     "ERROR",
@@ -96,6 +97,14 @@ export const WATCHTOWER_UNWATCHED_ERROR = { code: RPC_CALL_FAILED_CODE, message:
  * Fiber's answer to `settle_invoice` once the fulfil is applied (`fiber/network.rs:4990`, `rpc/utils.rs:90-131`): the settlement is done.
  */
 export const SDK_INVOICE_ALREADY_PAID_ERROR = { code: RPC_CALL_FAILED_CODE, message: "Invoice is already paid" } as const;
+
+/**
+ * Fiber's answer to `cancel_invoice` once the invoice is cancelled (`invoice/store.rs:61`, `rpc/invoice.rs:487`): the cancel is done.
+ */
+export const SDK_INVOICE_ALREADY_CANCELLED_ERROR = {
+    code: RPC_CALL_FAILED_CODE,
+    message: "invoice can not be canceled, current status: Cancelled",
+} as const;
 
 /**
  * Where fiber's external funding puts the channel's cell in the funding tx it freezes.
@@ -125,6 +134,8 @@ export const SDK_ERROR_CODES = [
     "payment_charged",
     "own_invoice",
     "close_fee_too_high",
+    "unknown_invoice",
+    "invoice_released",
 ] as const;
 
 /**

@@ -79,8 +79,7 @@ function register(h: RegistrationFlow, requestId: Uint8Array, signedAtMs: bigint
     return h.operator.registerTenant(h.sdk.signTenantRegistration({ requestId, signedAtMs }));
 }
 
-const signFundingInputs: SdkSignFundingInputs = (unsigned: Transaction) =>
-    Promise.resolve({ ...unsigned, witnesses: unsigned.witnesses.map(() => SIGNED_WITNESS) });
+const signFundingInputs: SdkSignFundingInputs = (unsigned: Transaction) => Promise.resolve(unsigned.witnesses.map(() => SIGNED_WITNESS));
 
 describe("the tenant registration over the tenant node", () => {
     it("registers the RootSigner the device signs for, its runtime cold and no channel bound", async () => {

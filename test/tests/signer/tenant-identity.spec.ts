@@ -3,7 +3,13 @@ import { bytesToHex, hexToBytes, utf8ToBytes } from "@noble/hashes/utils.js";
 import { UINT64_MAX } from "../../../src/common";
 import { blake2bHashWithSalt } from "../../../src/derivation";
 import type { TenantRegistryPayload } from "../../../src/signer";
-import { TENANT_ID_DOMAIN, TenantIdentity, buildTenantRegistryPayload, computeTenantRegistryDigest } from "../../../src/signer";
+import {
+    TENANT_ID_DOMAIN,
+    TenantIdentity,
+    buildTenantRegistryPayload,
+    computeTenantRegistryDigest,
+    deriveTenantId,
+} from "../../../src/signer";
 import { loadInteropVectors } from "../../utils/interop-vectors";
 import { refusalOf } from "../../utils/refusal";
 
@@ -442,6 +448,39 @@ describe("TenantIdentity", () => {
         ])("refuses a master seed that is %s", (_, value, message) => {
             expect(typeErrorOf(() => new TenantIdentity(value as Uint8Array))).toBe(message);
         });
+    });
+});
+
+describe("deriveTenantId", () => {
+    it("gives the tenant id of the identity built over the same seed", () => {
+        expect(deriveTenantId(MASTER_SEED)).toBe(new TenantIdentity(MASTER_SEED).tenantId);
+        expect(deriveTenantId(OTHER_MASTER_SEED)).toBe(new TenantIdentity(OTHER_MASTER_SEED).tenantId);
+    });
+
+    it("gives the pinned tenant ids, one per seed", () => {
+        expect(deriveTenantId(MASTER_SEED)).toBe("a42a2ad2f6b771aceed7f964eb25469a8cd292d7f430a918745d7a5a7822fd8f");
+        expect(deriveTenantId(OTHER_MASTER_SEED)).toBe("2bfb3edbb410cad1ea91e27bb0eee705749de74cf8a029c4bd24e3a92934448b");
+    });
+
+    it("gives fiber's tenant id for the vector's master seed", () => {
+        const vectors = loadInteropVectors();
+        expect(deriveTenantId(hexToBytes(vectors.sdk_scheme.master_seed))).toBe(vectors.tenant_registry.tenant_id);
+    });
+
+    it("leaves the seed it was given as it was", () => {
+        const seed = MASTER_SEED.slice();
+        deriveTenantId(seed);
+        expect(seed).toEqual(MASTER_SEED);
+    });
+
+    it.each([
+        ["31 bytes", new Uint8Array(31).fill(0x24), "masterSeed must be 32 bytes, got 31"],
+        ["33 bytes", new Uint8Array(33).fill(0x24), "masterSeed must be 32 bytes, got 33"],
+        ["hex instead of bytes", "24".repeat(32), "masterSeed must be a Uint8Array"],
+        ["absent", undefined, "masterSeed must be a Uint8Array"],
+        ["null", null, "masterSeed must be a Uint8Array"],
+    ])("refuses a master seed that is %s", (_, value, message) => {
+        expect(typeErrorOf(() => deriveTenantId(value as Uint8Array))).toBe(message);
     });
 });
 

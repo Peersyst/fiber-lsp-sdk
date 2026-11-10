@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { bytesToHex, hexToBytes } from "@noble/hashes/utils.js";
 import { FiberLspSdk } from "@peersyst/fiber-lsp-sdk";
-import type { SdkChannelOpening, SdkEvent, SdkEventType, SigningEventOutcome, Transaction } from "@peersyst/fiber-lsp-sdk";
+import type { Script, SdkChannelOpening, SdkEvent, SdkEventType, SigningEventOutcome, Transaction } from "@peersyst/fiber-lsp-sdk";
 import { registerAgentTenant, SDK_STORE_FILE } from "../../src/agent";
 import { OPEN_CHANNEL_WITH_EXTERNAL_FUNDING_METHOD } from "../../src/agent.constants";
 import { loadOrCreateMasterSeed } from "../../src/agent-store";
@@ -32,6 +32,9 @@ export const INVOICE_AMOUNT_SHANNONS = "1000000";
 // As fiber's hosted tenant pays node 1 (`e2e/lsp`, steps 27 and 28).
 export const OUTBOUND_AMOUNT_SHANNONS = 100_000n;
 const OUTBOUND_INVOICE_EXPIRY_SECONDS = 3600;
+
+// As fiber's hosted watchtower e2e approves settlement (`lsp-remote-signer-watchtower`, step 09b).
+const WATCHTOWER_MAX_FEE_SHANNONS = "10000";
 
 export type SdkEventOf<Type extends SdkEventType> = Extract<SdkEvent, { type: Type }>;
 
@@ -119,7 +122,7 @@ function isChannelClosed(channelId: string): (event: SdkEvent) => event is SdkEv
     return isSdkEvent("CHANNEL_CLOSED", (event) => bareLowerHex(event.channelId) === bareLowerHex(channelId));
 }
 
-// One step per request and outcome: the poller serves a pending request, or refuses it, again on every tick.
+// One step per request and outcome: the poller serves a pending request again on every tick.
 function firstOfEachStep(records: readonly RecordedEvent[]): { at: number; step: SigningStep }[] {
     const seen = new Set<string>();
     const steps: { at: number; step: SigningStep }[] = [];
@@ -154,6 +157,8 @@ export class ScenarioDevice {
     private unsubscribe: () => void;
 
     private readonly waiters = new Set<EventWaiter>();
+
+    private lspShutdownScript: Script | null = null;
 
     private constructor(
         private current: FiberLspSdk,
@@ -208,6 +213,12 @@ export class ScenarioDevice {
 
     get sdk(): FiberLspSdk {
         return this.current;
+    }
+
+    // The close script the LSP froze for the channel opened last: the one lock fiber's watchtower pays.
+    approveWatchtowerToLsp(): void {
+        if (this.lspShutdownScript === null) throw new Error("the device has opened no channel");
+        this.current.setWatchtowerApproval({ destination: this.lspShutdownScript, maxFeeShannons: WATCHTOWER_MAX_FEE_SHANNONS });
     }
 
     // Refused while a request is in flight: two stores over one file must never both write (docs/persistence.md).
@@ -302,6 +313,7 @@ export class ScenarioDevice {
         // The signer only writes witnesses, which the tx hash the SDK pinned leaves out.
         const witnesses = signedTx.witnesses.map((witness) => hexToBytes(witness.slice(2)));
         const fundingTx: Transaction = { ...opening.unsignedFundingTx, witnesses };
+        this.lspShutdownScript = opening.openingContext.remoteShutdownScript;
         await sdk.submitFundingTx(opening.channelId, fundingTx);
         noteTx("funding", opening.channelId, `0x${bytesToHex(ckbTxHash(unsignedTx))}`);
         await this.untilReady(opening.channelId, Math.max(0, deadline - Date.now()));
@@ -371,6 +383,23 @@ export class ScenarioDevice {
             `the tenant's side closed it uncooperatively, its flags are ${closed.stateFlags.join("|")}`,
         );
         return closed;
+    }
+
+    // Mines past the commitment's settlement delay.
+    waitForWatchtowerSigning(
+        channelId: string,
+        outcome: SdkEventOf<"WATCHTOWER_SIGNING">["outcome"],
+    ): Promise<SdkEventOf<"WATCHTOWER_SIGNING">> {
+        const wanted = isSdkEvent(
+            "WATCHTOWER_SIGNING",
+            (event) => bareLowerHex(event.channelId) === bareLowerHex(channelId) && event.outcome === outcome,
+        );
+        return advanceChainUntil(
+            this.env,
+            `a ${outcome} WATCHTOWER_SIGNING of ${channelId}`,
+            () => Promise.resolve(this.events.map(({ event }) => event).find(wanted)),
+            this.env.chain.openingTimeoutMs,
+        );
     }
 
     describeEvents(): string {

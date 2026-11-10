@@ -35,6 +35,8 @@ describe("SdkError", () => {
             "payment_charged",
             "own_invoice",
             "close_fee_too_high",
+            "unknown_invoice",
+            "invoice_released",
         ]);
     });
 });

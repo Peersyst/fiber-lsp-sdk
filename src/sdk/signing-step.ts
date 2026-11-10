@@ -17,6 +17,8 @@ export type ChannelSigningStepOptions = {
 
 type SignedDispatchOutcome = Extract<DispatchOutcome, { kind: "signed" }>;
 
+type RefusedDispatchOutcome = Extract<DispatchOutcome, { kind: "refused" }>;
+
 const POLL = "signing";
 
 /**
@@ -37,6 +39,8 @@ export function buildChannelSigningStep(options: ChannelSigningStepOptions): Pol
     const { rpc, store, activity, dispatch, emit, pollNow } = options;
     // Fiber answers `Applied` again while a request stays pending: hurrying each request once keeps the poller from spinning.
     const hurried = new Set<string>();
+    // Fiber keeps a refused request pending too: each is told once per reason, in this instance.
+    const refused = new Set<string>();
 
     /**
      * Submits a signature, then announces it.
@@ -66,6 +70,31 @@ export function buildChannelSigningStep(options: ChannelSigningStepOptions): Pol
     };
 
     /**
+     * Tells a refusal, once for a request and its reason, every time for a status with no request to name.
+     * @param run The run.
+     * @param channelId The channel.
+     * @param outcome The refusal.
+     */
+    const report = (run: PollRun, channelId: string, outcome: RefusedDispatchOutcome): void => {
+        const requestIdHex = outcome.requestId === null ? null : encodeSdkRequestId(outcome.requestId);
+        if (requestIdHex !== null) {
+            const refusedKey = `${channelId}:${requestIdHex}:${outcome.error.code}`;
+            // An abandoned run delivers nothing, so it must leave the refusal to the next one.
+            if (run.abandoned || refused.has(refusedKey)) return;
+            refused.add(refusedKey);
+        }
+        deliverStepEvent(run, emit, {
+            type: "SIGNING",
+            channelId,
+            requestId: requestIdHex,
+            transition: outcome.transition,
+            ...deadlineFieldOf(outcome.deadlineMs),
+            outcome: "refused",
+            error: { code: outcome.error.code, message: outcome.error.message },
+        });
+    };
+
+    /**
      * Answers one channel's signing status, if it is registered on this device.
      * @param run The run.
      * @param channelId The channel, as fiber names it.
@@ -89,15 +118,7 @@ export function buildChannelSigningStep(options: ChannelSigningStepOptions): Pol
         if (outcome.kind === "signed") {
             await submit(run, channelId, outcome);
         } else if (outcome.kind === "refused") {
-            deliverStepEvent(run, emit, {
-                type: "SIGNING",
-                channelId,
-                requestId: outcome.requestId === null ? null : encodeSdkRequestId(outcome.requestId),
-                transition: outcome.transition,
-                ...deadlineFieldOf(outcome.deadlineMs),
-                outcome: "refused",
-                error: { code: outcome.error.code, message: outcome.error.message },
-            });
+            report(run, channelId, outcome);
         } else if (outcome.kind === "fault") {
             reportStepFailure(run, emit, POLL, channelId, outcome.cause);
         }

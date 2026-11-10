@@ -426,6 +426,35 @@ describe("the watchtower step over the tenant node", () => {
         expect(chain(h)).toEqual(["node local commitment"]);
     });
 
+    it("signs the spend the node kept waiting once the host approves a destination after the device was built, rebuilding nothing", async () => {
+        const h = await inFlight(UNAPPROVED);
+        h.node.forceClose("local", FORCE_CLOSE);
+        await expectRefused(h, "Tlc@3 outbound TLC by timeout", "refused policy_refusal");
+        const refused = h.node.watchtowerServed[0]?.requestId;
+        h.device.policy.setWatchtowerApproval(APPROVAL);
+        await tick(h.device, 4);
+        expect(spends(h)).toEqual([
+            "Tlc@3 outbound TLC by timeout Applied",
+            "Tlc@2 inbound TLC by preimage Applied",
+            "Settlement settlement Applied",
+        ]);
+        expect(h.node.watchtowerServed[0]?.requestId).toBe(refused);
+        expect(watchtowerSignings(h.device)).toEqual([
+            "Tlc@3 refused policy_refusal",
+            "Tlc@3 refused policy_refusal",
+            "Tlc@3 signed",
+            "Tlc@2 signed",
+            "Settlement signed",
+        ]);
+        expect(chain(h)).toEqual([
+            "node local commitment",
+            "node outbound TLC by timeout",
+            "node inbound TLC by preimage",
+            "node settlement",
+        ]);
+        expect((await recordOf(h.device)).watchtowerSpends).toEqual(appliedSpendsOf(h, "local"));
+    });
+
     it("signs the same bytes again after a lost answer, and takes the node's AlreadyApplied as success", async () => {
         const node = tenantNode();
         const crashed = device(node, APPROVED, new InMemorySignerStorage());

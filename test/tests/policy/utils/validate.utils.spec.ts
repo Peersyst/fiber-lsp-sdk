@@ -746,6 +746,25 @@ describe("isHoldInvoicePolicyRecord", () => {
         expect(isHoldInvoicePolicyRecord({ ...invoice(), futureField: "x" })).toBe(true);
     });
 
+    it("accepts a cancelled record, and one that is released and cancelled at once", () => {
+        expect(isHoldInvoicePolicyRecord({ ...invoice(), cancelled: true })).toBe(true);
+        expect(isHoldInvoicePolicyRecord({ ...invoice(), released: true, cancelled: true })).toBe(true);
+    });
+
+    it("accepts a record whose cancelled field is absent, and one holding it as undefined", () => {
+        expect(isHoldInvoicePolicyRecord(invoice())).toBe(true);
+        expect(isHoldInvoicePolicyRecord({ ...invoice(), cancelled: undefined })).toBe(true);
+    });
+
+    it.each<[string, unknown]>([
+        ["false", false],
+        ["a string", "x"],
+        ["a number", 1],
+        ["null", null],
+    ])("rejects a record whose cancelled field is %s", (_, cancelled) => {
+        expect(isHoldInvoicePolicyRecord({ ...invoice(), cancelled })).toBe(false);
+    });
+
     it.each(Object.keys(invoice()))("rejects a record missing %s", (field) => {
         const value = invoice() as unknown as Record<string, unknown>;
         delete value[field];

@@ -712,7 +712,7 @@ describe("prepareSdkChannelOpen", () => {
         it("sends them from openChannel too", async () => {
             const h = harness();
             h.node.reject(new Error("offline"));
-            await rejection(openSdkChannel(h.options, AMOUNT, USER_LOCK, async () => SIGNED_TX, CELL_DEPS));
+            await rejection(openSdkChannel(h.options, AMOUNT, USER_LOCK, async () => SIGNED_TX.witnesses, CELL_DEPS));
             expect(h.node.calls()).toEqual([openCall({ ...OPEN_PARAMS, funding_lock_script_cell_deps: CELL_DEPS_WIRE })]);
         });
 
@@ -1176,6 +1176,12 @@ describe("submitSdkFundingTx", () => {
                 new TypeError("signedTx.witnesses[1] must be a Uint8Array"),
             ],
             [
+                "witnesses with a hole",
+                CHANNEL_ID,
+                withField(SIGNED_TX, "witnesses", new Array(2)),
+                new TypeError("signedTx.witnesses[0] must be a Uint8Array"),
+            ],
+            [
                 "a signed tx without inputs",
                 CHANNEL_ID,
                 withField(SIGNED_TX, "inputs", undefined),
@@ -1217,12 +1223,12 @@ describe("submitSdkFundingTx", () => {
 });
 
 describe("openSdkChannel", () => {
-    it("opens, has the host sign a copy of the frozen tx, unbound, and submits what it signed", async () => {
+    it("opens, has the host sign a copy of the frozen tx, unbound, and submits the frozen tx under its witnesses", async () => {
         const h = harness();
         const received: { tx: Transaction; receiver: unknown }[] = [];
-        const sign = async function (this: unknown, tx: Transaction): Promise<Transaction> {
+        const sign = async function (this: unknown, tx: Transaction): Promise<Uint8Array[]> {
             received.push({ tx: structuredClone(tx), receiver: this });
-            return SIGNED_TX;
+            return SIGNED_TX.witnesses;
         };
         h.node.result(OPEN_ANSWER).result(SUBMIT_ANSWER);
         await expect(openSdkChannel(h.options, AMOUNT, USER_LOCK, sign)).resolves.toBe(CHANNEL_ID);
@@ -1230,18 +1236,56 @@ describe("openSdkChannel", () => {
         expect(h.node.calls()).toEqual([openCall(), SUBMIT_CALL]);
     });
 
-    it("refuses what the host signed after writing to the tx it was handed: the cell is pinned by its hash", async () => {
+    it("sends the frozen tx whatever the host's signer wrote to the copy it was handed", async () => {
         const h = harness();
-        const sign = async (tx: Transaction): Promise<Transaction> => {
+        const sign = async (tx: Transaction): Promise<Uint8Array[]> => {
             const output = tx.outputs[1];
             if (output === undefined) throw new Error("no change output");
             output.capacityShannons += 1n;
-            return { ...tx, witnesses: SIGNED_TX.witnesses };
+            tx.outputsData.length = 0;
+            tx.cellDeps.length = 0;
+            return SIGNED_TX.witnesses;
         };
-        h.node.result(OPEN_ANSWER);
-        expect(await rejection(openSdkChannel(h.options, AMOUNT, USER_LOCK, sign))).toMatchObject({ code: "funding_tx_altered" });
-        expect(h.node.calls()).toEqual([openCall()]);
-        expect(storedAt(h.storage, OPENING_KEY)).toEqual(pendingOf(INDEX, CHANNEL_ID));
+        h.node.result(OPEN_ANSWER).result(SUBMIT_ANSWER);
+        await expect(openSdkChannel(h.options, AMOUNT, USER_LOCK, sign)).resolves.toBe(CHANNEL_ID);
+        expect(h.node.calls()).toEqual([openCall(), SUBMIT_CALL]);
+    });
+
+    it("takes the witnesses as they were when the signer resolved, whatever it writes to them while the record is read", async () => {
+        const h = harness();
+        const witnesses = SIGNED_TX.witnesses.map((witness) => witness.slice());
+        const sign = async (): Promise<Uint8Array[]> => {
+            const read = h.store.resolveChannelIndex.bind(h.store);
+            jest.spyOn(h.store, "resolveChannelIndex").mockImplementationOnce(async (channelId) => {
+                witnesses.forEach((witness) => witness.fill(0));
+                return read(channelId);
+            });
+            return witnesses;
+        };
+        h.node.result(OPEN_ANSWER).result(SUBMIT_ANSWER);
+        await openSdkChannel(h.options, AMOUNT, USER_LOCK, sign);
+        expect(h.node.calls()).toEqual([openCall(), SUBMIT_CALL]);
+    });
+
+    it.each<[string, number]>([
+        ["no witness at all", 0],
+        ["fewer witnesses than the inputs", 1],
+    ])("sets no rule on %s, which only CKB judges at broadcast", async (_, count) => {
+        const h = harness();
+        h.node.result(OPEN_ANSWER).result(SUBMIT_ANSWER);
+        await expect(openSdkChannel(h.options, AMOUNT, USER_LOCK, async () => SIGNED_TX.witnesses.slice(0, count))).resolves.toBe(
+            CHANNEL_ID,
+        );
+        expect(h.node.calls()).toEqual([
+            openCall(),
+            {
+                method: "submit_signed_funding_tx",
+                params: {
+                    channel_id: CHANNEL_ID,
+                    signed_funding_tx: { ...UNSIGNED_TX_WIRE, witnesses: Array(count).fill(SIGNED_WITNESS) },
+                },
+            },
+        ]);
     });
 
     it("lets the host's refusal through, keeping the opening for a retry that resumes it", async () => {
@@ -1255,16 +1299,39 @@ describe("openSdkChannel", () => {
             .result({ channels: [{ channel_id: CHANNEL_ID, state: OPENING_STATE }] })
             .result(OPEN_ANSWER)
             .result(SUBMIT_ANSWER);
-        await expect(openSdkChannel(h.options, AMOUNT, USER_LOCK, async () => SIGNED_TX)).resolves.toBe(CHANNEL_ID);
+        await expect(openSdkChannel(h.options, AMOUNT, USER_LOCK, async () => SIGNED_TX.witnesses)).resolves.toBe(CHANNEL_ID);
         expect(h.node.calls()).toEqual([openCall(), ONLY_PENDING_CALL, openCall(), SUBMIT_CALL]);
     });
 
-    it("refuses what the host's signer hands back when it is not a transaction, submitting nothing", async () => {
+    it("lets a host signer that throws, rather than rejects, through as itself", async () => {
+        const h = harness();
+        const declined = new Error("the user declined");
+        const sign = (): Promise<Uint8Array[]> => {
+            throw declined;
+        };
+        h.node.result(OPEN_ANSWER);
+        expect(await rejection(openSdkChannel(h.options, AMOUNT, USER_LOCK, sign))).toBe(declined);
+        expect(h.node.calls()).toEqual([openCall()]);
+        expect(storedAt(h.storage, OPENING_KEY)).toEqual(pendingOf(INDEX, CHANNEL_ID));
+    });
+
+    it.each<[string, unknown, string]>([
+        ["nothing", undefined, "signFundingInputs result must be an array"],
+        ["null", null, "signFundingInputs result must be an array"],
+        ["a whole transaction", SIGNED_TX, "signFundingInputs result must be an array"],
+        ["one witness outside a list", SIGNED_TX.witnesses[0], "signFundingInputs result must be an array"],
+        ["a witness in hex", [SIGNED_WITNESS], "signFundingInputs result[0] must be a Uint8Array"],
+        ["a second witness that is null", [SIGNED_TX.witnesses[0], null], "signFundingInputs result[1] must be a Uint8Array"],
+        ["a witness as a list of numbers", [[1, 2, 3]], "signFundingInputs result[0] must be a Uint8Array"],
+        ["a list with a hole", new Array(2), "signFundingInputs result[0] must be a Uint8Array"],
+    ])("refuses a host signer that resolves %s, submitting nothing and keeping the opening", async (_, resolved, message) => {
         const h = harness();
         h.node.result(OPEN_ANSWER);
-        const thrown = await rejection(openSdkChannel(h.options, AMOUNT, USER_LOCK, async () => undefined as unknown as Transaction));
-        expect(thrown).toEqual(new TypeError("signedTx must be an object"));
+        const thrown = await rejection(openSdkChannel(h.options, AMOUNT, USER_LOCK, async () => resolved as Uint8Array[]));
+        expect(thrown).toEqual(new TypeError(message));
+        expect(thrown).toBeInstanceOf(TypeError);
         expect(h.node.calls()).toEqual([openCall()]);
+        expect(storedAt(h.storage, OPENING_KEY)).toEqual(pendingOf(INDEX, CHANNEL_ID));
     });
 
     it.each<[string, unknown, unknown, unknown, unknown, Error]>([
@@ -1273,7 +1340,7 @@ describe("openSdkChannel", () => {
             "a signer that is an object",
             AMOUNT,
             USER_LOCK,
-            { sign: async () => SIGNED_TX },
+            { sign: async () => SIGNED_TX.witnesses },
             undefined,
             new TypeError("signFundingInputs must be a function"),
         ],
@@ -1291,7 +1358,7 @@ describe("openSdkChannel", () => {
             "an amount below the device's reserve",
             "9899999999",
             USER_LOCK,
-            async () => SIGNED_TX,
+            async () => SIGNED_TX.witnesses,
             undefined,
             new RangeError("fundedShannons 9899999999 is below the 9900000000 the device's reserve takes over that close script"),
         ],
@@ -1299,7 +1366,7 @@ describe("openSdkChannel", () => {
             "cell deps that are not a list",
             AMOUNT,
             USER_LOCK,
-            async () => SIGNED_TX,
+            async () => SIGNED_TX.witnesses,
             CELL_DEPS[0],
             new TypeError("userLockCellDeps must be an array"),
         ],
@@ -1307,7 +1374,7 @@ describe("openSdkChannel", () => {
             "a cell dep that is not an object",
             AMOUNT,
             USER_LOCK,
-            async () => SIGNED_TX,
+            async () => SIGNED_TX.witnesses,
             [CELL_DEPS[0], "dep"],
             new TypeError("userLockCellDeps[1] must be an object"),
         ],
@@ -1315,7 +1382,7 @@ describe("openSdkChannel", () => {
             "a cell dep with a dep type in camel case",
             AMOUNT,
             USER_LOCK,
-            async () => SIGNED_TX,
+            async () => SIGNED_TX.witnesses,
             [{ outPoint: { txHash: new Uint8Array(32), index: 2 }, depType: "depGroup" }],
             new TypeError("userLockCellDeps[0].depType must be one of code, dep_group"),
         ],
@@ -1330,7 +1397,7 @@ describe("openSdkChannel", () => {
     ])("refuses %s, writing and sending nothing", async (_, amount, lock, sign, deps, error) => {
         const h = harness();
         const thrown = await rejection(
-            openSdkChannel(h.options, amount as string, lock as Script, sign as () => Promise<Transaction>, deps as CellDep[]),
+            openSdkChannel(h.options, amount as string, lock as Script, sign as () => Promise<Uint8Array[]>, deps as CellDep[]),
         );
         expect(thrown).toEqual(error);
         expect(thrown).toBeInstanceOf(error.constructor);

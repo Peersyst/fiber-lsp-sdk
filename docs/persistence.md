@@ -161,6 +161,13 @@ the node, not the device, picks the channel a payment uses, and both carry `vers
 channel record does. Until the SDK's first release every format changes in place without bumping its version; from then
 on a change is a new version and a migration.
 
+A hold invoice record has one optional field more, `cancelled`, present only as `true`: the device marked the invoice
+cancelled, before it asked the node to cancel it, and its preimage is never released from then on ([policy.md](./policy.md),
+"Cancelled and released exclude each other"). A record never cancelled has no such field, so it is read without one,
+under the same `PAYMENT_RECORD_VERSION`. The reader takes the field absent, or `undefined`, or `true`,
+and refuses any other value (`false`, a string, a number, `null`) as a corrupt record, the way it refuses any other field out
+of form. The mark is never removed, and it is written in the same lane as `released`, the balance lane.
+
 `channelIndexes` lists every channel that has shown a TLC under the hash, so a claim can find the other channels drawing on
 one budget or crediting one invoice, since the storage cannot be enumerated. It is written before the claim that shows the
 TLC, and only once that claim has been decided: a crash in between leaves a channel listed that shows nothing, which costs

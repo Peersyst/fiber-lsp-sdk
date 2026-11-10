@@ -4,7 +4,7 @@ import type { PolicyChannelTerms } from "../../../src/policy";
 import { PolicyEngine, SignerStore } from "../../../src/policy";
 import { FiberRpcClient, RPC_CALL_FAILED_CODE, RpcError, RpcResponseError, RpcTransportError } from "../../../src/rpc";
 import type { SdkChannelClosingContext, SdkCloseOptions, SdkNetworkConfig } from "../../../src/sdk";
-import { ActivityPoller, SDK_NETWORK_PRESETS, SdkError, closeSdkChannel } from "../../../src/sdk";
+import { ActivityPoller, SDK_NETWORK_PRESETS, SdkError, closeSdkChannel, forceCloseSdkChannel } from "../../../src/sdk";
 import { TimerMock } from "../../mocks/common";
 import { InMemorySignerStorage } from "../../mocks/policy";
 import type { SentCall } from "../../mocks/rpc";
@@ -423,5 +423,58 @@ describe("closeSdkChannel", () => {
             expect(h.storage.ops).toEqual(RECORD_READS);
             expect(h.pollNow).not.toHaveBeenCalled();
         });
+    });
+});
+
+describe("forceCloseSdkChannel", () => {
+    const FORCE_CALL: SentCall = { method: "shutdown_channel", params: { channel_id: CHANNEL_ID, force: true } };
+
+    it("sends force alone, needs no record of the channel, reads and writes nothing, and asks for a tick once the node took it", async () => {
+        const order: string[] = [];
+        const h = harness();
+        h.pollNow.mockImplementation(() => order.push("poll"));
+        h.node.onCall("shutdown_channel", () => order.push("shutdown")).result(null);
+        await expect(forceCloseSdkChannel(h.context, CHANNEL_ID)).resolves.toBeUndefined();
+        expect(h.node.calls()).toEqual([FORCE_CALL]);
+        expect(h.storage.ops).toEqual([]);
+        expect(order).toEqual(["shutdown", "poll"]);
+    });
+
+    it("sends the same for a channel the device registered, whatever its pinned close would have been", async () => {
+        const h = await opened();
+        h.node.result(null);
+        await forceCloseSdkChannel(h.context, CHANNEL_ID);
+        expect(h.node.calls()).toEqual([FORCE_CALL]);
+        expect(h.storage.ops).toEqual([]);
+    });
+
+    it.each<[string, unknown]>([
+        ["no channel id", undefined],
+        ["a null channel id", null],
+        ["a channel id that is not a string", 7],
+        ["a channel id without the prefix", CHANNEL_ID.slice(2)],
+        ["a channel id one byte short", CHANNEL_ID.slice(0, -2)],
+        ["a channel id one byte long", `${CHANNEL_ID}aa`],
+        ["a channel id in upper case", `0x${CHANNEL_ID.slice(2).toUpperCase()}`],
+    ])("refuses %s, calling nothing", async (_, channelId) => {
+        const h = harness();
+        const thrown = await rejection(forceCloseSdkChannel(h.context, channelId as string));
+        expect(thrown).toEqual(new TypeError("channelId must be 32 bytes of 0x-prefixed lowercase hex"));
+        expect(thrown).toBeInstanceOf(TypeError);
+        expect(h.node.calls()).toEqual([]);
+        expect(h.storage.ops).toEqual([]);
+        expect(h.pollNow).not.toHaveBeenCalled();
+    });
+
+    it.each<[string, (h: Harness) => void, new (...args: never[]) => Error]>([
+        ["fiber's refusal", (h) => h.node.error(RPC_CALL_FAILED_CODE, NOT_FOUND), RpcError],
+        ["a transport failure", (h) => h.node.reject(new Error("offline")), RpcTransportError],
+        ["an answer that is not null", (h) => h.node.result(true), RpcResponseError],
+    ])("lets %s through unwrapped, asking no tick", async (_, answer, errorClass) => {
+        const h = harness();
+        answer(h);
+        expect(await rejection(forceCloseSdkChannel(h.context, CHANNEL_ID))).toBeInstanceOf(errorClass);
+        expect(h.node.calls()).toEqual([FORCE_CALL]);
+        expect(h.pollNow).not.toHaveBeenCalled();
     });
 });

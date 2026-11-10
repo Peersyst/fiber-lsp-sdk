@@ -129,6 +129,7 @@ export function isHoldInvoicePolicyRecord(value: unknown): value is HoldInvoiceP
         HASH_ALGORITHMS.includes(value.hashAlgorithm) &&
         isUnsignedInteger(value.invoiceIndex, MAX_INVOICE_INDEX) &&
         typeof value.released === "boolean" &&
+        (value.cancelled === undefined || value.cancelled === true) &&
         isChannelIndexSet(value.channelIndexes)
     );
 }

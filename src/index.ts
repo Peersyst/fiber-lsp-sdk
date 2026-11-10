@@ -53,4 +53,5 @@ export type {
     SdkWatchtowerOptions,
     SigningEventOutcome,
 } from "./sdk";
+export { deriveTenantId } from "./signer";
 export type { SignerRefusal } from "./signer";

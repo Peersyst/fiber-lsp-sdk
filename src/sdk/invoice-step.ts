@@ -6,6 +6,7 @@ import type { FiberRpcClient, RpcInvoice } from "../rpc";
 import type { HoldInvoicePreimages } from "../signer";
 import { tlcExpiryDelay } from "../signer";
 import type { ActivityTracker } from "./activity";
+import { cancelInvoiceOnNode } from "./invoice-cancelling";
 import type { PollRun, PollStep } from "./poller";
 import { SDK_INVOICE_ALREADY_PAID_ERROR, SDK_RELEASE_EXPIRY_SLACK_MS } from "./sdk.constants";
 import type { ActivityEntry, SdkEvent } from "./sdk.types";
@@ -33,8 +34,8 @@ export type InvoiceStepOptions = {
 
 const POLL = "invoice";
 
-// The release waits these out and tries again on the next tick: a payment out beside the held TLC resolves on its own.
-const RELEASE_WAITS: readonly HoldInvoiceErrorCode[] = ["not_held", "expiry_too_close", "offered_in_flight"];
+// These end the tick: the next tries the release again, a payment out beside the held TLC resolving on its own, or repeats a cancel.
+const RELEASE_WAITS: readonly HoldInvoiceErrorCode[] = ["not_held", "expiry_too_close", "offered_in_flight", "cancelled"];
 
 /**
  * Tells whether an invoice is past its expiry as fiber's `is_expired` judges it, refusing a string that is another invoice's.
@@ -99,14 +100,18 @@ export function buildInvoiceStep(options: InvoiceStepOptions): PollStep {
      * @param paymentHash The payment hash, lowercase hex.
      * @param type The event.
      */
-    const finish = async (run: PollRun, paymentHash: string, type: "PAYMENT_RECEIVED" | "PAYMENT_EXPIRED"): Promise<void> => {
+    const finish = async (
+        run: PollRun,
+        paymentHash: string,
+        type: "PAYMENT_RECEIVED" | "PAYMENT_EXPIRED" | "PAYMENT_CANCELLED",
+    ): Promise<void> => {
         deliverStepEvent(run, emit, { type, paymentHashHex: `0x${paymentHash}` });
         if (run.abandoned) return;
         await activity.forget("invoice", paymentHash);
     };
 
     /**
-     * Releases a received invoice's preimage once policy allows it and settles it, or settles again one already released.
+     * Releases a received invoice's preimage once policy allows it and settles it, or repairs a settlement or a cancel left unfinished.
      * @param run The run.
      * @param paymentHash The payment hash, lowercase hex.
      * @param invoice The invoice as the node answered it.
@@ -114,6 +119,11 @@ export function buildInvoiceStep(options: InvoiceStepOptions): PollStep {
     const release = async (run: PollRun, paymentHash: string, invoice: RpcInvoice): Promise<void> => {
         const record = await policy.readHoldInvoice(paymentHash);
         if (run.abandoned) return;
+        // Repairs a cancel the node never took; a released record takes the settlement's repair below instead.
+        if (record.cancelled === true && !record.released) {
+            await cancelInvoiceOnNode(rpc, paymentHash);
+            return;
+        }
         // Before the mark: a record whose index derives another hash is never released.
         const paymentPreimage = preimageOf(paymentHash, record.invoiceIndex);
         // Harmless while `Received`: it repairs a stop between the mark and the settlement.
@@ -131,6 +141,8 @@ export function buildInvoiceStep(options: InvoiceStepOptions): PollStep {
             await policy.markHoldInvoiceReleased(paymentHash, { now: readNow, releaseMarginMs });
         } catch (error) {
             if (!(error instanceof HoldInvoiceError) || !RELEASE_WAITS.includes(error.code)) throw error;
+            // Whatever its expiry: the next tick repeats the cancel, and fiber's `Cancelled` ends it.
+            if (error.code === "cancelled") return;
             // Fiber keeps an invoice whose TLC failed `Received` for good.
             if (isPastInvoiceExpiry(invoice.invoiceAddress, paymentHash, readNow()) && !(await policy.listsHoldInvoiceTlc(paymentHash))) {
                 await finish(run, paymentHash, "PAYMENT_EXPIRED");
@@ -170,7 +182,7 @@ export function buildInvoiceStep(options: InvoiceStepOptions): PollStep {
             if ((await policy.readHoldInvoice(paymentHash)).released) {
                 throw new Error(`the node reports 0x${paymentHash} ${status.toLowerCase()}, but the device released its preimage`);
             }
-            await finish(run, paymentHash, "PAYMENT_EXPIRED");
+            await finish(run, paymentHash, status === "Expired" ? "PAYMENT_EXPIRED" : "PAYMENT_CANCELLED");
         }
     };
 
