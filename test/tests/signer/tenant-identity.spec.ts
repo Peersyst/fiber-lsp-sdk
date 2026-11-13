@@ -2,13 +2,19 @@ import { secp256k1 } from "@noble/curves/secp256k1.js";
 import { bytesToHex, hexToBytes, utf8ToBytes } from "@noble/hashes/utils.js";
 import { UINT64_MAX } from "../../../src/common";
 import { blake2bHashWithSalt } from "../../../src/derivation";
+import type { RegisterTenantParams } from "../../../src/rpc";
 import type { TenantRegistryPayload } from "../../../src/signer";
 import {
     TENANT_ID_DOMAIN,
+    TENANT_REGISTRY_MAX_SIGNED_AT_AGE_MS,
+    TENANT_REGISTRY_MAX_SIGNED_AT_FUTURE_SKEW_MS,
     TenantIdentity,
     buildTenantRegistryPayload,
+    computeTenantId,
     computeTenantRegistryDigest,
     deriveTenantId,
+    readTenantRegistration,
+    verifyTenantRegistration,
 } from "../../../src/signer";
 import { loadInteropVectors } from "../../utils/interop-vectors";
 import { refusalOf } from "../../utils/refusal";
@@ -104,6 +110,7 @@ describe("against fiber's fixed registry vectors", () => {
 
     it("derives fiber's tenant id from its RootSigner", () => {
         expect(bytesToHex(blake2bHashWithSalt(hexToBytes(FIBER_ROOT_SIGNER_PUBKEY), utf8ToBytes(TENANT_ID_DOMAIN)))).toBe(FIBER_TENANT_ID);
+        expect(computeTenantId(hexToBytes(FIBER_ROOT_SIGNER_PUBKEY))).toBe(FIBER_TENANT_ID);
     });
 });
 
@@ -526,5 +533,377 @@ describe("against fiber's tenant registry vector", () => {
         expect(secp256k1.verify(signature, hexToBytes(vector.digest), hexToBytes(vector.root_signer_pubkey), { prehash: false })).toBe(
             true,
         );
+    });
+});
+
+describe("computeTenantId", () => {
+    const vectors = loadInteropVectors();
+    const vector = vectors.tenant_registry;
+
+    it("gives fiber's tenant id for the vector's root signer", () => {
+        expect(computeTenantId(hexToBytes(vector.root_signer_pubkey))).toBe(vector.tenant_id);
+    });
+
+    it("gives the id of the identity, and of deriveTenantId, over the vector's seed", () => {
+        const seed = hexToBytes(vectors.sdk_scheme.master_seed);
+        const id = computeTenantId(hexToBytes(vector.root_signer_pubkey));
+        expect(new TenantIdentity(seed).tenantId).toBe(id);
+        expect(deriveTenantId(seed)).toBe(id);
+    });
+
+    it("gives the pinned tenant id of each seed's root signer", () => {
+        expect(computeTenantId(hexToBytes(ROOT_SIGNER_PUBKEY))).toBe("a42a2ad2f6b771aceed7f964eb25469a8cd292d7f430a918745d7a5a7822fd8f");
+        expect(computeTenantId(hexToBytes(OTHER_ROOT_SIGNER_PUBKEY))).toBe(
+            "2bfb3edbb410cad1ea91e27bb0eee705749de74cf8a029c4bd24e3a92934448b",
+        );
+    });
+
+    it("leaves the key as it was, and hashes the bytes it holds at each call", () => {
+        const key = hexToBytes(ROOT_SIGNER_PUBKEY);
+        const id = computeTenantId(key);
+        expect(bytesToHex(key)).toBe(ROOT_SIGNER_PUBKEY);
+        // The same x under the other parity: still a point, another key.
+        key[0] = 0x02;
+        const other = computeTenantId(key);
+        expect(other).not.toBe(id);
+        expect(other).toBe(bytesToHex(blake2bHashWithSalt(key, utf8ToBytes(TENANT_ID_DOMAIN))));
+        expect(id).toBe("a42a2ad2f6b771aceed7f964eb25469a8cd292d7f430a918745d7a5a7822fd8f");
+    });
+
+    it.each([
+        ["absent", undefined, "rootSignerPubkey must be a Uint8Array"],
+        ["null", null, "rootSignerPubkey must be a Uint8Array"],
+        ["in hex", ROOT_SIGNER_PUBKEY, "rootSignerPubkey must be a Uint8Array"],
+        ["an array of bytes", Array.from(hexToBytes(ROOT_SIGNER_PUBKEY)), "rootSignerPubkey must be a Uint8Array"],
+        ["of 32 bytes", hexToBytes(ROOT_SIGNER_PUBKEY).slice(0, 32), "rootSignerPubkey must be 33 bytes, got 32"],
+        ["of 34 bytes", hexToBytes(`${ROOT_SIGNER_PUBKEY}00`), "rootSignerPubkey must be 33 bytes, got 34"],
+        ["33 zero bytes, no point's prefix", new Uint8Array(33), "rootSignerPubkey must be a compressed point on secp256k1"],
+        [
+            "under an uncompressed prefix",
+            hexToBytes(`04${ROOT_SIGNER_PUBKEY.slice(2)}`),
+            "rootSignerPubkey must be a compressed point on secp256k1",
+        ],
+        ["an x past the field's prime", hexToBytes(`02${"ff".repeat(32)}`), "rootSignerPubkey must be a compressed point on secp256k1"],
+    ])("refuses a root signer %s", (_, rootSignerPubkey, message) => {
+        expect(typeErrorOf(() => computeTenantId(rootSignerPubkey as Uint8Array))).toBe(message);
+    });
+});
+
+describe("the registration window", () => {
+    it("is fiber's: five minutes behind, thirty seconds ahead", () => {
+        expect(TENANT_REGISTRY_MAX_SIGNED_AT_AGE_MS).toBe(300000n);
+        expect(TENANT_REGISTRY_MAX_SIGNED_AT_FUTURE_SKEW_MS).toBe(30000n);
+    });
+});
+
+describe("readTenantRegistration", () => {
+    it("hands back the four fields alone, the very values it read", () => {
+        const given = {
+            rootSignerPubkey: hexToBytes(ROOT_SIGNER_PUBKEY),
+            requestId: hexToBytes(REQUEST_ID),
+            signedAtMs: SIGNED_AT_MS,
+            signature: hexToBytes(SIGNATURE),
+            tenantId: "a42a2ad2f6b771aceed7f964eb25469a8cd292d7f430a918745d7a5a7822fd8f",
+        };
+        const read = readTenantRegistration(given);
+        expect(Object.keys(read)).toEqual(["rootSignerPubkey", "requestId", "signedAtMs", "signature"]);
+        expect(read.rootSignerPubkey).toBe(given.rootSignerPubkey);
+        expect(read.requestId).toBe(given.requestId);
+        expect(read.signedAtMs).toBe(SIGNED_AT_MS);
+        expect(read.signature).toBe(given.signature);
+    });
+});
+
+describe("verifyTenantRegistration", () => {
+    const vectors = loadInteropVectors();
+    const vector = vectors.tenant_registry;
+    // secp256k1's group order n.
+    const ORDER = "fffffffffffffffffffffffffffffffebaaedce6af48a03bbfd25e8cd0364141";
+    const ORDER_N = BigInt(`0x${ORDER}`);
+    const R = vector.signature.slice(0, 64);
+    const S = vector.signature.slice(64);
+
+    const lspPubkey = (): Uint8Array => hexToBytes(vector.lsp_node_id);
+    const registration = (): RegisterTenantParams => ({
+        rootSignerPubkey: hexToBytes(vector.root_signer_pubkey),
+        requestId: hexToBytes(vector.request_id),
+        signedAtMs: BigInt(vector.signed_at),
+        signature: hexToBytes(vector.signature),
+    });
+    const withSignature = (signature: string): RegisterTenantParams => ({ ...registration(), signature: hexToBytes(signature) });
+    const scalar = (value: bigint): string => value.toString(16).padStart(64, "0");
+    const isPoint = (bytes: Uint8Array): boolean => {
+        try {
+            secp256k1.Point.fromBytes(bytes);
+            return true;
+        } catch {
+            return false;
+        }
+    };
+    const flipped = (hex: string, index: number): Uint8Array => hexToBytes(hex).map((byte, at) => (at === index ? byte ^ 0x01 : byte));
+    const indices = (length: number): number[] => Array.from({ length }, (_, index) => index);
+    const unverified = (value: unknown): RegisterTenantParams => value as RegisterTenantParams;
+
+    it("accepts the vector's registration under its LSP", () => {
+        expect(verifyTenantRegistration(lspPubkey(), registration())).toBe(true);
+    });
+
+    it("accepts what an identity signs, for any LSP, under its own key", () => {
+        const other = new TenantIdentity(OTHER_MASTER_SEED);
+        const request = { lspNodeId: hexToBytes(OTHER_LSP_NODE_ID), requestId: hexToBytes(REQUEST_ID), signedAtMs: SIGNED_AT_MS };
+        expect(verifyTenantRegistration(hexToBytes(OTHER_LSP_NODE_ID), other.signRegistration(request))).toBe(true);
+    });
+
+    it.each([
+        ["0", 0n],
+        ["u64's maximum", UINT64_MAX],
+    ])("accepts a signing time of %s, the bounds of fiber's u64", (_, signedAtMs) => {
+        const signed = new TenantIdentity(MASTER_SEED).signRegistration({ ...request(), signedAtMs });
+        expect(verifyTenantRegistration(hexToBytes(LSP_NODE_ID), signed)).toBe(true);
+    });
+
+    it("accepts keys and bytes the host passes as Node buffers", () => {
+        const buffered = {
+            rootSignerPubkey: Buffer.from(vector.root_signer_pubkey, "hex"),
+            requestId: Buffer.from(vector.request_id, "hex"),
+            signedAtMs: BigInt(vector.signed_at),
+            signature: Buffer.from(vector.signature, "hex"),
+        };
+        expect(verifyTenantRegistration(Buffer.from(vector.lsp_node_id, "hex"), buffered)).toBe(true);
+    });
+
+    it("accepts the facade's own output, which carries the tenant id beside the registration", () => {
+        const output = {
+            rootSignerPubkey: hexToBytes(vector.root_signer_pubkey),
+            requestId: hexToBytes(vector.request_id),
+            signedAtMs: BigInt(vector.signed_at),
+            signature: hexToBytes(vector.signature),
+            tenantId: vector.tenant_id,
+        };
+        expect(verifyTenantRegistration(lspPubkey(), output)).toBe(true);
+    });
+
+    it("leaves the key and the registration it was given as they were", () => {
+        const lsp = lspPubkey();
+        const given = registration();
+        verifyTenantRegistration(lsp, given);
+        expect(bytesToHex(lsp)).toBe(vector.lsp_node_id);
+        expect(bytesToHex(given.rootSignerPubkey)).toBe(vector.root_signer_pubkey);
+        expect(bytesToHex(given.requestId)).toBe(vector.request_id);
+        expect(given.signedAtMs).toBe(BigInt(vector.signed_at));
+        expect(bytesToHex(given.signature)).toBe(vector.signature);
+    });
+
+    describe("a signature that does not verify", () => {
+        it("is the vector's signature under another LSP", () => {
+            expect(verifyTenantRegistration(hexToBytes(OTHER_LSP_NODE_ID), registration())).toBe(false);
+        });
+
+        it("is the signature of another seed's identity over the same request", () => {
+            const other = new TenantIdentity(OTHER_MASTER_SEED).signRegistration({
+                lspNodeId: lspPubkey(),
+                requestId: hexToBytes(vector.request_id),
+                signedAtMs: BigInt(vector.signed_at),
+            });
+            expect(verifyTenantRegistration(lspPubkey(), { ...registration(), signature: other.signature })).toBe(false);
+        });
+
+        it("is the vector's signature claimed by another seed's root signer", () => {
+            const claimed = { ...registration(), rootSignerPubkey: hexToBytes(OTHER_ROOT_SIGNER_PUBKEY) };
+            expect(verifyTenantRegistration(lspPubkey(), claimed)).toBe(false);
+        });
+
+        it("is any byte of the request id altered", () => {
+            const verified = indices(32).filter((index) =>
+                verifyTenantRegistration(lspPubkey(), { ...registration(), requestId: flipped(vector.request_id, index) }),
+            );
+            expect(verified).toEqual([]);
+        });
+
+        it("is any of the eight bytes of the signing time altered", () => {
+            const signedAtMs = BigInt(vector.signed_at);
+            const verified = indices(8).filter((index) => {
+                const altered = signedAtMs ^ (0xffn << BigInt(8 * (7 - index)));
+                const written = buildTenantRegistryPayload({
+                    lspNodeId: lspPubkey(),
+                    rootSignerPubkey: hexToBytes(vector.root_signer_pubkey),
+                    requestId: hexToBytes(vector.request_id),
+                    signedAtMs: altered,
+                }).slice(133);
+                const differing = indices(8).filter((at) => written[at] !== hexToBytes(vector.payload.slice(266))[at]);
+                expect(differing).toEqual([index]);
+                return verifyTenantRegistration(lspPubkey(), { ...registration(), signedAtMs: altered });
+            });
+            expect(verified).toEqual([]);
+        });
+
+        it("is any byte of the signature altered", () => {
+            const verified = indices(64).filter((index) =>
+                verifyTenantRegistration(lspPubkey(), { ...registration(), signature: flipped(vector.signature, index) }),
+            );
+            expect(verified).toEqual([]);
+        });
+
+        it("is any byte of the LSP's key altered into another point; into no point, it is refused", () => {
+            const outcomes = indices(33).map((index) => {
+                const altered = flipped(vector.lsp_node_id, index);
+                if (!isPoint(altered)) {
+                    expect(typeErrorOf(() => verifyTenantRegistration(altered, registration()))).toBe(
+                        "lspPubkey must be a compressed point on secp256k1",
+                    );
+                    return "refused";
+                }
+                return verifyTenantRegistration(altered, registration()) ? "verified" : "unverified";
+            });
+            expect(outcomes).not.toContain("verified");
+            expect(outcomes).toContain("unverified");
+            expect(outcomes).toContain("refused");
+        });
+
+        it("is any byte of the root signer altered into another point; into no point, it is refused", () => {
+            const outcomes = indices(33).map((index) => {
+                const altered = { ...registration(), rootSignerPubkey: flipped(vector.root_signer_pubkey, index) };
+                if (!isPoint(altered.rootSignerPubkey)) {
+                    expect(typeErrorOf(() => verifyTenantRegistration(lspPubkey(), altered))).toBe(
+                        "registration.rootSignerPubkey must be a compressed point on secp256k1",
+                    );
+                    return "refused";
+                }
+                return verifyTenantRegistration(lspPubkey(), altered) ? "verified" : "unverified";
+            });
+            expect(outcomes).not.toContain("verified");
+            expect(outcomes).toContain("unverified");
+            expect(outcomes).toContain("refused");
+        });
+
+        it("is the high-S twin of the vector's signature, which libsecp256k1 does not normalize", () => {
+            const highS = scalar(ORDER_N - BigInt(`0x${S}`));
+            const digest = hexToBytes(vector.digest);
+            const pubkey = hexToBytes(vector.root_signer_pubkey);
+            expect(secp256k1.verify(hexToBytes(R + highS), digest, pubkey, { prehash: false, lowS: false, format: "compact" })).toBe(true);
+            expect(verifyTenantRegistration(lspPubkey(), withSignature(R + highS))).toBe(false);
+            expect(verifyTenantRegistration(lspPubkey(), withSignature(R + scalar(ORDER_N - BigInt(`0x${highS}`))))).toBe(true);
+        });
+
+        it.each([
+            ["r of zero", () => "00".repeat(32) + S],
+            ["s of zero", () => R + "00".repeat(32)],
+            ["r of the group order", () => ORDER + S],
+            ["s of the group order", () => R + ORDER],
+            ["r and s all 0xff", () => "ff".repeat(64)],
+        ])("is a signature with %s", (_, signature) => {
+            expect(verifyTenantRegistration(lspPubkey(), withSignature(signature()))).toBe(false);
+        });
+    });
+
+    describe("refusals", () => {
+        it.each([
+            ["absent", undefined, "lspPubkey must be a Uint8Array"],
+            ["null", null, "lspPubkey must be a Uint8Array"],
+            ["in hex", LSP_NODE_ID, "lspPubkey must be a Uint8Array"],
+            ["of 32 bytes", hexToBytes(LSP_NODE_ID).slice(0, 32), "lspPubkey must be 33 bytes, got 32"],
+            ["of 34 bytes", hexToBytes(`${LSP_NODE_ID}00`), "lspPubkey must be 33 bytes, got 34"],
+            ["33 zero bytes, no point's prefix", new Uint8Array(33), "lspPubkey must be a compressed point on secp256k1"],
+            ["under an uncompressed prefix", hexToBytes(`04${LSP_NODE_ID.slice(2)}`), "lspPubkey must be a compressed point on secp256k1"],
+            ["an x past the field's prime", hexToBytes(`02${"ff".repeat(32)}`), "lspPubkey must be a compressed point on secp256k1"],
+        ])("refuses an LSP key %s", (_, lsp, message) => {
+            expect(typeErrorOf(() => verifyTenantRegistration(lsp as Uint8Array, registration()))).toBe(message);
+        });
+
+        it.each([
+            ["null", null],
+            ["undefined", undefined],
+            ["an array", []],
+            ["a string", "registration"],
+        ])("refuses a registration that is %s", (_, value) => {
+            expect(typeErrorOf(() => verifyTenantRegistration(lspPubkey(), unverified(value)))).toBe("registration must be an object");
+        });
+
+        it.each([
+            ["absent", undefined, "registration.rootSignerPubkey must be a Uint8Array"],
+            ["null", null, "registration.rootSignerPubkey must be a Uint8Array"],
+            ["in hex", ROOT_SIGNER_PUBKEY, "registration.rootSignerPubkey must be a Uint8Array"],
+            ["of 32 bytes", hexToBytes(ROOT_SIGNER_PUBKEY).slice(0, 32), "registration.rootSignerPubkey must be 33 bytes, got 32"],
+            ["of 34 bytes", hexToBytes(`${ROOT_SIGNER_PUBKEY}00`), "registration.rootSignerPubkey must be 33 bytes, got 34"],
+            [
+                "33 zero bytes, no point's prefix",
+                new Uint8Array(33),
+                "registration.rootSignerPubkey must be a compressed point on secp256k1",
+            ],
+            [
+                "under an uncompressed prefix",
+                hexToBytes(`04${ROOT_SIGNER_PUBKEY.slice(2)}`),
+                "registration.rootSignerPubkey must be a compressed point on secp256k1",
+            ],
+            [
+                "an x past the field's prime",
+                hexToBytes(`02${"ff".repeat(32)}`),
+                "registration.rootSignerPubkey must be a compressed point on secp256k1",
+            ],
+        ])("refuses a root signer %s", (_, rootSignerPubkey, message) => {
+            const refused = unverified({ ...registration(), rootSignerPubkey });
+            expect(typeErrorOf(() => verifyTenantRegistration(lspPubkey(), refused))).toBe(message);
+        });
+
+        it.each([
+            ["absent", undefined, "registration.requestId must be a Uint8Array"],
+            ["null", null, "registration.requestId must be a Uint8Array"],
+            ["in hex", REQUEST_ID, "registration.requestId must be a Uint8Array"],
+            ["of 31 bytes", new Uint8Array(31).fill(0x03), "registration.requestId must be 32 bytes, got 31"],
+            ["of 33 bytes", new Uint8Array(33).fill(0x03), "registration.requestId must be 32 bytes, got 33"],
+        ])("refuses a request id %s", (_, requestId, message) => {
+            const refused = unverified({ ...registration(), requestId });
+            expect(typeErrorOf(() => verifyTenantRegistration(lspPubkey(), refused))).toBe(message);
+        });
+
+        it.each([
+            ["absent", undefined, "undefined"],
+            ["null", null, "null"],
+            ["a number", 1_700_000_000_123, "1700000000123"],
+            ["a number that is no integer", 1_700_000_000_123.5, "1700000000123.5"],
+            ["a decimal string", "1700000000123", "1700000000123"],
+            ["negative", -1n, "-1"],
+            ["past u64's maximum", UINT64_MAX + 1n, "18446744073709551616"],
+        ])("refuses a signing time %s", (_, signedAtMs, got) => {
+            const refused = unverified({ ...registration(), signedAtMs });
+            expect(rangeErrorOf(() => verifyTenantRegistration(lspPubkey(), refused))).toBe(
+                `registration.signedAtMs must be a bigint between 0 and 18446744073709551615, got ${got}`,
+            );
+        });
+
+        it.each([
+            ["absent", undefined, "registration.signature must be a Uint8Array"],
+            ["null", null, "registration.signature must be a Uint8Array"],
+            ["in hex", SIGNATURE, "registration.signature must be a Uint8Array"],
+            ["of 63 bytes", hexToBytes(SIGNATURE).slice(0, 63), "registration.signature must be 64 bytes, got 63"],
+            ["of 65 bytes, a recoverable one", hexToBytes(`${SIGNATURE}01`), "registration.signature must be 64 bytes, got 65"],
+        ])("refuses a signature %s", (_, signature, message) => {
+            const refused = unverified({ ...registration(), signature });
+            expect(typeErrorOf(() => verifyTenantRegistration(lspPubkey(), refused))).toBe(message);
+        });
+    });
+
+    it("reads each member of the registration once: what it checks is what it verifies", () => {
+        const reads: string[] = [];
+        const shifting = {
+            get rootSignerPubkey(): Uint8Array {
+                reads.push("rootSignerPubkey");
+                return hexToBytes(reads.length > 4 ? OTHER_ROOT_SIGNER_PUBKEY : vector.root_signer_pubkey);
+            },
+            get requestId(): Uint8Array {
+                reads.push("requestId");
+                return reads.length > 4 ? new Uint8Array(31) : hexToBytes(vector.request_id);
+            },
+            get signedAtMs(): bigint {
+                reads.push("signedAtMs");
+                return reads.length > 4 ? -1n : BigInt(vector.signed_at);
+            },
+            get signature(): Uint8Array {
+                reads.push("signature");
+                return reads.length > 4 ? new Uint8Array(63) : hexToBytes(vector.signature);
+            },
+        };
+        expect(verifyTenantRegistration(lspPubkey(), shifting)).toBe(true);
+        expect(reads).toEqual(["rootSignerPubkey", "requestId", "signedAtMs", "signature"]);
     });
 });

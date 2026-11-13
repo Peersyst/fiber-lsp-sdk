@@ -1,9 +1,7 @@
 import type { WireField } from "../wire";
 import { decodeString, malformedWireField, readObject } from "../wire";
-import { JSON_RPC_VERSION } from "./rpc.constants";
+import { JSON_RPC_VERSION, RPC_RESPONSE_PATH } from "./rpc.constants";
 import type { RpcErrorObjectWire, RpcMethod, RpcParamsWire, RpcRequestWire, RpcResponse, RpcResponseWire } from "./rpc.types";
-
-const RESPONSE_PATH = "response";
 
 /**
  * Writes a call as fiber reads it, the params as the only item of a positional array.
@@ -24,7 +22,7 @@ export function encodeRpcRequest(id: number, method: RpcMethod, params: RpcParam
  * @returns The result field, still to decode, or the error's code and message.
  */
 export function decodeRpcResponse(text: string, id: number): RpcResponse {
-    const response: WireField = { value: parseRpcResponse(text), path: RESPONSE_PATH };
+    const response: WireField = { value: parseRpcResponse(text), path: RPC_RESPONSE_PATH };
     const at = readObject<RpcResponseWire>(response);
     const version = at("jsonrpc");
     if (version.value !== JSON_RPC_VERSION) malformedWireField(version, `must be "${JSON_RPC_VERSION}"`);
@@ -48,7 +46,7 @@ function parseRpcResponse(text: string): unknown {
     try {
         return JSON.parse(text) as unknown;
     } catch {
-        malformedWireField({ value: text, path: RESPONSE_PATH }, "must be valid JSON");
+        malformedWireField({ value: text, path: RPC_RESPONSE_PATH }, "must be valid JSON");
     }
 }
 

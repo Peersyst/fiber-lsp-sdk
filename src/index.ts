@@ -19,10 +19,11 @@ export type { ChannelSigningTransition } from "./protocol";
 export { InvoiceError, decodeInvoice } from "./invoice";
 export type { Invoice, InvoiceAttribute, InvoiceAttributeType, InvoiceCurrency, UnsignedInvoice } from "./invoice";
 export { RpcError, RpcResponseError, RpcTransportError } from "./rpc";
-export type { FetchInit, FetchResponseLike, IFetchLike, RpcMethod, TenantChannelOpeningContext } from "./rpc";
+export type { FetchInit, FetchResponseLike, IFetchLike, RegisterTenantParams, RpcMethod, TenantChannelOpeningContext } from "./rpc";
 export {
     DEFAULT_POLL_INTERVAL_MS,
     FiberLspSdk,
+    LspOperatorClient,
     SDK_CHANNEL_STATES,
     SDK_ERROR_CODES,
     SDK_EVENT_TYPES,
@@ -31,6 +32,8 @@ export {
 } from "./sdk";
 export type {
     FiberLspSdkOptions,
+    LspOperatorClientOptions,
+    LspRegisteredTenant,
     SdkChannelEvidence,
     SdkChannelInfo,
     SdkChannelOpening,
@@ -53,5 +56,11 @@ export type {
     SdkWatchtowerOptions,
     SigningEventOutcome,
 } from "./sdk";
-export { deriveTenantId } from "./signer";
+export {
+    TENANT_REGISTRY_MAX_SIGNED_AT_AGE_MS,
+    TENANT_REGISTRY_MAX_SIGNED_AT_FUTURE_SKEW_MS,
+    computeTenantId,
+    deriveTenantId,
+    verifyTenantRegistration,
+} from "./signer";
 export type { SignerRefusal } from "./signer";

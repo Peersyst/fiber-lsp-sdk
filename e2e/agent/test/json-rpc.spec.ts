@@ -1,23 +1,12 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import type { AgentNodeFetch } from "../src/agent.types";
-import { AgentJsonRpc, jsonRpcCall, NO_BEARER_TOKEN, readJsonRpcRequest } from "../src/json-rpc";
+import { DEVICE_ROOT_SIGNER, DEVICE_TENANT_ID } from "./utils/fake-node";
+import { agentOperatorClient, AgentJsonRpc, jsonRpcCall, NO_BEARER_TOKEN, readJsonRpcRequest } from "../src/json-rpc";
 
 const URL = "http://127.0.0.1:21714";
 
 const LSP_NODE_ID = "02b7ca5d4b3a7e8e5e47d16d9b0d4a8e3f1c2b3a4d5e6f708192a3b4c5d6e7f809";
-
-const ROOT_SIGNER = "03aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
-
-const REQUEST_ID = "0x0101010101010101010101010101010101010101010101010101010101010101";
-
-// 2027-01-15T08:00:00Z.
-const SIGNED_AT_MS = 1_800_000_000_000n;
-
-const SIGNATURE =
-    "4444444444444444444444444444444444444444444444444444444444444444" + "5555555555555555555555555555555555555555555555555555555555555555";
-
-const TENANT_ID = "6666666666666666666666666666666666666666666666666666666666666666";
 
 const PAYMENT_HASH = "0x09dfb3a3e2e8e0e8a0a3d2e3b1d4c3b2a1f0e9d8c7b6a5f4e3d2c1b0a9f89138";
 
@@ -50,122 +39,7 @@ function assertSent(requests: Request[], token: string, body: string): void {
     assert.equal(request.init.signal.aborted, false);
 }
 
-function bytes(hex: string): Uint8Array {
-    return new Uint8Array(Buffer.from(hex.replace(/^0x/, ""), "hex"));
-}
-
 describe("AgentJsonRpc", () => {
-    describe("registerTenant", () => {
-        const registration = {
-            rootSignerPubkey: bytes(ROOT_SIGNER),
-            requestId: bytes(REQUEST_ID),
-            signedAtMs: SIGNED_AT_MS,
-            signature: bytes(SIGNATURE),
-        };
-        const tenant = {
-            tenant_id: TENANT_ID,
-            root_signer_pubkey: ROOT_SIGNER,
-            invoice_pubkey: LSP_NODE_ID,
-            channels: [],
-            created_at: "0x1",
-            runtime_status: "Active",
-        };
-
-        it("sends the key and signature bare, the request id and the signing time with 0x, and returns the tenant id and token", async () => {
-            const { fetch, requests } = fetchResult({ tenant, access_token: "tenant-token" });
-            assert.deepEqual(await new AgentJsonRpc(URL, fetch).registerTenant(registration, "operator"), {
-                tenantId: TENANT_ID,
-                accessToken: "tenant-token",
-            });
-            assertSent(
-                requests,
-                "operator",
-                `{"jsonrpc":"2.0","method":"lsp_register_tenant","params":[{"root_signer_pubkey":"${ROOT_SIGNER}","request_id":"${REQUEST_ID}","signed_at":"0x1a3185c5000","signature":"${SIGNATURE}"}],"id":1}`,
-            );
-        });
-
-        for (const [name, signedAtMs, written] of [
-            ["0", 0n, "0x0"],
-            ["u64's largest", 2n ** 64n - 1n, "0xffffffffffffffff"],
-        ] as const) {
-            it(`writes a signing time of ${name}`, async () => {
-                const { fetch, requests } = fetchResult({ tenant, access_token: "tenant-token" });
-                await new AgentJsonRpc(URL, fetch).registerTenant({ ...registration, signedAtMs }, "operator");
-                const sent = JSON.parse(requests[0]?.init.body ?? "{}") as { params: [{ signed_at: unknown }] };
-                assert.equal(sent.params[0].signed_at, written);
-            });
-        }
-
-        for (const [name, signedAtMs] of [
-            ["below 0", -1n],
-            ["past u64", 2n ** 64n],
-            ["a number", 1_800_000_000_000],
-        ] as const) {
-            it(`refuses a signing time ${name} before sending`, async () => {
-                const { fetch, requests } = fetchResult({ tenant, access_token: "tenant-token" });
-                const wrong = { ...registration, signedAtMs } as unknown as typeof registration;
-                await assert.rejects(new AgentJsonRpc(URL, fetch).registerTenant(wrong, "operator"), {
-                    name: "RangeError",
-                    message: "signedAtMs must be a bigint within u64",
-                });
-                assert.equal(requests.length, 0);
-            });
-        }
-
-        for (const [field, length] of [
-            ["rootSignerPubkey", 33],
-            ["requestId", 32],
-            ["signature", 64],
-        ] as const) {
-            for (const wrong of [length - 1, length + 1]) {
-                it(`refuses a ${field} of ${wrong} bytes before sending`, async () => {
-                    const { fetch, requests } = fetchResult({ tenant, access_token: "tenant-token" });
-                    await assert.rejects(
-                        new AgentJsonRpc(URL, fetch).registerTenant({ ...registration, [field]: new Uint8Array(wrong) }, "operator"),
-                        {
-                            message: `${field} must be ${length} bytes`,
-                        },
-                    );
-                    assert.equal(requests.length, 0);
-                });
-            }
-        }
-
-        it("refuses a result without a tenant", async () => {
-            const { fetch } = fetchResult({ access_token: "tenant-token" });
-            await assert.rejects(new AgentJsonRpc(URL, fetch).registerTenant(registration, "operator"), {
-                message: "lsp_register_tenant: tenant must be an object",
-            });
-        });
-
-        for (const [name, tenantId] of [
-            ["absent", undefined],
-            ["with 0x", `0x${TENANT_ID}`],
-            ["uppercase", TENANT_ID.replace(/6/g, "A")],
-            ["of 31 bytes", TENANT_ID.slice(2)],
-        ] as const) {
-            it(`refuses a tenant id ${name}`, async () => {
-                const { fetch } = fetchResult({ tenant: { ...tenant, tenant_id: tenantId }, access_token: "tenant-token" });
-                await assert.rejects(new AgentJsonRpc(URL, fetch).registerTenant(registration, "operator"), {
-                    message: "lsp_register_tenant: tenant.tenant_id must be 32 bytes of bare lowercase hex",
-                });
-            });
-        }
-
-        for (const [name, token] of [
-            ["absent", undefined],
-            ["empty", ""],
-            ["a number", 1],
-        ] as const) {
-            it(`refuses an access token ${name}`, async () => {
-                const { fetch } = fetchResult({ tenant, access_token: token });
-                await assert.rejects(new AgentJsonRpc(URL, fetch).registerTenant(registration, "operator"), {
-                    message: "lsp_register_tenant: access_token must be a non-empty string",
-                });
-            });
-        }
-    });
-
     describe("settleInvoice", () => {
         it("sends settle_invoice with payment_preimage under the tenant's token", async () => {
             const { fetch, requests } = fetchResult({});
@@ -312,6 +186,49 @@ describe("jsonRpcCall", () => {
             },
         });
         await assert.rejects(call(fetch), { message: `some_method: no answer from ${URL}: socket hang up` });
+    });
+});
+
+describe("agentOperatorClient", () => {
+    it("registers under the operator's token, bounding every call at 10 seconds", async (t) => {
+        const timeout = t.mock.method(AbortSignal, "timeout");
+        const requests: Request[] = [];
+        const fetch: AgentNodeFetch = async (url, init) => {
+            requests.push({ url, init });
+            const { id } = JSON.parse(String(init.body)) as { id: number };
+            return { status: 200, text: async () => JSON.stringify({ jsonrpc: "2.0", id, result }) };
+        };
+        const result = {
+            tenant: {
+                tenant_id: DEVICE_TENANT_ID,
+                root_signer_pubkey: DEVICE_ROOT_SIGNER,
+                invoice_pubkey: DEVICE_ROOT_SIGNER,
+                channels: [],
+                created_at: "0x1",
+                runtime_status: "active",
+            },
+            access_token: "tenant-token",
+        };
+        const operator = agentOperatorClient(URL, fetch, "operator");
+        const registration = {
+            rootSignerPubkey: new Uint8Array(Buffer.from(DEVICE_ROOT_SIGNER, "hex")),
+            requestId: new Uint8Array(32).fill(1),
+            signedAtMs: 1n,
+            signature: new Uint8Array(64).fill(2),
+        };
+        assert.deepEqual(await operator.registerTenant(registration), { tenantId: DEVICE_TENANT_ID, accessToken: "tenant-token" });
+        await operator.registerTenant(registration);
+        assert.deepEqual(
+            timeout.mock.calls.map((entry) => entry.arguments),
+            [[10_000], [10_000]],
+        );
+        assert.equal(requests.length, 2);
+        requests.forEach((request, index) => {
+            assert.equal(request.url, URL);
+            assert.equal(readJsonRpcRequest(String(request.init.body)).method, "lsp_register_tenant");
+            assert.equal(request.init.headers.authorization, "Bearer operator");
+            assert.equal(request.init.signal, timeout.mock.calls[index]?.result);
+        });
     });
 });
 

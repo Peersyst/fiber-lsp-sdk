@@ -22,20 +22,20 @@ These properties reflect the current specification and may evolve with it while 
 
 ## Modules
 
-| Module                           | Responsibility                                                                                                                                                                                                                                                                               |
-| -------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| [`derivation`](./src/derivation) | Fiber key scheme port + SDK-owned derivations (channel seed, wallet identity key, hold invoice preimage, nonce seed)                                                                                                                                                                         |
-| [`digest`](./src/digest)         | Rebuilds the four messages fiber signs, so the device never blind-signs; reads a watchtower spend's tx hash and settlement unlock; an opening's funding lock and channel id                                                                                                                  |
-| [`invoice`](./src/invoice)       | Fiber's invoice string, read and written bit for bit, so the device knows what it pays and what it asked for                                                                                                                                                                                 |
-| [`signer`](./src/signer)         | The entry of a signing request: the checks before the claim, the musig2 engine, the public material, the tenant identity, the hold invoice preimages, the watchtower's signature                                                                                                             |
-| [`policy`](./src/policy)         | Policy engine + persisted per-channel records, and the watchtower's rules                                                                                                                                                                                                                    |
-| [`wire`](./src/wire)             | How fiber writes values in JSON, the readers that refuse anything else, and the writers that produce it                                                                                                                                                                                      |
-| [`protocol`](./src/protocol)     | Fiber's two signing statuses read strictly: the transition, its slot, the plaintext, the peer's evidence; the watchtower's spend                                                                                                                                                             |
-| [`rpc`](./src/rpc)               | Typed fiber JSON-RPC client (Biscuit-authed)                                                                                                                                                                                                                                                 |
-| [`sdk`](./src/sdk)               | Public facade wiring the above: `FiberLspSdk`, its lifecycle, events and errors, the time index, the registration, the evidence, the channel opening and listing, the hold invoices and their cancel, the payments sent, the cooperative and the forced close, the poller and its five steps |
+| Module                           | Responsibility                                                                                                                                                                                                                                                                                                                       |
+| -------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| [`derivation`](./src/derivation) | Fiber key scheme port + SDK-owned derivations (channel seed, wallet identity key, hold invoice preimage, nonce seed)                                                                                                                                                                                                                 |
+| [`digest`](./src/digest)         | Rebuilds the four messages fiber signs, so the device never blind-signs; reads a watchtower spend's tx hash and settlement unlock; an opening's funding lock and channel id                                                                                                                                                          |
+| [`invoice`](./src/invoice)       | Fiber's invoice string, read and written bit for bit, so the device knows what it pays and what it asked for                                                                                                                                                                                                                         |
+| [`signer`](./src/signer)         | The entry of a signing request: the checks before the claim, the musig2 engine, the public material, the tenant identity, the hold invoice preimages, the watchtower's signature                                                                                                                                                     |
+| [`policy`](./src/policy)         | Policy engine + persisted per-channel records, and the watchtower's rules                                                                                                                                                                                                                                                            |
+| [`wire`](./src/wire)             | How fiber writes values in JSON, the readers that refuse anything else, and the writers that produce it                                                                                                                                                                                                                              |
+| [`protocol`](./src/protocol)     | Fiber's two signing statuses read strictly: the transition, its slot, the plaintext, the peer's evidence; the watchtower's spend                                                                                                                                                                                                     |
+| [`rpc`](./src/rpc)               | Typed fiber JSON-RPC client (Biscuit-authed)                                                                                                                                                                                                                                                                                         |
+| [`sdk`](./src/sdk)               | Public facade wiring the above: `FiberLspSdk`, its lifecycle, events and errors, the time index, the registration and the operator's client that makes it, the evidence, the channel opening and listing, the hold invoices and their cancel, the payments sent, the cooperative and the forced close, the poller and its five steps |
 
 `derivation`, `digest`, `invoice`, `signer`, `policy`, `wire`, `protocol` and `rpc` are implemented; `sdk` has its core,
-construction, `connect`/`disconnect`, the events, the tenant's registration and token, a channel's evidence, and the
+construction, `connect`/`disconnect`, the events, the tenant's registration and token with the operator's side of it (the registration verified and registered through `LspOperatorClient`), a channel's evidence, and the
 channel opening, checked against what was asked before anything is signed, with the listing of the node's channels,
 and the hold invoices, each string checked against what was asked and each preimage released only once the device's
 channels hold the payment, with the cancel of an invoice not settled, and the payments sent, each invoice checked before its budget is approved and each outcome
@@ -47,7 +47,7 @@ and `signer` answers the node's signing status, which the facade's poller reads 
 watchtower's requests to spend a force-closed commitment, signed only toward a destination the host approved (today
 fiber's watchtower pays the LSP node's own lock, so approving it is trusting the LSP after a force close:
 [signing.md](./docs/signing.md)); `signer` also holds the tenant identity that signs the registration, which the facade
-exposes. A test double of the tenant's node runs fiber's tenant opening, its sequences of signing requests, its
+exposes, and the verification of one that the backend registering it runs. A test double of the tenant's node runs fiber's tenant opening, its sequences of signing requests, its
 watchtower's spends, its hold invoices, its invoice cancels, its payments sent, its cooperative closes and its forced closes through that poller, and shows that under Fiber's current nonces a channel still stops at the settlement of a payment
 it sends and at its second payment received, even with `nonceReuse: "allow"` ([policy.md](./docs/policy.md), "The known
 cost"); fiber's devnet shows the first, where the node force-closes the tenant's channel some 30 to 33 s after the refused
@@ -156,16 +156,38 @@ sdk.disconnect(); // on background
 
 ### Registering as a tenant
 
-The device signs; the host, or its backend, makes the operator call and hands the tenant's token back:
+The device signs; its backend, which holds the operator's token, checks the registration, makes the operator call and hands
+the tenant's token back:
 
 ```js
+// On the device
 const requestId = crypto.getRandomValues(new Uint8Array(32)); // any CSPRNG (a polyfill on Hermes); single use: a lost answer needs a fresh one
-const signedAtMs = BigInt(Date.now()); // the node accepts from five minutes behind its clock to thirty seconds ahead
-const { rootSignerPubkey, signature, tenantId } = sdk.signTenantRegistration({ requestId, signedAtMs });
-const { tenant, accessToken } = await backend.registerTenant({ rootSignerPubkey, requestId, signedAtMs, signature }); // lsp_register_tenant
-if (tenant.tenantId !== tenantId) throw new Error("the LSP registered another tenant"); // as fiber's own client checks
+const signedAtMs = BigInt(Date.now());
+const { rootSignerPubkey, signature } = sdk.signTenantRegistration({ requestId, signedAtMs });
+const accessToken = await backend.register({ rootSignerPubkey, requestId, signedAtMs, signature }); // the host's own endpoint
 sdk.setBiscuitToken(accessToken); // from the next call on
 ```
+
+```js
+import {
+  LspOperatorClient,
+  TENANT_REGISTRY_MAX_SIGNED_AT_AGE_MS,
+  TENANT_REGISTRY_MAX_SIGNED_AT_FUTURE_SKEW_MS,
+  verifyTenantRegistration,
+} from "@peersyst/fiber-lsp-sdk";
+
+// On the backend
+const operator = new LspOperatorClient({ rpcUrl, operatorToken }); // fetch defaults to the runtime's
+const now = BigInt(Date.now());
+const { signedAtMs } = registration;
+if (signedAtMs < now - TENANT_REGISTRY_MAX_SIGNED_AT_AGE_MS || signedAtMs > now + TENANT_REGISTRY_MAX_SIGNED_AT_FUTURE_SKEW_MS) {
+  throw new Error("stale registration"); // fiber's window
+}
+if (!verifyTenantRegistration(lspPubkey, registration)) throw new Error("invalid registration"); // a malformed field throws instead
+const { tenantId, accessToken } = await operator.registerTenant(registration); // lsp_register_tenant; refuses an answer naming another tenant
+```
+
+`computeTenantId(rootSignerPubkey)` gives the tenant id of a key, for a backend that keys its records by it.
 
 ### Opening a channel
 

@@ -24,6 +24,16 @@ export const TENANT_REGISTRY_PROTOCOL = "fiber-hosted-lsp-tenant-registry/v2";
 export const TENANT_ID_DOMAIN = "fiber-hosted-lsp-tenant-id/v1";
 
 /**
+ * How far behind the node's clock a registration's `signedAtMs` may be, bound included (fiber's `TENANT_REGISTRY_MAX_SIGNED_AT_AGE_MS`).
+ */
+export const TENANT_REGISTRY_MAX_SIGNED_AT_AGE_MS = 300_000n;
+
+/**
+ * How far ahead of the node's clock a registration's `signedAtMs` may be, bound included (fiber's `TENANT_REGISTRY_MAX_SIGNED_AT_FUTURE_SKEW_MS`).
+ */
+export const TENANT_REGISTRY_MAX_SIGNED_AT_FUTURE_SKEW_MS = 30_000n;
+
+/**
  * The epoch length enters `tlc_expiry_delay`'s f64 arithmetic, exact for integers up to here.
  */
 export const MAX_MILLISECONDS_PER_EPOCH = Number.MAX_SAFE_INTEGER;

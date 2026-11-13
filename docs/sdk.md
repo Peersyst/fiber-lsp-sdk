@@ -3,7 +3,7 @@
 The facade: `FiberLspSdk`, the one object a wallet talks to. It is built once from the master seed and the host's
 effects, wires every other module behind it, and owns what none of them could: the lifecycle the host drives, the events
 the host listens to, the clock the device's indexes come from, and the list of what the device still has to ask the node
-about. This document covers that core, the tenant's registration and token, the opening of a channel and the events that
+about. This document covers that core, the tenant's registration and token, with the backend's side of it, the opening of a channel and the events that
 follow it, the listing of the channels, the evidence of a channel, a payment received on a hold invoice, from its
 creation to its settlement, a payment sent, from the check of its invoice to its outcome, and the cooperative close.
 
@@ -435,7 +435,7 @@ submission is not lost: the claim was written, and the next tick answers the sam
 
 A device is a tenant of the hosted LSP once its RootSigner, the key the master seed derives as the wallet identity
 ([signing.md](./signing.md)), is registered there. The facade signs and the host calls: the registration method takes
-the operator's token, so the host or its backend makes it ([rpc.md](./rpc.md)), never the facade.
+the operator's token, so the host or its backend makes it ([rpc.md](./rpc.md)), never the facade ([the operator's side](#the-operators-side) is the SDK's part of that call).
 
 - `rootSignerPubkey`, the RootSigner's 33-byte compressed key, a copy on every read: the key the registration
   names.
@@ -447,8 +447,8 @@ the operator's token, so the host or its backend makes it ([rpc.md](./rpc.md)), 
   of fiber's registry payload ([signing.md](./signing.md)). It is synchronous, reads no clock, draws no randomness, calls
   nothing and writes nothing. It refuses, with a `TypeError` naming the field by its path, a request that is not an object
   and a `request.requestId` that is not 32 bytes, and, with a `RangeError`, a `request.signedAtMs` that is not a u64
-  `bigint`. The node accepts a `signedAtMs` from five minutes behind its clock to thirty seconds ahead and refuses a
-  `requestId` it has seen, so a lost answer is retried with a fresh id.
+  `bigint`. The node accepts a `signedAtMs` only inside the window the two constants of [the operator's
+  side](#the-operators-side) name, and refuses a `requestId` it has seen, so a lost answer is retried with a fresh id.
 
 `deriveTenantId(masterSeed)` is the same id as a pure function of the seed, for a host that needs it before it has a
 store: a host that keys its storage by the tenant id cannot build the facade to read it. It is the SDK's own export, derives it over a throwaway identity, returns only the public id (no key leaves),
@@ -456,9 +456,38 @@ and refuses a seed that is not 32 bytes with the identity's own error.
 
 `setBiscuitToken(token)` hands the token `lsp_register_tenant` returned to the rpc client, which puts it on the next call
 on, the poller's included; a token the client refuses (not printable ASCII without spaces) throws its `TypeError` and
-leaves the previous one ([rpc.md](./rpc.md)). It takes no `null`: the token is replaced, never removed. Before handing it
-over, the host checks that the `tenant.tenant_id` the registration returned is the facade's `tenantId`, as fiber's own
-client does (`finish_registration`): the facade sees only the token, so it cannot tell a token issued to another tenant.
+leaves the previous one ([rpc.md](./rpc.md)). It takes no `null`: the token is replaced, never removed. The facade sees
+only the token, so it cannot tell a token issued to another tenant: the backend's client checks that, below.
+
+### The operator's side
+
+The backend that holds the operator's token checks a device's registration and registers it with what the SDK publishes
+for it, so the bytes of fiber's payload and its forms on the wire live in the SDK alone:
+
+- `verifyTenantRegistration(lspPubkey, registration)` tells whether `registration` (`RegisterTenantParams`, the four
+  fields `signTenantRegistration` returns) is signed by its `rootSignerPubkey` for the LSP of `lspPubkey`, as fiber
+  verifies it ([signing.md](./signing.md)). A malformed field throws, a `TypeError` or a `RangeError` naming it by its
+  path (`lspPubkey`, `registration.signature`...); a well-formed registration that does not verify returns `false`.
+- `computeTenantId(rootSignerPubkey)` is fiber's `TenantId::from_root_signer_pubkey`, the id `tenantId` and
+  `deriveTenantId` give, from the key alone.
+- `TENANT_REGISTRY_MAX_SIGNED_AT_AGE_MS` (`300_000n`) and `TENANT_REGISTRY_MAX_SIGNED_AT_FUTURE_SKEW_MS` (`30_000n`) are
+  fiber's window on `signedAtMs`, both bounds inclusive, as `bigint`s to compare with it: a backend refuses a stale
+  registration before it spends the call.
+- `LspOperatorClient` takes `LspOperatorClientOptions` (`{ rpcUrl, operatorToken, fetch? }`, `fetch` the runtime's
+  global when absent, read at construction) and refuses, with a `TypeError` naming it, options that are not an object, a
+  `rpcUrl` that is absent, not a string or empty, an `operatorToken` an authorization header cannot carry and a `fetch`
+  that is not a function. The inner rpc client sits in a private field of the class, so the operator's token appears in no
+  serialization or inspection of the client. Its one method, `registerTenant(registration)`, refuses, before anything is
+  sent, a `registration` that is not an object (a `TypeError`, "registration must be an object") and a malformed field
+  under the paths `verifyTenantRegistration` gives (`registration.rootSignerPubkey`, `registration.requestId`,
+  `registration.signedAtMs` as a `RangeError`, `registration.signature`), through the one guard of the signer module the
+  two share. It sends `lsp_register_tenant` under the operator's token and returns
+  `LspRegisteredTenant` (`{ tenantId, accessToken }`) once the answered `tenant.tenant_id` is the tenant of the key it
+  registered, as fiber's own client checks (`finish_registration`); another tenant is an `RpcResponseError` on
+  `response.result.tenant.tenant_id`. The id is computed from the key read before the call, so a registration changed
+  meanwhile changes neither. A failed call is an `RpcTransportError`, the node's refusal an `RpcError` and a malformed
+  answer an `RpcResponseError` ([rpc.md](./rpc.md)). It verifies neither the signature nor the window: the backend does,
+  with the two above, and the node verifies both again.
 
 ## Opening a channel
 
@@ -1150,13 +1179,16 @@ back), the listing's (`SdkChannelInfo`, `SdkChannelState`, `SDK_CHANNEL_STATES`)
 the class), the payment's (`SdkPayment`, `SdkTransferOptions`, which `transfer` takes and returns), the close's
 (`SdkCloseOptions`,
 which `closeChannel` takes), and what `SIGNING` and `WATCHTOWER_SIGNING` name (`SigningEventOutcome`,
-`ChannelSigningTransition`, `WatchtowerKeyPurpose`, `SignerRefusal`); the injection interfaces of the modules behind it,
+`ChannelSigningTransition`, `WatchtowerKeyPurpose`, `SignerRefusal`); the operator's side ([The operator's
+side](#the-operators-side)): `LspOperatorClient` with `LspOperatorClientOptions` and `LspRegisteredTenant`, the registration's
+params `RegisterTenantParams`, `computeTenantId`, `verifyTenantRegistration` and the window's two constants,
+`TENANT_REGISTRY_MAX_SIGNED_AT_AGE_MS` and `TENANT_REGISTRY_MAX_SIGNED_AT_FUTURE_SKEW_MS`; the injection interfaces of the modules behind it,
 `ISignerStorage`, `IAsyncSignerStorage`, `ITimer`, `IFetchLike` and their event and response types; the rpc client's
 three with the `RpcMethod` they name, which a wallet meets as causes; `decodeInvoice` with the invoice types and
 `InvoiceError`, since a wallet has to show what it is about to pay; and the chain's types the options and the operations
 take and return, `Script` with its template and hash type, and `Transaction` with `CellDep`, `CellInput`, `CellOutput`,
 `DepType` and `OutPoint`. Nothing else of the modules: the store, the engine, the dispatch and the rpc client are reached
-through the facade alone.
+through the facade alone, or, for the operator's one call, through `LspOperatorClient`.
 
 ## What the facade deliberately does not do
 
@@ -1166,7 +1198,7 @@ through the facade alone.
 - **No check of the funding inputs.** The device holds the funding cell to what it asked; what the inputs spend, the
   change and the fee are the host signer's, which can read the chain.
 - **No operator call.** The facade signs the registration and takes the token; the call that needs the operator's
-  token is the host's.
+  token is the host's backend's, made with `LspOperatorClient` ([the operator's side](#the-operators-side)).
 - **No deadline acted on.** `SIGNING`'s `deadlineMs` is reported, and every request is answered when it is seen.
 - **No app state.** The host calls `connect()` and `disconnect()`; the facade does not know whether the app is open.
 - **No automatic retry**, beyond the invoice step repeating a settlement or a cancel the device has already marked.
@@ -1184,6 +1216,7 @@ through the facade alone.
 | File                                     | Contents                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
 | ---------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `src/sdk/fiber-lsp-sdk.ts`               | `FiberLspSdk`: the options checked, the wiring, `connect`, `disconnect`, the events, the registration, the token, the opening's three methods, the listing, the evidence, `createInvoice`, `cancelInvoice`, `transfer`, `closeChannel`, `forceCloseChannel`, `setWatchtowerApproval`                                                                                                                                                                                      |
+| `src/sdk/lsp-operator-client.ts`         | `LspOperatorClient`: the operator's client of the node, the options and the registration checked, `lsp_register_tenant`, the answered tenant held to the key's, the token in a private field                                                                                                                                                                                                                                                                              |
 | `src/sdk/channel-opening.ts`             | `prepareSdkChannelOpen`, `submitSdkFundingTx` and `openSdkChannel`: the arguments, the request, the resume, the check's verdict, the pins, the refusals and the drop, the submission's checks                                                                                                                                                                                                                                                                             |
 | `src/sdk/utils/opening-check.utils.ts`   | `checkTenantOpening`: the node's answer held to what was asked, each failure `opening_rejected`                                                                                                                                                                                                                                                                                                                                                                           |
 | `src/sdk/pending-opening.ts`             | `PendingOpeningStore`: the pending opening's record, read, matched, written, named and dropped; `assertUserLockCellDeps`                                                                                                                                                                                                                                                                                                                                                  |
@@ -1201,7 +1234,7 @@ through the facade alone.
 | `src/sdk/utils/clock.utils.ts`           | `readSdkClock`: the host's clock read once, without a receiver, and checked                                                                                                                                                                                                                                                                                                                                                                                               |
 | `src/sdk/utils/invoice-expiry.utils.ts`  | `computeSdkInvoiceExpiryMs`: when an invoice runs out, as fiber's `is_expired` counts it, which the invoice step and the payment's check share                                                                                                                                                                                                                                                                                                                            |
 | `src/sdk/channel-evidence.ts`            | `readSdkChannelRecord`, a registered channel's record or `unknown_channel`, which the submission reads too; `readSdkChannelEvidence`: the record projected onto its evidence                                                                                                                                                                                                                                                                                              |
-| `src/sdk/sdk.types.ts`                   | The options, the network, the events, the error codes, the registration's forms, the opening's and the listing's, the pending opening, the evidence, the invoice's, the payment's and the payable invoice, the close's options, the activity record, the device's channels record, the context with the device's channels and its two sets of hashes                                                                                                                      |
+| `src/sdk/sdk.types.ts`                   | The options, the network, the events, the error codes, the registration's forms, the operator's client's options and result, the opening's and the listing's, the pending opening, the evidence, the invoice's, the payment's and the payable invoice, the close's options, the activity record, the device's channels record, the context with the device's channels and its two sets of hashes                                                                          |
 | `src/sdk/sdk.constants.ts`               | The network presets, the poll interval, the allocation floor, the storage keys, the event, error and state lists, the opening's output index and defaults, the watchtower step's unwatched answer, the invoice's expiry, final delta and timestamp tolerance, the release's slack, fiber's already-paid answer; the default fee rate and its denominator, fiber's not found, session-exists and lost-reply answers, the payment's two reasons and the two refusals' words |
 | `src/sdk/sdk.error.ts`                   | `SdkError`                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
 | `src/sdk/allocator.ts`                   | `IndexAllocator`: the channel and invoice indexes from the clock, the last one persisted                                                                                                                                                                                                                                                                                                                                                                                  |
@@ -2457,3 +2490,37 @@ once, the approval set after construction) and `deriveTenantId`, broken the same
 | A released invoice is reported as unknown             | 1                 |
 | An abandoned run uses up the refusal                  | 1                 |
 | The same request id on another channel is not told    | 1                 |
+
+`test/tests/sdk/lsp-operator-client.spec.ts` pins the operator's client over a `fetch` double: one POST of `lsp_register_tenant` to the
+url, under the operator's token, with the params in fiber's forms (the request id `0x`-prefixed, the key and the signature as bare hex, the time
+as `0x` hex), a numbered request per call of one client, the vector's registration of the device's root
+signer registered and its tenant answered; the answer read as the rpc client reads it, a tenant of another id an
+`RpcResponseError` on `response.result.tenant.tenant_id` after the call ran, the node's refusal an `RpcError`, a `fetch`
+that throws, a status out of 2xx and a body that cannot be read an `RpcTransportError` carrying the cause, and a malformed
+answer an `RpcResponseError`. The tenant check holds the id of the key as it was read before the call, so a key put in the
+registration meanwhile, or the bytes sent overwritten, change neither it nor the call, and each member of the registration
+is read once. Refused with the option's name, before any call: options that are not an object, a `rpcUrl` absent, not a
+string or empty, an `operatorToken` absent, of another type, empty or with a character an authorization header cannot
+carry (and never echoed in the message), a `fetch` that is not a function; with the field's path, a registration that is
+not an object and each malformed field, one per field. The runtime's `fetch` is the default, read once at construction and
+called without a receiver, the host's preferred over it. The inner client is in a true private field, so the operator's
+token is in no serialization or inspection of the client (`JSON.stringify`, its keys and properties, `util.inspect`).
+
+The operator's client, `LspOperatorClient` (its options, the registration read once, the tenant it is answered checked against the key's), broken the same way (`test/tests/sdk/lsp-operator-client.spec.ts`, `lsp-operator-client.ts` at 100% on all four metrics):
+
+| Mutation                                                     | Tests that failed |
+| ------------------------------------------------------------ | ----------------- |
+| The client skips the shared guard                            | 13                |
+| The operator token is not asserted under its name            | 7                 |
+| The result carries the whole tenant                          | 6                 |
+| Options that are not an object are not refused               | 4                 |
+| The answered tenant is not checked                           | 4                 |
+| The expected id is computed from the key read after the call | 4                 |
+| The mismatch is reported as a node refusal                   | 4                 |
+| The mismatch names the wrong path                            | 4                 |
+| The url is checked by the inner client under its name        | 4                 |
+| A fetch that is not a function is not refused                | 2                 |
+| The client is built without the operator token               | 2                 |
+| The expected id is computed from the key read again          | 1                 |
+| The inner client, and its token, also sit in a public field  | 1                 |
+| The registration is sent as the host's object, read again    | 1                 |

@@ -86,7 +86,9 @@ were thrown:
   parses a message.
 - `RpcResponseError` wraps the `WireError` of the field that failed, so `path` says whether the envelope or the result
   was unreadable (`response.id`, `response.result.channel_id`). A decoder that throws anything but a `WireError` is a bug,
-  and it propagates as it is.
+  and it propagates as it is. `LspOperatorClient` ([sdk.md](./sdk.md)) raises it too, for an answer it read and refuses
+  because it names another tenant than the key registered: there the call ran, the request id is spent and a token was
+  minted for the tenant the answer names.
 
 A non-2xx status is a transport error even when the body would hold a JSON-RPC error: the status is what says the
 exchange did not complete, and how jsonrpsee maps its own failures to statuses is only visible against a node.
@@ -337,8 +339,10 @@ watchtower step calls ([sdk.md](./sdk.md)).
 One method registers a device's root signer as a tenant of the hosted LSP, under the operator's token: the registration
 is the one exchange a tenant cannot make with its own token, which it does not have yet. The client's `registerTenant`
 calls it, on a client built with the operator's token: the host's backend or an agent makes it, never the facade, and the
-device only signs, through `TenantIdentity` ([signing.md](./signing.md)). `FiberRpcClient` is not published yet, so the
-method is within reach of the repo's code alone until the facade's operations settle what the package exports.
+device only signs, through `TenantIdentity` ([signing.md](./signing.md)). `FiberRpcClient` is not published; a backend
+reaches the method through `LspOperatorClient`, which holds one built with the operator's token and checks the tenant the
+answer names ([sdk.md](./sdk.md), "The operator's side"). A token is checked by `assertRpcToken(name, token)`, which the
+client's own `token` and the operator's `operatorToken` share.
 
 | Method                | Sends                                                        | Reads                    |
 | --------------------- | ------------------------------------------------------------ | ------------------------ |
@@ -346,7 +350,8 @@ method is within reach of the repo's code alone until the facade's operations se
 
 - **The request id is single use and the time is the device's**: `request_id` is 32 bytes the host draws, written with its
   `0x`, and `signed_at` the host's clock in Unix milliseconds, a u64 written as `0x` hex. The node accepts a `signed_at`
-  from five minutes behind its clock to thirty seconds ahead and refuses a request id it has seen
+  inside the window the SDK publishes as `TENANT_REGISTRY_MAX_SIGNED_AT_AGE_MS` and
+  `TENANT_REGISTRY_MAX_SIGNED_AT_FUTURE_SKEW_MS` ([signing.md](./signing.md)) and refuses a request id it has seen
   (window `crates/fiber-types/src/hosted_lsp.rs:16-20`, checked at `:115-124`; replay
   `crates/fiber-lib/src/lsp/registry.rs:283-295`, at `d8dd6d28`).
 - **The signature is compact ECDSA**, 64 bytes, over fiber's `TenantRegistryPayload`, and is written as **bare hex**, 128
@@ -409,7 +414,7 @@ inputs do, and the host hands it to its CKB signer as it is.
 
 | File                                  | Contents                                                                                                                                                                                                                                                                                 |
 | ------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `src/rpc/fiber-rpc-client.ts`         | `FiberRpcClient`: the token and `setToken`, the request, the status, the three errors, the methods                                                                                                                                                                                       |
+| `src/rpc/fiber-rpc-client.ts`         | `FiberRpcClient`: the token and `setToken`, `assertRpcToken`, the request, the status, the three errors, the methods                                                                                                                                                                     |
 | `src/rpc/channels.ts`                 | The codecs of the four channel methods, the tenant's form of the open and `shutdown_channel`, the channel, its state, the listing read for its ids and states, and the opening context                                                                                                   |
 | `src/rpc/invoices.ts`                 | The codecs of the four invoice methods, and the description's guard                                                                                                                                                                                                                      |
 | `src/rpc/payments.ts`                 | The codecs of the two payment methods                                                                                                                                                                                                                                                    |
@@ -755,3 +760,10 @@ all four metrics):
 | The shutdown's params go out unencoded                 | 3                 |
 | The shutdown's answer is not read                      | 1                 |
 | The shutdown's params are written as a bare channel id | 1                 |
+
+`assertRpcToken`, the token guard the client and the operator's client share, broken the same way (`test/tests/rpc/fiber-rpc-client.spec.ts`):
+
+| Mutation                                               | Tests that failed |
+| ------------------------------------------------------ | ----------------- |
+| assertRpcToken takes a non-string                      | 10                |
+| assertRpcToken names the token token whatever its name | 7                 |

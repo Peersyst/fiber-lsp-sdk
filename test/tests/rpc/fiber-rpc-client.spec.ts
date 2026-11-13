@@ -1,5 +1,5 @@
 import type { FetchInit, FetchResponseLike, IFetchLike, RegisterTenantParams } from "../../../src/rpc";
-import { FiberRpcClient, RPC_UNAUTHORIZED_CODE, RpcError, RpcResponseError, RpcTransportError } from "../../../src/rpc";
+import { FiberRpcClient, RPC_UNAUTHORIZED_CODE, assertRpcToken, RpcError, RpcResponseError, RpcTransportError } from "../../../src/rpc";
 import type { WireField } from "../../../src/wire";
 import { WireError, decodeHexBytes, readObject } from "../../../src/wire";
 import { FetchMock } from "../../mocks/rpc";
@@ -629,5 +629,23 @@ describe("FiberRpcClient", () => {
             expect(error).toBeInstanceOf(RpcResponseError);
             expect(error).toMatchObject({ method: "open_channel_with_external_funding", path: "response.result.opening_context" });
         });
+    });
+});
+
+describe("assertRpcToken", () => {
+    it("takes a token of the bounds of printable ASCII", () => {
+        expect(() => assertRpcToken("operatorToken", "!~")).not.toThrow();
+    });
+
+    it.each([
+        ["absent", undefined],
+        ["null", null],
+        ["empty", ""],
+        ["with a space", "a b"],
+        ["with DEL", "a\x7f"],
+        ["with a non-ASCII character", "a\u00e9"],
+        ["a number", 1],
+    ])("refuses a token %s, naming it", (_, token) => {
+        expect(() => assertRpcToken("operatorToken", token)).toThrow(new TypeError("operatorToken must be printable ASCII without spaces"));
     });
 });

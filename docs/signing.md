@@ -255,18 +255,30 @@ gives out three things:
 `deriveTenantId(masterSeed)` is the tenant id alone, for a host that needs it before it builds the SDK: a pure function that
 builds the identity, returns its `tenantId` and keeps nothing, so the seed enters it as it enters the constructor and only the
 public id leaves. The seed is checked as the constructor checks it (32 bytes of a `Uint8Array`, a `TypeError` naming
-`masterSeed`) and is left as it was given.
+`masterSeed`) and is left as it was given. `computeTenantId(rootSignerPubkey)` is the same hash from the key alone, which
+the identity computes its own id with, refusing a key that is not a compressed point.
+
+`verifyTenantRegistration(lspPubkey, registration)` is the other end, for the backend that registers the device: it
+rebuilds the 141 bytes for the LSP of `lspPubkey` and verifies the signature as fiber's
+`TenantRegistryPayload::verify_signature` does (`fiber-types/src/hosted_lsp.rs:132-142` at `d8dd6d28`): rust-secp256k1's
+`verify_ecdsa` (libsecp256k1's `secp256k1_ecdsa_verify`) over the digest, with no normalization, so a high-S signature does
+not verify, and an r or an s of zero or not below the curve's order does not either (an r or an s out of range is refused
+by rust-secp256k1's `from_compact`, in fiber's `TenantRegistrySignature::from_slice`, while the params are parsed; a zero
+parses and fails at the verify). noble's `verify` with `prehash: false`, `lowS: true` and the compact format is that check,
+and returns `false` in every one of those cases. A field of the wrong shape throws, naming its path; a signature that does
+not verify is `false`.
 
 The identity reads no clock and draws no randomness: the request id and the time are the host's. The LSP's node id must
 be a point, the request id 32 bytes and the time a u64. The node accepts a `signed_at` from five minutes behind its clock
-to thirty seconds ahead and refuses a request id it has seen (`fiber-types/src/hosted_lsp.rs:16-20` and `:115-124`,
-`fiber-lib/src/lsp/registry.rs:283-295`, at `d8dd6d28`), so a registration whose answer was lost is signed again under a
+to thirty seconds ahead, which `TENANT_REGISTRY_MAX_SIGNED_AT_AGE_MS` and `TENANT_REGISTRY_MAX_SIGNED_AT_FUTURE_SKEW_MS`
+publish (`fiber-types/src/hosted_lsp.rs:17` and `:20`, checked at `:115-124` after the signature, both bounds inclusive), and
+refuses a request id it has seen (`fiber-lib/src/lsp/registry.rs:283-295`, at `d8dd6d28`), so a registration whose answer was lost is signed again under a
 fresh id. Which LSP the node id is comes from the facade's
 options ([sdk.md](./sdk.md), "The tenant's registration").
 
-The SDK signs and never calls: the registration method needs the operator's token ([rpc.md](./rpc.md)), which a phone
-does not hold, so the host's backend (or an agent) has the device sign a registration, registers, and hands the
-tenant's token back to the device.
+The device signs and never calls: the registration method needs the operator's token ([rpc.md](./rpc.md)), which a phone
+does not hold, so the host's backend (or an agent) has the device sign a registration, checks it, registers it through
+`LspOperatorClient` ([sdk.md](./sdk.md)) and hands the tenant's token back to the device.
 
 The private field is ES2022 syntax the build emits as is; under React Native, Metro's Babel preset transpiles it, as it
 does the bundle's other ES2022 syntax.
@@ -594,20 +606,20 @@ flows that run the facade's opening over it are [sdk.md](./sdk.md)'s.
 
 ## Where it lives
 
-| File                                      | Contents                                                                                                                                            |
-| ----------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `src/signer/signer-dispatch.ts`           | The twelve steps, the four outcomes, the deadline of two, and the opening; `handleWatchtower` and its four outcomes                                 |
-| `src/signer/musig2-engine.ts`             | The public keys, points and nonces, the nonce sum, the partial signature, the peer's half verified, the aggregate                                   |
-| `src/signer/signer-material.ts`           | The opening block and the next material                                                                                                             |
-| `src/signer/signing-deadline.ts`          | `tlcExpiryDelay` and `pendingTlcSignatureDeadline`: fiber's deadline for a pending request, its f64 arithmetic and casts                            |
-| `src/signer/hold-invoice-preimages.ts`    | `HoldInvoicePreimages`: the seed's copy, each invoice's preimage and payment hash, the algorithm                                                    |
-| `src/signer/tenant-identity.ts`           | The RootSigner: its public key, the tenant id (and `deriveTenantId`, the id alone), the registry payload, its digest and the registration signature |
-| `src/signer/onchain-signature.ts`         | `signOnchain`: the watchtower's recoverable signature under the key its purpose names                                                               |
-| `src/signer/signer.constants.ts`          | The key order per transition, fiber's two tenant domains                                                                                            |
-| `src/signer/utils/key-order.utils.ts`     | The order of the two funding keys, and the peer's key read out of a request held to it                                                              |
-| `src/signer/utils/signing-terms.utils.ts` | The message from the plaintext, and the operation built from the content, the pins and the network                                                  |
-| `src/signer/signer.types.ts`              | The options, the cosigned session, the prepared operation, the two outcomes and the pending open                                                    |
-| `src/common/utils/musig.utils.ts`         | The musig2 shapes `policy` and `protocol` hold a session to as well: the nonce halves, an aggregate's half, two distinct keys                       |
+| File                                      | Contents                                                                                                                                                                                                                                          |
+| ----------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `src/signer/signer-dispatch.ts`           | The twelve steps, the four outcomes, the deadline of two, and the opening; `handleWatchtower` and its four outcomes                                                                                                                               |
+| `src/signer/musig2-engine.ts`             | The public keys, points and nonces, the nonce sum, the partial signature, the peer's half verified, the aggregate                                                                                                                                 |
+| `src/signer/signer-material.ts`           | The opening block and the next material                                                                                                                                                                                                           |
+| `src/signer/signing-deadline.ts`          | `tlcExpiryDelay` and `pendingTlcSignatureDeadline`: fiber's deadline for a pending request, its f64 arithmetic and casts                                                                                                                          |
+| `src/signer/hold-invoice-preimages.ts`    | `HoldInvoicePreimages`: the seed's copy, each invoice's preimage and payment hash, the algorithm                                                                                                                                                  |
+| `src/signer/tenant-identity.ts`           | The RootSigner: its public key, the tenant id (`deriveTenantId`, the id of a seed, and `computeTenantId`, the id of a key), the registry payload, its digest, the registration signature, `readTenantRegistration` and `verifyTenantRegistration` |
+| `src/signer/onchain-signature.ts`         | `signOnchain`: the watchtower's recoverable signature under the key its purpose names                                                                                                                                                             |
+| `src/signer/signer.constants.ts`          | The key order per transition, fiber's two tenant domains, the registration's window (its two bounds)                                                                                                                                              |
+| `src/signer/utils/key-order.utils.ts`     | The order of the two funding keys, and the peer's key read out of a request held to it                                                                                                                                                            |
+| `src/signer/utils/signing-terms.utils.ts` | The message from the plaintext, and the operation built from the content, the pins and the network                                                                                                                                                |
+| `src/signer/signer.types.ts`              | The options, the cosigned session, the prepared operation, the two outcomes and the pending open                                                                                                                                                  |
+| `src/common/utils/musig.utils.ts`         | The musig2 shapes `policy` and `protocol` hold a session to as well: the nonce halves, an aggregate's half, two distinct keys                                                                                                                     |
 
 ## What the tests guarantee
 
@@ -840,3 +852,39 @@ ckb-hash as `hashAlgorithm` (`test/tests/signer`, still 100% on all four metrics
 | A payment hash is handed out by reference, cached per index | 1                 |
 | The preimages state sha256 as their algorithm               | 1                 |
 | The preimages' seed is held by reference                    | 1                 |
+
+In the same spec, `computeTenantId` gives
+fiber's id for the vector's root signer, the identity's and `deriveTenantId`'s for the same seed and a pinned id per seed, hashes
+the bytes the key holds at each call, and refuses what is not a compressed point. `verifyTenantRegistration` verifies the
+vector's registration under its LSP and what an identity signs for any LSP under its own key (also from Node buffers),
+leaves its arguments as they were, and returns `false` for the vector's signature under another LSP, for another seed's
+signature over the same request, for another root signer's claim, for any byte of the request id, of the eight of the time
+and of the signature altered, for any byte of the LSP's key or the root signer's altered into another point (into no point
+it throws, a `TypeError`), for the high-S twin of the vector's signature and for an r or an s of zero or equal to or above
+the curve's order; it refuses, one case per field and under its path, an LSP key that is not a point, a registration that
+is not an object, a root signer that is not a point, a request id or a signature of the wrong length or type and a time
+of the wrong type or out of the u64's range, and reads each member of the registration once. The two window constants
+are pinned against fiber's numbers (five minutes, thirty seconds) and are `bigint`s.
+
+The tenant registration's operator side, `readTenantRegistration` (the guard the verify and the operator's client share), `computeTenantId` (with the identity's id computed through it), `verifyTenantRegistration` and the two window constants, broken the same way (`test/tests/signer/tenant-identity.spec.ts`, `tenant-identity.ts` at 100% on all four metrics):
+
+| Mutation                                                                    | Tests that failed |
+| --------------------------------------------------------------------------- | ----------------- |
+| The verify skips the shared guard                                           | 30                |
+| Every well-formed registration verifies                                     | 14                |
+| The LSP key is not checked                                                  | 9                 |
+| The root signer is checked under the payload's path, not the registration's | 9                 |
+| computeTenantId hashes without the domain salt                              | 9                 |
+| computeTenantId takes any 33 bytes, point or not                            | 9                 |
+| The digest is hashed again before verifying                                 | 8                 |
+| The payload names the root signer as the LSP                                | 8                 |
+| The signing time is not checked under the registration's path               | 7                 |
+| The identity's tenant id is hashed without the salt                         | 6                 |
+| The request id is not checked under the registration's path                 | 5                 |
+| The signature's length is not checked                                       | 5                 |
+| A registration that is not an object is not refused                         | 4                 |
+| The guard hands the host's object back, to be read again                    | 2                 |
+| A high-S signature verifies                                                 | 1                 |
+| The age bound is one millisecond off                                        | 1                 |
+| The future skew bound is one millisecond off                                | 1                 |
+| The verify reads the registration's member again instead of the checked one | 1                 |

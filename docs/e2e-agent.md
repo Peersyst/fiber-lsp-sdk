@@ -92,9 +92,10 @@ channel the TLC takes, so a hash holds one authorization on the device.
 
 On start the agent serves the port, then initializes, retrying every second until the node answers: it builds the facade
 with `nonceReuse: "allow"` and, unless its store holds a token, registers the tenant: `signTenantRegistration` over a
-request id of 32 random bytes and the clock's time in milliseconds, then `lsp_register_tenant` with the operator token.
-Each attempt draws its own request id, since the node refuses a request id it has seen for good. It checks the tenant id
-and hands the token to the facade. The store keeps the master seed, the SDK's storage and `agent.json` (the token, the
+request id of 32 random bytes and the clock's time in milliseconds, then the SDK's `LspOperatorClient` with the operator
+token, over the node fetch with the agent's 10 s deadline, so the devnet runs the registration a backend runs. Each attempt
+draws its own request id, since the node refuses a request id it has seen for good. The client checks the tenant id it is
+answered, and the agent hands the token to the facade. The store keeps the master seed, the SDK's storage and `agent.json` (the token, the
 channels opened with both close scripts, and the authorizations), so a restart makes no operator call and keeps the token.
 `agent.json` is read field by field, so one of another shape, an earlier agent's included, is refused at start and its store
 is wiped rather than migrated; the devnet runs start on a clean store.
