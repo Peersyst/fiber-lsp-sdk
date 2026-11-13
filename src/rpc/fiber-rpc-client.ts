@@ -70,15 +70,24 @@ import { encodeRpcChannelIdParams, encodeRpcPaymentHashParams } from "./utils";
 const TOKEN_PATTERN = /^[\x21-\x7e]+$/;
 
 /**
+ * Asserts that a Biscuit token is one an authorization header can carry.
+ * @param name The token's name, for the refusal.
+ * @param token The value to check.
+ */
+export function assertRpcToken(name: string, token: unknown): asserts token is string {
+    // The pattern alone would read `null` as the token "null".
+    if (typeof token !== "string" || !TOKEN_PATTERN.test(token)) {
+        throw new TypeError(`${name} must be printable ASCII without spaces`);
+    }
+}
+
+/**
  * Builds the authorization header value of a token, refusing one a header cannot carry.
  * @param token The Biscuit token.
  * @returns The Bearer header value.
  */
 function bearerOf(token: unknown): string {
-    // The pattern alone would read `null` as the token "null".
-    if (typeof token !== "string" || !TOKEN_PATTERN.test(token)) {
-        throw new TypeError("token must be printable ASCII without spaces");
-    }
+    assertRpcToken("token", token);
     return RPC_BEARER_PREFIX + token;
 }
 

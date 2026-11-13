@@ -10,6 +10,7 @@ export * from "./fiber-lsp-sdk";
 export * from "./invoice-cancelling";
 export * from "./invoice-creation";
 export * from "./invoice-step";
+export * from "./lsp-operator-client";
 export * from "./payment-sending";
 export * from "./payment-step";
 export * from "./pending-opening";

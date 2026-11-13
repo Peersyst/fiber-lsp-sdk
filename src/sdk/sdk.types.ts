@@ -330,6 +330,26 @@ export type SdkTenantRegistrationRequest = Pick<RegisterTenantParams, "requestId
 
 export type SdkTenantRegistration = RegisterTenantParams & { tenantId: string };
 
+export type LspOperatorClientOptions = {
+    rpcUrl: string;
+    /**
+     * Grants `lsp_register_tenant`: a backend's secret, never a device's.
+     */
+    operatorToken: string;
+    /**
+     * Defaults to the runtime's global `fetch`.
+     */
+    fetch?: IFetchLike;
+};
+
+export type LspRegisteredTenant = {
+    tenantId: string;
+    /**
+     * The device's `biscuitToken`.
+     */
+    accessToken: string;
+};
+
 type CommitmentEvidence = { commitmentNumber: number; txHash: string };
 
 /**

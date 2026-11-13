@@ -442,7 +442,8 @@ export type RegisterTenantParams = {
      */
     requestId: Uint8Array;
     /**
-     * Unix milliseconds; the node accepts from five minutes behind its clock to thirty seconds ahead.
+     * Unix milliseconds, within `TENANT_REGISTRY_MAX_SIGNED_AT_AGE_MS` behind the node's clock and
+     * `TENANT_REGISTRY_MAX_SIGNED_AT_FUTURE_SKEW_MS` ahead.
      */
     signedAtMs: bigint;
     /**

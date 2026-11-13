@@ -29,6 +29,8 @@ export const RPC_MAX_INVOICE_DESCRIPTION_BYTES = 639;
 
 export const JSON_RPC_VERSION = "2.0";
 
+export const RPC_RESPONSE_PATH = "response";
+
 export const RPC_CONTENT_TYPE = "application/json";
 
 /**

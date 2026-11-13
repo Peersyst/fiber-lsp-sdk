@@ -14,7 +14,7 @@ import { FileSignerStorage } from "../../src/file-storage";
 import { NonceCapBypassStorage } from "../../src/nonce-cap-bypass";
 import { bareLowerHex, messageOf } from "../../src/agent.utils";
 import { ckbTxHash, readCkbTxJson } from "../../src/ckb-tx";
-import { AgentJsonRpc } from "../../src/json-rpc";
+import { agentOperatorClient } from "../../src/json-rpc";
 import { scriptFromJson } from "../../src/open-params";
 import { liveCellLockResolver, signSighashAllInputs } from "../../src/sighash-signer";
 import { FaultyFetch } from "./faulty-fetch";
@@ -181,7 +181,7 @@ export class ScenarioDevice {
             const faults = options.faults ?? new FaultyFetch();
             const capture = new OpenResultCapture(faults.fetch);
             const seed = loadOrCreateMasterSeed(storeDir);
-            const registry = new AgentJsonRpc(env.node2RpcUrl, fetch);
+            const operator = agentOperatorClient(env.node2RpcUrl, fetch, env.operatorToken);
             // Pinned from the scenarios' environment, never from the node the pin is meant to hold to.
             const lspPubkey = hexToBytes(bareLowerHex(env.node2Pubkey));
             const storePath = join(storeDir, SDK_STORE_FILE);
@@ -199,7 +199,7 @@ export class ScenarioDevice {
                 });
             };
             const sdk = build();
-            const tenant = await registerAgentTenant(sdk, registry, env.operatorToken, { now: Date.now, randomBytes });
+            const tenant = await registerAgentTenant(sdk, operator, { now: Date.now, randomBytes });
             sdk.setBiscuitToken(tenant.accessToken);
             const rebuild = (): FiberLspSdk => build(tenant.accessToken);
             const device = new ScenarioDevice(sdk, env, nodes, faults, tenant.tenantId, tenant.accessToken, storeDir, rebuild, capture);

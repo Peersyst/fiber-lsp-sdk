@@ -45,6 +45,45 @@ export function computeTenantRegistryDigest(payload: TenantRegistryPayload): Uin
     return ckbBlake2b(buildTenantRegistryPayload(payload));
 }
 
+/**
+ * Computes fiber's `TenantId::from_root_signer_pubkey`, the salted hash of the RootSigner's compressed key.
+ * @param rootSignerPubkey The RootSigner's 33-byte compressed public key.
+ * @returns The 64-character lowercase hex tenant id.
+ */
+export function computeTenantId(rootSignerPubkey: Uint8Array): string {
+    assertCompressedPoint("rootSignerPubkey", rootSignerPubkey);
+    return bytesToHex(blake2bHashWithSalt(rootSignerPubkey, TENANT_ID_SALT));
+}
+
+/**
+ * Reads a registration's four fields once, refusing each under its path.
+ * @param registration The params of `lsp_register_tenant` the RootSigner signed.
+ * @returns The four fields, in a fresh object.
+ */
+export function readTenantRegistration(registration: RegisterTenantParams): RegisterTenantParams {
+    if (!isPlainObject(registration)) throw new TypeError("registration must be an object");
+    const { rootSignerPubkey, requestId, signedAtMs, signature } = registration;
+    assertCompressedPoint("registration.rootSignerPubkey", rootSignerPubkey);
+    assertBytes("registration.requestId", requestId, HASH256_LENGTH);
+    assertUnsignedBigInt("registration.signedAtMs", signedAtMs, UINT64_MAX);
+    assertBytes("registration.signature", signature, COMPACT_ECDSA_SIGNATURE_LENGTH);
+    return { rootSignerPubkey, requestId, signedAtMs, signature };
+}
+
+/**
+ * Verifies a registration's signature as fiber's `TenantRegistryPayload::verify_signature` does, for the LSP given.
+ * @param lspPubkey The LSP's node id, which the signed payload names.
+ * @param registration The params of `lsp_register_tenant` the RootSigner signed.
+ * @returns Whether the signature is the root signer's, low-S, over the registry digest.
+ */
+export function verifyTenantRegistration(lspPubkey: Uint8Array, registration: RegisterTenantParams): boolean {
+    assertCompressedPoint("lspPubkey", lspPubkey);
+    const { rootSignerPubkey, requestId, signedAtMs, signature } = readTenantRegistration(registration);
+    const digest = computeTenantRegistryDigest({ lspNodeId: lspPubkey, rootSignerPubkey, requestId, signedAtMs });
+    // As rust-secp256k1's `verify_ecdsa`, which does not normalize: a high-S signature is refused.
+    return secp256k1.verify(signature, digest, rootSignerPubkey, { prehash: false, lowS: true, format: "compact" });
+}
+
 export class TenantIdentity {
     readonly #secretKey: Uint8Array;
 
@@ -59,7 +98,7 @@ export class TenantIdentity {
     constructor(masterSeed: Uint8Array) {
         this.#secretKey = deriveWalletIdentityKey(masterSeed);
         this.#publicKey = pubkeyOf(this.#secretKey);
-        this.#tenantId = bytesToHex(blake2bHashWithSalt(this.#publicKey, TENANT_ID_SALT));
+        this.#tenantId = computeTenantId(this.#publicKey);
     }
 
     /**

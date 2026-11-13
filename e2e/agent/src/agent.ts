@@ -1,7 +1,15 @@
 import { join } from "node:path";
 import { hexToBytes } from "@noble/hashes/utils.js";
 import { RpcError, SdkError } from "@peersyst/fiber-lsp-sdk";
-import type { FiberLspSdk, ISignerStorage, SdkChannelOpening, SdkEvent, SdkNetwork } from "@peersyst/fiber-lsp-sdk";
+import type {
+    FiberLspSdk,
+    ISignerStorage,
+    LspOperatorClient,
+    LspRegisteredTenant,
+    SdkChannelOpening,
+    SdkEvent,
+    SdkNetwork,
+} from "@peersyst/fiber-lsp-sdk";
 import { AgentRequestError } from "./agent.error";
 import type {
     AgentChannel,
@@ -25,8 +33,7 @@ import { recordAgentDebitIntent } from "./debit-intent";
 import { devnetNetwork } from "./devnet-network";
 import { FacadeGate } from "./facade-gate";
 import { FileSignerStorage, writeFileAtomically } from "./file-storage";
-import { AgentJsonRpc } from "./json-rpc";
-import type { AgentRegisteredTenant } from "./json-rpc";
+import { agentOperatorClient, AgentJsonRpc } from "./json-rpc";
 import { messageOf, readJsonObject } from "./agent.utils";
 import { NonceCapBypassStorage } from "./nonce-cap-bypass";
 import { readOpenChannelRequest, readScriptJson, sameScriptJson, scriptFromJson } from "./open-params";
@@ -53,27 +60,20 @@ function sdkRefusal(error: unknown): unknown {
 }
 
 /**
- * Registers the device's tenant with the LSP and checks the tenant id it answers.
+ * Registers the device's tenant with the LSP.
  * @param sdk The facade.
- * @param rpc The client of the LSP's node.
- * @param operatorToken The operator's token.
+ * @param operator The operator's client of the LSP's node.
  * @param effects The clock and the randomness.
  * @returns The tenant id and the tenant's access token.
  */
 export async function registerAgentTenant(
-    sdk: Pick<FiberLspSdk, "tenantId" | "signTenantRegistration">,
-    rpc: AgentJsonRpc,
-    operatorToken: string,
+    sdk: Pick<FiberLspSdk, "signTenantRegistration">,
+    operator: Pick<LspOperatorClient, "registerTenant">,
     effects: Pick<AgentEffects, "now" | "randomBytes">,
-): Promise<AgentRegisteredTenant> {
+): Promise<LspRegisteredTenant> {
     // The node refuses a request id it has seen for good, so every attempt draws its own.
     const requestId = effects.randomBytes(REGISTRATION_REQUEST_ID_LENGTH);
-    const registration = sdk.signTenantRegistration({ requestId, signedAtMs: BigInt(effects.now()) });
-    const tenant = await rpc.registerTenant(registration, operatorToken);
-    if (tenant.tenantId !== sdk.tenantId) {
-        throw new Error(`lsp_register_tenant registered tenant ${tenant.tenantId}, the device is ${sdk.tenantId}`);
-    }
-    return tenant;
+    return operator.registerTenant(sdk.signTenantRegistration({ requestId, signedAtMs: BigInt(effects.now()) }));
 }
 
 /**
@@ -111,6 +111,8 @@ export class Agent {
     private readonly network: SdkNetwork;
 
     private readonly rpc: AgentJsonRpc;
+
+    private readonly operator: LspOperatorClient;
 
     private readonly capture: OpenResultCapture;
 
@@ -150,6 +152,7 @@ export class Agent {
         this.sdkStorage = config.nonceCapBypass ? new NonceCapBypassStorage(this.storage) : this.storage;
         this.network = config.network.name === "devnet" ? devnetNetwork(config.network.contractsDir) : config.network.name;
         this.rpc = new AgentJsonRpc(config.rpcUrl, effects.fetch);
+        this.operator = agentOperatorClient(config.rpcUrl, effects.fetch, config.operatorToken);
         this.capture = new OpenResultCapture(effects.fetch);
         this.log = agentLogger(effects.now, effects.log);
         this.statusWrites = new CoalescingTask(() => this.writeStatusFile());
@@ -167,7 +170,9 @@ export class Agent {
                 this.markReady();
                 return;
             } catch (error) {
-                this.log("initialize_failed", { error: messageOf(error) });
+                // The SDK's transport error carries what failed in its cause.
+                const cause = error instanceof Error && error.cause !== undefined ? { cause: messageOf(error.cause) } : {};
+                this.log("initialize_failed", { error: messageOf(error), ...cause });
                 await this.effects.sleep(INITIALIZE_RETRY_MS);
             }
         }
@@ -254,7 +259,7 @@ export class Agent {
         const facade = this.buildFacade(this.state);
         const { sdk } = facade;
         if (this.state.tenantToken === null) {
-            const tenant = await registerAgentTenant(sdk, this.rpc, this.config.operatorToken, this.effects);
+            const tenant = await registerAgentTenant(sdk, this.operator, this.effects);
             this.persist({ ...this.state, tenantToken: tenant.accessToken });
             sdk.setBiscuitToken(tenant.accessToken);
         }

@@ -4,6 +4,7 @@ import type { RegisterTenantResult } from "../../../src/rpc";
 import { FiberRpcClient, RpcError } from "../../../src/rpc";
 import type { SdkEvent, SdkSignFundingInputs } from "../../../src/sdk";
 import { FiberLspSdk } from "../../../src/sdk";
+import { TENANT_REGISTRY_MAX_SIGNED_AT_AGE_MS, TENANT_REGISTRY_MAX_SIGNED_AT_FUTURE_SKEW_MS } from "../../../src/signer";
 import { TimerMock } from "../../mocks/common";
 import { InMemorySignerStorage } from "../../mocks/policy";
 import { flush } from "../../utils/flush";
@@ -37,18 +38,13 @@ const OTHER_REQUEST_ID = new Uint8Array(32).fill(0x52);
 
 const THIRD_REQUEST_ID = new Uint8Array(32).fill(0x53);
 
-// Fiber's window around its clock (`fiber-types/src/hosted_lsp.rs:16-20`).
-const MAX_AGE_MS = 300_000n;
-
-const MAX_FUTURE_SKEW_MS = 30_000n;
-
 // A `WitnessArgs` whose 65-byte lock stands for the user's signature.
 const SIGNED_WITNESS = hexToBytes(`5500000010000000550000005500000041000000${"5a".repeat(65)}`);
 
 type RegistrationFlow = {
     node: InMemoryTenantNode;
     sdk: FiberLspSdk;
-    // The host's client under the operator's token, which the double does not check.
+    // Tokenless, standing for the operator's: the double reads no token.
     operator: FiberRpcClient;
     timer: TimerMock;
     clock: { nowMs: number };
@@ -166,15 +162,19 @@ describe("the tenant registration over the tenant node", () => {
     });
 
     it.each([
-        ["five minutes old", BigInt(NOW_MS) - MAX_AGE_MS],
-        ["thirty seconds ahead", BigInt(NOW_MS) + MAX_FUTURE_SKEW_MS],
+        ["five minutes old", BigInt(NOW_MS) - TENANT_REGISTRY_MAX_SIGNED_AT_AGE_MS],
+        ["thirty seconds ahead", BigInt(NOW_MS) + TENANT_REGISTRY_MAX_SIGNED_AT_FUTURE_SKEW_MS],
     ])("is accepted signed %s, the bounds of the node's window", async (_, signedAtMs) => {
         expect((await register(flow(), REQUEST_ID, signedAtMs)).tenant.tenantId).toBe(TENANT_ID);
     });
 
     it.each([
-        ["a millisecond more than five minutes old", BigInt(NOW_MS) - MAX_AGE_MS - 1n, "too old"],
-        ["a millisecond more than thirty seconds ahead", BigInt(NOW_MS) + MAX_FUTURE_SKEW_MS + 1n, "too far in the future"],
+        ["a millisecond more than five minutes old", BigInt(NOW_MS) - TENANT_REGISTRY_MAX_SIGNED_AT_AGE_MS - 1n, "too old"],
+        [
+            "a millisecond more than thirty seconds ahead",
+            BigInt(NOW_MS) + TENANT_REGISTRY_MAX_SIGNED_AT_FUTURE_SKEW_MS + 1n,
+            "too far in the future",
+        ],
         ["at the epoch", 0n, "too old"],
         ["at u64's maximum", (1n << 64n) - 1n, "too far in the future"],
     ])("is refused signed %s, which the device signs without judging, consuming nothing", async (_, signedAtMs, why) => {

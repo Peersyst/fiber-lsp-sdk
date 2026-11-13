@@ -1,19 +1,10 @@
-import { bytesToHex } from "@noble/hashes/utils.js";
-import type { SdkTenantRegistration } from "@peersyst/fiber-lsp-sdk";
-import { HASH256_HEX_LENGTH, UINT64_MAX } from "./agent.constants";
+import { LspOperatorClient } from "@peersyst/fiber-lsp-sdk";
+import { HASH256_HEX_LENGTH } from "./agent.constants";
 import type { AgentNodeFetch } from "./agent.types";
 import { isBareHex, messageOf } from "./agent.utils";
 
-export type AgentTenantRegistration = Pick<SdkTenantRegistration, "rootSignerPubkey" | "requestId" | "signedAtMs" | "signature">;
-
-export type AgentRegisteredTenant = { tenantId: string; accessToken: string };
-
 // As fiber's agent: a node that never answers fails the call instead of holding the agent.
 const AGENT_RPC_TIMEOUT_MS = 10_000;
-
-const COMPRESSED_POINT_HEX_LENGTH = 66;
-
-const SIGNATURE_LENGTH = 64;
 
 /**
  * Tells whether a value is 32 bytes of `0x`-prefixed lowercase hex.
@@ -25,36 +16,18 @@ function isHash256(value: unknown): value is string {
 }
 
 /**
- * Reads a result, or a field of one, as an object.
- * @param method The method that returned it, for the refusal.
- * @param field What the value is, for the refusal.
- * @param value The value.
- * @returns Its fields.
+ * Builds the operator's client of a node, its calls abandoned after the agent's timeout.
+ * @param url The node's JSON-RPC endpoint.
+ * @param fetch How requests are sent.
+ * @param operatorToken The operator's token.
+ * @returns The client.
  */
-function readResultObject(method: string, field: string, value: unknown): Record<string, unknown> {
-    if (typeof value !== "object" || value === null || Array.isArray(value)) throw new Error(`${method}: ${field} must be an object`);
-    return value as Record<string, unknown>;
-}
-
-/**
- * Builds the refusal of a malformed result field.
- * @param method The method that returned it.
- * @param field The field.
- * @param shape What it must be.
- * @returns The error to throw.
- */
-function malformedResult(method: string, field: string, shape: string): Error {
-    return new Error(`${method}: ${field} must be ${shape}`);
-}
-
-/**
- * Asserts that bytes have an exact length before they go on the wire.
- * @param name The value, for the refusal.
- * @param bytes The bytes.
- * @param length The length they must have.
- */
-function assertLength(name: string, bytes: Uint8Array, length: number): void {
-    if (!(bytes instanceof Uint8Array) || bytes.length !== length) throw new TypeError(`${name} must be ${length} bytes`);
+export function agentOperatorClient(url: string, fetch: AgentNodeFetch, operatorToken: string): LspOperatorClient {
+    return new LspOperatorClient({
+        rpcUrl: url,
+        operatorToken,
+        fetch: (target, init) => fetch(target, { ...init, signal: AbortSignal.timeout(AGENT_RPC_TIMEOUT_MS) }),
+    });
 }
 
 /**
@@ -141,37 +114,6 @@ export class AgentJsonRpc {
         private readonly url: string,
         private readonly fetch: AgentNodeFetch,
     ) {}
-
-    /**
-     * Registers the device's RootSigner as a tenant.
-     * @param registration The SDK's signed registration.
-     * @param operatorToken The operator's token.
-     * @returns The tenant id and the tenant's access token.
-     */
-    async registerTenant(registration: AgentTenantRegistration, operatorToken: string): Promise<AgentRegisteredTenant> {
-        assertLength("rootSignerPubkey", registration.rootSignerPubkey, COMPRESSED_POINT_HEX_LENGTH / 2);
-        assertLength("requestId", registration.requestId, HASH256_HEX_LENGTH / 2);
-        const { signedAtMs } = registration;
-        if (typeof signedAtMs !== "bigint" || signedAtMs < 0n || signedAtMs > UINT64_MAX) {
-            throw new RangeError("signedAtMs must be a bigint within u64");
-        }
-        assertLength("signature", registration.signature, SIGNATURE_LENGTH);
-        const method = "lsp_register_tenant";
-        // In the order and the forms of fiber's `RegisterLspTenantParams`.
-        const params = {
-            root_signer_pubkey: bytesToHex(registration.rootSignerPubkey),
-            request_id: `0x${bytesToHex(registration.requestId)}`,
-            signed_at: `0x${signedAtMs.toString(16)}`,
-            signature: bytesToHex(registration.signature),
-        };
-        const result = readResultObject(method, "the result", await this.call(method, [params], operatorToken));
-        const tenant = readResultObject(method, "tenant", result.tenant);
-        if (!isBareHex(tenant.tenant_id, HASH256_HEX_LENGTH))
-            throw malformedResult(method, "tenant.tenant_id", "32 bytes of bare lowercase hex");
-        if (typeof result.access_token !== "string" || result.access_token === "")
-            throw malformedResult(method, "access_token", "a non-empty string");
-        return { tenantId: tenant.tenant_id, accessToken: result.access_token };
-    }
 
     /**
      * Sends one call to the bound node.

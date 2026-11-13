@@ -11,11 +11,11 @@ import type { FiberLspSdkOptions } from "@peersyst/fiber-lsp-sdk";
 import { Agent, INITIALIZE_RETRY_MS, registerAgentTenant } from "../src/agent";
 import { AgentRequestError } from "../src/agent.error";
 import { messageOf } from "../src/agent.utils";
-import type { AgentConfig, AgentNodeFetch, AgentState } from "../src/agent.types";
+import type { AgentConfig, AgentState } from "../src/agent.types";
 import { readAgentState, writeAgentState } from "../src/agent-store";
 import { startControlServer } from "../src/control-server";
 import { FileSignerStorage } from "../src/file-storage";
-import { AgentJsonRpc } from "../src/json-rpc";
+import { agentOperatorClient } from "../src/json-rpc";
 import { NonceCapBypassStorage } from "../src/nonce-cap-bypass";
 import {
     DEVICE_ROOT_SIGNER,
@@ -490,9 +490,7 @@ describe("Agent", () => {
                 entries(run)
                     .filter((entry) => entry.kind === "initialize_failed")
                     .map((entry) => entry.error),
-                [
-                    `lsp_register_tenant registered tenant 6666666666666666666666666666666666666666666666666666666666666666, the device is ${DEVICE_TENANT_ID}`,
-                ],
+                ["lsp_register_tenant: response.result.tenant.tenant_id is not the tenant of the registered root signer"],
             );
         });
 
@@ -513,7 +511,7 @@ describe("Agent", () => {
                     .filter((entry) => entry.kind === "initialize_failed")
                     .map((entry) => entry.error),
                 [
-                    `lsp_register_tenant registered tenant 6666666666666666666666666666666666666666666666666666666666666666, the device is ${DEVICE_TENANT_ID}`,
+                    "lsp_register_tenant: response.result.tenant.tenant_id is not the tenant of the registered root signer",
                     REGISTRATION_REQUEST_CONSUMED,
                 ],
             );
@@ -563,6 +561,29 @@ describe("Agent", () => {
                 JSON.stringify({ version: 1, signedSessions: { "COMMITMENT:3": "cc".repeat(32) }, nonceReuse: {} }),
             );
             assert.equal(sdkStore(dirs)["fiber-lsp-sdk:channel:7"], JSON.stringify(record));
+        });
+
+        it("refuses an operator token with a space at construction", () => {
+            const dirs = freshDirs();
+            assert.throws(
+                () =>
+                    new Agent(
+                        { ...configOf(dirs, IDLE_INTERVAL_MS), operatorToken: "a b" },
+                        {
+                            fetch: new FakeNode().fetch,
+                            now: () => NOW_MS,
+                            randomBytes: requestIds(),
+                            sleep: async () => undefined,
+                            exit: () => undefined,
+                            log: () => undefined,
+                            createSdk: (masterSeed, options) => new FiberLspSdk(masterSeed, options),
+                        },
+                    ),
+                {
+                    name: "TypeError",
+                    message: "operatorToken must be printable ASCII without spaces",
+                },
+            );
         });
 
         it("writes no status without a status file", async (t) => {
@@ -1555,89 +1576,126 @@ describe("Agent", () => {
 });
 
 describe("registerAgentTenant", () => {
-    const ROOT_SIGNER_HEX = "03aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
-    const OTHER_TENANT_ID = "6666666666666666666666666666666666666666666666666666666666666666";
-    const rootSignerPubkey = new Uint8Array(33).fill(0xaa);
-    rootSignerPubkey[0] = 0x03;
-
-    const SIGNATURE_HEX = "44".repeat(64);
-
-    function nodeFetch(registeredTenantId: string): { fetch: AgentNodeFetch; methods: string[]; tokens: string[]; params: unknown[] } {
-        const methods: string[] = [];
-        const tokens: string[] = [];
-        const params: unknown[] = [];
-        const fetch: AgentNodeFetch = async (_url, init) => {
-            const body = JSON.parse(init.body) as { method: string; params: unknown };
-            methods.push(body.method);
-            params.push(body.params);
-            tokens.push(String(init.headers.Authorization));
-            const result = { tenant: { tenant_id: registeredTenantId, channels: [] }, access_token: "tenant-token" };
-            return { status: 200, text: async () => JSON.stringify({ jsonrpc: "2.0", result, id: 1 }) };
-        };
-        return { fetch, methods, tokens, params };
-    }
-
-    function deviceOf(tenantId: string, requests: unknown[] = []): Parameters<typeof registerAgentTenant>[0] {
-        return {
-            tenantId,
-            signTenantRegistration: (request) => {
-                requests.push(request);
-                return { rootSignerPubkey, ...request, signature: new Uint8Array(64).fill(0x44), tenantId };
-            },
-        };
+    function deviceOf(dirs: AgentDirs): FiberLspSdk {
+        return new FiberLspSdk(Buffer.from(DEVICE_SEED_HEX, "hex"), {
+            network: "testnet",
+            storage: new FileSignerStorage(join(dirs.storeDir, "sdk-store.json")),
+            rpcUrl: RPC_URL,
+            lspPubkey: Buffer.from(LSP_PUBKEY, "hex"),
+            now: () => NOW_MS,
+        });
     }
 
     it("signs a fresh 32-byte request id at the clock's time and registers it under the operator's token", async () => {
-        const { fetch, methods, tokens, params } = nodeFetch(OTHER_TENANT_ID);
-        const requests: unknown[] = [];
+        const node = new FakeNode();
         const drawn: number[] = [];
-        const tenant = await registerAgentTenant(deviceOf(OTHER_TENANT_ID, requests), new AgentJsonRpc(RPC_URL, fetch), OPERATOR_TOKEN, {
+        const tenant = await registerAgentTenant(deviceOf(freshDirs()), agentOperatorClient(RPC_URL, node.fetch, OPERATOR_TOKEN), {
             now: () => NOW_MS,
             randomBytes: requestIds(drawn),
         });
-        assert.deepEqual(tenant, { tenantId: OTHER_TENANT_ID, accessToken: "tenant-token" });
+        assert.deepEqual(tenant, { tenantId: DEVICE_TENANT_ID, accessToken: "tenant-token-1" });
         assert.deepEqual(drawn, [32]);
-        assert.deepEqual(requests, [{ requestId: new Uint8Array(32).fill(0x5a), signedAtMs: 1_800_000_000_000n }]);
-        assert.deepEqual(methods, ["lsp_register_tenant"]);
-        assert.deepEqual(params, [
-            [
-                {
-                    root_signer_pubkey: ROOT_SIGNER_HEX,
-                    request_id: `0x${"5a".repeat(32)}`,
-                    signed_at: REGISTRATION_SIGNED_AT,
-                    signature: SIGNATURE_HEX,
-                },
-            ],
+        assert.deepEqual(node.calls, [
+            {
+                method: "lsp_register_tenant",
+                params: [
+                    {
+                        root_signer_pubkey: DEVICE_ROOT_SIGNER,
+                        request_id: `0x${"5a".repeat(32)}`,
+                        signed_at: REGISTRATION_SIGNED_AT,
+                        signature: REGISTRATION_SIGNATURE,
+                    },
+                ],
+                authorization: `Bearer ${OPERATOR_TOKEN}`,
+            },
         ]);
-        assert.deepEqual(tokens, [`Bearer ${OPERATOR_TOKEN}`]);
     });
 
-    it("draws a new request id and reads the clock again on every call", async () => {
-        const { fetch, params } = nodeFetch(OTHER_TENANT_ID);
-        const effects = { now: (): number => NOW_MS + params.length, randomBytes: requestIds() };
-        const rpc = new AgentJsonRpc(RPC_URL, fetch);
-        await registerAgentTenant(deviceOf(OTHER_TENANT_ID), rpc, OPERATOR_TOKEN, effects);
-        await registerAgentTenant(deviceOf(OTHER_TENANT_ID), rpc, OPERATOR_TOKEN, effects);
+    it("draws a new request id on every call", async () => {
+        const node = new FakeNode();
+        const sdk = deviceOf(freshDirs());
+        const operator = agentOperatorClient(RPC_URL, node.fetch, OPERATOR_TOKEN);
+        const effects = { now: () => NOW_MS, randomBytes: requestIds() };
+        await registerAgentTenant(sdk, operator, effects);
+        await registerAgentTenant(sdk, operator, effects);
         assert.deepEqual(
-            params.map((sent) => {
-                const [{ request_id: requestId, signed_at: signedAt }] = sent as [{ request_id: unknown; signed_at: unknown }];
-                return [requestId, signedAt];
-            }),
+            node.calls.map((call) => (call.params as [{ request_id: unknown; signature: unknown }])[0]),
             [
-                [`0x${"5a".repeat(32)}`, "0x1a3185c5000"],
-                [`0x${"5b".repeat(32)}`, "0x1a3185c5001"],
+                {
+                    root_signer_pubkey: DEVICE_ROOT_SIGNER,
+                    request_id: `0x${"5a".repeat(32)}`,
+                    signed_at: REGISTRATION_SIGNED_AT,
+                    signature: REGISTRATION_SIGNATURE,
+                },
+                {
+                    root_signer_pubkey: DEVICE_ROOT_SIGNER,
+                    request_id: `0x${"5b".repeat(32)}`,
+                    signed_at: REGISTRATION_SIGNED_AT,
+                    signature: RETRY_SIGNATURE,
+                },
             ],
         );
     });
 
-    it("refuses a registration for another tenant", async () => {
-        const { fetch } = nodeFetch(OTHER_TENANT_ID);
+    it("refuses an answer that registers another tenant", async () => {
+        const node = new FakeNode();
+        node.foreignRegistrations = 1;
         await assert.rejects(
-            registerAgentTenant(deviceOf(DEVICE_TENANT_ID), new AgentJsonRpc(RPC_URL, fetch), OPERATOR_TOKEN, {
+            registerAgentTenant(deviceOf(freshDirs()), agentOperatorClient(RPC_URL, node.fetch, OPERATOR_TOKEN), {
                 now: () => NOW_MS,
                 randomBytes: requestIds(),
             }),
-            { message: `lsp_register_tenant registered tenant ${OTHER_TENANT_ID}, the device is ${DEVICE_TENANT_ID}` },
+            {
+                name: "RpcResponseError",
+                path: "response.result.tenant.tenant_id",
+                reason: "is not the tenant of the registered root signer",
+            },
+        );
+    });
+
+    it("hands the registration the facade signed to the operator and returns what it answers", async () => {
+        const received: unknown[] = [];
+        const tenant = await registerAgentTenant(
+            deviceOf(freshDirs()),
+            {
+                registerTenant: async (registration) => {
+                    received.push(registration);
+                    return { tenantId: DEVICE_TENANT_ID, accessToken: "stub-token" };
+                },
+            },
+            { now: () => NOW_MS, randomBytes: requestIds() },
+        );
+        assert.deepEqual(tenant, { tenantId: DEVICE_TENANT_ID, accessToken: "stub-token" });
+        assert.deepEqual(received, [
+            {
+                rootSignerPubkey: new Uint8Array(Buffer.from(DEVICE_ROOT_SIGNER, "hex")),
+                requestId: new Uint8Array(32).fill(0x5a),
+                signedAtMs: BigInt(NOW_MS),
+                signature: new Uint8Array(Buffer.from(REGISTRATION_SIGNATURE, "hex")),
+                tenantId: DEVICE_TENANT_ID,
+            },
+        ]);
+    });
+
+    it("reads the clock afresh for every registration", async () => {
+        const received: { requestId: Uint8Array; signedAtMs: bigint }[] = [];
+        const operator = {
+            registerTenant: async (registration: { requestId: Uint8Array; signedAtMs: bigint }) => {
+                received.push(registration);
+                return { tenantId: DEVICE_TENANT_ID, accessToken: "stub-token" };
+            },
+        };
+        const sdk = deviceOf(freshDirs());
+        let n = 0;
+        const effects = { now: () => NOW_MS + n++, randomBytes: requestIds() };
+        await registerAgentTenant(sdk, operator, effects);
+        await registerAgentTenant(sdk, operator, effects);
+        assert.deepEqual(
+            received.map((registration) => [registration.signedAtMs, registration.requestId]),
+            [
+                [BigInt(NOW_MS), new Uint8Array(32).fill(0x5a)],
+                [BigInt(NOW_MS + 1), new Uint8Array(32).fill(0x5b)],
+            ],
         );
     });
 });
