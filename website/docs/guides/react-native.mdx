@@ -1,0 +1,149 @@
+---
+title: React Native
+description: Run the SDK in a React Native app on Android, with MMKV storage, a fetch that times out, the right background behavior and storage kept out of backups.
+---
+
+# React Native
+
+The SDK runs unmodified in a React Native app on Hermes. What the app has to add is the same as on any runtime, a storage and optionally a `fetch`, plus a few Android specifics: a `fetch` that cannot hang, a storage that backups never restore, and a lifecycle that follows the app's foreground.
+
+:::note
+This guide covers Android. iOS has its own background rules, which are not described here.
+:::
+
+## What you'll do
+
+- Install the package with no extra configuration.
+- Adapt an MMKV store to `ISignerStorage`.
+- Pass a `fetch` with a deadline.
+- Connect and disconnect with the app's state, and keep the storage out of Android's backups.
+
+## What the package needs
+
+The published package runs as it is on Expo 55, React Native 0.83, Hermes and the new architecture, bundled by Metro with no configuration. It needs **no polyfill**: the only web API it uses that a runtime might lack is `TextEncoder`, which Hermes provides, and it draws no randomness.
+
+If your app already uses `@noble/*` or `@scure/*` at major version 1, the SDK's version 2 installs beside them; each import resolves to its own.
+
+Your app does need a random source of its own for one thing: the `requestId` of a [tenant registration](/docs/guides/register-a-tenant). That is your code, not the SDK's.
+
+## Step 1: Storage over MMKV
+
+A synchronous `ISignerStorage` over MMKV serves the SDK well. Use **one store per master seed**, and store the values as the strings the SDK writes. The adapter only needs `getString` and `set`, so it can be typed against that much:
+
+```ts title="signer-storage.ts"
+import type { ISignerStorage } from "@peersyst/fiber-lsp-sdk";
+
+// The part of an MMKV instance the adapter uses. Your MMKV library's instance has this shape.
+interface KeyValueStore {
+    getString(key: string): string | undefined;
+    set(key: string, value: string): void;
+}
+
+export function mmkvSignerStorage(mmkv: KeyValueStore): ISignerStorage {
+    return {
+        get: (key) => mmkv.getString(key) ?? null,
+        set: (key, value) => mmkv.set(key, value),
+    };
+}
+```
+
+:::warning[MMKV and power loss]
+MMKV writes through a memory map that it does not sync to disk. Its data survives the app's process being killed, but not a power loss or an OS crash, after which it may reload an earlier state. A storage that **goes back in time** can make the device sign twice for the same slot. A store that syncs before it returns closes that gap, for example an `IAsyncSignerStorage` over SQLite with `synchronous=FULL`. Read [Storage](/docs/concepts/storage) to weigh the trade-off.
+:::
+
+## Step 2: A fetch with a deadline
+
+React Native's global `fetch` has no timeout on Android: its HTTP client connects, reads and writes with none. A half-open connection hangs a request forever, and since that client runs at most 5 calls per host, a few hung requests end up blocking every later one. Pass your own `fetch` with an `AbortController` deadline:
+
+```ts title="fetch-with-deadline.ts"
+import type { IFetchLike } from "@peersyst/fiber-lsp-sdk";
+
+// Long enough for a channel opening, which blocks while the LSP builds the funding tx.
+const RPC_DEADLINE_MS = 60_000;
+
+export const fetchWithDeadline: IFetchLike = async (url, init) => {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), RPC_DEADLINE_MS);
+    try {
+        return await fetch(url, { ...init, signal: controller.signal });
+    } finally {
+        clearTimeout(timeout);
+    }
+};
+```
+
+Make the deadline long enough for `prepareChannelOpen` and `openChannel`: the node only answers an opening once it has agreed the channel with the LSP and built the funding transaction. The poller has its own 30-second limit per step on top of this.
+
+## Step 3: Wire the SDK to the app's state
+
+```ts title="wallet.ts"
+import { FiberLspSdk, deriveTenantId } from "@peersyst/fiber-lsp-sdk";
+
+// One store per master seed, keyed by its tenant id.
+const storage = mmkvSignerStorage(createMmkv(`fiber-signer-${deriveTenantId(masterSeed)}`));
+
+const sdk = new FiberLspSdk(masterSeed, {
+    network: "testnet",
+    storage,
+    rpcUrl: "https://lsp.example.com/rpc",
+    lspPubkey,
+    biscuitToken,
+    fetch: fetchWithDeadline,
+});
+
+sdk.connect();
+const subscription = AppState.addEventListener("change", (state) => {
+    if (state === "active") sdk.connect();
+    else sdk.disconnect();
+});
+```
+
+`createMmkv` stands for however your MMKV library creates an instance with an id; `AppState` is React Native's. `deriveTenantId` gives a stable id per seed before the SDK exists, which makes a good store name.
+
+## In the background
+
+What happens while the app is away:
+
+- **A connected SDK stops polling anyway.** React Native pauses its timers on Android, so the next tick waits for the app to return, and runs within one interval of it.
+- **Cached apps are frozen.** Recent Android versions freeze them, so no response reaches the JavaScript, and nothing is read or signed.
+- **Without that freezer**, a step already in flight may complete, and sign, in the background.
+- **On the return**, a step that was in flight settles. If the app was away more than 30 seconds, the step's deadline may fire first and report it once as a `poll_failed` `ERROR` ("the step did not settle"). Either way, the next tick reads everything afresh.
+- **If you call `disconnect()` on the way out**, as in the example above, that step is abandoned instead and you hear nothing of it.
+
+A killed app is in the same position until its relaunch builds the SDK again on the same storage.
+
+:::warning[Signing rounds have a time budget]
+A device that is away in the middle of a payment's signing round can lose the channel: Fiber force-closes it if the round is not finished in time. See [Backgrounding](/docs/guides/backgrounding) for the budget and how to stay inside it.
+:::
+
+## Keep the storage out of backups
+
+The SDK's storage must **never come back older than it was**. A backup restored onto the device (or onto a new one) is exactly that. Exclude the store from Android's Auto Backup: `dataExtractionRules` on Android 12 and later, `fullBackupContent` on earlier versions.
+
+```xml title="android/app/src/main/res/xml/data_extraction_rules.xml"
+<?xml version="1.0" encoding="utf-8"?>
+<data-extraction-rules>
+    <cloud-backup>
+        <exclude domain="file" path="mmkv/" />
+    </cloud-backup>
+    <device-transfer>
+        <exclude domain="file" path="mmkv/" />
+    </device-transfer>
+</data-extraction-rules>
+```
+
+Point it at the directory your MMKV library actually writes to (the path above is a common default), and reference the file from `android:dataExtractionRules` in `AndroidManifest.xml`. A wallet restored from its seed starts with an empty storage; what that means for its existing channels is in [Keys and recovery](/docs/concepts/keys-and-recovery).
+
+## Next steps
+
+<CardGrid>
+    <Card icon="compass" title="Backgrounding" to="/docs/guides/backgrounding">
+        The time budget of a signing round, and how to stay inside it.
+    </Card>
+    <Card icon="lock" title="Storage" to="/docs/concepts/storage">
+        What the SDK stores, and why it must never go back in time.
+    </Card>
+    <Card icon="devices" title="Runtimes" to="/docs/get-started/runtimes">
+        Node, browsers and React Native side by side.
+    </Card>
+</CardGrid>

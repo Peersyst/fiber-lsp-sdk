@@ -1,0 +1,144 @@
+---
+title: Send a payment
+description: Pay a Fiber invoice from the device through its LSP, set a fee budget, and follow the payment to PAYMENT_SENT or PAYMENT_FAILED.
+---
+
+# Send a payment
+
+`transfer` pays an invoice through the device's LSP. The device decodes and checks the invoice itself, records the most it agrees to spend, and only then asks the node to send. From that point the device signs only what fits that budget.
+
+## What you'll do
+
+- Show the invoice to the user before paying ([Decode an invoice](/docs/guides/decode-an-invoice)).
+- Call `transfer`, with or without a fee budget.
+- Follow the outcome through `PAYMENT_SENT` and `PAYMENT_FAILED`, and handle the errors.
+
+## Prerequisites
+
+- A registered `FiberLspSdk` with a ready channel holding enough balance ([Open a channel](/docs/guides/open-a-channel)).
+- The SDK connected (`connect()`): the poller signs the payment's rounds and reads how it ends.
+
+:::warning[Fiber's current nonces]
+Under Fiber's current nonce lifecycle, the settlement of a payment the device sends cannot complete, even with `nonceReuse: "allow"`, and Fiber force-closes the channel. See [Status](/docs/resources/status).
+:::
+
+## Step 1: Pay the invoice
+
+```ts title="pay.ts"
+const payment = await sdk.transfer(encodedInvoice);
+console.log(payment.paymentHashHex, payment.amountShannons, payment.maxFeeShannons);
+
+// Or with a fee budget of your own, in decimal shannons.
+const capped = await sdk.transfer(encodedInvoice, { maxFeeShannons: "200000" });
+```
+
+`transfer(encodedInvoice, options?)` resolves once the node took the payment, not when it arrives. It returns `SdkPayment`:
+
+| Field | What it is |
+| --- | --- |
+| `paymentHashHex` | The payment hash, `0x`-prefixed lowercase hex: what `PAYMENT_SENT` and `PAYMENT_FAILED` carry. |
+| `amountShannons` | The invoice's amount. |
+| `maxFeeShannons` | The fee budget sent. |
+
+### The checks on the invoice
+
+Before anything is recorded or sent, the device holds the invoice to what it pays. Every failure is `invoice_unpayable`, naming the field:
+
+- It decodes and is signed by the payee key it carries.
+- It is for the network the SDK is on.
+- It has an amount, and it is not zero. Amountless invoices are not paid.
+- It is a CKB invoice, not a UDT one.
+- It carries a payee public key.
+- It has not expired by the device's clock.
+
+Any node's invoice that passes these is payable: no route hint or feature is asked of it.
+
+### The fee budget
+
+`maxFeeShannons` is the most the payment may pay in fees, as decimal shannons (`"0"` allowed).
+
+- **Left out**, it is Fiber's own default: 0.5% of the amount, rounded up. That is also Fiber's cap: a larger budget is accepted, but the node never spends past 0.5%.
+- The device approves the **amount plus the budget**, and signs nothing that would pay more.
+- **Through a trampoline**, to any payee except the LSP itself, a budget below `ceil(amount / 1000)` fails the route: the node refuses with an `RpcError`. Invoices of the LSP itself are paid directly and need no fee.
+
+### The trampoline
+
+The device's node only sees its own channels, so the one node it can reach is its LSP. Every payment therefore leaves through the LSP as a trampoline, whatever route hint the invoice carries. You do not configure anything for it.
+
+## Step 2: Follow the outcome
+
+```ts title="pay.ts"
+sdk.onEvent((event) => {
+    if (event.type === "PAYMENT_SENT") setPaymentStatus(event.paymentHashHex, "sent");
+    if (event.type === "PAYMENT_FAILED") setPaymentStatus(event.paymentHashHex, "failed", event.reason);
+});
+```
+
+| Event | What it means |
+| --- | --- |
+| `PAYMENT_SENT` | The node reports the payment succeeded. Final. |
+| `PAYMENT_FAILED` | The node reports it failed, or never ran it. `reason` is the node's text verbatim, or the SDK's own when the node gave none. Final. |
+
+Both are delivered at least once; deduplicate on the event type and `paymentHashHex`. They report what the node says. Whatever it says, the device never signs more than the amount and budget the user approved.
+
+## What can go wrong
+
+| Error | When | What to do |
+| --- | --- | --- |
+| `SdkError` `invoice_unpayable` | The invoice failed a check above, or its hash collides with another payment's or invoice's. Nothing was sent. | Show the message to the user; this invoice cannot be paid. |
+| `SdkError` `payment_in_flight` | A payment under this hash is already on its way and not reported yet. | Do not pay again. Wait for `PAYMENT_SENT` or `PAYMENT_FAILED`. |
+| `SdkError` `payment_charged` | A payment under this hash reached the point where it may have been made. The device never sends it again. | Tell the user it may already be paid. This is not a proof of payment. |
+| `SdkError` `own_invoice` | The invoice is one of this device's own invoices. | Paying yourself is refused. |
+| `RpcError` | The node refused the send: no route, not enough balance, a fee below the trampoline's floor. Nothing ran, and no event follows. | Show `message`. You can retry the same invoice, with a larger budget if the fee was the cause. |
+| `RpcTransportError`, `RpcResponseError` | The call may or may not have run. | Do not pay again: wait for the event, which the poller reads from the node. |
+| `TypeError`, `RangeError` | A malformed argument or budget, or an amount plus budget past a u128. Nothing was sent. | A bug in the call. |
+
+```ts title="pay.ts"
+try {
+    await sdk.transfer(encodedInvoice);
+    showPending(); // PAYMENT_SENT or PAYMENT_FAILED tells how it ends
+} catch (error) {
+    if (error instanceof SdkError) {
+        switch (error.code) {
+            case "invoice_unpayable":
+                showError(`This invoice cannot be paid: ${error.message}`);
+                break;
+            case "payment_in_flight":
+                showPending(); // a payment under this hash is already on its way
+                break;
+            case "payment_charged":
+                showError("This invoice may already have been paid. It is never paid twice.");
+                break;
+            case "own_invoice":
+                showError("This is one of your own invoices.");
+                break;
+            default:
+                throw error;
+        }
+    } else if (error instanceof RpcTransportError || error instanceof RpcResponseError) {
+        showPending(); // unknown outcome: the poller reads it and emits the event
+    } else if (error instanceof RpcError) {
+        showError(`The payment could not be routed: ${error.message}`);
+    } else {
+        throw error;
+    }
+}
+```
+
+:::note[One RpcError is an unknown outcome]
+Fiber reports an internal reply it lost ("Messaging failed because channel is closed") as a refusal, but the send may have run. The SDK treats it as an unknown outcome: the payment stays watched and an event follows. When an `RpcError` arrives, keep listening for that hash for a while before you call the payment failed.
+:::
+
+## Next steps
+
+<CardGrid>
+    <Card icon="eye" title="Decode an invoice" to="/docs/guides/decode-an-invoice">
+        Show the amount, description and expiry before the user confirms.
+    </Card>
+    <Card icon="layers" title="Events and errors" to="/docs/guides/events-and-errors">
+        One handler for every event and every error code.
+    </Card>
+    <Card icon="compass" title="Backgrounding" to="/docs/guides/backgrounding">
+        What a trip to the background does to a payment in progress.
+    </Card>
+</CardGrid>

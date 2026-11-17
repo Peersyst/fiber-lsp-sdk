@@ -1,0 +1,140 @@
+---
+title: Decode an invoice
+description: Read a Fiber invoice string with decodeInvoice, show its amount, description and expiry to the user, and handle the strings it refuses.
+---
+
+# Decode an invoice
+
+`decodeInvoice` reads a Fiber invoice string on the device, with no network call. Use it to show the user what they are about to pay (the amount, the description, when it expires) before you call `transfer`. It reads exactly what Fiber's own encoder writes and verifies the payee's signature, so what you show is what the invoice says.
+
+## What you'll do
+
+- Decode a scanned or pasted string, and handle `InvoiceError`.
+- Pick the attributes a wallet shows out of the decoded `Invoice`.
+- Show a confirmation screen, then pay.
+
+## Prerequisites
+
+- The package installed. `decodeInvoice` is a plain function: it needs no `FiberLspSdk` instance.
+
+## Step 1: Decode the string
+
+```ts title="scan.ts"
+import { InvoiceError, decodeInvoice } from "@peersyst/fiber-lsp-sdk";
+import type { Invoice } from "@peersyst/fiber-lsp-sdk";
+
+let invoice: Invoice | undefined;
+try {
+    invoice = decodeInvoice(scanned.trim());
+} catch (error) {
+    if (!(error instanceof InvoiceError)) throw error;
+    showError(`Not a valid invoice (${error.path} ${error.reason})`);
+}
+```
+
+`decodeInvoice(text)` returns an `Invoice` or throws:
+
+- **`InvoiceError`** for a string it refuses. `path` says what was refused: a layer of the string (`invoice`, `currency`, `amount`, `flag`, `compressed`, `signature`) or a field of its data. `reason` says what it had to be, never what it was.
+- **`TypeError`** when the argument is not a string.
+
+It only accepts **signed** invoices, and the signature must be by the payee key the invoice carries.
+
+:::tip[Uppercase strings]
+The decoder refuses any uppercase character, because Fiber's encoder never writes one. QR codes sometimes carry bech32 strings in uppercase; such a string, all in uppercase, is the same invoice in lowercase, so lowercase it before decoding.
+:::
+
+## Step 2: Read the fields
+
+An `Invoice` has:
+
+| Field | Type | What it is |
+| --- | --- | --- |
+| `currency` | `"Fibb" \| "Fibt" \| "Fibd"` | Mainnet, testnet, or any other chain. |
+| `amountShannons` | `string \| null` | Decimal shannons. `null` leaves the amount to the payer. |
+| `timestampMs` | `bigint` | When it was created, Unix milliseconds. |
+| `paymentHash` | `Uint8Array` | The 32-byte payment hash. |
+| `attributes` | `InvoiceAttribute[]` | Everything else, in the order of the string. |
+| `signature` | `Uint8Array` | The payee's signature, 65 bytes. |
+
+Each attribute has a `type`, and TypeScript narrows the rest of it on that `type`:
+
+| `type` | Value | Notes |
+| --- | --- | --- |
+| `expiryTime` | `seconds: bigint` | Counted from `timestampMs`. No expiry means it never expires. |
+| `description` | `text: string` | |
+| `finalHtlcMinimumExpiryDelta` | `milliseconds: bigint` | |
+| `finalHtlcTimeout` | `milliseconds: bigint` | Deprecated, still read. |
+| `fallbackAddr` | `address: string` | |
+| `feature` | `bits: Uint8Array` | Fiber's feature bits, as raw bytes. |
+| `udtScript` | `script: Script` | The invoice is for a UDT, not CKB. |
+| `payeePublicKey` | `publicKey: Uint8Array` | 33-byte compressed key. |
+| `hashAlgorithm` | `algorithm: "ckb-hash" \| "sha256"` | |
+| `paymentSecret` | `secret: Uint8Array` | |
+| `trampolineRouteHint` | `nodeId: Uint8Array` | The node id of the payee's LSP. |
+
+Each type appears at most once: the decoder refuses a string that repeats one.
+
+## Step 3: Show it to the user
+
+```ts title="confirm.ts"
+const SHANNONS_PER_CKB = 100_000_000n;
+
+function formatCkb(shannons: string): string {
+    const value = BigInt(shannons);
+    const fraction = (value % SHANNONS_PER_CKB).toString().padStart(8, "0").replace(/0+$/, "");
+    return `${value / SHANNONS_PER_CKB}${fraction ? `.${fraction}` : ""} CKB`;
+}
+
+let description: string | undefined;
+let expirySeconds: bigint | undefined;
+let isUdt = false;
+for (const attribute of invoice.attributes) {
+    // The union narrows on `type`, so each branch sees its own value.
+    switch (attribute.type) {
+        case "description":
+            description = attribute.text;
+            break;
+        case "expiryTime":
+            expirySeconds = attribute.seconds;
+            break;
+        case "udtScript":
+            isUdt = true;
+            break;
+    }
+}
+
+const expiresAtMs = expirySeconds === undefined ? null : invoice.timestampMs + expirySeconds * 1000n;
+const summary = {
+    network: invoice.currency === "Fibb" ? "mainnet" : invoice.currency === "Fibt" ? "testnet" : "other chain",
+    amount: invoice.amountShannons === null ? "set by the payer" : formatCkb(invoice.amountShannons),
+    description: description ?? "",
+    expires: expiresAtMs === null ? "never" : new Date(Number(expiresAtMs)).toISOString(),
+    expired: expiresAtMs !== null && expiresAtMs <= BigInt(Date.now()),
+    isUdt,
+};
+```
+
+Amounts stay strings and `bigint`s all the way: never convert shannons to a JavaScript `number`.
+
+## Step 4: Pay it
+
+Once the user confirms, pass the **original string** to `transfer` ([Send a payment](/docs/guides/send-a-payment)). `transfer` decodes it again and runs its own checks, so decoding first is for display: it never replaces them. Some invoices decode fine and are still refused by `transfer` as `invoice_unpayable`:
+
+- an invoice for another network than the SDK's,
+- an amountless invoice, or one of zero,
+- a UDT invoice,
+- an invoice without a payee key,
+- an expired one.
+
+Checking those on your confirmation screen saves the user a refusal after they tapped "Pay".
+
+## Next steps
+
+<CardGrid>
+    <Card icon="bolt" title="Send a payment" to="/docs/guides/send-a-payment">
+        Pay the decoded invoice through the LSP.
+    </Card>
+    <Card icon="code" title="decodeInvoice in the API reference" to="/docs/api/functions/decodeInvoice">
+        The signature and the generated types.
+    </Card>
+</CardGrid>

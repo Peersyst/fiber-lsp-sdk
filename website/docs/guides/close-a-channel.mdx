@@ -1,0 +1,150 @@
+---
+title: Close a channel
+description: Close a channel cooperatively or by force, handle a close the LSP starts, list the device's channels and read what the device keeps of each.
+---
+
+# Close a channel
+
+A cooperative close pays both sides their balances in one transaction that both sign. A force close is the way out when that is not possible: the node publishes its latest commitment, and the funds come out on chain after a delay. This guide covers both, the close the LSP starts, and the two read calls that help a wallet show its channels.
+
+## What you'll do
+
+- Close a channel with `closeChannel`, and choose its fee rate.
+- Force a close with `forceCloseChannel`.
+- Show the channels with `listChannels`, and read a channel's record with `channelEvidence`.
+
+## Prerequisites
+
+- A channel this device opened, and its `channelId` ([Open a channel](/docs/guides/open-a-channel)).
+- The SDK connected (`connect()`): the close's signature is served by the poller.
+
+## Close cooperatively
+
+`closeChannel(channelId, options?)` asks the node to close the channel. It resolves once the node took the request; the signature the close needs is served by the poller, and `CHANNEL_CLOSED` tells you when the channel is closed.
+
+```ts title="close.ts"
+sdk.onEvent((event) => {
+    if (event.type === "CHANNEL_CLOSED" && event.channelId === channelId) console.log("closed");
+});
+
+try {
+    await sdk.closeChannel(channelId); // the channel's commitment fee rate
+    // or: await sdk.closeChannel(channelId, { feeRate: 2000n }); // shannons per kilobyte
+} catch (error) {
+    if (error instanceof SdkError && error.code === "close_fee_too_high") {
+        showError("That fee rate would cost more than 1 CKB. Pick a lower one.");
+    } else {
+        throw error;
+    }
+}
+```
+
+- **The destination is fixed.** The device's side always goes to the lock that funded the channel, recorded when it opened. You cannot redirect it.
+- **`feeRate`** is a `bigint` of shannons per kilobyte. Left out, it is the channel's commitment fee rate (1000 by default), which is also the lowest rate Fiber accepts.
+- **The side that starts the close pays its fee.** A close you ask for comes out of the device's balance.
+- **The fee is capped.** The device signs no close whose output is more than 1 CKB short of its balance. So before sending anything, `closeChannel` computes the fee at your rate and refuses one above 1 CKB as `close_fee_too_high`. On a typical close (about 528 bytes), the default rate costs 528 shannons.
+
+A channel with payments still in flight can be closed: it stays `closing` until they settle, and the device keeps signing their rounds.
+
+:::note
+Prefer the default rate. When the connection between the two nodes drops during a close at a custom rate, Fiber resends the close at the default rate, the two sides build different transactions, and the close stalls until a force close.
+:::
+
+## Force a close
+
+```ts title="force-close.ts"
+await sdk.forceCloseChannel(channelId);
+```
+
+`forceCloseChannel(channelId)` asks the node to close the channel unilaterally. The device signs nothing for it, so it needs no record of the channel. After a force close, the node's watchtower spends the commitment's outputs, and each spend asks the device for a signature, which it gives only toward a destination you approved (`watchtower` option or `setWatchtowerApproval`). Today Fiber's watchtower pays only the LSP node's own lock, so approving it means trusting the LSP after a force close. See [The watchtower](/docs/concepts/watchtower).
+
+Only a channel the device watches tells `CHANNEL_CLOSED`. For a channel this device has no record of, read the result from `listChannels`.
+
+## The close the LSP starts
+
+The LSP can close the channel too. Its node answers on the device's behalf, and the device sees the close only as a signing request, which the poller signs under the same rules as any close: the funding output, both close scripts as recorded at opening, no payment in flight, and a fee within the cap. `CHANNEL_CLOSED` reports it like any other close.
+
+If the LSP asks for its share to be paid somewhere other than the script it gave at opening, the device refuses: a `SIGNING` event with `outcome: "refused"` and error code `policy_refusal`. Fiber never times out a close that does not complete, so the channel stays `closing` until someone forces it closed.
+
+## When it ends
+
+`CHANNEL_CLOSED` comes from the poller, on the first tick that sees the channel closed. It covers every kind of close: cooperative, forced by either side, abandoned, and an opening that was never funded. It can come without a `CHANNEL_READY` before it.
+
+## List the channels
+
+`listChannels()` asks the node for every channel it holds for this tenant, closed ones included, in the node's order. Each `SdkChannelInfo` has:
+
+| Field | What it is |
+| --- | --- |
+| `channelId` | The channel id, `0x`-prefixed hex. |
+| `state` | One of `SDK_CHANNEL_STATES`, below. |
+| `localBalanceShannons`, `remoteBalanceShannons` | Each side's balance, decimal shannons. |
+| `offeredTlcBalanceShannons`, `receivedTlcBalanceShannons` | What is in flight in each direction. |
+| `hasRecord` | Whether this device registered the channel. A `false` is one the node holds for the tenant that this device never filed, such as an opening whose answer was lost. |
+
+| State | Meaning |
+| --- | --- |
+| `opening` | Being negotiated or funded. |
+| `ready` | Open and usable. |
+| `closing` | A close has started; payments in flight settle first. |
+| `closed` | Closed, by any route. |
+| `stale` | The node restored the channel from an old database and is checking it with the LSP before it resumes. |
+
+```ts title="channels.ts"
+const labels: Record<SdkChannelState, string> = {
+    opening: "Opening",
+    ready: "Open",
+    closing: "Closing",
+    closed: "Closed",
+    stale: "Checking with the LSP",
+};
+
+for (const channel of await sdk.listChannels()) {
+    // hasRecord: false is a channel the node holds for you that this device never registered.
+    console.log(channel.channelId, labels[channel.state], channel.localBalanceShannons, channel.hasRecord);
+}
+```
+
+Typing the map as `Record<SdkChannelState, string>` makes the compiler point at it if a state is ever added. An opening the node aborted is not listed: `CHANNEL_CLOSED` is what reported it.
+
+## A channel's evidence
+
+`channelEvidence(channelId)` reads, from the device's own storage, what it keeps of a channel. It calls nothing: use it to show a channel's history, or to export a record of what the device signed, for a dispute or a support case.
+
+```ts title="evidence.ts"
+const evidence = await sdk.channelEvidence(channelId);
+console.log(evidence.commitments.local?.commitmentNumber, evidence.commitments.remote?.commitmentNumber);
+console.log(`${evidence.revocations.length} revocations, ${evidence.watchtowerSignatures.length} watchtower signatures`);
+```
+
+| Field | What it holds |
+| --- | --- |
+| `revocations` | The LSP's revocation signatures of its old commitments, `{ version, forRemote, signature }`, ascending by version. |
+| `commitments` | Each side's last commitment the device signed, `{ commitmentNumber, txHash }` or `null`. `txHash` is Fiber's signing message of the transaction, not the hash a block explorer shows. |
+| `watchtowerSignatures` | The watchtower spends the device signed, `{ requestId, purpose, signature, applied }`, in the order it claimed them. |
+
+Every hex value is `0x`-prefixed lowercase. The result is a copy. A channel this device never registered is `unknown_channel`.
+
+## What can go wrong
+
+| Error | When | What to do |
+| --- | --- | --- |
+| `SdkError` `close_fee_too_high` | The device's fee at the given rate is above 1 CKB. Nothing was sent. | Use a lower `feeRate`, or leave it out. |
+| `SdkError` `unknown_channel` | `closeChannel` or `channelEvidence` named a channel this device never registered. | Use `forceCloseChannel` if it must close; check `hasRecord` in `listChannels`. |
+| `RpcError` | The node refused: the channel is not ready (a close already running included), the LSP is offline, a payment was just added and is not committed yet, a rate below the commitment's, or a channel it does not hold. | Show `message`. For a payment just added, retry once it settles; for an offline LSP, retry later or force the close. |
+| `RpcTransportError`, `RpcResponseError` | The call may or may not have run. | Watch for `CHANNEL_CLOSED`; the next tick signs the close if the node built it. |
+| `TypeError`, `RangeError` | A malformed id, or a `feeRate` that is not a `bigint` within a u64. | A bug in the call. |
+
+## Next steps
+
+<CardGrid>
+    <Card icon="shield" title="The watchtower" to="/docs/concepts/watchtower">
+        What happens after a force close, and what the device signs for it.
+    </Card>
+    <Card icon="layers" title="Events and errors" to="/docs/guides/events-and-errors">
+        Handle CHANNEL_CLOSED, SIGNING refusals and every error code.
+    </Card>
+    <Card icon="book" title="Errors reference" to="/docs/reference/errors">
+        Every SDK error code in one table.
+    </Card>
+</CardGrid>

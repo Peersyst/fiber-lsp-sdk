@@ -1,0 +1,205 @@
+---
+title: Open a channel
+description: Open a channel from the device to the LSP, sign its funding transaction with your own wallet, and know when it is ready.
+---
+
+import Tabs from "@theme/Tabs";
+import TabItem from "@theme/TabItem";
+
+# Open a channel
+
+A device moves payments through one or more channels to its LSP. Opening one takes two parties: the LSP node builds the funding transaction, and your wallet signs the user's inputs to it. The SDK sits between them, checks what the node built against what the device asked for, and records everything it will later hold the channel to before your wallet sees the transaction.
+
+## What you'll do
+
+- Call `openChannel` with an amount, the user's lock and a funding signer of your own, or split it into `prepareChannelOpen` and `submitFundingTx` when the signing happens elsewhere.
+- Write the funding signer: the checks it owns, and what it returns.
+- Listen for `CHANNEL_READY`, and handle the errors and the crash cases.
+
+## Prerequisites
+
+- A connected `FiberLspSdk` registered as a tenant, with its access token installed ([Register a tenant](/docs/guides/register-a-tenant)).
+- The user's lock (`Script`) and a wallet that can sign for it and look up the cells it owns on chain.
+- `connect()` called, so the poller can serve the signatures the opening asks for and report the channel's progress.
+
+:::warning[Fiber's current nonces]
+Under the default `nonceReuse: "refuse"`, no channel opens against Fiber's nodes today: Fiber asks for a second signing session on some of an opening's slots. A host that must work with Fiber now sets `nonceReuse: "allow"`. Even then, some later payment rounds stop and Fiber force-closes the channel. See [Status](/docs/resources/status) before you ship.
+:::
+
+## Step 1: Choose the amount and the lock
+
+- **`amountShannons`** is what the user pays into the channel, as a decimal string of shannons (1 CKB is `100000000`). It **includes the device's reserve**, the part that stays locked while the channel is open. On a typical lock the reserve is 99 or 100 CKB, so a 500 CKB channel leaves about 400 CKB to spend. An amount below the reserve, or past a u64, is a `RangeError` naming `fundedShannons`.
+- **`userLock`** is the lock whose cells fund the channel. It is also where every close pays the device's side back: the SDK records it as the channel's close script.
+- **`userLockCellDeps`** (optional) are the cell deps the node needs to spend that lock. The node only knows the chain's genesis scripts by itself, so a lock outside them needs its code cell here.
+
+## Step 2: Write the funding signer
+
+The SDK checks the **funding cell**: the channel's output, its lock, its capacity and the terms the node agreed to. It cannot read the chain, so it does not know what the inputs spend or whether the change is right. That is your signer's job.
+
+`SdkSignFundingInputs` is `(unsignedFundingTx: Transaction) => Promise<Uint8Array[]>`. Before signing, it must:
+
+1. Resolve each of the user's inputs on chain and add up what they hold.
+2. Check that what comes back to the user (their change outputs) is what they hold less the amount funded and the fee.
+3. Check that the fee is one the user accepts.
+4. Sign, and return **the whole witness list, by position**. Leave the slots of other parties' inputs exactly as they came: the node merges the list by index.
+
+The SDK hands your signer a copy of the transaction and uses only the witnesses you return: nothing else you change reaches the node. It arrives with a placeholder witness per lock group, its lock 65 zero bytes.
+
+```ts title="open-channel.ts"
+const amountShannons = "50000000000"; // 500 CKB, the device's reserve included
+const MAX_FUNDING_FEE_SHANNONS = 1_000_000n; // 0.01 CKB, your wallet's own limit
+
+const signFundingInputs: SdkSignFundingInputs = async (unsignedFundingTx) => {
+    // The SDK checked the funding cell. The inputs and the change are yours to check.
+    const spent = await wallet.sumOwnInputs(unsignedFundingTx); // resolve the user's inputs on chain
+    const back = wallet.sumOwnOutputs(unsignedFundingTx); // the user's change outputs
+    const fee = spent - back - BigInt(amountShannons);
+    if (fee < 0n || fee > MAX_FUNDING_FEE_SHANNONS) throw new Error("funding fee not accepted");
+    // The whole witness list, by position, other parties' slots left as they came.
+    return wallet.signWitnesses(unsignedFundingTx);
+};
+```
+
+`wallet` stands for your own wallet code; the SDK exports no helper for it.
+
+:::warning[Converting to ccc]
+The SDK's `Transaction` spells a cell dep's type `"dep_group"`; ccc spells it `"depGroup"`. ccc's codec writes any string it does not know as a `code` dep, without an error, so a signer that passes the SDK's spelling straight through signs a different transaction. Convert it explicitly.
+:::
+
+## Step 3: Open the channel
+
+<Tabs groupId="open-flow">
+<TabItem value="one-call" label="One call" default>
+
+`openChannel` asks the node for the channel, checks and records its answer, calls your signer, and hands the signed transaction to the node. It returns the channel id once the node took the transaction.
+
+```ts title="open-channel.ts"
+const channelId = await sdk.openChannel(amountShannons, userLock, signFundingInputs);
+```
+
+With cell deps for the lock:
+
+```ts title="open-channel.ts"
+// The cell deps the node needs to spend a lock outside the chain's genesis scripts.
+const userLockCellDeps: CellDep[] = [{ outPoint: { txHash: lockCodeTxHash, index: 0 }, depType: "code" }];
+
+const channelId = await sdk.openChannel("50000000000", userLock, signFundingInputs, userLockCellDeps);
+```
+
+</TabItem>
+<TabItem value="split" label="Prepare, then submit">
+
+Use the split flow when the signature happens outside the call: a hardware wallet, a backend, or a user who confirms later. `prepareChannelOpen` returns the channel id, the unsigned funding transaction and the terms the node agreed to (`openingContext`). `submitFundingTx` takes the **whole signed transaction** and refuses one that is not the transaction the opening froze.
+
+```ts title="open-channel.ts"
+// 1. Ask the node for the channel. The answer is checked and pinned before it is returned.
+const { channelId, unsignedFundingTx, openingContext } = await sdk.prepareChannelOpen("50000000000", userLock);
+
+// 2. Show the terms and sign wherever the keys are.
+await confirmWithUser({
+    fundedShannons: openingContext.localAmountShannons,
+    reserveShannons: openingContext.localReservedCkbShannons,
+});
+const signedTx = await hardwareWallet.sign(unsignedFundingTx);
+
+// 3. Hand the signed tx back. It is refused unless it is the tx the opening froze.
+await sdk.submitFundingTx(channelId, signedTx);
+```
+
+The returned objects are copies: changing them changes nothing the device keeps. Your signer's checks from Step 2 apply here just the same.
+
+</TabItem>
+</Tabs>
+
+`prepareChannelOpen` can block for a while: the node agrees the channel with the LSP before it answers. Give your `fetch` a timeout long enough for it (see [React Native](/docs/guides/react-native) for an example).
+
+## Step 4: Wait for the channel to be ready
+
+Once the node took the signed transaction, it carries the opening on with the LSP. When the channel reaches its ready state, the poller reports it:
+
+```ts title="open-channel.ts"
+const unsubscribe = sdk.onEvent((event) => {
+    if (event.type === "CHANNEL_READY") console.log("channel ready", event.channelId);
+    if (event.type === "CHANNEL_CLOSED") console.log("channel closed", event.channelId); // an aborted opening too
+});
+```
+
+While the channel opens, the poller already signs its first commitments, so keep the SDK connected. `listChannels` shows it as `opening` meanwhile.
+
+## What the device checks
+
+Before anything is recorded or handed to your signer, the SDK holds the node's answer to the request. Every failure here is `opening_rejected`, its message naming the field:
+
+- The peer's keys are valid and not the device's own, and the channel id is the one those keys produce.
+- The commitment delay and fee rate are the ones the device sent (Fiber's defaults: one epoch and 1000 shannons per kilobyte).
+- The local amount is the amount funded, and both reserves are what the device computes for each side's lock.
+- Output 0 of the funding transaction is the channel's cell: the network's funding lock over both funding keys, no type script, no data, and a capacity of exactly both amounts.
+
+Then it records the channel and its terms, so any later signing request is held to them, and starts watching it. Only then does your signer see the transaction. Learn why in [No blind signing](/docs/concepts/no-blind-signing).
+
+## The pending opening, and resuming after a crash
+
+The SDK opens **one channel at a time**. Before it asks the node, it records the opening (the amount, the lock and the cell deps) in its storage. That record is how a crash, a lost answer or a timeout is recovered: **call the same method again with the same arguments**. The SDK sends the identical request, and the node answers it with the opening it already froze.
+
+- **Same arguments:** the pending opening resumes. If the node aborted it in the meantime, the SDK starts a fresh one.
+- **Different arguments:** a fresh opening replaces the pending one. The node keeps negotiating the old one until it gives up on it.
+- **Your signer threw:** the opening is kept, so the same call resumes it.
+- **An unfunded opening** is aborted by the node after its funding timeout (300 seconds by default). If it was watched, you get `CHANNEL_CLOSED` for it.
+
+You cannot cancel an opening yourself: leave it unfunded and the node aborts it.
+
+## What can go wrong
+
+| Error | When | What to do |
+| --- | --- | --- |
+| `SdkError` `opening_rejected` | The node's answer is not what the device asked for; the message names the field. The pending opening is dropped. | Show it as a refused offer. A retry starts a fresh opening; if it keeps failing, the LSP offers terms the device does not accept. |
+| `SdkError` `opening_conflict` | The answer contradicts what the device already recorded (the channel id or index belongs to another channel). The policy's error is its `cause`. | Do not retry blindly: report it, it means the node's answer is inconsistent. |
+| `SdkError` `funding_tx_altered` | The signed transaction handed to `submitFundingTx` is not the one the opening froze. | Submit the transaction `prepareChannelOpen` returned, signed, with nothing else changed. |
+| `SdkError` `clock_before_floor` | The device's clock reads a date before the SDK's floor. | Ask the user to fix the date. |
+| `SdkError` `unknown_channel` | `submitFundingTx` named a channel this device never registered. | Use the `channelId` the opening returned. |
+| `RpcTransportError`, `RpcResponseError` | The call may or may not have run, or its answer could not be read. The pending opening is kept. | Call again with the same arguments to resume it. |
+| `RpcError` | The node refused. Fiber's "tenant opening interrupted; retry the same request" is one of them. The pending opening is kept. | Retry the same call; show `message` if it keeps failing. |
+| Your signer's error | Whatever it threw comes through unchanged. | Fix the cause and call again with the same arguments. |
+| `TypeError`, `RangeError` | A malformed argument, an amount out of range, or a signer result that is not a list of byte arrays. Nothing was sent. | A bug in the call. |
+
+```ts title="open-channel.ts"
+try {
+    const channelId = await sdk.openChannel("50000000000", userLock, signFundingInputs);
+    console.log("funding tx submitted for", channelId);
+} catch (error) {
+    if (error instanceof SdkError) {
+        switch (error.code) {
+            case "opening_rejected": // the node's answer is not what the device asked for
+            case "opening_conflict": // the answer contradicts what the device recorded
+            case "funding_tx_altered": // the tx handed in is not the one the opening froze
+                showError(`The LSP's channel offer was refused: ${error.message}`);
+                break;
+            default:
+                throw error;
+        }
+    } else if (error instanceof RpcTransportError || error instanceof RpcResponseError) {
+        // Unknown outcome: the same call, with the same arguments, resumes the opening.
+        showError("Could not reach the LSP. Try again.");
+    } else if (error instanceof RpcError) {
+        showError(`The LSP refused the channel: ${error.message}`);
+    } else {
+        throw error; // a TypeError or RangeError is a bug in the call, or your signer's own error
+    }
+}
+```
+
+A second `submitFundingTx` of a transaction the node already took is the node's `RpcError` ("Signed funding tx has already been submitted"): the first one counted.
+
+## Next steps
+
+<CardGrid>
+    <Card icon="bolt" title="Receive a payment" to="/docs/guides/receive-a-payment">
+        Create an invoice the device settles once its channel holds the payment.
+    </Card>
+    <Card icon="flag" title="Close a channel" to="/docs/guides/close-a-channel">
+        Close cooperatively, force a close, and list the device's channels.
+    </Card>
+    <Card icon="eye" title="No blind signing" to="/docs/concepts/no-blind-signing">
+        What the device holds every signature to, and why.
+    </Card>
+</CardGrid>

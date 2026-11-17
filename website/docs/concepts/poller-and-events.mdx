@@ -1,0 +1,123 @@
+---
+title: The poller and events
+description: How the SDK polls the node while your app is in the foreground, the five steps of each tick, and how to consume its at-least-once events.
+---
+
+# The poller and events
+
+The device never gets a call from the node. Instead, while your app is open, the SDK polls the node on a timer, answers what it finds, and tells you what happened through events.
+
+## `connect()` and `disconnect()`
+
+Think of them as your app's foreground and background:
+
+```ts title="lifecycle.ts"
+sdk.connect(); // app comes to the foreground
+sdk.disconnect(); // app goes to the background
+```
+
+- **`connect()`** starts the poller and returns at once. The first tick runs immediately. There is no connection to establish, so it cannot fail, and calling it while already polling changes nothing.
+- **`disconnect()`** stops the poller. It never throws: the step in flight is abandoned, nothing of its answer is acted on, and no further tick runs. The instance stays usable, and the next `connect()` polls again.
+
+Constructing the SDK touches nothing: the storage is not read and the node is not called until the first `connect()`. Operations such as `transfer` or `createInvoice` work whether or not you are connected, but their outcomes (and every signature they need) only happen while the poller runs.
+
+:::warning[Background time has a budget]
+A payment needs several signatures in a row, and Fiber force-closes a channel when the device stops answering in the middle of a round for about 30 seconds. Disconnecting while a payment is in flight can cost the channel. A payment that arrives while the app is in the background waits for the next `connect()`. See [Backgrounding](/docs/guides/backgrounding).
+:::
+
+## The poll interval
+
+`pollIntervalMs` sets the pause between ticks. It defaults to [`DEFAULT_POLL_INTERVAL_MS`](/docs/api/variables/DEFAULT_POLL_INTERVAL_MS), 2 seconds, and accepts any whole number of milliseconds from 1 to 2³¹ − 1.
+
+- **The pause starts when a tick ends**, so a slow node never runs two ticks at once.
+- **Some actions poll again at once** instead of waiting: a signature the node accepted (the next step of the round is usually ready), a hold invoice's preimage handed to the node, and the operations `transfer`, `closeChannel`, `forceCloseChannel`, `cancelInvoice` and `setWatchtowerApproval`. A signing round therefore costs its round trips, not an interval per signature.
+- **Each step has 30 seconds.** A step that has not finished by then is reported as an error and the tick moves on, so a request hung across a trip to the background cannot freeze polling.
+
+## The five steps of a tick
+
+Each tick runs five steps, in this order. Every step runs even when an earlier one failed, so, for example, a channel listing that keeps failing never stops a held payment from settling.
+
+| # | Step | What it does | Events |
+| --- | --- | --- | --- |
+| 1 | **Channel** | Lists the node's channels and follows the ones this device opened: ready, closed | `CHANNEL_READY`, `CHANNEL_CLOSED` |
+| 2 | **Signing** | Reads each open channel's signing status, checks and signs a pending request, submits the signature | `SIGNING` |
+| 3 | **Watchtower** | Reads each channel's watchtower status (it matters after a force close) and signs spends the host approved | `WATCHTOWER_SIGNING` |
+| 4 | **Invoice** | Reads each of the device's open hold invoices; once a payment is held in the channels, releases the preimage so the node can settle it | `PAYMENT_PENDING`, `PAYMENT_RECEIVED`, `PAYMENT_EXPIRED`, `PAYMENT_CANCELLED` |
+| 5 | **Payment** | Reads each payment the device sent until it succeeds or fails | `PAYMENT_SENT`, `PAYMENT_FAILED` |
+
+A step with nothing to watch calls nothing. A device with no channel open and no invoice or payment in flight only asks for the watchtower status of the channels it still lists. That also matters to the LSP: it can put an idle tenant to sleep, and only calls about channels, invoices and payments wake it.
+
+The invoice step runs after the two signing steps on purpose: it releases a preimage only once the commitments signed earlier in the same tick hold the payment.
+
+## Events
+
+Subscribe with [`onEvent`](/docs/api/classes/FiberLspSdk#onevent). It returns the function that unsubscribes:
+
+```ts title="events.ts"
+import type { SdkEvent } from "@peersyst/fiber-lsp-sdk";
+
+// The activity events are at least once: remember what you already showed.
+const seen = new Set<string>();
+
+function dedupKey(event: SdkEvent): string | null {
+    switch (event.type) {
+        case "CHANNEL_READY":
+        case "CHANNEL_CLOSED":
+            return `${event.type}:${event.channelId}`;
+        case "PAYMENT_SENT":
+        case "PAYMENT_FAILED":
+        case "PAYMENT_PENDING":
+        case "PAYMENT_RECEIVED":
+        case "PAYMENT_EXPIRED":
+        case "PAYMENT_CANCELLED":
+            return `${event.type}:${event.paymentHashHex}`;
+        default:
+            return null; // SIGNING, WATCHTOWER_SIGNING and ERROR are handled on their own
+    }
+}
+
+const unsubscribe = sdk.onEvent((event) => {
+    const key = dedupKey(event);
+    if (key !== null) {
+        if (seen.has(key)) return;
+        seen.add(key);
+        notify(key);
+    }
+    if (event.type === "ERROR") console.warn(event.error.code, event.error.message, event.error.cause);
+});
+```
+
+Payment hashes in events are `0x`-prefixed lowercase hex, the same form `createInvoice` and `transfer` return. Every event and its payload is listed in [Events](/docs/reference/events).
+
+### At least once, and how to deduplicate
+
+The SDK emits an event and *then* records that it did. A crash or a `disconnect()` between the two repeats the event on the next tick. So your handlers should be idempotent, keyed as follows:
+
+| Events | Delivery | Deduplicate on |
+| --- | --- | --- |
+| `CHANNEL_READY`, `CHANNEL_CLOSED` | At least once | Type + `channelId` |
+| The six `PAYMENT_*` events | At least once | Type + `paymentHashHex` |
+| `SIGNING` | A `signed` or `warning` outcome can repeat when the node serves the request again; a `refused` one is told once per channel, request id and error code | `requestId` |
+| `WATCHTOWER_SIGNING` | A refusal repeats on every tick while the spend waits; a signature can repeat | `requestId` |
+| `ERROR` | Once per failure, never repeated or recorded | Nothing: it is a diagnostic |
+
+### What `ERROR` means
+
+A poll tick has no caller to throw to, so its failures come out as events. An `ERROR` event carries an [`SdkError`](/docs/api/classes/SdkError) whose `code` is `poll_failed`, whose `message` says what failed (often naming the channel, invoice or payment), and whose `cause` is the underlying error: the node unreachable, an answer that cannot be read, your storage throwing, a step past its 30 seconds.
+
+Nothing is lost when it happens: the failed item is retried on the next tick, and the rest of the tick still runs. Log it, and show the user a connectivity hint if it keeps coming, but do not treat it as a refused signature. Refusals are `SIGNING` events (see [No blind signing](/docs/concepts/no-blind-signing#what-a-refusal-looks-like)).
+
+### Listener rules
+
+- **A listener that throws** is ignored: it never breaks the SDK or the other listeners.
+- **An event reaches the listeners subscribed when it was raised.** A listener added while handling an event gets the next one, not that one; a listener removed while handling it still gets that one and nothing after.
+- **A listener must be a function**, or `onEvent` throws a `TypeError`.
+- **Listeners are called synchronously**, and the SDK does not wait for a promise you return. If your listener is `async`, catch its errors yourself: a rejected promise is not caught by the SDK.
+
+## Next steps
+
+<CardGrid>
+  <Card icon="flag" title="Events and errors" to="/docs/guides/events-and-errors">Turn events into notifications and handle errors in a wallet.</Card>
+  <Card icon="devices" title="Backgrounding" to="/docs/guides/backgrounding">When to connect and disconnect on mobile.</Card>
+  <Card icon="book" title="Events reference" to="/docs/reference/events">Every event and its payload.</Card>
+</CardGrid>

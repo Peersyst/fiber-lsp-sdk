@@ -1,0 +1,136 @@
+---
+title: Receive a payment
+description: Create a hold invoice that only the device can settle, follow the payment through its events, and cancel an invoice that should not be paid.
+---
+
+# Receive a payment
+
+To get paid, the device creates an invoice and gives the string to the payer. The invoice is a **hold invoice**: when a payment arrives, the LSP holds it and cannot take it, because only the device has the secret that settles it. The device releases that secret only once its own channels hold the payment.
+
+## What you'll do
+
+- Create an invoice with `createInvoice` and show its string to the payer.
+- Follow the payment with `PAYMENT_PENDING`, `PAYMENT_RECEIVED`, `PAYMENT_EXPIRED` and `PAYMENT_CANCELLED`.
+- Cancel an invoice with `cancelInvoice`.
+
+## Prerequisites
+
+- A registered `FiberLspSdk` with at least one ready channel that has room to receive ([Open a channel](/docs/guides/open-a-channel)).
+- The SDK connected (`connect()`): the poller is what settles a held payment.
+
+:::warning[Fiber's current nonces]
+Under Fiber's current nonce lifecycle, a payment received after one the device already settled on the same channel cannot complete, even with `nonceReuse: "allow"`, and Fiber force-closes the channel. See [Status](/docs/resources/status).
+:::
+
+## How a hold invoice works
+
+1. The device derives a secret (the **preimage**) for each new invoice from its master seed, and its hash goes in the invoice. Nothing secret is stored: the device can always derive it again.
+2. A payer's payment reaches the LSP and is offered to the device's channel, locked to that hash.
+3. The poller sees the invoice has a payment held on it (`PAYMENT_PENDING`). It checks the device's channels: both sides' latest commitments must hold at least the invoice's amount, with enough time left before the payment expires to finish.
+4. Only then does it hand the preimage to the node, and signs the round that moves the funds into the device's balance (`PAYMENT_RECEIVED`).
+
+If those conditions are not met yet, the device waits and checks again on the next tick. The preimage never leaves the device for a payment its channels do not hold.
+
+## Step 1: Create the invoice
+
+`createInvoice(amountShannons, options?)` takes the amount as decimal shannons (above zero) and two options:
+
+| Option | Type | Default | Notes |
+| --- | --- | --- | --- |
+| `description` | `string` | none | At most 639 bytes of UTF-8, Fiber's limit. |
+| `expirySeconds` | `number` | `3600` (one hour) | A whole number of seconds, at least 1. |
+
+It returns `SdkInvoice`: `invoice`, the string to show the payer, and `paymentHashHex`, the `0x`-prefixed hash every event about this invoice carries.
+
+```ts title="receive.ts"
+const { invoice, paymentHashHex } = await sdk.createInvoice("1000000000", {
+    description: "Coffee",
+    expirySeconds: 900, // 15 minutes; one hour when omitted
+});
+showQrCode(invoice); // the string to give the payer
+```
+
+Before you get the string, the SDK checks what the node wrote: it must decode, be for the right network, and carry exactly the amount, hash, expiry and description the device asked for, with the LSP as its route hint. Anything else is `invoice_rejected`.
+
+## Step 2: Follow the payment
+
+```ts title="receive.ts"
+sdk.onEvent((event) => {
+    switch (event.type) {
+        case "PAYMENT_PENDING": // a payment is held on the invoice; the device is settling it
+            setInvoiceStatus(event.paymentHashHex, "pending");
+            break;
+        case "PAYMENT_RECEIVED": // settled: the funds are in the device's channel
+            setInvoiceStatus(event.paymentHashHex, "received");
+            break;
+        case "PAYMENT_EXPIRED": // ended unpaid
+            setInvoiceStatus(event.paymentHashHex, "expired");
+            break;
+        case "PAYMENT_CANCELLED": // ended unpaid, cancelled
+            setInvoiceStatus(event.paymentHashHex, "cancelled");
+            break;
+    }
+});
+sdk.connect();
+```
+
+| Event | What it means | Show the user |
+| --- | --- | --- |
+| `PAYMENT_PENDING` | A payment is held on the invoice. The device is releasing it, which usually takes a few ticks. | "Receiving..." |
+| `PAYMENT_RECEIVED` | The node confirmed the settlement. Final. | "Received" |
+| `PAYMENT_EXPIRED` | The invoice ran out unpaid: either nobody paid in time, or a held payment expired before it could be settled. The preimage never left the device. Final. | "Expired" |
+| `PAYMENT_CANCELLED` | The invoice was cancelled, unpaid. Final. | "Cancelled" |
+
+Events are delivered **at least once**: after a crash or a cut tick, one can come again. Deduplicate on the event type and `paymentHashHex` (see [Events and errors](/docs/guides/events-and-errors)).
+
+:::tip[Keep the app open while receiving]
+Settling a held payment takes the device's signatures, so the poller has to run. If the app goes to the background between `PAYMENT_PENDING` and `PAYMENT_RECEIVED`, the round can run out of time. See [Backgrounding](/docs/guides/backgrounding).
+:::
+
+## Cancel an invoice
+
+`cancelInvoice(paymentHashHex)` ends an invoice unpaid; its preimage is never released afterwards. It takes the hash `createInvoice` returned and settles once the node took the cancel. `PAYMENT_CANCELLED` then confirms it.
+
+```ts title="cancel.ts"
+try {
+    await sdk.cancelInvoice(paymentHashHex);
+} catch (error) {
+    if (error instanceof SdkError && error.code === "invoice_released") {
+        // Too late: the payment is being settled. Wait for PAYMENT_RECEIVED.
+    } else if (error instanceof SdkError && error.code === "unknown_invoice") {
+        // Not an invoice this device created.
+    } else {
+        throw error; // a node or transport error: the same call again is safe
+    }
+}
+```
+
+The device marks the invoice cancelled in its storage **before** it asks the node, so from that moment it never releases the preimage, even if the node call fails. Calling `cancelInvoice` again is safe, and an invoice already cancelled settles without an error. If a payment arrives on an invoice you cancelled, the poller repeats the cancel.
+
+Two cases end without `PAYMENT_CANCELLED`: a cancel whose node call failed and was never retried (the invoice then ends as `PAYMENT_EXPIRED`), and a cancel of an invoice that had already expired.
+
+## What can go wrong
+
+| Error | When | What to do |
+| --- | --- | --- |
+| `RangeError`, `TypeError` | An amount of zero or not decimal, a description over 639 bytes, an expiry that is not a whole number of seconds, a malformed hash. Nothing was sent. | A bug in the call. |
+| `SdkError` `clock_before_floor` | The device's clock reads a date before the SDK's floor. | Ask the user to fix the date. |
+| `SdkError` `invoice_rejected` | The node's invoice string is not the invoice the device asked for; the message names the field. | Do not show that string. Create a new invoice; report it if it repeats. |
+| `RpcError`, `RpcTransportError`, `RpcResponseError` | The node refused, could not be reached, or answered something unreadable. | Create a new invoice. Each attempt is a new invoice with a new hash; a failed one is never paid, since nobody received it. |
+| `SdkError` `unknown_invoice` | `cancelInvoice` named a hash this device has no invoice for. | Check you passed `paymentHashHex` from `createInvoice`. |
+| `SdkError` `invoice_released` | `cancelInvoice` came after the device released the preimage. | It can no longer be cancelled; `PAYMENT_RECEIVED` follows. |
+| `ERROR` event (`poll_failed`) | A tick could not read or settle an invoice. | Retried on the next tick. Log it. |
+
+## Next steps
+
+<CardGrid>
+    <Card icon="bolt" title="Send a payment" to="/docs/guides/send-a-payment">
+        Pay an invoice through the LSP, within a fee budget.
+    </Card>
+    <Card icon="layers" title="Events and errors" to="/docs/guides/events-and-errors">
+        Wire every event into the UI, and deduplicate them.
+    </Card>
+    <Card icon="eye" title="No blind signing" to="/docs/concepts/no-blind-signing">
+        The rules the device signs a received payment under.
+    </Card>
+</CardGrid>
