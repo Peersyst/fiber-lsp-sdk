@@ -1,0 +1,150 @@
+.main {
+    max-width: 60rem;
+    margin: 0 auto;
+    padding: 4rem 1rem 5rem;
+}
+
+.hero {
+    text-align: center;
+    margin-bottom: 3.5rem;
+}
+
+.badges {
+    display: flex;
+    justify-content: center;
+    gap: 0.5rem;
+    margin-bottom: 1.5rem;
+}
+
+.badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.35rem;
+    padding: 0.2rem 0.6rem;
+    border-radius: 6px;
+    background: var(--site-accent-soft);
+    color: var(--ifm-color-primary);
+    font-size: 0.8rem;
+    font-weight: 500;
+}
+
+.title {
+    font-size: clamp(2.2rem, 5vw, 3rem);
+    font-weight: 700;
+    letter-spacing: -0.03em;
+    margin-bottom: 1rem;
+}
+
+.subtitle {
+    max-width: 36rem;
+    margin: 0 auto;
+    font-size: 1.12rem;
+    line-height: 1.55;
+    color: var(--site-text-muted);
+}
+
+.starts {
+    display: flex;
+    flex-direction: column;
+    gap: 3rem;
+}
+
+.startRow {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1.1fr);
+    gap: 2.5rem;
+    align-items: center;
+}
+
+.startRowReverse .startText {
+    order: 2;
+}
+
+.startText h2 {
+    font-size: 1.2rem;
+    margin-bottom: 0.6rem;
+}
+
+.startText p {
+    color: var(--site-text-muted);
+    margin-bottom: 1.25rem;
+}
+
+.startLink {
+    display: table;
+    margin-bottom: 0.9rem;
+    color: var(--site-text);
+    font-weight: 600;
+    text-decoration: underline;
+    text-decoration-color: var(--ifm-color-primary);
+    text-decoration-thickness: 1.5px;
+    text-underline-offset: 4px;
+}
+
+.startLink:hover {
+    color: var(--ifm-color-primary);
+}
+
+.startCode :global(.theme-code-block) {
+    margin-bottom: 0;
+}
+
+.section {
+    margin-top: 4rem;
+    padding-top: 4rem;
+    border-top: 1px solid var(--site-border);
+}
+
+.sectionTitle,
+.sectionTitleCentered {
+    font-size: 1.6rem;
+    font-weight: 650;
+    letter-spacing: -0.02em;
+    margin-bottom: 1.75rem;
+}
+
+.sectionTitleCentered {
+    text-align: center;
+}
+
+.features {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(min(100%, 17rem), 1fr));
+    gap: 1rem;
+}
+
+.feature {
+    display: flex;
+    gap: 1rem;
+    align-items: center;
+    padding: 1.35rem;
+    border: 1px solid var(--site-border);
+    border-radius: 12px;
+}
+
+.featureIcon {
+    display: inline-flex;
+    color: var(--ifm-color-primary);
+}
+
+.featureTitle {
+    font-weight: 600;
+    margin-bottom: 0.15rem;
+}
+
+.featureBody {
+    font-size: 0.9rem;
+    line-height: 1.5;
+    color: var(--site-text-muted);
+}
+
+@media (max-width: 768px) {
+    .startRow {
+        grid-template-columns: minmax(0, 1fr);
+        gap: 1.25rem;
+    }
+
+    .startRowReverse .startText {
+        order: 0;
+    }
+}

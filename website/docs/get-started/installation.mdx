@@ -1,0 +1,107 @@
+---
+title: Installation
+description: Install the Fiber LSP SDK from npm and learn what your app must provide to run it.
+---
+
+import Tabs from "@theme/Tabs";
+import TabItem from "@theme/TabItem";
+
+# Installation
+
+Add one package and you have everything the device needs. The SDK does no I/O of its own, so the only thing you must write yourself is a small storage adapter.
+
+## Install the package
+
+<Tabs groupId="package-manager">
+<TabItem value="pnpm" label="pnpm" default>
+
+```bash
+pnpm add @peersyst/fiber-lsp-sdk
+```
+
+</TabItem>
+<TabItem value="npm" label="npm">
+
+```bash
+npm install @peersyst/fiber-lsp-sdk
+```
+
+</TabItem>
+<TabItem value="yarn" label="yarn">
+
+```bash
+yarn add @peersyst/fiber-lsp-sdk
+```
+
+</TabItem>
+</Tabs>
+
+:::warning[Pre-release]
+The package is at version 0.0.0 and the API may change between releases. See [Status and known limitations](/docs/resources/status).
+:::
+
+## Requirements
+
+- **Node.js 20.19 or later** when you run it in Node. The package's `engines` field asks for `>=20.19.0`.
+- **TypeScript is optional.** The package ships its own type declarations, so you need no `@types` package.
+
+## ESM and CommonJS
+
+The package ships both module formats, with one set of type declarations for both. Use whichever your project uses:
+
+```ts title="ESM"
+import { FiberLspSdk } from "@peersyst/fiber-lsp-sdk";
+```
+
+```js title="CommonJS"
+const { FiberLspSdk } = require("@peersyst/fiber-lsp-sdk");
+```
+
+The runtime dependencies are ESM-only packages, so the CommonJS build loads them through Node's `require(esm)` support. That is why Node 20.19 is the minimum.
+
+## Dependencies
+
+The SDK has exactly four runtime dependencies, all small, audited cryptography libraries:
+
+| Package             | Used for                                       |
+| ------------------- | ---------------------------------------------- |
+| `@noble/curves`     | secp256k1 keys and signatures                  |
+| `@noble/hashes`     | blake2b and SHA-256                            |
+| `@scure/bip32`      | The hardened path that derives the master seed |
+| `@scure/btc-signer` | musig2 (BIP-327) partial signatures            |
+
+They are declared as caret ranges (`^2.2.0`), not exact versions. If your app already uses one of them on the same major version, your package manager installs a single copy instead of two. An app still on version 1 of these libraries installs both lines side by side, each resolved by the code that imports it.
+
+## No polyfills
+
+The SDK needs no polyfill in any supported runtime. The only web API it uses that a runtime could lack is `TextEncoder`, which Node, browsers and Hermes all provide. It never draws randomness, so it does not need `crypto.getRandomValues` either.
+
+:::note
+Your own app may still need a random source. The tenant registration takes a 32-byte request id that you generate, so on React Native you need a secure random polyfill for that call. See [Register a tenant](/docs/guides/register-a-tenant).
+:::
+
+## What your app provides
+
+The SDK never reaches the platform directly. You hand it every external effect when you construct `FiberLspSdk`, and three of the four have defaults:
+
+| Effect    | Type                                     | Default                                     |
+| --------- | ---------------------------------------- | ------------------------------------------- |
+| `storage` | `ISignerStorage` or `IAsyncSignerStorage` | None: you must provide it                    |
+| `fetch`   | `IFetchLike`                             | The runtime's global `fetch`                |
+| `timer`   | `ITimer`                                 | The runtime's `setTimeout` and `clearTimeout` |
+| `now`     | `() => number`                           | `Date.now`                                  |
+
+**Storage** is the one you must write. It is a string key-value store with `get` and `set`, synchronous or asynchronous. It holds the device's signing records, so it must survive restarts and must never be restored to an older state. [Storage](/docs/concepts/storage) explains what to build it on.
+
+**Fetch and the timer** are read from the global scope once, at construction. Override them when you need to, for example to add a request timeout on React Native.
+
+## Next steps
+
+<CardGrid>
+<Card icon="rocket" title="Quickstart" to="/docs/get-started/quickstart">
+Build a working wallet flow in one page.
+</Card>
+<Card icon="devices" title="Runtimes" to="/docs/get-started/runtimes">
+What changes between Node, browsers and React Native.
+</Card>
+</CardGrid>

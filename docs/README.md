@@ -1,6 +1,7 @@
 # Docs
 
-Long-form documentation that does not belong in code comments. For commands and repository layout see the root
+Long-form documentation that does not belong in code comments: the design, module by module. The guide for integrators
+is the documentation site in [`../website/`](../website), which links here for the internals. For commands and repository layout see the root
 [README.md](../README.md); for agent guidance see [CLAUDE.md](../CLAUDE.md).
 
 ## Index
@@ -22,5 +23,6 @@ Long-form documentation that does not belong in code comments. For commands and 
 
 ## Conventions
 
-- Keep docs next to the truth of the code: when a documented behavior changes, update the doc in the same change.
+- Keep docs next to the truth of the code: when a documented behavior changes, update the doc in the same change, and the
+  site's page that describes it (`website/docs/`) too.
 - Cross-link rather than duplicate. A fact belongs in exactly one place.

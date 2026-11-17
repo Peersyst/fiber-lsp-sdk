@@ -1,0 +1,171 @@
+/* Sidebar icons, one class per file of static/img/icons/ (sidebars.ts sets the class). */
+
+.sidebar-icon--alert > .menu__link::before,
+.sidebar-icon--alert > div > .menu__link::before {
+    --site-icon: url("/img/icons/alert.svg");
+}
+
+.sidebar-icon--arrow-down > .menu__link::before,
+.sidebar-icon--arrow-down > div > .menu__link::before {
+    --site-icon: url("/img/icons/arrow-down.svg");
+}
+
+.sidebar-icon--arrow-up > .menu__link::before,
+.sidebar-icon--arrow-up > div > .menu__link::before {
+    --site-icon: url("/img/icons/arrow-up.svg");
+}
+
+.sidebar-icon--arrow-up-right > .menu__link::before,
+.sidebar-icon--arrow-up-right > div > .menu__link::before {
+    --site-icon: url("/img/icons/arrow-up-right.svg");
+}
+
+.sidebar-icon--bell > .menu__link::before,
+.sidebar-icon--bell > div > .menu__link::before {
+    --site-icon: url("/img/icons/bell.svg");
+}
+
+.sidebar-icon--bolt > .menu__link::before,
+.sidebar-icon--bolt > div > .menu__link::before {
+    --site-icon: url("/img/icons/bolt.svg");
+}
+
+.sidebar-icon--book > .menu__link::before,
+.sidebar-icon--book > div > .menu__link::before {
+    --site-icon: url("/img/icons/book.svg");
+}
+
+.sidebar-icon--chevron-right > .menu__link::before,
+.sidebar-icon--chevron-right > div > .menu__link::before {
+    --site-icon: url("/img/icons/chevron-right.svg");
+}
+
+.sidebar-icon--code > .menu__link::before,
+.sidebar-icon--code > div > .menu__link::before {
+    --site-icon: url("/img/icons/code.svg");
+}
+
+.sidebar-icon--compass > .menu__link::before,
+.sidebar-icon--compass > div > .menu__link::before {
+    --site-icon: url("/img/icons/compass.svg");
+}
+
+.sidebar-icon--database > .menu__link::before,
+.sidebar-icon--database > div > .menu__link::before {
+    --site-icon: url("/img/icons/database.svg");
+}
+
+.sidebar-icon--devices > .menu__link::before,
+.sidebar-icon--devices > div > .menu__link::before {
+    --site-icon: url("/img/icons/devices.svg");
+}
+
+.sidebar-icon--eye > .menu__link::before,
+.sidebar-icon--eye > div > .menu__link::before {
+    --site-icon: url("/img/icons/eye.svg");
+}
+
+.sidebar-icon--flag > .menu__link::before,
+.sidebar-icon--flag > div > .menu__link::before {
+    --site-icon: url("/img/icons/flag.svg");
+}
+
+.sidebar-icon--globe > .menu__link::before,
+.sidebar-icon--globe > div > .menu__link::before {
+    --site-icon: url("/img/icons/globe.svg");
+}
+
+.sidebar-icon--hash > .menu__link::before,
+.sidebar-icon--hash > div > .menu__link::before {
+    --site-icon: url("/img/icons/hash.svg");
+}
+
+.sidebar-icon--help > .menu__link::before,
+.sidebar-icon--help > div > .menu__link::before {
+    --site-icon: url("/img/icons/help.svg");
+}
+
+.sidebar-icon--home > .menu__link::before,
+.sidebar-icon--home > div > .menu__link::before {
+    --site-icon: url("/img/icons/home.svg");
+}
+
+.sidebar-icon--key > .menu__link::before,
+.sidebar-icon--key > div > .menu__link::before {
+    --site-icon: url("/img/icons/key.svg");
+}
+
+.sidebar-icon--layers > .menu__link::before,
+.sidebar-icon--layers > div > .menu__link::before {
+    --site-icon: url("/img/icons/layers.svg");
+}
+
+.sidebar-icon--link > .menu__link::before,
+.sidebar-icon--link > div > .menu__link::before {
+    --site-icon: url("/img/icons/link.svg");
+}
+
+.sidebar-icon--list > .menu__link::before,
+.sidebar-icon--list > div > .menu__link::before {
+    --site-icon: url("/img/icons/list.svg");
+}
+
+.sidebar-icon--lock > .menu__link::before,
+.sidebar-icon--lock > div > .menu__link::before {
+    --site-icon: url("/img/icons/lock.svg");
+}
+
+.sidebar-icon--moon > .menu__link::before,
+.sidebar-icon--moon > div > .menu__link::before {
+    --site-icon: url("/img/icons/moon.svg");
+}
+
+.sidebar-icon--package > .menu__link::before,
+.sidebar-icon--package > div > .menu__link::before {
+    --site-icon: url("/img/icons/package.svg");
+}
+
+.sidebar-icon--phone > .menu__link::before,
+.sidebar-icon--phone > div > .menu__link::before {
+    --site-icon: url("/img/icons/phone.svg");
+}
+
+.sidebar-icon--refresh > .menu__link::before,
+.sidebar-icon--refresh > div > .menu__link::before {
+    --site-icon: url("/img/icons/refresh.svg");
+}
+
+.sidebar-icon--rocket > .menu__link::before,
+.sidebar-icon--rocket > div > .menu__link::before {
+    --site-icon: url("/img/icons/rocket.svg");
+}
+
+.sidebar-icon--scan > .menu__link::before,
+.sidebar-icon--scan > div > .menu__link::before {
+    --site-icon: url("/img/icons/scan.svg");
+}
+
+.sidebar-icon--server > .menu__link::before,
+.sidebar-icon--server > div > .menu__link::before {
+    --site-icon: url("/img/icons/server.svg");
+}
+
+.sidebar-icon--shield > .menu__link::before,
+.sidebar-icon--shield > div > .menu__link::before {
+    --site-icon: url("/img/icons/shield.svg");
+}
+
+.sidebar-icon--sliders > .menu__link::before,
+.sidebar-icon--sliders > div > .menu__link::before {
+    --site-icon: url("/img/icons/sliders.svg");
+}
+
+.sidebar-icon--user-plus > .menu__link::before,
+.sidebar-icon--user-plus > div > .menu__link::before {
+    --site-icon: url("/img/icons/user-plus.svg");
+}
+
+.sidebar-icon--x-circle > .menu__link::before,
+.sidebar-icon--x-circle > div > .menu__link::before {
+    --site-icon: url("/img/icons/x-circle.svg");
+}

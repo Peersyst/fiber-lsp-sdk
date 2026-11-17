@@ -61,11 +61,15 @@ test/tests/     Specs, mirroring the src tree one-to-one
 test/mocks/     Doubles of the injected effects, one folder per module
 test/utils/     Shared test helpers
 docs/           Long-form documentation, indexed by docs/README.md
+website/        The documentation site (Docusaurus), with the API reference generated from src/index.ts
 interop/        Rust harness and the generated cross-implementation vectors
 e2e/agent/      The device of fiber's e2e suites, run by the SDK, and its own scenarios on the devnet or testnet (private)
 ```
 
 ## Documentation
+
+The guide for integrators (getting started, concepts, guides, reference and the generated API reference) is the
+documentation site in [`website/`](./website). The design write-ups below are its internals.
 
 Full index in [docs/README.md](./docs/README.md). The load-bearing ones:
 

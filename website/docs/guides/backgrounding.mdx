@@ -1,0 +1,113 @@
+---
+title: Backgrounding
+description: How long a device can be away in the middle of a signing round, what happens when it is away too long, and how to keep a wallet inside the budget.
+---
+
+# Backgrounding
+
+The device signs every update of its channels, and the LSP node waits for those signatures. Most of the time that wait is long and nothing is lost if the app is closed. In the middle of a **signing round**, though, Fiber gives the device only seconds, and a device that is away too long loses the channel to a force close. This guide explains that budget in plain words and how to design around it.
+
+## What you'll learn
+
+- What `connect()` and `disconnect()` do, and how fast the poller answers in the foreground.
+- The two clocks that limit an absent device: the round's budget, and the signing deadline `deadlineMs`.
+- What happens when the device is away too long, and how to keep the user inside the budget.
+
+## Foreground and background
+
+`connect()` is the app's foreground: it starts the poller and returns. There is no link to establish, so it cannot fail, and calling it while polling changes nothing. `disconnect()` is the background: it stops the poller and abandons the step in flight, so nothing of it is acted on. It never throws, and the next `connect()` resumes polling.
+
+In the foreground, the poller reads the node every `pollIntervalMs` (2 seconds by default). When the node takes a signature, the poller asks for the next tick at once instead of waiting out the interval, so a round costs its round trips, not an interval per signature. A connected device in the foreground finishes a round in a few seconds.
+
+Everything the device needs to answer waits on the node until the device comes back: the node never calls the device.
+
+## The round's budget
+
+A payment or a close moves a channel through a **round**: a short exchange of signatures between the device and the LSP's node. Before a round is under way, the device is only held to the signing deadline (below). Once the device has sent its part, Fiber starts a timer:
+
+- After the device's **commitment signature**, Fiber force-closes the channel 30 seconds later unless the device has taken the LSP's revocation in reply.
+- After the device's **revocation** (or the LSP's, while the device still owes its own), Fiber force-closes the channel at its first channel check past 30 seconds. Release nodes check every 60 seconds, so the close lands between 30 and about 90 seconds later.
+
+In plain words: **once a round is under way, treat 30 seconds as the budget**. In tests, a device that came back 21 seconds after its revocation finished the round. One that came back past the latest close (45 seconds on a local devnet, 102 seconds against release nodes on testnet) found its channel force-closed with the payment left unresolved.
+
+Rounds update the channel's balance, so they happen while a payment moves:
+
+| The user is... | The round runs between |
+| --- | --- |
+| Sending a payment | `transfer` resolving and `PAYMENT_SENT` or `PAYMENT_FAILED` |
+| Receiving a payment | The payment arriving (`PAYMENT_PENDING`) and `PAYMENT_RECEIVED` |
+
+:::warning[Fiber's current nonces]
+Separately from the time budget, Fiber's current nonce lifecycle stops some rounds no matter how fast the device is, and Fiber force-closes the channel. See [Status](/docs/resources/status).
+:::
+
+## The signing deadline
+
+Before a round is under way (when the LSP has sent its commitment and waits for the device's, or the device has a round of its own to start) the only limit is the **signing deadline**. While a payment is pending on the channel, Fiber force-closes it once the earliest payment gets too close to its expiry. That is usually hours away, not seconds.
+
+The SDK reports it on `SIGNING` events as `deadlineMs`, milliseconds since the epoch, comparable with `Date.now()`:
+
+- It is present only when the device can compute it: on commitment requests that list at least one pending payment.
+- Its absence does not mean there is no deadline. A revocation, a close, or the commitment that settles a payment still falls under Fiber's deadline.
+- It is an **upper bound**: Fiber may close earlier, never later.
+
+It is for showing, not for scheduling: the device answers every request as soon as it sees it.
+
+```ts title="background-banner.ts"
+// Payments this wallet started or is receiving and has not seen end.
+const inFlight = new Set<string>();
+const refreshBanner = (): void => ui.keepOpenBanner(inFlight.size > 0);
+
+sdk.onEvent((event) => {
+    switch (event.type) {
+        case "PAYMENT_PENDING":
+            inFlight.add(event.paymentHashHex);
+            break;
+        case "PAYMENT_SENT":
+        case "PAYMENT_FAILED":
+        case "PAYMENT_RECEIVED":
+        case "PAYMENT_EXPIRED":
+        case "PAYMENT_CANCELLED":
+            inFlight.delete(event.paymentHashHex);
+            break;
+        case "SIGNING":
+            if (event.deadlineMs !== undefined) ui.signingDeadline(event.channelId, new Date(event.deadlineMs));
+            break;
+    }
+    refreshBanner();
+});
+
+const { paymentHashHex } = await sdk.transfer(encodedInvoice);
+inFlight.add(paymentHashHex);
+refreshBanner();
+```
+
+## If the app is away too long
+
+- **Inside a round, past the budget:** Fiber force-closes the channel, and `CHANNEL_CLOSED` reports it when the app is back. The funds then sit in the commitment's output until the node's watchtower spends them. The device signs those spends only toward the destination you approved, and today Fiber's watchtower pays only the LSP node's own lock ([The watchtower](/docs/concepts/watchtower)).
+- **Outside a round:** nothing is lost. Requests wait on the node, and the poller answers them on the first tick after `connect()`.
+- **A step in flight when the app left** settles when it returns. If it was away more than 30 seconds, the step's own deadline may fire first and report a `poll_failed` `ERROR` once. Either way, the next tick reads everything afresh.
+
+On Android, a backgrounded app stops polling even without `disconnect()`, and recent versions freeze it completely. A killed app is in the same position until it is relaunched and builds the SDK again on the same storage. See [React Native](/docs/guides/react-native).
+
+## Recommendations
+
+- **Call `connect()` as soon as the app is active again**, and subscribe to events before it.
+- **Keep the user in the app while a payment is in flight.** Show a "keep the app open" banner from `transfer` or `PAYMENT_PENDING` until the payment's final event.
+- **Do not start payments or closes when the app is about to go away**, for example from a notification action that backgrounds the app right after.
+- **Keep the poll interval short.** When the next request of a round is not ready on the immediate tick, the poller waits a full interval for it. The default of 2 seconds leaves most of the budget for the network.
+- **Show `deadlineMs`** when it is near, so a user who must leave knows how long they have.
+
+## Next steps
+
+<CardGrid>
+    <Card icon="devices" title="React Native" to="/docs/guides/react-native">
+        What Android does to a backgrounded app, and the setup it needs.
+    </Card>
+    <Card icon="compass" title="The poller and events" to="/docs/concepts/poller-and-events">
+        How a tick runs its steps, and what each one reads.
+    </Card>
+    <Card icon="flag" title="Status" to="/docs/resources/status">
+        What works against Fiber today, and what does not yet.
+    </Card>
+</CardGrid>

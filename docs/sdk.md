@@ -122,7 +122,7 @@ double and the flows"). Before that, answering the peer's `commitment_signed` or
 bounded only by the TLC's safety deadline (below). In a round the peer started, a device back 21 s after its
 revocation finished the round, and one back past the latest close (45 s on the devnet, 102 s against release nodes on
 testnet) lost its channel, closed uncooperatively with the payment left unresolved. A device in the foreground at the
-default five-second poll signs one step per channel per tick, and the next one at once after a hold invoice's release,
+default two-second poll signs one step per channel per tick, and the next one at once after a hold invoice's release,
 which polls again.
 
 ## Events
@@ -225,8 +225,8 @@ not a condition of the device's. The amount of an opening is the policy's to bou
 `RangeError` too, before anything is written.
 
 What is not a condition of the device's comes through as its own error, unwrapped: the node's answers, through the rpc
-client's three errors ([rpc.md](./rpc.md)), on an opening, a submission, a listing, an invoice's creation, a payment's
-send and a close, but for the node's answers that a session under the hash already exists (`payment_in_flight`, the
+client's three errors ([rpc.md](./rpc.md)), on an opening, a submission, a listing, an invoice's creation, an invoice's
+cancel, a payment's send and a close, but for the node's answers that a session under the hash already exists (`payment_in_flight`, the
 `RpcError` its
 cause); the
 policy's own refusal of an invoice record it cannot take; the host's own effects, a storage

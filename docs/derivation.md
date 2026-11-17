@@ -275,9 +275,9 @@ invoice's record ([persistence.md](./persistence.md)) and derives the preimage a
 fiber generates the channel seed **randomly** on the node. The SDK derives it from the master seed instead. The change is
 deliberate and cuts both ways.
 
-**For:** full recoverability. Mnemonic plus channel index regenerates every key. Losing the device, or losing the SDK's local
-storage, is not losing funds: counters and balances are reseeded from the state the node sends, and monotonicity protects against
-being rolled back.
+**For:** full recoverability of the keys. Mnemonic plus channel index regenerates every key, so losing the device or the SDK's
+local storage does not lose them. The signing state the storage held is another matter: rebuilding it is not implemented
+([persistence.md](./persistence.md), "Recovery").
 
 **Against:** the channel index becomes part of the state to recover — you have to know how many channels existed — and all
 security rests on the master seed. It also means the scheme is a consensus with our future selves: changing it orphans existing

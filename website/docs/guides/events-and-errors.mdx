@@ -1,0 +1,203 @@
+---
+title: Events and errors
+description: Wire the SDK's events into a wallet UI with full type narrowing and deduplication, and handle every error it throws by what you can conclude from it.
+---
+
+# Events and errors
+
+Most of what happens to a channel happens while no call of yours is running: the poller reads the node, signs, and reports what it saw as **events**. The calls you do make fail in a small number of well-defined ways, each an error you can branch on. This guide wires both into a wallet.
+
+## What you'll do
+
+- Subscribe one listener with `onEvent`, narrow each event on its `type`, and deduplicate the ones that can repeat.
+- Decide which events the user sees and which go to your logs.
+- Turn errors into UI: `SdkError` by `code`, the three RPC errors by what they tell you, `TypeError` and `RangeError` as bugs.
+
+For the complete tables, see the [Events reference](/docs/reference/events) and the [Errors reference](/docs/reference/errors).
+
+## Subscribe to events
+
+`onEvent(listener)` subscribes to every event and returns a function that unsubscribes. Subscribe once, before `connect()`, so nothing the first tick reports is missed.
+
+- A listener that throws never breaks the SDK or the other listeners: its error is swallowed. Catch your own errors if you want to see them.
+- A listener added while an event is being delivered gets the next event, not that one.
+
+`SdkEvent` is a union discriminated by `type`, so a `switch` gives each branch its own fields, and a `never` check makes the compiler tell you when an event type is added:
+
+```ts title="events.ts"
+function handle(event: SdkEvent): void {
+    switch (event.type) {
+        case "CHANNEL_READY":
+            return ui.channel(event.channelId, "ready");
+        case "CHANNEL_CLOSED":
+            return ui.channel(event.channelId, "closed");
+        case "PAYMENT_SENT":
+            return ui.payment(event.paymentHashHex, "sent");
+        case "PAYMENT_FAILED":
+            return ui.payment(event.paymentHashHex, "failed", event.reason);
+        case "PAYMENT_PENDING":
+            return ui.payment(event.paymentHashHex, "pending");
+        case "PAYMENT_RECEIVED":
+            return ui.payment(event.paymentHashHex, "received");
+        case "PAYMENT_EXPIRED":
+            return ui.payment(event.paymentHashHex, "expired");
+        case "PAYMENT_CANCELLED":
+            return ui.payment(event.paymentHashHex, "cancelled");
+        case "SIGNING":
+            if (event.outcome === "refused") {
+                log.warn("signing refused", event.channelId, event.transition, event.error.code, event.error.message);
+            } else {
+                log.info("signed", event.channelId, event.transition, event.outcome);
+            }
+            if (event.deadlineMs !== undefined) ui.warnDeadline(event.channelId, event.deadlineMs);
+            return;
+        case "WATCHTOWER_SIGNING":
+            if (event.outcome === "refused") log.warn("watchtower spend refused", event.channelId, event.purpose, event.error.code);
+            else log.info("watchtower spend signed", event.channelId, event.purpose);
+            return;
+        case "ERROR":
+            return log.warn(event.error.code, event.error.message, event.error.cause);
+        default: {
+            // A new event type fails to compile here.
+            const unhandled: never = event;
+            return unhandled;
+        }
+    }
+}
+```
+
+Note the second narrowing on `SIGNING` and `WATCHTOWER_SIGNING`: only `outcome: "refused"` carries `error`.
+
+## Deduplicate
+
+The SDK reports first and records second, so a crash or a cut tick in between repeats the event on the next tick. That makes the channel and payment events **at least once**, and some signing events repeat by design. The key to deduplicate on:
+
+| Event | Repeats when | Key |
+| --- | --- | --- |
+| `CHANNEL_READY`, `CHANNEL_CLOSED` | After a crash or cut tick | `type` + `channelId` |
+| The six `PAYMENT_*` events | After a crash or cut tick | `type` + `paymentHashHex` |
+| `SIGNING` | A signed request is announced again whenever its signature is sent again. A refusal is told once per channel, request and error code, per instance. | `requestId` (and `outcome`) |
+| `WATCHTOWER_SIGNING` | A refused spend is reported on every tick while it waits; a signed one when its signature is sent again. | `requestId` (and `outcome`) |
+| `ERROR` | Every tick while the cause lasts | None: it is a diagnostic |
+
+A `SIGNING` or `WATCHTOWER_SIGNING` with a `null` `requestId` is a status the device could not read, reported on every tick, like an `ERROR`.
+
+```ts title="events.ts"
+// Events are delivered at least once: remember what you already handled.
+const seen = new Set<string>();
+
+function dedupKey(event: SdkEvent): string | null {
+    switch (event.type) {
+        case "CHANNEL_READY":
+        case "CHANNEL_CLOSED":
+            return `${event.type}:${event.channelId}`;
+        case "PAYMENT_SENT":
+        case "PAYMENT_FAILED":
+        case "PAYMENT_PENDING":
+        case "PAYMENT_RECEIVED":
+        case "PAYMENT_EXPIRED":
+        case "PAYMENT_CANCELLED":
+            return `${event.type}:${event.paymentHashHex}`;
+        case "SIGNING":
+        case "WATCHTOWER_SIGNING":
+            return event.requestId === null ? null : `${event.type}:${event.requestId}:${event.outcome}`;
+        case "ERROR":
+            return null;
+    }
+}
+
+const unsubscribe = sdk.onEvent((event) => {
+    const key = dedupKey(event);
+    if (key !== null) {
+        if (seen.has(key)) return;
+        seen.add(key);
+    }
+    handle(event);
+});
+```
+
+An in-memory set is lost on a restart, which is exactly when a repeat happens. The sturdier pattern is to make the handlers idempotent: "set this payment's status to sent" is safe to run twice, "add a notification" is not. Use the set for notifications, and let your own records absorb repeats.
+
+## What to show the user
+
+| Event | Show it? |
+| --- | --- |
+| `CHANNEL_READY`, `CHANNEL_CLOSED` | Yes: update the channel's status. |
+| `PAYMENT_SENT`, `PAYMENT_FAILED` | Yes: the outcome of a payment the user made. `reason` is the node's text, better suited to a details view than a headline. |
+| `PAYMENT_PENDING` | Yes: "receiving". Ask the user to keep the app open until `PAYMENT_RECEIVED` ([Backgrounding](/docs/guides/backgrounding)). |
+| `PAYMENT_RECEIVED`, `PAYMENT_EXPIRED`, `PAYMENT_CANCELLED` | Yes: the outcome of an invoice. |
+| `SIGNING` signed | No: log it. `outcome: "warning"` is a signature made under `nonceReuse: "allow"` on a slot that already served once; log it as a warning. |
+| `SIGNING` refused | Usually log only. A refusal means the device would not sign what the node asked; the channel may be force-closed as a result, which `CHANNEL_CLOSED` will report. |
+| `SIGNING` `deadlineMs` | Worth a banner when it is near: it is the moment Fiber force-closes the channel if the request is still unanswered. It is an upper bound; Fiber may act earlier. |
+| `WATCHTOWER_SIGNING` refused | Log it. After a force close, the funds stay where they are until you approve the spend's destination ([The watchtower](/docs/concepts/watchtower)). |
+| `ERROR` | Log every one. Show a "can't reach the LSP" banner only when they keep coming for a while: a single failed tick is retried on the next. |
+
+## Handle errors
+
+Every call that fails throws one of four kinds of error. Branch on the class first.
+
+### `SdkError`: a condition of the device
+
+`SdkError` has a `code` (one of `SDK_ERROR_CODES`) and, often, the underlying error as `cause`. It is something the device refused or detected, and the guide of each operation says what to do:
+
+| Code | From | Guide |
+| --- | --- | --- |
+| `clock_before_floor` | `openChannel`, `prepareChannelOpen`, `createInvoice` | Ask the user to fix the device's date. |
+| `unknown_channel` | `submitFundingTx`, `closeChannel`, `channelEvidence` | [Close a channel](/docs/guides/close-a-channel) |
+| `opening_rejected`, `opening_conflict`, `funding_tx_altered` | The opening | [Open a channel](/docs/guides/open-a-channel) |
+| `invoice_rejected`, `unknown_invoice`, `invoice_released` | Invoices | [Receive a payment](/docs/guides/receive-a-payment) |
+| `invoice_unpayable`, `payment_in_flight`, `payment_charged`, `own_invoice` | `transfer` | [Send a payment](/docs/guides/send-a-payment) |
+| `close_fee_too_high` | `closeChannel` | [Close a channel](/docs/guides/close-a-channel) |
+| `poll_failed` | `ERROR` events only | Log it; it is retried on the next tick. |
+
+### The RPC errors: what the node did
+
+Errors of the node come through as they are, not wrapped. Each tells you something different about whether the call ran:
+
+| Error | What you know | Typical handling |
+| --- | --- | --- |
+| `RpcTransportError` | Nothing: the call may or may not have run (no response, a non-2xx status, an unreadable body). `status` is the HTTP status when there was one. | Treat the outcome as unknown. Each guide says how to resolve it, usually by retrying the same call or waiting for an event. |
+| `RpcError` | The node refused. `code` is its JSON-RPC code, `message` its text, verbatim. `-32999` is an authentication refusal (check the Biscuit token). | Show `message` where it helps. |
+| `RpcResponseError` | The node answered, but with something the SDK cannot read. `path` names the field. | Treat like an unknown outcome. Report it: it usually means a node version the SDK does not match. |
+
+All three carry `method`, the node method that was called.
+
+### `TypeError` and `RangeError`: bugs
+
+A `TypeError` or `RangeError` from an SDK call means the call itself was wrong: an argument of the wrong shape or out of range. The message names the field. Nothing was sent. Do not show these to the user; fix the call.
+
+Two more things come through as their own errors: whatever your **storage** throws (or a stored record the SDK cannot read), and whatever your **funding signer** throws during `openChannel`.
+
+```ts title="errors.ts"
+const messages: Partial<Record<SdkErrorCode, string>> = {
+    clock_before_floor: "Your device's clock is wrong. Set the date and try again.",
+    invoice_unpayable: "This invoice cannot be paid.",
+    payment_in_flight: "This payment is already on its way.",
+    payment_charged: "This invoice may already have been paid.",
+    own_invoice: "This is one of your own invoices.",
+    close_fee_too_high: "That fee is too high for a close.",
+};
+
+export function describeError(error: unknown): string {
+    if (error instanceof SdkError) return messages[error.code] ?? `Something went wrong (${error.code}).`;
+    if (error instanceof RpcTransportError) return "Could not reach the LSP. Check your connection.";
+    if (error instanceof RpcResponseError) return "The LSP sent an answer the wallet could not read.";
+    if (error instanceof RpcError) return `The LSP refused: ${error.message}`;
+    // TypeError and RangeError are bugs in the call: report them, do not show them.
+    throw error;
+}
+```
+
+## Next steps
+
+<CardGrid>
+    <Card icon="book" title="Events reference" to="/docs/reference/events">
+        Every event and its payload.
+    </Card>
+    <Card icon="book" title="Errors reference" to="/docs/reference/errors">
+        Every error code, its cause and when it is thrown.
+    </Card>
+    <Card icon="compass" title="The poller and events" to="/docs/concepts/poller-and-events">
+        How a tick works, and why events come from it.
+    </Card>
+</CardGrid>

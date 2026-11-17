@@ -3,3 +3,6 @@ dist/
 coverage/
 *.tsbuildinfo
 interop/rust/target/
+website/build/
+website/.docusaurus/
+website/docs/api/
