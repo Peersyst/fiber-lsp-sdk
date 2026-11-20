@@ -1,15 +1,15 @@
 import { hexToBytes } from "@noble/hashes/utils.js";
 import type { RegisterTenantParams } from "../../../src/rpc";
-import { RPC_TENANT_RUNTIME_STATUSES, decodeRegisterTenantResult, encodeRegisterTenantParams } from "../../../src/rpc";
+import { RPC_TENANT_RUNTIME_STATUSES, decodeLspNodeStatus, decodeRegisterTenantResult, encodeRegisterTenantParams } from "../../../src/rpc";
 import { refusal } from "../../utils/refusal";
 import { RPC_RESULT_PATH as RESULT, resultField as result } from "../../utils/rpc-answers";
-import { toRegisterTenantParams, toRegisterTenantResult, withoutNulls } from "../../utils/rpc-typed";
+import { toLspNodeStatus, toRegisterTenantParams, toRegisterTenantResult, withoutNulls } from "../../utils/rpc-typed";
 import { loadRpcVectors } from "../../utils/rpc-vectors";
 import { ABOVE_U64, U64_MAX_HEX } from "../../utils/uint-hex";
 import { withField } from "../../utils/with-field";
 
 const vectors = loadRpcVectors();
-const { lsp_register_tenant: register } = vectors.methods;
+const { lsp_register_tenant: register, lsp_get_status: lspStatus } = vectors.methods;
 
 const ROOT_SIGNER = `02${"ab".repeat(32)}`;
 const INVOICE_PUBKEY = `02${"ef".repeat(32)}`;
@@ -56,6 +56,15 @@ const ACTIVE_TENANT = {
 const REGISTERED = { tenant: COLD_TENANT, access_token: ACCESS_TOKEN };
 
 const REGISTERED_ACTIVE = { tenant: ACTIVE_TENANT, access_token: ACCESS_TOKEN };
+
+const NODE_ID = "0255e0d170cb368fd5bc1e8d6d199d778e65c3ff096ae15ef9dedef2b8da98aa0d";
+
+const NODE_STATUS = {
+    public_node_id: NODE_ID,
+    tenant_store_root: "/var/lib/fiber/tenants",
+    registered_tenants: "0x3",
+    active_tenants: "0x1",
+};
 
 describe("lsp_register_tenant", () => {
     describe("encodeRegisterTenantParams", () => {
@@ -280,6 +289,86 @@ describe("lsp_register_tenant", () => {
 
         it.each([null, [], ACCESS_TOKEN])("refuses the result %p, which is not an object", (value) => {
             expect(refusal(() => decodeRegisterTenantResult(result(value))).message).toBe(`${RESULT} must be an object`);
+        });
+    });
+});
+
+describe("lsp_get_status", () => {
+    describe("decodeLspNodeStatus", () => {
+        it.each(lspStatus.results.map((entry) => [entry.name, entry] as const))("reads the %s", (_, entry) => {
+            expect(decodeLspNodeStatus(result(entry.json))).toEqual(toLspNodeStatus(entry.values));
+        });
+
+        it("reads the node's key as bytes, its store root as written and its counts as integers", () => {
+            expect(decodeLspNodeStatus(result(NODE_STATUS))).toEqual({
+                publicNodeId: hexToBytes(NODE_ID),
+                tenantStoreRoot: "/var/lib/fiber/tenants",
+                registeredTenants: 3n,
+                activeTenants: 1n,
+            });
+        });
+
+        it("reads the bounds of the counts and an empty store root", () => {
+            const zero = decodeLspNodeStatus(
+                result({ ...NODE_STATUS, tenant_store_root: "", registered_tenants: "0x0", active_tenants: "0x0" }),
+            );
+            expect(zero).toMatchObject({ tenantStoreRoot: "", registeredTenants: 0n, activeTenants: 0n });
+            const largest = decodeLspNodeStatus(result({ ...NODE_STATUS, registered_tenants: U64_MAX_HEX, active_tenants: U64_MAX_HEX }));
+            expect(largest).toMatchObject({ registeredTenants: 2n ** 64n - 1n, activeTenants: 2n ** 64n - 1n });
+        });
+
+        it("ignores the members it does not read", () => {
+            expect(decodeLspNodeStatus(result({ ...NODE_STATUS, watchtower_node_id: 5, uptime: null }))).toEqual(
+                decodeLspNodeStatus(result(NODE_STATUS)),
+            );
+        });
+
+        it.each([
+            ["public_node_id", undefined],
+            ["public_node_id", null],
+            ["public_node_id", 1],
+            ["public_node_id", `0x${NODE_ID}`],
+            ["public_node_id", NODE_ID.slice(2)],
+            ["public_node_id", `${NODE_ID}00`],
+            ["public_node_id", NODE_ID.toUpperCase()],
+            ["public_node_id", `02${"00".repeat(32)}`],
+            ["public_node_id", `05${NODE_ID.slice(2)}`],
+            ["tenant_store_root", undefined],
+            ["tenant_store_root", null],
+            ["tenant_store_root", 1],
+            ["tenant_store_root", ["/var/lib/fiber/tenants"]],
+            ["registered_tenants", undefined],
+            ["registered_tenants", null],
+            ["registered_tenants", 3],
+            ["registered_tenants", "3"],
+            ["registered_tenants", "0x03"],
+            ["registered_tenants", "0X3"],
+            ["registered_tenants", ABOVE_U64],
+            ["active_tenants", undefined],
+            ["active_tenants", null],
+            ["active_tenants", 1],
+            ["active_tenants", "1"],
+            ["active_tenants", "0x01"],
+            ["active_tenants", "0X1"],
+            ["active_tenants", ABOVE_U64],
+        ])("refuses %s = %p, naming the field from the result", (path, value) => {
+            expect(refusal(() => decodeLspNodeStatus(result(withField(NODE_STATUS, path, value)))).path).toBe(`${RESULT}.${path}`);
+        });
+
+        it("says that the node's key has to be a point", () => {
+            expect(refusal(() => decodeLspNodeStatus(result({ ...NODE_STATUS, public_node_id: `02${"00".repeat(32)}` }))).message).toBe(
+                `${RESULT}.public_node_id must be a compressed point on secp256k1`,
+            );
+        });
+
+        it("says that a count has to fit in a u64", () => {
+            expect(refusal(() => decodeLspNodeStatus(result({ ...NODE_STATUS, active_tenants: ABOVE_U64 }))).message).toBe(
+                `${RESULT}.active_tenants must be at most ${2n ** 64n - 1n}`,
+            );
+        });
+
+        it.each([null, [], NODE_ID])("refuses the result %p, which is not an object", (value) => {
+            expect(refusal(() => decodeLspNodeStatus(result(value))).message).toBe(`${RESULT} must be an object`);
         });
     });
 });

@@ -1,22 +1,40 @@
 import { bytesToHex, hexToBytes } from "@noble/hashes/utils.js";
-import { decodeInvoice } from "../invoice";
+import { decodeInvoice, findInvoiceAttribute } from "../invoice";
 import type { HoldInvoiceErrorCode, PolicyEngine } from "../policy";
 import { HoldInvoiceError } from "../policy";
 import type { FiberRpcClient, RpcInvoice } from "../rpc";
 import type { HoldInvoicePreimages } from "../signer";
 import { tlcExpiryDelay } from "../signer";
 import type { ActivityTracker } from "./activity";
+import type { PaymentHistory } from "./payment-history";
 import { cancelInvoiceOnNode } from "./invoice-cancelling";
 import type { PollRun, PollStep } from "./poller";
-import { SDK_INVOICE_ALREADY_PAID_ERROR, SDK_RELEASE_EXPIRY_SLACK_MS } from "./sdk.constants";
+import {
+    SDK_INVOICE_ALREADY_PAID_ERROR,
+    SDK_RECEIVE_CANCELLED_REASON,
+    SDK_RECEIVE_EXPIRED_REASON,
+    SDK_RELEASE_EXPIRY_SLACK_MS,
+} from "./sdk.constants";
 import type { ActivityEntry, SdkEvent } from "./sdk.types";
-import { answerEachPolled, assertSdkAnsweredHash, computeSdkInvoiceExpiryMs, deliverStepEvent, isFiberRefusal } from "./utils";
+import type { PaymentHistoryReceive } from "./utils";
+import {
+    answerEachPolled,
+    arrivedReceiveRecord,
+    assertSdkAnsweredHash,
+    computeSdkInvoiceExpiryMs,
+    deliverStepEvent,
+    isFiberRefusal,
+    readSdkClock,
+    settlePaymentRecord,
+    toSdkPaymentRecord,
+} from "./utils";
 
 export type InvoiceStepOptions = {
     rpc: FiberRpcClient;
     policy: PolicyEngine;
     preimages: HoldInvoicePreimages;
     activity: ActivityTracker;
+    history: PaymentHistory;
     /**
      * Fiber's `MILLI_SECONDS_PER_EPOCH`.
      */
@@ -53,11 +71,11 @@ function isPastInvoiceExpiry(invoiceAddress: string, paymentHash: string, nowMs:
 
 /**
  * Builds the poll step that follows each watched invoice, releasing its preimage once its channels hold the payment.
- * @param options The node's client, the policy gate, the preimages, the activity list, the epoch, the clock, the emitter and `pollNow`.
+ * @param options The node's client, the policy gate, the preimages, the activity list, the history, the epoch, the clock, the emitter and `pollNow`.
  * @returns The step; it rejects only when the watched invoices cannot be read.
  */
 export function buildInvoiceStep(options: InvoiceStepOptions): PollStep {
-    const { rpc, policy, preimages, activity, millisecondsPerEpoch, now, emit, pollNow } = options;
+    const { rpc, policy, preimages, activity, history, millisecondsPerEpoch, now, emit, pollNow } = options;
 
     /**
      * Computes the margin a held TLC's expiry must clear for the release, from its channel's pinned delay.
@@ -95,17 +113,72 @@ export function buildInvoiceStep(options: InvoiceStepOptions): PollStep {
     };
 
     /**
-     * Announces an invoice's final status, then stops watching it.
+     * Reads what a receive's record keeps of its invoice: the amount the device recorded, the node's string and its description.
+     * @param paymentHash The payment hash, lowercase hex.
+     * @param invoice The invoice as the node answered it.
+     * @returns The receive.
+     */
+    const receiveOf = async (paymentHash: string, invoice: RpcInvoice): Promise<PaymentHistoryReceive> => {
+        const { amountShannons } = await policy.readHoldInvoice(paymentHash);
+        const decoded = decodeInvoice(invoice.invoiceAddress);
+        assertSdkAnsweredHash("invoice", paymentHash, decoded.paymentHash);
+        return {
+            paymentHashHex: `0x${paymentHash}`,
+            amountShannons,
+            invoice: invoice.invoiceAddress,
+            description: findInvoiceAttribute(decoded, "description")?.text ?? null,
+        };
+    };
+
+    /**
+     * Records that an invoice's payment arrived and announces it.
      * @param run The run.
      * @param paymentHash The payment hash, lowercase hex.
+     * @param invoice The invoice as the node answered it.
+     */
+    const arrive = async (run: PollRun, paymentHash: string, invoice: RpcInvoice): Promise<void> => {
+        const receive = await receiveOf(paymentHash, invoice);
+        if (run.abandoned) return;
+        const nowMs = readSdkClock(now);
+        const record = await history.update(paymentHash, (current) => arrivedReceiveRecord(current, receive, nowMs));
+        // Never `null` for a receive.
+        if (record === null) return;
+        deliverStepEvent(run, emit, { type: "PAYMENT_PENDING", paymentHashHex: `0x${paymentHash}`, payment: toSdkPaymentRecord(record) });
+    };
+
+    /**
+     * Settles an invoice's record, creating a paid one's that never arrived, announces its final status and stops watching it.
+     * @param run The run.
+     * @param paymentHash The payment hash, lowercase hex.
+     * @param invoice The invoice as the node answered it.
      * @param type The event.
      */
     const finish = async (
         run: PollRun,
         paymentHash: string,
+        invoice: RpcInvoice,
         type: "PAYMENT_RECEIVED" | "PAYMENT_EXPIRED" | "PAYMENT_CANCELLED",
     ): Promise<void> => {
-        deliverStepEvent(run, emit, { type, paymentHashHex: `0x${paymentHash}` });
+        const paymentHashHex = `0x${paymentHash}`;
+        if (type === "PAYMENT_RECEIVED") {
+            const receive = await receiveOf(paymentHash, invoice);
+            if (run.abandoned) return;
+            const nowMs = readSdkClock(now);
+            const record = await history.update(paymentHash, (current) =>
+                settlePaymentRecord(arrivedReceiveRecord(current, receive, nowMs), { status: "completed", feeShannons: "0" }, nowMs),
+            );
+            if (record === null) return;
+            deliverStepEvent(run, emit, { type, paymentHashHex, payment: toSdkPaymentRecord(record) });
+        } else {
+            if (run.abandoned) return;
+            const reason = type === "PAYMENT_EXPIRED" ? SDK_RECEIVE_EXPIRED_REASON : SDK_RECEIVE_CANCELLED_REASON;
+            const nowMs = readSdkClock(now);
+            // An invoice nobody paid has no record, and gets none.
+            const record = await history.update(paymentHash, (current) =>
+                settlePaymentRecord(current, { status: "failed", reason }, nowMs),
+            );
+            deliverStepEvent(run, emit, { type, paymentHashHex, payment: record === null ? null : toSdkPaymentRecord(record) });
+        }
         if (run.abandoned) return;
         await activity.forget("invoice", paymentHash);
     };
@@ -145,7 +218,7 @@ export function buildInvoiceStep(options: InvoiceStepOptions): PollStep {
             if (error.code === "cancelled") return;
             // Fiber keeps an invoice whose TLC failed `Received` for good.
             if (isPastInvoiceExpiry(invoice.invoiceAddress, paymentHash, readNow()) && !(await policy.listsHoldInvoiceTlc(paymentHash))) {
-                await finish(run, paymentHash, "PAYMENT_EXPIRED");
+                await finish(run, paymentHash, invoice, "PAYMENT_EXPIRED");
             }
             return;
         }
@@ -166,7 +239,7 @@ export function buildInvoiceStep(options: InvoiceStepOptions): PollStep {
         const { status } = invoice;
         if (status === "Received") {
             if (entry.status !== "Received") {
-                deliverStepEvent(run, emit, { type: "PAYMENT_PENDING", paymentHashHex: `0x${paymentHash}` });
+                await arrive(run, paymentHash, invoice);
                 if (run.abandoned) return;
                 await activity.mark("invoice", paymentHash, "Received");
             }
@@ -176,13 +249,13 @@ export function buildInvoiceStep(options: InvoiceStepOptions): PollStep {
             if (!(await policy.readHoldInvoice(paymentHash)).released) {
                 throw new Error(`the node reports 0x${paymentHash} paid, but the device never released its preimage`);
             }
-            await finish(run, paymentHash, "PAYMENT_RECEIVED");
+            await finish(run, paymentHash, invoice, "PAYMENT_RECEIVED");
         } else if (status === "Expired" || status === "Cancelled") {
             // Only an invoice never released ends unpaid: a released preimage may still pay it, so the anomaly keeps it watched.
             if ((await policy.readHoldInvoice(paymentHash)).released) {
                 throw new Error(`the node reports 0x${paymentHash} ${status.toLowerCase()}, but the device released its preimage`);
             }
-            await finish(run, paymentHash, status === "Expired" ? "PAYMENT_EXPIRED" : "PAYMENT_CANCELLED");
+            await finish(run, paymentHash, invoice, status === "Expired" ? "PAYMENT_EXPIRED" : "PAYMENT_CANCELLED");
         }
     };
 

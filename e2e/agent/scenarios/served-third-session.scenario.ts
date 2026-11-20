@@ -8,11 +8,15 @@ import { CHANNEL_READY_STATE } from "./utils/fiber-node";
 import {
     INVOICE_AMOUNT_SHANNONS,
     isPaymentSent,
+    isSdkEvent,
     OPEN_STEPS,
+    OUTBOUND_AMOUNT_SHANNONS,
+    OUTBOUND_MINIMUM_FEE_SHANNONS,
     RECEIVED_STEPS,
     ScenarioDevice,
     SENT_STEPS,
     signingSteps,
+    untimedRecord,
 } from "./utils/scenario-device";
 import type { SigningStep } from "./utils/scenario-device";
 import { sleep } from "./utils/wait";
@@ -34,9 +38,27 @@ test("a payment the tenant sends completes once the third signing session on C@3
         assert.deepEqual(signingSteps(device.events.slice(0, sendFrom), channelId), OPEN_STEPS, "the opening's signing steps");
 
         const invoice = await device.nodeOneInvoice("served third session");
-        const payment = await device.sdk.transfer(invoice.invoiceAddress);
+        const estimate = await device.sdk.estimateTransferFee(invoice.invoiceAddress, { maxFeeShannons: OUTBOUND_MINIMUM_FEE_SHANNONS });
+        assert.equal(estimate.feeShannons, OUTBOUND_MINIMUM_FEE_SHANNONS, "the estimate, the whole budget");
+        const payment = await device.sdk.transfer(invoice.invoiceAddress, { maxFeeShannons: estimate.feeShannons });
         assert.equal(bareLowerHex(payment.paymentHashHex), bareLowerHex(invoice.paymentHash));
-        await device.waitForEvent(isPaymentSent(payment.paymentHashHex));
+        const sent = await device.waitForEvent(isPaymentSent(payment.paymentHashHex));
+        assert.equal(sent.feeShannons, estimate.feeShannons, "PAYMENT_SENT's fee, the estimate");
+        const sentRecord = {
+            paymentHashHex: payment.paymentHashHex,
+            direction: "send",
+            status: "completed",
+            amountShannons: OUTBOUND_AMOUNT_SHANNONS.toString(),
+            invoice: invoice.invoiceAddress,
+            description: "served third session",
+            maxFeeShannons: estimate.feeShannons,
+            feeShannons: estimate.feeShannons,
+            failedReason: null,
+            createdAtMs: 0,
+            settledAtMs: 0,
+        };
+        assert.deepEqual(untimedRecord(sent.payment), sentRecord, "PAYMENT_SENT's record");
+        assert.deepEqual(await device.sdk.getPayment(payment.paymentHashHex), sent.payment, "the history's record, the event's");
         const sentSteps = await device.waitForSigningSteps(channelId, sendFrom, SERVED_SENT_STEPS.length);
         t.diagnostic(`the payment sent's steps, ms from the first: ${device.signingStepTimes(channelId, sendFrom)}`);
         assert.deepEqual(sentSteps, SERVED_SENT_STEPS);
@@ -51,7 +73,39 @@ test("a payment the tenant sends completes once the third signing session on C@3
         const receiveFrom = device.events.length;
         const received = await device.sdk.createInvoice(INVOICE_AMOUNT_SHANNONS, { description: "after the served session" });
         await node1.sendPayment(received.invoice);
-        await device.waitForPaymentReceived(received.paymentHashHex);
+        const receivedEvent = await device.waitForPaymentReceived(received.paymentHashHex);
+        assert.deepEqual(
+            untimedRecord(receivedEvent.payment),
+            {
+                paymentHashHex: received.paymentHashHex,
+                direction: "receive",
+                status: "completed",
+                amountShannons: INVOICE_AMOUNT_SHANNONS,
+                invoice: received.invoice,
+                description: "after the served session",
+                maxFeeShannons: null,
+                feeShannons: "0",
+                failedReason: null,
+                createdAtMs: 0,
+                settledAtMs: 0,
+            },
+            "PAYMENT_RECEIVED's record",
+        );
+        const pendingEvent = device.events
+            .slice(receiveFrom)
+            .map(({ event }) => event)
+            .find(isSdkEvent("PAYMENT_PENDING", (event) => event.paymentHashHex === received.paymentHashHex));
+        assert.deepEqual(
+            untimedRecord(pendingEvent?.payment ?? null),
+            { ...untimedRecord(receivedEvent.payment), status: "pending", feeShannons: null, settledAtMs: null },
+            "PAYMENT_PENDING's record",
+        );
+        assert.equal(pendingEvent?.payment.createdAtMs, receivedEvent.payment.createdAtMs, "the receive keeps its arrival time");
+        assert.deepEqual(
+            (await device.sdk.listPayments()).map(untimedRecord),
+            [untimedRecord(receivedEvent.payment), sentRecord],
+            "the history, newest first",
+        );
         await node1.waitForPaymentStatus(received.paymentHashHex, "Success");
         // RECEIVED_STEPS repeat, on later slots.
         const receivedSteps = await device.waitForSigningSteps(channelId, receiveFrom, RECEIVED_STEPS.length);

@@ -218,6 +218,8 @@ export type LspTenantStatusVector = {
 
 export type RegisterTenantResultVector = { tenant: LspTenantStatusVector; access_token: string };
 
+export type LspNodeStatusVector = { public_node_id: string; tenant_store_root: string; registered_tenants: string; active_tenants: string };
+
 export type RpcVectorShapes = {
     open_channel_with_external_funding: { params: OpenParamsVector; result: OpenChannelResultVector };
     submit_signed_funding_tx: { params: SubmitSignedFundingTxParamsVector; result: SubmitSignedFundingTxResultVector };
@@ -235,6 +237,8 @@ export type RpcVectorShapes = {
     get_watchtower_signing_status: { params: ChannelIdParamsVector; result: WatchtowerSigningStatusResultVector };
     submit_watchtower_signature: { params: SubmitWatchtowerSignatureParamsVector; result: SubmissionResultVector };
     lsp_register_tenant: { params: RegisterTenantParamsVector; result: RegisterTenantResultVector };
+    // The method takes no params.
+    lsp_get_status: { params: never; result: LspNodeStatusVector };
 };
 
 export type RpcCaseVector<Values> = { name: string; values: Values; json: unknown };
@@ -520,6 +524,10 @@ function asEmptyRecord(value: unknown, path: string): Record<string, never> {
     return {};
 }
 
+function asNoParams(_value: unknown, path: string): never {
+    throw new Error(`${path}: the method takes no params`);
+}
+
 const METHOD_PARSERS: {
     [Method in RpcMethod]: { params: Parser<RpcVectorShapes[Method]["params"]>; result: Parser<RpcVectorShapes[Method]["result"]> };
 } = {
@@ -623,6 +631,11 @@ const METHOD_PARSERS: {
                 access_token: asString(record.access_token, `${path}.access_token`),
             };
         },
+    },
+    lsp_get_status: {
+        params: asNoParams,
+        result: (value, path) =>
+            asStringFields(value, path, ["public_node_id", "tenant_store_root", "registered_tenants", "active_tenants"] as const),
     },
 };
 

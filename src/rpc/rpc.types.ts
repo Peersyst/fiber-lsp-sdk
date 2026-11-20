@@ -18,7 +18,7 @@ export type RpcMethod = (typeof RPC_METHODS)[number];
 
 export type RpcParamsWire = Record<string, unknown>;
 
-export type RpcRequestWire = { jsonrpc: typeof JSON_RPC_VERSION; id: number; method: RpcMethod; params: [RpcParamsWire] };
+export type RpcRequestWire = { jsonrpc: typeof JSON_RPC_VERSION; id: number; method: RpcMethod; params: [] | [RpcParamsWire] };
 
 export type RpcErrorObjectWire = { code: number; message: string };
 
@@ -206,6 +206,13 @@ export type LspTenantStatusWire = {
 
 export type RegisterTenantResultWire = { tenant: LspTenantStatusWire; access_token: string };
 
+export type LspNodeStatusWire = {
+    public_node_id: BareHexWire;
+    tenant_store_root: string;
+    registered_tenants: UintHexWire;
+    active_tenants: UintHexWire;
+};
+
 export type RpcParamsWireByMethod = {
     open_channel_with_external_funding: OpenChannelWithExternalFundingParamsWire;
     submit_signed_funding_tx: SubmitSignedFundingTxParamsWire;
@@ -223,6 +230,7 @@ export type RpcParamsWireByMethod = {
     get_watchtower_signing_status: RpcChannelIdParamsWire;
     submit_watchtower_signature: SubmitWatchtowerSignatureParamsWire;
     lsp_register_tenant: RegisterTenantParamsWire;
+    lsp_get_status: null;
 };
 
 export type OpenChannelWithExternalFundingParams = {
@@ -474,3 +482,13 @@ export type LspTenantChannel = {
 };
 
 export type RegisterTenantResult = { tenant: LspTenantStatus; accessToken: string };
+
+export type LspNodeStatus = {
+    publicNodeId: Uint8Array;
+    tenantStoreRoot: string;
+    registeredTenants: bigint;
+    /**
+     * Tenants whose runtime is resident in the node's process.
+     */
+    activeTenants: bigint;
+};

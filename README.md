@@ -35,7 +35,7 @@ These properties reflect the current specification and may evolve with it while 
 | [`sdk`](./src/sdk)               | Public facade wiring the above: `FiberLspSdk`, its lifecycle, events and errors, the time index, the registration and the operator's client that makes it, the evidence, the channel opening and listing, the hold invoices and their cancel, the payments sent, the cooperative and the forced close, the poller and its five steps |
 
 `derivation`, `digest`, `invoice`, `signer`, `policy`, `wire`, `protocol` and `rpc` are implemented; `sdk` has its core,
-construction, `connect`/`disconnect`, the events, the tenant's registration and token with the operator's side of it (the registration verified and registered through `LspOperatorClient`), a channel's evidence, and the
+construction, `connect`/`disconnect`, the events, the tenant's registration and token with the operator's side of it (the registration verified and registered through `LspOperatorClient`, the LSP's status checked), a channel's evidence, and the
 channel opening, checked against what was asked before anything is signed, with the listing of the node's channels,
 and the hold invoices, each string checked against what was asked and each preimage released only once the device's
 channels hold the payment, with the cancel of an invoice not settled, and the payments sent, each invoice checked before its budget is approved and each outcome
@@ -86,7 +86,7 @@ Full index in [docs/README.md](./docs/README.md). The load-bearing ones:
   with, split by what the caller can conclude, and the channel, invoice, payment and signing methods on top.
 - [What a wallet talks to](./docs/sdk.md): the facade, the effects it is given and their defaults, `connect` and
   `disconnect`, the events and the errors, the time index a wipe cannot reset, the channel opening and the listing, a
-  payment received on a hold invoice, a payment sent with `transfer`, and the poller with its channel, signing,
+  payment received on a hold invoice, a payment sent with `transfer`, its fee estimated and read back, and the poller with its channel, signing,
   watchtower, invoice and payment steps.
 - [Running in React Native](./docs/react-native.md): what the package needs, the storage and the `fetch` the app provides, and
   the poller in the background.
@@ -185,6 +185,11 @@ if (signedAtMs < now - TENANT_REGISTRY_MAX_SIGNED_AT_AGE_MS || signedAtMs > now 
 }
 if (!verifyTenantRegistration(lspPubkey, registration)) throw new Error("invalid registration"); // a malformed field throws instead
 const { tenantId, accessToken } = await operator.registerTenant(registration); // lsp_register_tenant; refuses an answer naming another tenant
+// a spent request id is SdkError "registration_consumed", a proof the node does not accept "registration_invalid"
+
+// At startup: the node must be the LSP the backend and its devices are configured with
+const { publicNodeId } = await operator.getStatus(); // lsp_get_status
+if (bytesToHex(publicNodeId) !== bytesToHex(lspPubkey)) throw new Error("the node is not the configured LSP");
 ```
 
 `computeTenantId(rootSignerPubkey)` gives the tenant id of a key, for a backend that keys its records by it.
@@ -210,6 +215,7 @@ sdk.onEvent((event) => {
   if (event.type === "CHANNEL_CLOSED") hide(event.channelId); // an opening fiber aborted unfunded included
 });
 const channels = await sdk.listChannels(); // channelId, state, the four balances, hasRecord
+const balance = await sdk.getBalance(); // decimal shannons: the ready registered channels, offered TLCs taken out
 ```
 
 A retry with the same arguments resumes the opening the node still holds. A custom `network` object needs its
@@ -242,19 +248,42 @@ released (`invoice_released`); asking again, or for one already cancelled, is no
 
 `transfer` checks the invoice, records the budget the user approves (the amount plus a fee bound, fiber's 0.5% by
 default) so the device signs no more than that, and asks the node to pay through the LSP; the outcome arrives as an
-event:
+event. `estimateTransferFee` takes the same options and tells, beforehand, the fee that `transfer` is charged: through
+the LSP a payment pays its whole budget, and the LSP pays its route to the payee out of it.
 
 ```js
-const { paymentHashHex } = await sdk.transfer(invoice); // or { maxFeeShannons: "1000000" }
+const options = { maxFeeShannons }; // or none, for fiber's 0.5% default
+const { feeShannons } = await sdk.estimateTransferFee(invoice, options); // a dry run: nothing sent, recorded or watched
+showFee(feeShannons); // the fee the user is charged
+try {
+  await sdk.transfer(invoice, options); // the same hash the estimate named
+} catch (error) {
+  if (!(error instanceof SdkError)) throw error; // a TypeError or RangeError is a wrong argument
+  switch (error.code) {
+    case "payment_in_flight":
+    case "payment_session_exists":
+    case "payment_unresolved":
+      break; // still watched: PAYMENT_SENT or PAYMENT_FAILED follows
+    case "insufficient_balance":
+    case "no_route":
+    case "fee_budget_too_low":
+    case "payment_rejected":
+    default:
+      showRefused(error.code); // nothing left, no event follows
+  }
+}
 
 sdk.onEvent((event) => {
-  if (event.type === "PAYMENT_SENT") showSent(event.paymentHashHex);
+  if (event.type === "PAYMENT_SENT") showSent(event.paymentHashHex, event.feeShannons);
   if (event.type === "PAYMENT_FAILED") showFailed(event.paymentHashHex, event.reason);
 });
+
+const payment = await sdk.getPayment(paymentHashHex); // its record: status, amount, fees, dates
+const history = await sdk.listPayments({ limit: 20, offset: 0 }); // newest first
 ```
 
-A transport failure of the call leaves the payment tracked, so one of the two events still follows. A payment that
-may have been made (`payment_charged`) is never sent again.
+A payment that may have been made (`payment_charged`) is never sent again. The SDK keeps the payment history in the same
+storage: every `PAYMENT_*` event carries the payment's record, and an invoice nobody paid is never listed.
 
 ### Closing a channel
 

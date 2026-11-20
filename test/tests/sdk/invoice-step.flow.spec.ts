@@ -4,7 +4,7 @@ import { COMMITMENT_LOCK_TESTNET, FUNDING_LOCK_TESTNET } from "../../../src/dige
 import { decodeInvoice } from "../../../src/invoice";
 import type { IFetchLike } from "../../../src/rpc";
 import { RpcTransportError } from "../../../src/rpc";
-import type { FiberLspSdkOptions, SdkChannelInfo, SdkEvent } from "../../../src/sdk";
+import type { FiberLspSdkOptions, SdkChannelInfo, SdkEvent, SdkPaymentRecord } from "../../../src/sdk";
 import type { HoldInvoicePolicyRecord } from "../../../src/policy";
 import { PolicyEngine, SignerStore } from "../../../src/policy";
 import { FiberLspSdk, SdkError } from "../../../src/sdk";
@@ -166,6 +166,21 @@ function holdRecordOf(h: InvoiceFlow): Promise<HoldInvoicePolicyRecord> {
     return new PolicyEngine(new SignerStore(h.storage)).readHoldInvoice(PAYMENT_HASH.slice(2));
 }
 
+// `null` for an invoice nobody paid.
+function paymentsOf(h: InvoiceFlow): (SdkPaymentRecord | null)[] {
+    return h.events.flatMap((event) => {
+        switch (event.type) {
+            case "PAYMENT_PENDING":
+            case "PAYMENT_RECEIVED":
+            case "PAYMENT_EXPIRED":
+            case "PAYMENT_CANCELLED":
+                return [event.payment];
+            default:
+                return [];
+        }
+    });
+}
+
 function eventsOf(h: InvoiceFlow): string[] {
     return h.events.map((event) => {
         switch (event.type) {
@@ -264,6 +279,23 @@ describe("hold invoices over the tenant node", () => {
             REMOVE_SIGNINGS[3],
         ]);
         expect(pendingWhenPaid).toBe("SendRevokeAndAck Revocation@3 unanswered");
+        const arrived: SdkPaymentRecord = {
+            paymentHashHex: PAYMENT_HASH,
+            direction: "receive",
+            status: "pending",
+            amountShannons: AMOUNT,
+            invoice: created.invoice,
+            description: "coffee",
+            maxFeeShannons: null,
+            feeShannons: null,
+            failedReason: null,
+            createdAtMs: NOW_MS,
+            settledAtMs: null,
+        };
+        const received: SdkPaymentRecord = { ...arrived, status: "completed", feeShannons: "0", settledAtMs: NOW_MS };
+        expect(paymentsOf(h)).toStrictEqual([arrived, received]);
+        expect(await h.sdk.getPayment(PAYMENT_HASH)).toStrictEqual(received);
+        await expect(h.sdk.listPayments()).resolves.toStrictEqual([received]);
         expect(await invoiceOf(h)).toMatchObject({ status: "Paid" });
         expect(await h.sdk.listChannels()).toEqual([
             { ...LISTED, localBalanceShannons: "62250000000", remoteBalanceShannons: "18250000000" },
@@ -533,6 +565,10 @@ describe("hold invoices over the tenant node", () => {
         expect(h.node.calls[from]).toEqual({ method: "cancel_invoice", params: { payment_hash: PAYMENT_HASH } });
         expect((await holdRecordOf(h)).cancelled).toBe(true);
         expect(eventsOf(h)).toEqual(["PAYMENT_CANCELLED invoice"]);
+        // Nobody paid it: the history never holds it.
+        expect(paymentsOf(h)).toEqual([null]);
+        expect(await h.sdk.getPayment(PAYMENT_HASH)).toBeNull();
+        await expect(h.sdk.listPayments()).resolves.toEqual([]);
         expect(await invoiceOf(h)).toMatchObject({ status: "Cancelled" });
         // Forgotten once told: past the expiry the step tells nothing.
         h.clock.nowMs = INVOICE_EXPIRED_MS;

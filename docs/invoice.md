@@ -127,6 +127,13 @@ The barrel lists its exports one by one, as the other ports' do: the four functi
 `findInvoiceAttribute` is the one attribute lookup, which the decoder reads the payee key with and the facade reads a
 string's attributes with ([sdk.md](./sdk.md)).
 
+The package's root publishes `decodeInvoice`, `encodeInvoice` and `findInvoiceAttribute` with the invoice types and
+`InvoiceError`, so a wallet reads the description, the payee key, a UDT script or the expiry of what it is about to pay
+with the decoder's own lookup and writes a string with fiber's own form. Two helpers of the facade go with them
+([sdk.md](./sdk.md)): `computeSdkInvoiceExpiryMs`, when an invoice runs out as fiber's `is_expired` counts it, and
+`SDK_NETWORK_INVOICE_CURRENCIES`, the currency each network's invoices carry. `computeInvoiceDigest` and the constants
+stay inside the SDK.
+
 ## What the vectors guarantee
 
 `interop/vectors/invoice.json` is written by the harness from fiber's own types (see [interop/README.md](../interop/README.md)):

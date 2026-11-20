@@ -7,7 +7,7 @@ import { encodeInvoice } from "../../../src/invoice";
 import { CHANNEL_ALIAS_KEY_PREFIX } from "../../../src/policy";
 import type { Script, Transaction } from "../../../src/common";
 import { UINT64_MAX } from "../../../src/common";
-import type { FiberLspSdkOptions, SdkContext, SdkEvent, SdkTenantRegistrationRequest } from "../../../src/sdk";
+import type { FiberLspSdkOptions, SdkContext, SdkEvent, SdkPaymentRecord, SdkTenantRegistrationRequest } from "../../../src/sdk";
 import {
     ActivityTracker,
     DEFAULT_POLL_INTERVAL_MS,
@@ -29,6 +29,7 @@ import { TimerMock } from "../../mocks/common";
 import { loadInteropVectors } from "../../utils/interop-vectors";
 import { refusalOf } from "../../utils/refusal";
 import { rejection } from "../../utils/rejection";
+import { writes } from "../../utils/stored-records";
 import { LIST_CHANNELS_WITH_CLOSED_CALL, signingStatusCall, watchtowerStatusCall } from "../../utils/rpc-answers";
 import type { SigningChannel } from "../../utils/signing-channel";
 import {
@@ -539,10 +540,26 @@ describe("FiberLspSdk", () => {
             await contextOf(h.sdk).allocator.allocateChannelIndex();
             await contextOf(h.sdk).activity.watch("channel", CHANNEL_ID);
             await contextOf(h.sdk).openings.write(7, "10000000000", OPENING_USER_LOCK);
+            await contextOf(h.sdk).history.update("5a".repeat(32), () => ({
+                version: 1,
+                paymentHashHex: `0x${"5a".repeat(32)}`,
+                direction: "receive",
+                status: "pending",
+                amountShannons: "1",
+                invoice: "fibt1",
+                description: null,
+                maxFeeShannons: null,
+                feeShannons: null,
+                failedReason: null,
+                createdAtMs: NOW_MS,
+                settledAtMs: null,
+            }));
             expect([...h.storage.map.keys()]).toEqual([
                 "fiber-lsp-sdk:allocator:channel",
                 "fiber-lsp-sdk:activity",
                 "fiber-lsp-sdk:opening",
+                `fiber-lsp-sdk:payment-history:${"5a".repeat(32)}`,
+                "fiber-lsp-sdk:payment-history",
             ]);
         });
 
@@ -1329,6 +1346,37 @@ describe("FiberLspSdk", () => {
             expect(h.node.calls().at(-1)).toEqual(LIST_CHANNELS_WITH_CLOSED_CALL);
         });
 
+        it("reads the balance over the listing, counting only the ready channels this device registered", async () => {
+            const h = await openingHarness();
+            h.node.result(OPENING_ANSWER);
+            await h.sdk.prepareChannelOpen(OPENING_AMOUNT, OPENING_USER_LOCK);
+            const ready = {
+                channel_id: OPENING_CHANNEL_ID,
+                is_public: false,
+                is_acceptor: false,
+                is_one_way: false,
+                channel_outpoint: `0x${"a3".repeat(36)}`,
+                pubkey: OPENING_LSP_PUBKEY,
+                funding_udt_type_script: null,
+                state: { state_name: "ChannelReady" },
+                local_balance: "0xe6f7cec00",
+                offered_tlc_balance: "0x5f5e100",
+                remote_balance: "0x44eaf9900",
+                received_tlc_balance: "0x0",
+                pending_tlcs: [],
+                latest_commitment_transaction_hash: `0x${"66".repeat(32)}`,
+                created_at: "0x19a4d4e6e00",
+                enabled: true,
+                tlc_expiry_delta: "0x5265c00",
+                tlc_fee_proportional_millionths: "0x3e8",
+                shutdown_transaction_hash: null,
+                failure_detail: null,
+            };
+            h.node.result({ channels: [ready, { ...ready, channel_id: CHANNEL_ID }] });
+            await expect(h.sdk.getBalance()).resolves.toBe("61900000000");
+            expect(h.node.calls().at(-1)).toEqual(LIST_CHANNELS_WITH_CLOSED_CALL);
+        });
+
         it("polls the channel step before the signing steps, announcing the opened channel ready and dropping its opening", async () => {
             const h = await openingHarness();
             h.node.result(OPENING_ANSWER);
@@ -1475,7 +1523,22 @@ describe("FiberLspSdk", () => {
             created_at: "0x1a115cf2760",
             last_updated_at: "0x1a115cf2760",
             failed_error: null,
-            fee: "0x0",
+            fee: "0x1f4",
+        };
+
+        // The record of INVOICE's send under fiber's default budget, as the facade's clock reads it.
+        const PENDING_RECORD: SdkPaymentRecord = {
+            paymentHashHex: `0x${PAYMENT_HASH}`,
+            direction: "send",
+            status: "pending",
+            amountShannons: "250000000",
+            invoice: INVOICE,
+            description: null,
+            maxFeeShannons: "1250000",
+            feeShannons: null,
+            failedReason: null,
+            createdAtMs: NOW_MS,
+            settledAtMs: null,
         };
 
         function transferHarness(overrides: Partial<FiberLspSdkOptions> = {}) {
@@ -1617,8 +1680,124 @@ describe("FiberLspSdk", () => {
             await flush();
             expect(idleTick).toEqual([]);
             expect(calls).toEqual(["send_payment", ...idleTick, ...idleTick, `get_payment 0x${PAYMENT_HASH}`]);
-            expect(events).toEqual([{ type: "PAYMENT_SENT", paymentHashHex: `0x${PAYMENT_HASH}` }]);
+            const sent = { ...PENDING_RECORD, status: "completed", feeShannons: "500", settledAtMs: NOW_MS };
+            expect(events).toEqual([{ type: "PAYMENT_SENT", paymentHashHex: `0x${PAYMENT_HASH}`, feeShannons: "500", payment: sent }]);
+            await expect(sdk.getPayment(`0x${PAYMENT_HASH}`)).resolves.toStrictEqual(sent);
             sdk.disconnect();
+        });
+
+        describe("estimateTransferFee()", () => {
+            it("asks a dry run through the facade's LSP under the budget given, touching no storage, holding no hash and asking for no tick", async () => {
+                const h = transferHarness();
+                const pollNow = jest.spyOn(contextOf(h.sdk).poller, "pollNow");
+                let held: unknown;
+                h.node.onCall("send_payment", () => {
+                    held = [...contextOf(h.sdk).sending];
+                });
+                h.node.result({ ...SENT_ANSWER, fee: "0x3d090" });
+                await expect(h.sdk.estimateTransferFee(INVOICE, { maxFeeShannons: "250000" })).resolves.toStrictEqual({
+                    paymentHashHex: `0x${PAYMENT_HASH}`,
+                    amountShannons: "250000000",
+                    feeShannons: "250000",
+                });
+                expect(h.node.calls()).toEqual([
+                    {
+                        method: "send_payment",
+                        params: { invoice: INVOICE, max_fee_amount: "0x3d090", dry_run: true, trampoline_hops: [OPENING_LSP_PUBKEY] },
+                    },
+                ]);
+                expect(h.storage.ops).toEqual([]);
+                expect(held).toEqual([]);
+                expect(pollNow).not.toHaveBeenCalled();
+            });
+
+            it("asks it while a transfer of the hash is held or watched: the node, not the device, refuses a session it holds", async () => {
+                const h = transferHarness();
+                h.node.reject(new TypeError("fetch failed"));
+                await rejection(h.sdk.transfer(INVOICE));
+                contextOf(h.sdk).sending.add(PAYMENT_HASH);
+                const ops = h.storage.ops.length;
+                const text = `InvalidParameter: Payment session already exists: Hash256(0x${PAYMENT_HASH}) with payment session status: Inflight`;
+                h.node.error(-32000, text);
+                const error = await rejection(h.sdk.estimateTransferFee(INVOICE));
+                expect(error).toMatchObject({ code: "payment_session_exists" });
+                expect(h.node.calls()[1]).toMatchObject({ method: "send_payment", params: { dry_run: true } });
+                expect(h.storage.ops.slice(ops)).toEqual([]);
+                expect(contextOf(h.sdk).sending).toEqual(new Set([PAYMENT_HASH]));
+            });
+
+            it("asks it under transfer's default budget without options", async () => {
+                const h = transferHarness();
+                h.node.result(SENT_ANSWER);
+                await expect(h.sdk.estimateTransferFee(INVOICE)).resolves.toMatchObject({ feeShannons: "500" });
+                expect(h.node.calls()).toEqual([
+                    {
+                        method: "send_payment",
+                        params: { invoice: INVOICE, max_fee_amount: "0x1312d0", dry_run: true, trampoline_hops: [OPENING_LSP_PUBKEY] },
+                    },
+                ]);
+            });
+
+            it("checks the invoice against the facade's own network, sending nothing", async () => {
+                const h = transferHarness({ network: DEV_NETWORK });
+                const error = await rejection(h.sdk.estimateTransferFee(INVOICE));
+                expect(error).toMatchObject({ code: "invoice_unpayable" });
+                expect(h.node.calls()).toEqual([]);
+            });
+        });
+
+        describe("getPayment()", () => {
+            it("reads the history, calling no node, writing nothing, emitting nothing and asking for no tick", async () => {
+                const h = transferHarness();
+                h.node.reject(new TypeError("fetch failed"));
+                await rejection(h.sdk.transfer(INVOICE));
+                const pollNow = jest.spyOn(contextOf(h.sdk).poller, "pollNow");
+                const events: SdkEvent[] = [];
+                h.sdk.onEvent((event) => events.push(event));
+                const calls = h.node.calls().length;
+                h.storage.ops.length = 0;
+                await expect(h.sdk.getPayment(`0x${PAYMENT_HASH}`)).resolves.toStrictEqual(PENDING_RECORD);
+                expect(h.node.calls()).toHaveLength(calls);
+                expect(writes(h.storage)).toEqual([]);
+                expect(events).toEqual([]);
+                expect(pollNow).not.toHaveBeenCalled();
+            });
+
+            it("is null for a hash the history holds nothing of", async () => {
+                const h = transferHarness();
+                await expect(h.sdk.getPayment(`0x${PAYMENT_HASH}`)).resolves.toBeNull();
+                expect(h.node.calls()).toEqual([]);
+            });
+
+            it("refuses a hash of another form", async () => {
+                const h = transferHarness();
+                await expect(h.sdk.getPayment(PAYMENT_HASH)).rejects.toEqual(
+                    new TypeError("paymentHashHex must be 32 bytes of 0x-prefixed lowercase hex"),
+                );
+            });
+        });
+
+        describe("listPayments()", () => {
+            it("lists the history newest first, calling no node", async () => {
+                let nowMs = NOW_MS;
+                const h = transferHarness({ now: () => nowMs });
+                h.node.reject(new TypeError("fetch failed"));
+                await rejection(h.sdk.transfer(INVOICE));
+                const other = { ...PENDING_RECORD, paymentHashHex: `0x${"7e".repeat(32)}`, createdAtMs: NOW_MS + 1 };
+                nowMs = NOW_MS + 1;
+                await contextOf(h.sdk).history.update("7e".repeat(32), () => ({ version: 1, ...other }));
+                const calls = h.node.calls().length;
+                await expect(h.sdk.listPayments()).resolves.toStrictEqual([other, PENDING_RECORD]);
+                await expect(h.sdk.listPayments({ limit: 1, offset: 1 })).resolves.toStrictEqual([PENDING_RECORD]);
+                expect(h.node.calls()).toHaveLength(calls);
+            });
+
+            it("refuses options of another form", async () => {
+                const h = transferHarness();
+                await expect(h.sdk.listPayments({ limit: -1 })).rejects.toEqual(
+                    new RangeError("options.limit must be an integer between 0 and 9007199254740991, got -1"),
+                );
+            });
         });
     });
 

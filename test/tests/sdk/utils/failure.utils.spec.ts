@@ -28,7 +28,7 @@ describe("emitSdkEvent", () => {
         const emit = jest.fn(() => {
             throw new Error("the host's listener failed");
         });
-        expect(() => emitSdkEvent(emit, { type: "PAYMENT_PENDING", paymentHashHex: `0x${"22".repeat(32)}` })).not.toThrow();
+        expect(() => emitSdkEvent(emit, { type: "CHANNEL_CLOSED", channelId: `0x${"22".repeat(32)}` })).not.toThrow();
         expect(emit).toHaveBeenCalledTimes(1);
     });
 });

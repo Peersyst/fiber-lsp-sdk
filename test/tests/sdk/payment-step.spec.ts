@@ -1,8 +1,8 @@
 import type { DebitIntentRecord } from "../../../src/policy";
 import { PolicyEngine, SignerStore } from "../../../src/policy";
 import { FiberRpcClient, RpcError, RpcResponseError } from "../../../src/rpc";
-import type { SdkEvent } from "../../../src/sdk";
-import { ActivityTracker, buildPaymentStep } from "../../../src/sdk";
+import type { SdkEvent, SdkPaymentRecord, StoredPaymentRecord } from "../../../src/sdk";
+import { ActivityTracker, PaymentHistory, buildPaymentStep, getSdkPayment } from "../../../src/sdk";
 import { InMemorySignerStorage } from "../../mocks/policy";
 import { ScriptedNode } from "../../mocks/rpc";
 import { rejection } from "../../utils/rejection";
@@ -24,12 +24,17 @@ const FIBER_REASON = "Failed to build route, PathFind error: no path found";
 const NOT_FOUND = `InvalidParameter: Payment session not found: Hash256(0x${"3c".repeat(32)})`;
 const NEVER_SENT = "the node holds no session of the payment: it was never sent";
 const UNEXPLAINED = "the node reports the payment failed without a reason";
+const RECORD_PREFIX = "fiber-lsp-sdk:payment-history:";
+const CREATED_AT_MS = 1_791_367_200_000;
+const NOW_MS = 1_791_367_206_000;
 
 type Harness = {
     node: ScriptedNode;
     storage: InMemorySignerStorage;
     policy: PolicyEngine;
     activity: ActivityTracker;
+    history: PaymentHistory;
+    now: jest.Mock<number, []>;
     sending: Set<string>;
     reading: Set<string>;
     events: SdkEvent[];
@@ -41,6 +46,8 @@ function harness(onEmit: (event: SdkEvent) => void = () => undefined): Harness {
     const store = new SignerStore(storage);
     const policy = new PolicyEngine(store);
     const activity = new ActivityTracker(store);
+    const history = new PaymentHistory(store);
+    const now = jest.fn<number, []>(() => NOW_MS);
     const node = new ScriptedNode();
     const events: SdkEvent[] = [];
     const sending = new Set<string>();
@@ -49,6 +56,8 @@ function harness(onEmit: (event: SdkEvent) => void = () => undefined): Harness {
         rpc: new FiberRpcClient({ url: URL, fetch: node.fetch }),
         policy,
         activity,
+        history,
+        now,
         sending,
         reading,
         emit: (event) => {
@@ -56,12 +65,80 @@ function harness(onEmit: (event: SdkEvent) => void = () => undefined): Harness {
             onEmit(event);
         },
     });
-    return { node, storage, policy, activity, sending, reading, events, step };
+    return { node, storage, policy, activity, history, now, sending, reading, events, step };
+}
+
+function pendingRecord(paymentHash: string): StoredPaymentRecord {
+    return {
+        version: 1,
+        paymentHashHex: `0x${paymentHash}`,
+        direction: "send",
+        status: "pending",
+        amountShannons: "1000000000",
+        invoice: "fibt10000000001send",
+        description: "two coffees",
+        maxFeeShannons: "5000000",
+        feeShannons: null,
+        failedReason: null,
+        createdAtMs: CREATED_AT_MS,
+        settledAtMs: null,
+    };
+}
+
+function sentRecord(paymentHash: string): SdkPaymentRecord {
+    return {
+        paymentHashHex: `0x${paymentHash}`,
+        direction: "send",
+        status: "completed",
+        amountShannons: "1000000000",
+        invoice: "fibt10000000001send",
+        description: "two coffees",
+        maxFeeShannons: "5000000",
+        feeShannons: "1000",
+        failedReason: null,
+        createdAtMs: CREATED_AT_MS,
+        settledAtMs: NOW_MS,
+    };
+}
+
+function failedRecord(paymentHash: string, reason: string): SdkPaymentRecord {
+    return { ...sentRecord(paymentHash), status: "failed", feeShannons: null, failedReason: reason };
+}
+
+function sentEvent(paymentHash: string): SdkEvent {
+    return { type: "PAYMENT_SENT", paymentHashHex: `0x${paymentHash}`, feeShannons: "1000", payment: sentRecord(paymentHash) };
+}
+
+function failedEvent(paymentHash: string, reason: string): SdkEvent {
+    return { type: "PAYMENT_FAILED", paymentHashHex: `0x${paymentHash}`, reason, payment: failedRecord(paymentHash, reason) };
+}
+
+function withoutVersion({ version, ...record }: StoredPaymentRecord): SdkPaymentRecord {
+    expect(version).toBe(1);
+    return record;
+}
+
+function pendingRead(paymentHash: string): SdkPaymentRecord {
+    return withoutVersion(pendingRecord(paymentHash));
+}
+
+async function seedRecord(h: Harness, record: StoredPaymentRecord): Promise<void> {
+    await h.history.update(record.paymentHashHex.slice(2), () => record);
+}
+
+// No intent: the policy never opened it or already closed it.
+async function watchedWithRecord(h: Harness, paymentHash: string): Promise<void> {
+    await h.activity.watch("payment", paymentHash);
+    await seedRecord(h, pendingRecord(paymentHash));
 }
 
 async function watchedWithIntent(h: Harness, paymentHash: string): Promise<void> {
-    await h.activity.watch("payment", paymentHash);
+    await watchedWithRecord(h, paymentHash);
     await h.policy.recordDebitIntent(paymentHash, BUDGET);
+}
+
+async function recordOf(h: Harness, paymentHash: string): Promise<SdkPaymentRecord | null> {
+    return getSdkPayment(h, `0x${paymentHash}`);
 }
 
 async function paymentsOf(h: Harness): Promise<Record<string, { status: string | null }>> {
@@ -83,7 +160,7 @@ function paymentResult(paymentHash: string, status: string, failedError: string 
         created_at: "0x191dd9dec00",
         last_updated_at: "0x191dd9defe8",
         failed_error: failedError,
-        fee: "0x0",
+        fee: "0x3e8",
     };
 }
 
@@ -146,17 +223,17 @@ describe("buildPaymentStep", () => {
             h.node.result(paymentResult(HASH, "Success", null));
             await h.step(live());
             expect(h.node.calls()).toEqual([getPaymentCall(HASH)]);
-            expect(h.events).toStrictEqual([{ type: "PAYMENT_SENT", paymentHashHex: `0x${HASH}` }]);
+            expect(h.events).toStrictEqual([sentEvent(HASH)]);
             expect(await intentOf(h, HASH)).toStrictEqual(intentRecord(HASH, false));
             expect(await paymentsOf(h)).toStrictEqual({});
         });
 
         it("emits PAYMENT_SENT for one with no intent, recording none", async () => {
             const h = harness();
-            await h.activity.watch("payment", HASH);
+            await watchedWithRecord(h, HASH);
             h.node.result(paymentResult(HASH, "Success", null));
             await h.step(live());
-            expect(h.events).toStrictEqual([{ type: "PAYMENT_SENT", paymentHashHex: `0x${HASH}` }]);
+            expect(h.events).toStrictEqual([sentEvent(HASH)]);
             expect(await intentOf(h, HASH)).toBeNull();
             expect(await paymentsOf(h)).toStrictEqual({});
         });
@@ -168,7 +245,7 @@ describe("buildPaymentStep", () => {
             h.node.result(paymentResult(OTHER_HASH, "Inflight", null)).result(paymentResult(HASH, "Success", null));
             await h.step(live());
             expect(h.node.calls()).toEqual([getPaymentCall(OTHER_HASH), getPaymentCall(HASH)]);
-            expect(h.events).toStrictEqual([{ type: "PAYMENT_SENT", paymentHashHex: `0x${HASH}` }]);
+            expect(h.events).toStrictEqual([sentEvent(HASH)]);
             expect(await intentOf(h, OTHER_HASH)).toStrictEqual(intentRecord(OTHER_HASH, true));
             expect(await paymentsOf(h)).toStrictEqual({ [OTHER_HASH]: { status: null } });
         });
@@ -181,7 +258,7 @@ describe("buildPaymentStep", () => {
             h.node.result(paymentResult(HASH, "Failed", FIBER_REASON));
             await h.step(live());
             expect(h.node.calls()).toEqual([getPaymentCall(HASH)]);
-            expect(h.events).toStrictEqual([{ type: "PAYMENT_FAILED", paymentHashHex: `0x${HASH}`, reason: FIBER_REASON }]);
+            expect(h.events).toStrictEqual([failedEvent(HASH, FIBER_REASON)]);
             expect(await intentOf(h, HASH)).toStrictEqual(intentRecord(HASH, false));
             expect(await paymentsOf(h)).toStrictEqual({});
         });
@@ -191,7 +268,7 @@ describe("buildPaymentStep", () => {
             await watchedWithIntent(h, HASH);
             h.node.result(paymentResult(HASH, "Failed", null));
             await h.step(live());
-            expect(h.events).toStrictEqual([{ type: "PAYMENT_FAILED", paymentHashHex: `0x${HASH}`, reason: UNEXPLAINED }]);
+            expect(h.events).toStrictEqual([failedEvent(HASH, UNEXPLAINED)]);
         });
 
         it("keeps an empty reason of fiber's as it is", async () => {
@@ -199,15 +276,15 @@ describe("buildPaymentStep", () => {
             await watchedWithIntent(h, HASH);
             h.node.result(paymentResult(HASH, "Failed", ""));
             await h.step(live());
-            expect(h.events).toStrictEqual([{ type: "PAYMENT_FAILED", paymentHashHex: `0x${HASH}`, reason: "" }]);
+            expect(h.events).toStrictEqual([failedEvent(HASH, "")]);
         });
 
         it("emits PAYMENT_FAILED for one with no intent, recording none", async () => {
             const h = harness();
-            await h.activity.watch("payment", HASH);
+            await watchedWithRecord(h, HASH);
             h.node.result(paymentResult(HASH, "Failed", FIBER_REASON));
             await h.step(live());
-            expect(h.events).toStrictEqual([{ type: "PAYMENT_FAILED", paymentHashHex: `0x${HASH}`, reason: FIBER_REASON }]);
+            expect(h.events).toStrictEqual([failedEvent(HASH, FIBER_REASON)]);
             expect(await intentOf(h, HASH)).toBeNull();
             expect(await paymentsOf(h)).toStrictEqual({});
         });
@@ -220,17 +297,17 @@ describe("buildPaymentStep", () => {
             h.node.error(-32000, NOT_FOUND);
             await h.step(live());
             expect(h.node.calls()).toEqual([getPaymentCall(HASH)]);
-            expect(h.events).toStrictEqual([{ type: "PAYMENT_FAILED", paymentHashHex: `0x${HASH}`, reason: NEVER_SENT }]);
+            expect(h.events).toStrictEqual([failedEvent(HASH, NEVER_SENT)]);
             expect(await intentOf(h, HASH)).toStrictEqual(intentRecord(HASH, false));
             expect(await paymentsOf(h)).toStrictEqual({});
         });
 
         it("emits PAYMENT_FAILED for one with no intent, recording none", async () => {
             const h = harness();
-            await h.activity.watch("payment", HASH);
+            await watchedWithRecord(h, HASH);
             h.node.error(-32000, NOT_FOUND);
             await h.step(live());
-            expect(h.events).toStrictEqual([{ type: "PAYMENT_FAILED", paymentHashHex: `0x${HASH}`, reason: NEVER_SENT }]);
+            expect(h.events).toStrictEqual([failedEvent(HASH, NEVER_SENT)]);
             expect(await intentOf(h, HASH)).toBeNull();
             expect(await paymentsOf(h)).toStrictEqual({});
         });
@@ -240,10 +317,10 @@ describe("buildPaymentStep", () => {
             // Shares with HASH the 20 bytes a TLC's witness binds, so the intent's key is HASH's.
             const twin = `${"3c".repeat(20)}${"00".repeat(12)}`;
             await h.policy.recordDebitIntent(twin, BUDGET);
-            await h.activity.watch("payment", HASH);
+            await watchedWithRecord(h, HASH);
             h.node.error(-32000, NOT_FOUND);
             await h.step(live());
-            expect(h.events).toStrictEqual([{ type: "PAYMENT_FAILED", paymentHashHex: `0x${HASH}`, reason: NEVER_SENT }]);
+            expect(h.events).toStrictEqual([failedEvent(HASH, NEVER_SENT)]);
             expect(await intentOf(h, HASH)).toBeNull();
             expect(await intentOf(h, twin)).toStrictEqual(intentRecord(twin, true));
             expect(await paymentsOf(h)).toStrictEqual({});
@@ -296,7 +373,7 @@ describe("buildPaymentStep", () => {
             h.node.result(paymentResult(OTHER_HASH, "Success", null));
             await h.step(live());
             expect(h.node.calls()).toEqual([getPaymentCall(OTHER_HASH)]);
-            expect(h.events).toEqual([{ type: "PAYMENT_SENT", paymentHashHex: `0x${OTHER_HASH}` }]);
+            expect(h.events).toEqual([sentEvent(OTHER_HASH)]);
             expect(await paymentsOf(h)).toStrictEqual({ [HASH]: { status: null } });
             expect(await intentOf(h, HASH)).toStrictEqual(intentRecord(HASH, true));
         });
@@ -310,7 +387,7 @@ describe("buildPaymentStep", () => {
             h.node.error(-32000, NOT_FOUND);
             await h.step(live());
             expect(h.node.calls()).toEqual([getPaymentCall(HASH)]);
-            expect(h.events).toEqual([{ type: "PAYMENT_FAILED", paymentHashHex: `0x${HASH}`, reason: NEVER_SENT }]);
+            expect(h.events).toEqual([failedEvent(HASH, NEVER_SENT)]);
         });
 
         it("is judged when its turn comes, not when the tick began", async () => {
@@ -402,7 +479,7 @@ describe("buildPaymentStep", () => {
         it.each<[string, unknown, SdkEvent["type"]]>([
             ["sent", paymentResult(HASH, "Success", null), "PAYMENT_SENT"],
             ["failed", paymentResult(HASH, "Failed", FIBER_REASON), "PAYMENT_FAILED"],
-        ])("closes the intent of one %s, then emits, then stops watching it", async (_, result, type) => {
+        ])("closes the intent of one %s, then settles its record, then emits, then stops watching it", async (_, result, type) => {
             const order: string[] = [];
             const h = harness((event) => order.push(event.type));
             await watchedWithIntent(h, HASH);
@@ -411,6 +488,11 @@ describe("buildPaymentStep", () => {
                 order.push("close");
                 await close(paymentHash);
             });
+            const update = h.history.update.bind(h.history);
+            jest.spyOn(h.history, "update").mockImplementation(async (...args) => {
+                order.push("record");
+                return update(...args);
+            });
             const forget = h.activity.forget.bind(h.activity);
             jest.spyOn(h.activity, "forget").mockImplementation(async (...args) => {
                 order.push("forget");
@@ -418,21 +500,189 @@ describe("buildPaymentStep", () => {
             });
             h.node.result(result);
             await h.step(live());
-            expect(order).toEqual(["close", type, "forget"]);
+            expect(order).toEqual(["close", "record", type, "forget"]);
         });
 
-        it("shows the listener the intent closed and the payment still watched", async () => {
+        it("shows the listener the intent closed, the record settled and the payment still watched", async () => {
             const seen: unknown[] = [];
             const h = harness(() => {
                 const intent = h.storage.map.get(INTENT_KEY);
+                const record = h.storage.map.get(RECORD_PREFIX + HASH);
                 const activity = h.storage.map.get(ACTIVITY_KEY);
-                if (intent === undefined || activity === undefined) throw new Error("the records are missing");
-                seen.push((JSON.parse(intent) as { open: unknown }).open, (JSON.parse(activity) as { payments: unknown }).payments);
+                if (intent === undefined || record === undefined || activity === undefined) throw new Error("the records are missing");
+                seen.push(
+                    (JSON.parse(intent) as { open: unknown }).open,
+                    (JSON.parse(record) as { status: unknown }).status,
+                    (JSON.parse(activity) as { payments: unknown }).payments,
+                );
             });
             await watchedWithIntent(h, HASH);
             h.node.error(-32000, NOT_FOUND);
             await h.step(live());
-            expect(seen).toStrictEqual([false, { [HASH]: { status: null } }]);
+            expect(seen).toStrictEqual([false, "failed", { [HASH]: { status: null } }]);
+            expect(await paymentsOf(h)).toStrictEqual({});
+        });
+    });
+
+    describe("the history", () => {
+        it.each<[string, unknown, SdkPaymentRecord]>([
+            ["sent", paymentResult(HASH, "Success", null), sentRecord(HASH)],
+            ["failed", paymentResult(HASH, "Failed", FIBER_REASON), failedRecord(HASH, FIBER_REASON)],
+        ])(
+            "settles the record of one %s at the clock's reading, the event carrying it as getPayment reads it",
+            async (_, result, expected) => {
+                const h = harness();
+                await watchedWithIntent(h, HASH);
+                h.node.result(result);
+                await h.step(live());
+                expect(await recordOf(h, HASH)).toStrictEqual(expected);
+                const [event] = h.events;
+                expect(event !== undefined && "payment" in event ? event.payment : undefined).toStrictEqual(await recordOf(h, HASH));
+                expect(h.now).toHaveBeenCalledTimes(1);
+            },
+        );
+
+        it("fails the record of one the node holds no session of with the SDK's reason", async () => {
+            const h = harness();
+            await watchedWithIntent(h, HASH);
+            h.node.error(-32000, NOT_FOUND);
+            await h.step(live());
+            expect(await recordOf(h, HASH)).toStrictEqual(failedRecord(HASH, NEVER_SENT));
+        });
+
+        it("fails the record with the SDK's reason when fiber gives none", async () => {
+            const h = harness();
+            await watchedWithIntent(h, HASH);
+            h.node.result(paymentResult(HASH, "Failed", null));
+            await h.step(live());
+            expect(await recordOf(h, HASH)).toStrictEqual(failedRecord(HASH, UNEXPLAINED));
+        });
+
+        it("turns a failed record completed on fiber's Success, its reason cleared: the Failed was false", async () => {
+            const h = harness();
+            await h.activity.watch("payment", HASH);
+            await seedRecord(h, {
+                ...pendingRecord(HASH),
+                status: "failed",
+                failedReason: FIBER_REASON,
+                settledAtMs: CREATED_AT_MS + 1000,
+            });
+            h.node.result(paymentResult(HASH, "Success", null));
+            await h.step(live());
+            expect(await recordOf(h, HASH)).toStrictEqual(sentRecord(HASH));
+            expect(h.events).toStrictEqual([sentEvent(HASH)]);
+        });
+
+        it("leaves a completed record as it is on a Success delivered again, emitting it as stored", async () => {
+            const h = harness();
+            await h.activity.watch("payment", HASH);
+            const completed = { version: 1 as const, ...sentRecord(HASH), settledAtMs: CREATED_AT_MS + 2000 };
+            await seedRecord(h, completed);
+            h.storage.ops.length = 0;
+            h.node.result(paymentResult(HASH, "Success", null));
+            await h.step(live());
+            const stored = withoutVersion(completed);
+            expect(await recordOf(h, HASH)).toStrictEqual(stored);
+            expect(h.events).toStrictEqual([{ type: "PAYMENT_SENT", paymentHashHex: `0x${HASH}`, feeShannons: "1000", payment: stored }]);
+            expect(writes(h.storage)).toEqual([ACTIVITY_KEY]);
+        });
+
+        it("announces nothing for a completed record answered Failed, keeping it completed, closing its intent and forgetting it", async () => {
+            const h = harness();
+            await watchedWithIntent(h, HASH);
+            const completed = { version: 1 as const, ...sentRecord(HASH), settledAtMs: CREATED_AT_MS + 2000 };
+            await seedRecord(h, completed);
+            h.storage.ops.length = 0;
+            h.node.result(paymentResult(HASH, "Failed", FIBER_REASON));
+            await h.step(live());
+            expect(h.events).toEqual([]);
+            expect(await recordOf(h, HASH)).toStrictEqual(withoutVersion(completed));
+            expect(writes(h.storage)).toEqual([INTENT_KEY, ACTIVITY_KEY]);
+            expect(await intentOf(h, HASH)).toStrictEqual(intentRecord(HASH, false));
+            expect(await paymentsOf(h)).toStrictEqual({});
+        });
+
+        it("ends silently a watch with no record and no session: it stopped before the node heard of it", async () => {
+            const h = harness();
+            await h.activity.watch("payment", HASH);
+            await h.policy.recordDebitIntent(HASH, BUDGET);
+            h.node.error(-32000, NOT_FOUND);
+            await h.step(live());
+            expect(h.events).toEqual([]);
+            expect(await recordOf(h, HASH)).toBeNull();
+            expect(await intentOf(h, HASH)).toStrictEqual(intentRecord(HASH, false));
+            expect(await paymentsOf(h)).toStrictEqual({});
+        });
+
+        it.each<[string, unknown]>([
+            ["Success", paymentResult(HASH, "Success", null)],
+            ["Failed", paymentResult(HASH, "Failed", FIBER_REASON)],
+        ])("reports a watch with no record whose session the node holds as %s as poll_failed, keeping it watched", async (_, result) => {
+            const h = harness();
+            await h.activity.watch("payment", HASH);
+            h.node.result(result).result(result);
+            await h.step(live());
+            await h.step(live());
+            const failure = pollFailedEvent(
+                `the payment poll of 0x${HASH} failed: the node holds a payment under 0x${HASH}, whose record is missing`,
+                expect.any(TypeError),
+            );
+            expect(summarized(h.events)).toStrictEqual([failure, failure]);
+            expect(await recordOf(h, HASH)).toBeNull();
+            expect(await paymentsOf(h)).toStrictEqual({ [HASH]: { status: null } });
+        });
+
+        it("emits nothing and keeps watching after a record write that failed, the intent closed, then ends it on the next tick", async () => {
+            const h = harness();
+            await watchedWithIntent(h, HASH);
+            jest.spyOn(h.history, "update").mockRejectedValueOnce(new TypeError("storage is full"));
+            h.node.result(paymentResult(HASH, "Success", null)).result(paymentResult(HASH, "Success", null));
+            await h.step(live());
+            expect(await recordOf(h, HASH)).toStrictEqual(pendingRead(HASH));
+            expect(await intentOf(h, HASH)).toStrictEqual(intentRecord(HASH, false));
+            expect(await paymentsOf(h)).toStrictEqual({ [HASH]: { status: null } });
+            await h.step(live());
+            expect(summarized(h.events)).toStrictEqual([
+                pollFailedEvent(`the payment poll of 0x${HASH} failed: storage is full`, expect.any(TypeError)),
+                sentEvent(HASH),
+            ]);
+            expect(await paymentsOf(h)).toStrictEqual({});
+        });
+
+        it("reports a clock the step refuses as poll_failed, the record left pending and the payment watched", async () => {
+            const h = harness();
+            await watchedWithIntent(h, HASH);
+            h.now.mockReturnValue(-1);
+            h.node.result(paymentResult(HASH, "Success", null));
+            await h.step(live());
+            expect(summarized(h.events)).toStrictEqual([
+                pollFailedEvent(
+                    `the payment poll of 0x${HASH} failed: now() must be an integer between 0 and 9007199254740991, got -1`,
+                    expect.any(RangeError),
+                ),
+            ]);
+            expect(await recordOf(h, HASH)).toStrictEqual(pendingRead(HASH));
+            expect(await paymentsOf(h)).toStrictEqual({ [HASH]: { status: null } });
+        });
+
+        it("emits nothing and keeps watching once abandoned during the record write, and emits the same record on the next tick", async () => {
+            const h = harness();
+            const run = live();
+            await watchedWithIntent(h, HASH);
+            const update = h.history.update.bind(h.history);
+            jest.spyOn(h.history, "update").mockImplementationOnce(async (...args) => {
+                const record = await update(...args);
+                run.abandoned = true;
+                return record;
+            });
+            h.node.result(paymentResult(HASH, "Success", null)).result(paymentResult(HASH, "Success", null));
+            await h.step(run);
+            expect(h.events).toEqual([]);
+            expect(await recordOf(h, HASH)).toStrictEqual(sentRecord(HASH));
+            expect(await paymentsOf(h)).toStrictEqual({ [HASH]: { status: null } });
+            h.now.mockReturnValue(NOW_MS + 5000);
+            await h.step(live());
+            expect(h.events).toStrictEqual([sentEvent(HASH)]);
             expect(await paymentsOf(h)).toStrictEqual({});
         });
     });
@@ -447,7 +697,7 @@ describe("buildPaymentStep", () => {
             expect(h.node.calls()).toEqual([getPaymentCall(OTHER_HASH), getPaymentCall(HASH)]);
             expect(summarized(h.events)).toStrictEqual([
                 pollFailedEvent(`the payment poll of 0x${OTHER_HASH} failed: Failed to get payment`, expect.any(RpcError)),
-                { type: "PAYMENT_SENT", paymentHashHex: `0x${HASH}` },
+                sentEvent(HASH),
             ]);
             expect(await intentOf(h, OTHER_HASH)).toStrictEqual(intentRecord(OTHER_HASH, true));
             expect(await paymentsOf(h)).toStrictEqual({ [OTHER_HASH]: { status: null } });
@@ -512,7 +762,7 @@ describe("buildPaymentStep", () => {
             await h.step(live());
             expect(summarized(h.events)).toStrictEqual([
                 pollFailedEvent(`the payment poll of 0x${HASH} failed: storage is unreadable`, expect.any(TypeError)),
-                { type: "PAYMENT_SENT", paymentHashHex: `0x${HASH}` },
+                sentEvent(HASH),
             ]);
             expect(await intentOf(h, HASH)).toStrictEqual(intentRecord(HASH, false));
             expect(await paymentsOf(h)).toStrictEqual({});
@@ -529,7 +779,7 @@ describe("buildPaymentStep", () => {
             await h.step(live());
             expect(summarized(h.events)).toStrictEqual([
                 pollFailedEvent(`the payment poll of 0x${HASH} failed: storage is full`, expect.any(TypeError)),
-                { type: "PAYMENT_FAILED", paymentHashHex: `0x${HASH}`, reason: FIBER_REASON },
+                failedEvent(HASH, FIBER_REASON),
             ]);
             expect(await intentOf(h, HASH)).toStrictEqual(intentRecord(HASH, false));
             expect(await paymentsOf(h)).toStrictEqual({});
@@ -544,9 +794,9 @@ describe("buildPaymentStep", () => {
             expect(await intentOf(h, HASH)).toStrictEqual(intentRecord(HASH, false));
             await h.step(live());
             expect(summarized(h.events)).toStrictEqual([
-                { type: "PAYMENT_SENT", paymentHashHex: `0x${HASH}` },
+                sentEvent(HASH),
                 pollFailedEvent(`the payment poll of 0x${HASH} failed: storage is full`, expect.any(TypeError)),
-                { type: "PAYMENT_SENT", paymentHashHex: `0x${HASH}` },
+                sentEvent(HASH),
             ]);
             expect(await intentOf(h, HASH)).toStrictEqual(intentRecord(HASH, false));
             expect(await paymentsOf(h)).toStrictEqual({});
@@ -609,7 +859,7 @@ describe("buildPaymentStep", () => {
             expect(await intentOf(h, HASH)).toStrictEqual(intentRecord(HASH, true));
             expect(await paymentsOf(h)).toStrictEqual({ [HASH]: { status: null } });
             await h.step(live());
-            expect(h.events).toStrictEqual([{ type: "PAYMENT_FAILED", paymentHashHex: `0x${HASH}`, reason: FIBER_REASON }]);
+            expect(h.events).toStrictEqual([failedEvent(HASH, FIBER_REASON)]);
             expect(await intentOf(h, HASH)).toStrictEqual(intentRecord(HASH, false));
             expect(await paymentsOf(h)).toStrictEqual({});
         });
@@ -617,7 +867,7 @@ describe("buildPaymentStep", () => {
         it("emits nothing for one with no intent once abandoned while its intent is read", async () => {
             const h = harness();
             const run = live();
-            await h.activity.watch("payment", HASH);
+            await watchedWithRecord(h, HASH);
             const read = h.policy.readDebitIntent.bind(h.policy);
             jest.spyOn(h.policy, "readDebitIntent").mockImplementationOnce(async (paymentHash) => {
                 const record = await read(paymentHash);
@@ -645,7 +895,7 @@ describe("buildPaymentStep", () => {
             expect(await intentOf(h, HASH)).toStrictEqual(intentRecord(HASH, false));
             expect(await paymentsOf(h)).toStrictEqual({ [HASH]: { status: null } });
             await h.step(live());
-            expect(h.events).toStrictEqual([{ type: "PAYMENT_SENT", paymentHashHex: `0x${HASH}` }]);
+            expect(h.events).toStrictEqual([sentEvent(HASH)]);
             expect(await paymentsOf(h)).toStrictEqual({});
         });
 

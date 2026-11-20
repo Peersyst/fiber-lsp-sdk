@@ -58,12 +58,22 @@ function unpayable(detail: string): SdkError {
 }
 
 describe("checkPayableInvoice", () => {
-    it("hands back the payment hash, the amount and the payee's key", () => {
+    it("hands back the payment hash, the amount, the payee's key, the expiry and no description for an invoice without one", () => {
         expect(checkPayableInvoice(stringOf(INVOICE), "Fibt", NOW_MS)).toStrictEqual({
             paymentHash: hexToBytes(PAYMENT_HASH),
             amountShannons: "250000000",
             payeePublicKey: hexToBytes(PAYEE_PUBKEY),
+            description: null,
+            expiresAtMs: BigInt(EXPIRES_AT_MS),
         });
+    });
+
+    it.each<[string, string]>([
+        ["a description", "coffee for two"],
+        ["an empty description", ""],
+    ])("hands back %s as the invoice carries it", (_, text) => {
+        const described = withAttribute({ type: "description", text });
+        expect(checkPayableInvoice(stringOf(described), "Fibt", NOW_MS)).toMatchObject({ description: text });
     });
 
     it("pays any node's invoice: one with its payee alone, no hint, no feature, no algorithm, no expiry", () => {
@@ -72,6 +82,8 @@ describe("checkPayableInvoice", () => {
             paymentHash: hexToBytes(PAYMENT_HASH),
             amountShannons: "250000000",
             payeePublicKey: hexToBytes(PAYEE_PUBKEY),
+            description: null,
+            expiresAtMs: null,
         });
     });
 

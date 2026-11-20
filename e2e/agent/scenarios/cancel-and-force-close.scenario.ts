@@ -5,7 +5,7 @@ import { readScenarioEnv } from "./utils/scenario-env";
 import { EVENT_TIMEOUT_MS, waitUntil } from "./utils/wait";
 import { CHANNEL_READY_STATE } from "./utils/fiber-node";
 import { ensurePublicChannels } from "./utils/public-channels";
-import { INVOICE_AMOUNT_SHANNONS, isSdkEvent, OPEN_STEPS, ScenarioDevice, signingSteps } from "./utils/scenario-device";
+import { INVOICE_AMOUNT_SHANNONS, isSdkEvent, OPEN_STEPS, ScenarioDevice, signingSteps, untimedRecord } from "./utils/scenario-device";
 
 test("a cancelled invoice, even with its TLC held, ends as PAYMENT_CANCELLED and fails its payer, and a force close the device asked for ends as CHANNEL_CLOSED with the watchtower's spend signed once approved", async (t) => {
     const env = readScenarioEnv();
@@ -26,6 +26,8 @@ test("a cancelled invoice, even with its TLC held, ends as PAYMENT_CANCELLED and
             isSdkEvent("PAYMENT_CANCELLED", (event) => bareLowerHex(event.paymentHashHex) === bareLowerHex(invoice.paymentHashHex)),
         );
         assert.equal(bareLowerHex(cancelled.paymentHashHex), bareLowerHex(invoice.paymentHashHex));
+        assert.equal(cancelled.payment, null, "an invoice nobody paid has no record");
+        assert.equal(await device.sdk.getPayment(invoice.paymentHashHex), null, "an invoice nobody paid stays out of the history");
         assert.equal((await node2.getInvoice(invoice.paymentHashHex, device.accessToken)).status, "Cancelled");
         // Idempotent: fiber's refusal of a cancelled invoice is no error.
         await device.sdk.cancelInvoice(invoice.paymentHashHex);
@@ -61,6 +63,35 @@ test("a cancelled invoice, even with its TLC held, ends as PAYMENT_CANCELLED and
                 isSdkEvent("PAYMENT_CANCELLED", (event) => bareLowerHex(event.paymentHashHex) === heldHash),
             );
             assert.equal(bareLowerHex(heldCancelled.paymentHashHex), heldHash);
+            const heldRecord = {
+                paymentHashHex: heldInvoice.paymentHashHex,
+                direction: "receive",
+                status: "failed",
+                amountShannons: INVOICE_AMOUNT_SHANNONS,
+                invoice: heldInvoice.invoice,
+                description: "cancelled while held",
+                maxFeeShannons: null,
+                feeShannons: null,
+                failedReason: "the invoice was cancelled",
+                createdAtMs: 0,
+                settledAtMs: 0,
+            };
+            assert.deepEqual(untimedRecord(heldCancelled.payment), heldRecord, "PAYMENT_CANCELLED's record");
+            const held = device.events
+                .slice(heldFrom)
+                .map(({ event }) => event)
+                .find(isSdkEvent("PAYMENT_PENDING", (event) => bareLowerHex(event.paymentHashHex) === heldHash));
+            assert.deepEqual(
+                untimedRecord(held?.payment ?? null),
+                { ...heldRecord, status: "pending", failedReason: null, settledAtMs: null },
+                "PAYMENT_PENDING's record",
+            );
+            assert.deepEqual(await device.sdk.getPayment(heldInvoice.paymentHashHex), heldCancelled.payment, "the history's record");
+            assert.deepEqual(
+                (await device.sdk.listPayments()).map(({ paymentHashHex }) => paymentHashHex),
+                [heldInvoice.paymentHashHex],
+                "the history holds the paid invoice alone",
+            );
         } finally {
             stopListening();
         }

@@ -4,8 +4,8 @@ import { InvoiceError, encodeInvoice } from "../../../src/invoice";
 import type { HoldInvoiceErrorCode, HoldInvoiceReleaseTiming } from "../../../src/policy";
 import { HoldInvoiceError, PolicyEngine, SignerStore } from "../../../src/policy";
 import { FiberRpcClient, RpcError, RpcResponseError } from "../../../src/rpc";
-import type { SdkEvent } from "../../../src/sdk";
-import { ActivityTracker, buildInvoiceStep } from "../../../src/sdk";
+import type { SdkEvent, SdkPaymentRecord } from "../../../src/sdk";
+import { ActivityTracker, PaymentHistory, buildInvoiceStep, getSdkPayment, listSdkPayments } from "../../../src/sdk";
 import { HoldInvoicePreimages } from "../../../src/signer";
 import { InMemorySignerStorage } from "../../mocks/policy";
 import type { SentCall } from "../../mocks/rpc";
@@ -38,12 +38,17 @@ const TIMESTAMP_MS = 1_790_900_000_000n;
 const EXPIRES_AT_MS = 1_790_903_600_000;
 const NOW_MS = 1_790_900_060_000;
 const ALREADY_PAID = "Invoice is already paid";
+const RECORD_PREFIX = "fiber-lsp-sdk:payment-history:";
+const INDEX_KEY = "fiber-lsp-sdk:payment-history";
+const EXPIRED_REASON = "the invoice expired";
+const CANCELLED_REASON = "the invoice was cancelled";
 
 type Harness = {
     node: ScriptedNode;
     storage: InMemorySignerStorage;
     policy: PolicyEngine;
     activity: ActivityTracker;
+    history: PaymentHistory;
     events: SdkEvent[];
     pollNow: jest.Mock;
     clock: { nowMs: number };
@@ -55,6 +60,7 @@ function harness(onEmit: (event: SdkEvent) => void = () => undefined, millisecon
     const store = new SignerStore(storage);
     const policy = new PolicyEngine(store);
     const activity = new ActivityTracker(store);
+    const history = new PaymentHistory(store);
     const node = new ScriptedNode();
     const events: SdkEvent[] = [];
     const pollNow = jest.fn();
@@ -64,6 +70,7 @@ function harness(onEmit: (event: SdkEvent) => void = () => undefined, millisecon
         policy,
         preimages: new HoldInvoicePreimages(MASTER_SEED),
         activity,
+        history,
         millisecondsPerEpoch,
         now: () => clock.nowMs,
         emit: (event) => {
@@ -72,7 +79,48 @@ function harness(onEmit: (event: SdkEvent) => void = () => undefined, millisecon
         },
         pollNow,
     });
-    return { node, storage, policy, activity, events, pollNow, clock, step };
+    return { node, storage, policy, activity, history, events, pollNow, clock, step };
+}
+
+function arrivedRecord(paymentHash: string, createdAtMs: number = NOW_MS): SdkPaymentRecord {
+    return {
+        paymentHashHex: `0x${paymentHash}`,
+        direction: "receive",
+        status: "pending",
+        amountShannons: AMOUNT,
+        invoice: invoiceOf(paymentHash),
+        description: null,
+        maxFeeShannons: null,
+        feeShannons: null,
+        failedReason: null,
+        createdAtMs,
+        settledAtMs: null,
+    };
+}
+
+function receivedRecord(paymentHash: string, createdAtMs: number = NOW_MS, settledAtMs: number = createdAtMs): SdkPaymentRecord {
+    return { ...arrivedRecord(paymentHash, createdAtMs), status: "completed", feeShannons: "0", settledAtMs };
+}
+
+function endedRecord(
+    paymentHash: string,
+    reason: string,
+    createdAtMs: number = NOW_MS,
+    settledAtMs: number = createdAtMs,
+): SdkPaymentRecord {
+    return { ...arrivedRecord(paymentHash, createdAtMs), status: "failed", failedReason: reason, settledAtMs };
+}
+
+function pendingEvent(paymentHash: string, createdAtMs: number = NOW_MS): SdkEvent {
+    return { type: "PAYMENT_PENDING", paymentHashHex: `0x${paymentHash}`, payment: arrivedRecord(paymentHash, createdAtMs) };
+}
+
+function receivedEvent(paymentHash: string, createdAtMs: number = NOW_MS, settledAtMs: number = createdAtMs): SdkEvent {
+    return { type: "PAYMENT_RECEIVED", paymentHashHex: `0x${paymentHash}`, payment: receivedRecord(paymentHash, createdAtMs, settledAtMs) };
+}
+
+async function recordOf(h: Harness, paymentHash: string): Promise<SdkPaymentRecord | null> {
+    return getSdkPayment(h, `0x${paymentHash}`);
 }
 
 async function watching(h: Harness, paymentHash: string, invoiceIndex: number): Promise<void> {
@@ -213,7 +261,7 @@ describe("buildInvoiceStep", () => {
             h.node.result(invoiceResult(HASH, "Received"));
             await h.step(live());
             expect(h.node.calls()).toEqual([getInvoiceCall(HASH)]);
-            expect(h.events).toStrictEqual([{ type: "PAYMENT_PENDING", paymentHashHex: `0x${HASH}` }]);
+            expect(h.events).toStrictEqual([pendingEvent(HASH)]);
             expect(await invoicesOf(h)).toStrictEqual({ [HASH]: { status: "Received" } });
             expect(await releasedOf(h, HASH)).toBe(false);
             expect(h.pollNow).not.toHaveBeenCalled();
@@ -227,7 +275,7 @@ describe("buildInvoiceStep", () => {
             await h.step(live());
             h.storage.ops.length = 0;
             await h.step(live());
-            expect(h.events).toStrictEqual([{ type: "PAYMENT_PENDING", paymentHashHex: `0x${HASH}` }]);
+            expect(h.events).toStrictEqual([pendingEvent(HASH)]);
             expect(writes(h.storage)).toEqual([]);
             expect(mark).toHaveBeenCalledTimes(2);
         });
@@ -267,7 +315,7 @@ describe("buildInvoiceStep", () => {
             await h.step(live());
             expect(h.node.calls()).toEqual([getInvoiceCall(HASH), settleCall(HASH, PREIMAGE)]);
             expect(order).toEqual(["release", "settle", "pollNow"]);
-            expect(h.events).toStrictEqual([{ type: "PAYMENT_PENDING", paymentHashHex: `0x${HASH}` }]);
+            expect(h.events).toStrictEqual([pendingEvent(HASH)]);
             expect(await invoicesOf(h)).toStrictEqual({ [HASH]: { status: "Received" } });
         });
 
@@ -302,7 +350,7 @@ describe("buildInvoiceStep", () => {
             expect(now()).toBe(1_790_900_123_456);
         });
 
-        it("reads the host's clock once on a tick whose release waits past the invoice's expiry", async () => {
+        it("reads the host's clock once for the release and once for each record write, on a tick whose release waits past the expiry", async () => {
             const h = harness();
             await watching(h, HASH, INDEX);
             let reads = 0;
@@ -316,7 +364,7 @@ describe("buildInvoiceStep", () => {
             h.node.result(invoiceResult(HASH, "Received"));
             await h.step(live());
             expect(h.events.map((event) => event.type)).toEqual(["PAYMENT_PENDING", "PAYMENT_EXPIRED"]);
-            expect(reads).toBe(1);
+            expect(reads).toBe(3);
         });
 
         it.each([
@@ -348,7 +396,7 @@ describe("buildInvoiceStep", () => {
             h.node.result(invoiceResult(HASH, "Received")).error(-32000, ALREADY_PAID);
             await h.step(live());
             expect(h.node.calls()).toEqual([getInvoiceCall(HASH), settleCall(HASH, PREIMAGE)]);
-            expect(h.events).toStrictEqual([{ type: "PAYMENT_PENDING", paymentHashHex: `0x${HASH}` }]);
+            expect(h.events).toStrictEqual([pendingEvent(HASH)]);
             expect(h.pollNow).toHaveBeenCalledTimes(1);
         });
 
@@ -387,7 +435,7 @@ describe("buildInvoiceStep", () => {
                 expect(await releasedOf(h, HASH)).toBe(released);
                 expect(h.node.calls()).toEqual([getInvoiceCall(HASH)]);
                 expect(summarized(h.events)).toStrictEqual([
-                    { type: "PAYMENT_PENDING", paymentHashHex: `0x${HASH}` },
+                    pendingEvent(HASH),
                     pollFailedEvent(
                         `the invoice poll of 0x${HASH} failed: the invoice index recorded for 0x${HASH} derives the preimage of 0x${OTHER_HASH}`,
                         expect.any(TypeError),
@@ -408,7 +456,7 @@ describe("buildInvoiceStep", () => {
             h.node.result(invoiceResult(HASH, "Received")).error(code, message);
             await h.step(live());
             expect(summarized(h.events)).toStrictEqual([
-                { type: "PAYMENT_PENDING", paymentHashHex: `0x${HASH}` },
+                pendingEvent(HASH),
                 pollFailedEvent(`the invoice poll of 0x${HASH} failed: ${message}`, expect.any(RpcError)),
             ]);
             expect(h.pollNow).not.toHaveBeenCalled();
@@ -426,7 +474,7 @@ describe("buildInvoiceStep", () => {
             expect(h.node.calls()).toEqual([getInvoiceCall(HASH), settleCall(HASH, PREIMAGE)]);
             expect(mark).not.toHaveBeenCalled();
             expect(h.pollNow).not.toHaveBeenCalled();
-            expect(h.events).toStrictEqual([{ type: "PAYMENT_PENDING", paymentHashHex: `0x${HASH}` }]);
+            expect(h.events).toStrictEqual([pendingEvent(HASH)]);
         });
 
         it("settles it again on every tick it stays received", async () => {
@@ -441,7 +489,7 @@ describe("buildInvoiceStep", () => {
                 getInvoiceCall(HASH),
                 settleCall(HASH, PREIMAGE),
             ]);
-            expect(h.events).toStrictEqual([{ type: "PAYMENT_PENDING", paymentHashHex: `0x${HASH}` }]);
+            expect(h.events).toStrictEqual([pendingEvent(HASH)]);
         });
 
         it("takes an invoice already paid as settled", async () => {
@@ -449,7 +497,7 @@ describe("buildInvoiceStep", () => {
             await watchingReleased(h, HASH, INDEX);
             h.node.result(invoiceResult(HASH, "Received")).error(-32000, ALREADY_PAID);
             await h.step(live());
-            expect(h.events).toStrictEqual([{ type: "PAYMENT_PENDING", paymentHashHex: `0x${HASH}` }]);
+            expect(h.events).toStrictEqual([pendingEvent(HASH)]);
         });
 
         it("never ends it unpaid, even past its expiry with no TLC of it left", async () => {
@@ -459,7 +507,7 @@ describe("buildInvoiceStep", () => {
             h.clock.nowMs = EXPIRES_AT_MS + 1;
             h.node.result(invoiceResult(HASH, "Received")).result({});
             await h.step(live());
-            expect(h.events).toStrictEqual([{ type: "PAYMENT_PENDING", paymentHashHex: `0x${HASH}` }]);
+            expect(h.events).toStrictEqual([pendingEvent(HASH, EXPIRES_AT_MS + 1)]);
             expect(lists).not.toHaveBeenCalled();
             expect(await invoicesOf(h)).toStrictEqual({ [HASH]: { status: "Received" } });
         });
@@ -484,7 +532,7 @@ describe("buildInvoiceStep", () => {
                 settleCall(HASH, PREIMAGE),
             ]);
             expect(summarized(h.events)).toStrictEqual([
-                { type: "PAYMENT_PENDING", paymentHashHex: `0x${HASH}` },
+                pendingEvent(HASH),
                 pollFailedEvent(`the invoice poll of 0x${HASH} failed: internal error`, expect.any(RpcError)),
             ]);
         });
@@ -501,7 +549,7 @@ describe("buildInvoiceStep", () => {
                 await h.step(live());
                 await h.step(live());
                 expect(h.node.calls()).toEqual([getInvoiceCall(HASH), getInvoiceCall(HASH)]);
-                expect(h.events).toStrictEqual([{ type: "PAYMENT_PENDING", paymentHashHex: `0x${HASH}` }]);
+                expect(h.events).toStrictEqual([pendingEvent(HASH)]);
                 expect(mark).toHaveBeenCalledTimes(2);
                 expect(h.pollNow).not.toHaveBeenCalled();
                 expect(await invoicesOf(h)).toStrictEqual({ [HASH]: { status: "Received" } });
@@ -517,7 +565,7 @@ describe("buildInvoiceStep", () => {
             h.node.result(invoiceResult(HASH, "Received"));
             await h.step(live());
             expect(summarized(h.events)).toStrictEqual([
-                { type: "PAYMENT_PENDING", paymentHashHex: `0x${HASH}` },
+                pendingEvent(HASH, EXPIRES_AT_MS + 1),
                 pollFailedEvent(`the invoice poll of 0x${HASH} failed: ${error.message}`, error),
             ]);
             expect(await invoicesOf(h)).toStrictEqual({ [HASH]: { status: "Received" } });
@@ -545,19 +593,37 @@ describe("buildInvoiceStep", () => {
             h.node.result(invoiceResult(HASH, "Received"));
             await h.step(live());
             expect(summarized(h.events)).toStrictEqual([
-                { type: "PAYMENT_PENDING", paymentHashHex: `0x${HASH}` },
+                pendingEvent(HASH, EXPIRES_AT_MS + 1),
                 pollFailedEvent(`the invoice poll of 0x${HASH} failed: storage is full`, error),
             ]);
+        });
+
+        it("reports a host clock the arrival's record refuses as poll_failed naming the invoice, writing and marking nothing", async () => {
+            const h = harness();
+            await watching(h, HASH, INDEX);
+            h.clock.nowMs = 1.5;
+            h.storage.ops.length = 0;
+            h.node.result(invoiceResult(HASH, "Received"));
+            await h.step(live());
+            expect(summarized(h.events)).toStrictEqual([
+                pollFailedEvent(
+                    `the invoice poll of 0x${HASH} failed: now() must be an integer between 0 and ${Number.MAX_SAFE_INTEGER}, got 1.5`,
+                    expect.any(RangeError),
+                ),
+            ]);
+            expect(writes(h.storage)).toEqual([]);
+            expect(await invoicesOf(h)).toStrictEqual({ [HASH]: { status: null } });
         });
 
         it("reports a host clock the release refuses as poll_failed naming the invoice", async () => {
             const h = harness();
             await watching(h, HASH, INDEX);
-            h.clock.nowMs = 1.5;
+            let reads = 0;
+            Object.defineProperty(h.clock, "nowMs", { get: () => (++reads === 1 ? NOW_MS : 1.5) });
             h.node.result(invoiceResult(HASH, "Received"));
             await h.step(live());
             expect(summarized(h.events)).toStrictEqual([
-                { type: "PAYMENT_PENDING", paymentHashHex: `0x${HASH}` },
+                pendingEvent(HASH),
                 pollFailedEvent(
                     `the invoice poll of 0x${HASH} failed: timing.now() must be an integer between 0 and ${Number.MAX_SAFE_INTEGER}, got 1.5`,
                     expect.any(RangeError),
@@ -575,11 +641,12 @@ describe("buildInvoiceStep", () => {
             await h.step(live());
             expect(h.node.calls()).toEqual([getInvoiceCall(HASH)]);
             expect(h.events).toStrictEqual([
-                { type: "PAYMENT_PENDING", paymentHashHex: `0x${HASH}` },
-                { type: "PAYMENT_EXPIRED", paymentHashHex: `0x${HASH}` },
+                pendingEvent(HASH, EXPIRES_AT_MS + 1),
+                { type: "PAYMENT_EXPIRED", paymentHashHex: `0x${HASH}`, payment: endedRecord(HASH, EXPIRED_REASON, EXPIRES_AT_MS + 1) },
             ]);
             expect(await invoicesOf(h)).toStrictEqual({});
             expect(await releasedOf(h, HASH)).toBe(false);
+            expect(await recordOf(h, HASH)).toStrictEqual(endedRecord(HASH, EXPIRED_REASON, EXPIRES_AT_MS + 1));
         });
 
         it("emits only PAYMENT_EXPIRED for one already announced pending", async () => {
@@ -590,8 +657,12 @@ describe("buildInvoiceStep", () => {
             h.clock.nowMs = EXPIRES_AT_MS + 1;
             await h.step(live());
             expect(h.events).toStrictEqual([
-                { type: "PAYMENT_PENDING", paymentHashHex: `0x${HASH}` },
-                { type: "PAYMENT_EXPIRED", paymentHashHex: `0x${HASH}` },
+                pendingEvent(HASH),
+                {
+                    type: "PAYMENT_EXPIRED",
+                    paymentHashHex: `0x${HASH}`,
+                    payment: endedRecord(HASH, EXPIRED_REASON, NOW_MS, EXPIRES_AT_MS + 1),
+                },
             ]);
         });
 
@@ -632,7 +703,7 @@ describe("buildInvoiceStep", () => {
             h.clock.nowMs = EXPIRES_AT_MS;
             h.node.result(invoiceResult(HASH, "Received"));
             await h.step(live());
-            expect(h.events).toStrictEqual([{ type: "PAYMENT_PENDING", paymentHashHex: `0x${HASH}` }]);
+            expect(h.events).toStrictEqual([pendingEvent(HASH, EXPIRES_AT_MS)]);
             expect(lists).not.toHaveBeenCalled();
             expect(await invoicesOf(h)).toStrictEqual({ [HASH]: { status: "Received" } });
         });
@@ -645,7 +716,7 @@ describe("buildInvoiceStep", () => {
             h.node.result(invoiceResult(HASH, "Received"));
             await h.step(live());
             expect(lists).toHaveBeenCalledWith(HASH);
-            expect(h.events).toStrictEqual([{ type: "PAYMENT_PENDING", paymentHashHex: `0x${HASH}` }]);
+            expect(h.events).toStrictEqual([pendingEvent(HASH, EXPIRES_AT_MS + 1)]);
             expect(await invoicesOf(h)).toStrictEqual({ [HASH]: { status: "Received" } });
         });
 
@@ -653,35 +724,44 @@ describe("buildInvoiceStep", () => {
             const h = harness();
             await watching(h, HASH, INDEX);
             h.clock.nowMs = Number.MAX_SAFE_INTEGER;
-            h.node.result({ invoice_address: invoiceString(HASH, [{ type: "hashAlgorithm", algorithm: "ckb-hash" }]), status: "Received" });
+            const invoice = invoiceString(HASH, [{ type: "hashAlgorithm", algorithm: "ckb-hash" }]);
+            h.node.result({ invoice_address: invoice, status: "Received" });
             await h.step(live());
-            expect(h.events).toStrictEqual([{ type: "PAYMENT_PENDING", paymentHashHex: `0x${HASH}` }]);
+            expect(h.events).toStrictEqual([
+                {
+                    type: "PAYMENT_PENDING",
+                    paymentHashHex: `0x${HASH}`,
+                    payment: { ...arrivedRecord(HASH, Number.MAX_SAFE_INTEGER), invoice },
+                },
+            ]);
         });
 
-        it("reports a string that is another invoice's as poll_failed naming the invoice, ending nothing", async () => {
+        it("reports a string that is another invoice's as poll_failed naming the invoice, recording and ending nothing", async () => {
             const h = harness();
             await watching(h, HASH, INDEX);
             h.clock.nowMs = EXPIRES_AT_MS + 1;
+            h.storage.ops.length = 0;
             h.node.result({ invoice_address: invoiceOf(STRANGER_HASH), status: "Received" });
             await h.step(live());
+            expect(writes(h.storage)).toEqual([]);
             expect(summarized(h.events)).toStrictEqual([
-                { type: "PAYMENT_PENDING", paymentHashHex: `0x${HASH}` },
                 pollFailedEvent(
                     `the invoice poll of 0x${HASH} failed: the node answered the invoice of 0x${HASH} with that of 0x${STRANGER_HASH}`,
                     expect.any(Error),
                 ),
             ]);
-            expect(await invoicesOf(h)).toStrictEqual({ [HASH]: { status: "Received" } });
+            expect(await invoicesOf(h)).toStrictEqual({ [HASH]: { status: null } });
         });
 
-        it("reports a string that does not decode as poll_failed naming the invoice, ending nothing", async () => {
+        it("reports a string that does not decode as poll_failed naming the invoice, recording and ending nothing", async () => {
             const h = harness();
             await watching(h, HASH, INDEX);
             h.node.result({ invoice_address: "fibt1", status: "Received" });
             await h.step(live());
-            expect(h.events.map((event) => event.type)).toEqual(["PAYMENT_PENDING", "ERROR"]);
-            expect(h.events[1]).toMatchObject({ error: { code: "poll_failed", cause: expect.any(InvoiceError) } });
-            expect(await invoicesOf(h)).toStrictEqual({ [HASH]: { status: "Received" } });
+            expect(h.events.map((event) => event.type)).toEqual(["ERROR"]);
+            expect(h.events[0]).toMatchObject({ error: { code: "poll_failed", cause: expect.any(InvoiceError) } });
+            expect(await recordOf(h, HASH)).toBeNull();
+            expect(await invoicesOf(h)).toStrictEqual({ [HASH]: { status: null } });
         });
     });
 
@@ -692,7 +772,7 @@ describe("buildInvoiceStep", () => {
             h.node.result(invoiceResult(HASH, "Paid"));
             await h.step(live());
             expect(h.node.calls()).toEqual([getInvoiceCall(HASH)]);
-            expect(h.events).toStrictEqual([{ type: "PAYMENT_RECEIVED", paymentHashHex: `0x${HASH}` }]);
+            expect(h.events).toStrictEqual([receivedEvent(HASH)]);
             expect(await invoicesOf(h)).toStrictEqual({});
         });
 
@@ -745,10 +825,7 @@ describe("buildInvoiceStep", () => {
             await h.step(live());
             await h.step(live());
             expect(h.node.calls()).toEqual([getInvoiceCall(HASH), settleCall(HASH, PREIMAGE), getInvoiceCall(HASH)]);
-            expect(h.events).toStrictEqual([
-                { type: "PAYMENT_PENDING", paymentHashHex: `0x${HASH}` },
-                { type: "PAYMENT_RECEIVED", paymentHashHex: `0x${HASH}` },
-            ]);
+            expect(h.events).toStrictEqual([pendingEvent(HASH), receivedEvent(HASH)]);
             expect(await invoicesOf(h)).toStrictEqual({});
         });
 
@@ -759,10 +836,7 @@ describe("buildInvoiceStep", () => {
             await h.step(live());
             await h.step(live());
             expect(h.node.calls()).toEqual([getInvoiceCall(HASH), settleCall(HASH, PREIMAGE), getInvoiceCall(HASH)]);
-            expect(h.events).toStrictEqual([
-                { type: "PAYMENT_PENDING", paymentHashHex: `0x${HASH}` },
-                { type: "PAYMENT_RECEIVED", paymentHashHex: `0x${HASH}` },
-            ]);
+            expect(h.events).toStrictEqual([pendingEvent(HASH), receivedEvent(HASH)]);
             expect(await invoicesOf(h)).toStrictEqual({});
         });
 
@@ -792,21 +866,26 @@ describe("buildInvoiceStep", () => {
             h.node.result(invoiceResult(HASH, status));
             await h.step(live());
             expect(h.node.calls()).toEqual([getInvoiceCall(HASH)]);
-            expect(h.events).toStrictEqual([{ type, paymentHashHex: `0x${HASH}` }]);
+            expect(h.events).toStrictEqual([{ type, paymentHashHex: `0x${HASH}`, payment: null }]);
             expect(mark).not.toHaveBeenCalled();
             expect(await invoicesOf(h)).toStrictEqual({});
+            expect(await recordOf(h, HASH)).toBeNull();
+            await expect(listSdkPayments(h)).resolves.toEqual([]);
         });
 
         it.each([
-            ["Expired", "PAYMENT_EXPIRED"],
-            ["Cancelled", "PAYMENT_CANCELLED"],
-        ])("reads %s as %s for one announced pending", async (status, type) => {
+            ["Expired", "PAYMENT_EXPIRED", EXPIRED_REASON],
+            ["Cancelled", "PAYMENT_CANCELLED", CANCELLED_REASON],
+        ])("reads %s as %s for one announced pending, failing its record", async (status, type, reason) => {
             const h = harness();
             await watching(h, HASH, INDEX);
             h.node.result(invoiceResult(HASH, "Received")).result(invoiceResult(HASH, status));
             await h.step(live());
+            h.clock.nowMs = NOW_MS + 5000;
             await h.step(live());
-            expect(h.events.map((event) => event.type)).toEqual(["PAYMENT_PENDING", type]);
+            const ended = endedRecord(HASH, reason, NOW_MS, NOW_MS + 5000);
+            expect(h.events).toStrictEqual([pendingEvent(HASH), { type, paymentHashHex: `0x${HASH}`, payment: ended }]);
+            expect(await recordOf(h, HASH)).toStrictEqual(ended);
         });
 
         it("emits PAYMENT_CANCELLED for one the device marked cancelled, cancelling nothing more", async () => {
@@ -816,7 +895,7 @@ describe("buildInvoiceStep", () => {
             h.node.result(invoiceResult(HASH, "Cancelled"));
             await h.step(live());
             expect(h.node.calls()).toEqual([getInvoiceCall(HASH)]);
-            expect(h.events).toStrictEqual([{ type: "PAYMENT_CANCELLED", paymentHashHex: `0x${HASH}` }]);
+            expect(h.events).toStrictEqual([{ type: "PAYMENT_CANCELLED", paymentHashHex: `0x${HASH}`, payment: null }]);
             expect(await invoicesOf(h)).toStrictEqual({});
         });
 
@@ -863,11 +942,14 @@ describe("buildInvoiceStep", () => {
 
         function crossingCancel(h: Harness): void {
             const read = h.policy.readHoldInvoice.bind(h.policy);
-            jest.spyOn(h.policy, "readHoldInvoice").mockImplementationOnce(async (paymentHash) => {
-                const record = await read(paymentHash);
-                await h.policy.markHoldInvoiceCancelled(paymentHash);
-                return record;
-            });
+            // The arrival's read first, then the release's, which the cancel crosses.
+            jest.spyOn(h.policy, "readHoldInvoice")
+                .mockImplementationOnce(read)
+                .mockImplementationOnce(async (paymentHash) => {
+                    const record = await read(paymentHash);
+                    await h.policy.markHoldInvoiceCancelled(paymentHash);
+                    return record;
+                });
         }
 
         it("cancels it again, releasing nothing and settling nothing", async () => {
@@ -877,7 +959,7 @@ describe("buildInvoiceStep", () => {
             h.node.result(invoiceResult(HASH, "Received")).result(invoiceResult(HASH, "Cancelled"));
             await h.step(live());
             expect(h.node.calls()).toEqual([getInvoiceCall(HASH), cancelCall(HASH)]);
-            expect(h.events).toStrictEqual([{ type: "PAYMENT_PENDING", paymentHashHex: `0x${HASH}` }]);
+            expect(h.events).toStrictEqual([pendingEvent(HASH)]);
             expect(mark).not.toHaveBeenCalled();
             expect(h.pollNow).not.toHaveBeenCalled();
             expect(await releasedOf(h, HASH)).toBe(false);
@@ -903,7 +985,7 @@ describe("buildInvoiceStep", () => {
             await watchingCancelled(h);
             h.node.result(invoiceResult(HASH, "Received")).error(-32000, "invoice can not be canceled, current status: Cancelled");
             await h.step(live());
-            expect(h.events).toStrictEqual([{ type: "PAYMENT_PENDING", paymentHashHex: `0x${HASH}` }]);
+            expect(h.events).toStrictEqual([pendingEvent(HASH)]);
         });
 
         it("reports a cancel the node refuses as poll_failed naming the invoice, and cancels again on the next tick", async () => {
@@ -918,7 +1000,7 @@ describe("buildInvoiceStep", () => {
             await h.step(live());
             expect(h.node.calls()).toEqual([getInvoiceCall(HASH), cancelCall(HASH), getInvoiceCall(HASH), cancelCall(HASH)]);
             expect(summarized(h.events)).toStrictEqual([
-                { type: "PAYMENT_PENDING", paymentHashHex: `0x${HASH}` },
+                pendingEvent(HASH),
                 pollFailedEvent(
                     `the invoice poll of 0x${HASH} failed: invoice can not be canceled, current status: Paid`,
                     expect.any(RpcError),
@@ -977,7 +1059,7 @@ describe("buildInvoiceStep", () => {
             h.node.result(invoiceResult(HASH, "Received")).result({});
             await h.step(live());
             expect(h.node.calls()).toEqual([getInvoiceCall(HASH), settleCall(HASH, PREIMAGE)]);
-            expect(h.events).toStrictEqual([{ type: "PAYMENT_PENDING", paymentHashHex: `0x${HASH}` }]);
+            expect(h.events).toStrictEqual([pendingEvent(HASH)]);
         });
 
         it("cancels nothing once abandoned while the record is read", async () => {
@@ -985,11 +1067,14 @@ describe("buildInvoiceStep", () => {
             const run = live();
             await watchingCancelled(h);
             const read = h.policy.readHoldInvoice.bind(h.policy);
-            jest.spyOn(h.policy, "readHoldInvoice").mockImplementationOnce(async (paymentHash) => {
-                const record = await read(paymentHash);
-                run.abandoned = true;
-                return record;
-            });
+            // The arrival's read first, then the release's.
+            jest.spyOn(h.policy, "readHoldInvoice")
+                .mockImplementationOnce(read)
+                .mockImplementationOnce(async (paymentHash) => {
+                    const record = await read(paymentHash);
+                    run.abandoned = true;
+                    return record;
+                });
             h.node.result(invoiceResult(HASH, "Received"));
             await h.step(run);
             expect(h.node.calls()).toEqual([getInvoiceCall(HASH)]);
@@ -1003,11 +1088,11 @@ describe("buildInvoiceStep", () => {
             h.node.result(invoiceResult(HASH, "Received")).result(invoiceResult(HASH, "Received")).result(invoiceResult(HASH, "Cancelled"));
             await h.step(live());
             expect(h.node.calls()).toEqual([getInvoiceCall(HASH)]);
-            expect(h.events).toStrictEqual([{ type: "PAYMENT_PENDING", paymentHashHex: `0x${HASH}` }]);
+            expect(h.events).toStrictEqual([pendingEvent(HASH, EXPIRES_AT_MS + 1)]);
             expect(await invoicesOf(h)).toStrictEqual({ [HASH]: { status: "Received" } });
             await h.step(live());
             expect(h.node.calls()).toEqual([getInvoiceCall(HASH), getInvoiceCall(HASH), cancelCall(HASH)]);
-            expect(h.events).toStrictEqual([{ type: "PAYMENT_PENDING", paymentHashHex: `0x${HASH}` }]);
+            expect(h.events).toStrictEqual([pendingEvent(HASH, EXPIRES_AT_MS + 1)]);
         });
 
         it("waits out a cancel that crossed the release, and repeats the cancel on the next tick", async () => {
@@ -1017,11 +1102,176 @@ describe("buildInvoiceStep", () => {
             h.node.result(invoiceResult(HASH, "Received")).result(invoiceResult(HASH, "Received")).result(invoiceResult(HASH, "Cancelled"));
             await h.step(live());
             expect(h.node.calls()).toEqual([getInvoiceCall(HASH)]);
-            expect(h.events).toStrictEqual([{ type: "PAYMENT_PENDING", paymentHashHex: `0x${HASH}` }]);
+            expect(h.events).toStrictEqual([pendingEvent(HASH)]);
             expect(await releasedOf(h, HASH)).toBe(false);
             expect(h.pollNow).not.toHaveBeenCalled();
             await h.step(live());
             expect(h.node.calls()).toEqual([getInvoiceCall(HASH), getInvoiceCall(HASH), cancelCall(HASH)]);
+        });
+    });
+
+    describe("the history", () => {
+        it("records the arrival pending, then completes it with no fee once paid, the events carrying it as getPayment reads it", async () => {
+            const h = harness();
+            await watching(h, HASH, INDEX);
+            releasing(h);
+            h.node.result(invoiceResult(HASH, "Received")).result({}).result(invoiceResult(HASH, "Paid"));
+            await h.step(live());
+            expect(await recordOf(h, HASH)).toStrictEqual(arrivedRecord(HASH));
+            await expect(listSdkPayments(h)).resolves.toStrictEqual([arrivedRecord(HASH)]);
+            // The release the spy stood in for, as policy writes it.
+            await watchingReleased(h, HASH, INDEX);
+            h.clock.nowMs = NOW_MS + 5000;
+            await h.step(live());
+            expect(h.events).toStrictEqual([pendingEvent(HASH), receivedEvent(HASH, NOW_MS, NOW_MS + 5000)]);
+            expect(await recordOf(h, HASH)).toStrictEqual(receivedRecord(HASH, NOW_MS, NOW_MS + 5000));
+            await expect(listSdkPayments(h)).resolves.toStrictEqual([receivedRecord(HASH, NOW_MS, NOW_MS + 5000)]);
+        });
+
+        it("creates the record of one paid whose arrival it never saw, completed at once", async () => {
+            const h = harness();
+            await watchingReleased(h, HASH, INDEX);
+            h.node.result(invoiceResult(HASH, "Paid"));
+            await h.step(live());
+            expect(await recordOf(h, HASH)).toStrictEqual(receivedRecord(HASH));
+            expect(writes(h.storage)).toContain(INDEX_KEY);
+            await expect(listSdkPayments(h)).resolves.toStrictEqual([receivedRecord(HASH)]);
+        });
+
+        it("keeps the amount the device recorded and the node's string with its description", async () => {
+            const h = harness();
+            await watching(h, HASH, INDEX);
+            const invoice = encodeInvoice(
+                signInvoice(
+                    {
+                        currency: "Fibt",
+                        amountShannons: "1",
+                        timestampMs: TIMESTAMP_MS,
+                        paymentHash: hexToBytes(HASH),
+                        attributes: [
+                            { type: "expiryTime", seconds: 3600n },
+                            { type: "description", text: "a coffee" },
+                        ],
+                    },
+                    PAYEE_SECRET_KEY,
+                ),
+            );
+            h.node.result({ invoice_address: invoice, status: "Received" });
+            await h.step(live());
+            expect(await recordOf(h, HASH)).toStrictEqual({ ...arrivedRecord(HASH), invoice, description: "a coffee" });
+        });
+
+        it("orders the receives newest first by their arrival", async () => {
+            const h = harness();
+            await watching(h, HASH, INDEX);
+            h.node.result(invoiceResult(HASH, "Received"));
+            await h.step(live());
+            await watching(h, OTHER_HASH, OTHER_INDEX);
+            h.clock.nowMs = NOW_MS + 1000;
+            h.node.result(invoiceResult(HASH, "Received")).result(invoiceResult(OTHER_HASH, "Received"));
+            await h.step(live());
+            await expect(listSdkPayments(h)).resolves.toStrictEqual([arrivedRecord(OTHER_HASH, NOW_MS + 1000), arrivedRecord(HASH)]);
+        });
+
+        it.each<[string, (h: Harness) => Promise<void>, string, SdkEvent]>([
+            [
+                "the arrival",
+                (h) => watching(h, HASH, INDEX),
+                "Received",
+                { type: "PAYMENT_PENDING", paymentHashHex: `0x${HASH}`, payment: arrivedRecord(HASH) },
+            ],
+            ["the payment", (h) => watchingReleased(h, HASH, INDEX), "Paid", receivedEvent(HASH)],
+        ])(
+            "emits and marks nothing after a record write of %s that failed, and emits it on the next tick",
+            async (_, watch, status, event) => {
+                const h = harness();
+                await watch(h);
+                jest.spyOn(h.history, "update").mockRejectedValueOnce(new TypeError("storage is full"));
+                jest.spyOn(h.policy, "markHoldInvoiceReleased").mockRejectedValue(holdInvoiceError("not_held"));
+                h.node.result(invoiceResult(HASH, status)).result(invoiceResult(HASH, status));
+                await h.step(live());
+                expect(await recordOf(h, HASH)).toBeNull();
+                expect(await invoicesOf(h)).toStrictEqual({ [HASH]: { status: null } });
+                await h.step(live());
+                expect(summarized(h.events)).toStrictEqual([
+                    pollFailedEvent(`the invoice poll of 0x${HASH} failed: storage is full`, expect.any(TypeError)),
+                    event,
+                ]);
+            },
+        );
+
+        it("keeps watching one whose failed record write left it pending at its expiry, and ends it on the next tick", async () => {
+            const h = harness();
+            await watching(h, HASH, INDEX);
+            h.node.result(invoiceResult(HASH, "Received")).result(invoiceResult(HASH, "Expired")).result(invoiceResult(HASH, "Expired"));
+            await h.step(live());
+            jest.spyOn(h.history, "update").mockRejectedValueOnce(new TypeError("storage is full"));
+            await h.step(live());
+            expect(await recordOf(h, HASH)).toStrictEqual(arrivedRecord(HASH));
+            expect(await invoicesOf(h)).toStrictEqual({ [HASH]: { status: "Received" } });
+            await h.step(live());
+            expect(summarized(h.events)).toStrictEqual([
+                pendingEvent(HASH),
+                pollFailedEvent(`the invoice poll of 0x${HASH} failed: storage is full`, expect.any(TypeError)),
+                { type: "PAYMENT_EXPIRED", paymentHashHex: `0x${HASH}`, payment: endedRecord(HASH, EXPIRED_REASON) },
+            ]);
+            expect(await invoicesOf(h)).toStrictEqual({});
+        });
+
+        it.each<[string, string, (h: Harness, paymentHash: string, invoiceIndex: number) => Promise<void>]>([
+            ["PAYMENT_PENDING", "Received", watching],
+            ["PAYMENT_RECEIVED", "Paid", watchingReleased],
+        ])("emits no %s for a history that hands back no record", async (_, status, watch) => {
+            const h = harness();
+            await watch(h, HASH, INDEX);
+            jest.spyOn(h.history, "update").mockResolvedValue(null);
+            jest.spyOn(h.policy, "markHoldInvoiceReleased").mockRejectedValue(holdInvoiceError("not_held"));
+            h.node.result(invoiceResult(HASH, status));
+            await h.step(live());
+            expect(h.events).toEqual([]);
+            expect(Object.keys(await invoicesOf(h))).toEqual([HASH]);
+        });
+
+        it.each<[string, string, (h: Harness, paymentHash: string, invoiceIndex: number) => Promise<void>]>([
+            ["Received", "Received", watching],
+            ["Paid", "Paid", watchingReleased],
+        ])("writes no record once abandoned while the invoice of one %s is read", async (_, status, watch) => {
+            const run = live();
+            const h = harness();
+            await watch(h, HASH, INDEX);
+            const read = h.policy.readHoldInvoice.bind(h.policy);
+            // The step's own check of a paid invoice reads it first.
+            const spy = jest.spyOn(h.policy, "readHoldInvoice");
+            if (status === "Paid") spy.mockImplementationOnce(read);
+            spy.mockImplementationOnce(async (paymentHash) => {
+                const record = await read(paymentHash);
+                run.abandoned = true;
+                return record;
+            });
+            h.storage.ops.length = 0;
+            h.node.result(invoiceResult(HASH, status));
+            await h.step(run);
+            expect(writes(h.storage)).toEqual([]);
+            expect(h.events).toEqual([]);
+        });
+
+        it.each(["Expired", "Cancelled"])("writes no record once abandoned before %s is recorded", async (status) => {
+            const run = live();
+            const h = harness();
+            await watching(h, HASH, INDEX);
+            h.node.result(invoiceResult(HASH, "Received"));
+            await h.step(live());
+            const read = h.policy.readHoldInvoice.bind(h.policy);
+            jest.spyOn(h.policy, "readHoldInvoice").mockImplementationOnce(async (paymentHash) => {
+                const record = await read(paymentHash);
+                run.abandoned = true;
+                return record;
+            });
+            h.storage.ops.length = 0;
+            h.node.result(invoiceResult(HASH, status));
+            await h.step(run);
+            expect(writes(h.storage)).toEqual([]);
+            expect(await recordOf(h, HASH)).toStrictEqual(arrivedRecord(HASH));
         });
     });
 
@@ -1035,7 +1285,7 @@ describe("buildInvoiceStep", () => {
             expect(h.node.calls()).toEqual([getInvoiceCall(OTHER_HASH), getInvoiceCall(HASH)]);
             expect(summarized(h.events)).toStrictEqual([
                 pollFailedEvent(`the invoice poll of 0x${OTHER_HASH} failed: Invoice not found`, expect.any(RpcError)),
-                { type: "PAYMENT_RECEIVED", paymentHashHex: `0x${HASH}` },
+                receivedEvent(HASH),
             ]);
             expect(await invoicesOf(h)).toStrictEqual({ [OTHER_HASH]: { status: null } });
         });
@@ -1055,9 +1305,9 @@ describe("buildInvoiceStep", () => {
             h.node.result(invoiceResult(HASH, "Received"));
             await h.step(live());
             expect(summarized(h.events)).toStrictEqual([
-                { type: "PAYMENT_PENDING", paymentHashHex: `0x${HASH}` },
                 pollFailedEvent(`the invoice poll of 0x${HASH} failed: no hold invoice was recorded for ${HASH}`, expect.any(TypeError)),
             ]);
+            expect(await recordOf(h, HASH)).toBeNull();
         });
 
         it("rejects the step when the activity list cannot be read, calling nothing", async () => {
@@ -1076,9 +1326,9 @@ describe("buildInvoiceStep", () => {
             await h.step(live());
             await h.step(live());
             expect(summarized(h.events)).toStrictEqual([
-                { type: "PAYMENT_RECEIVED", paymentHashHex: `0x${HASH}` },
+                receivedEvent(HASH),
                 pollFailedEvent(`the invoice poll of 0x${HASH} failed: storage is full`, expect.any(TypeError)),
-                { type: "PAYMENT_RECEIVED", paymentHashHex: `0x${HASH}` },
+                receivedEvent(HASH),
             ]);
             expect(await invoicesOf(h)).toStrictEqual({});
         });
@@ -1130,7 +1380,7 @@ describe("buildInvoiceStep", () => {
             expect(release).not.toHaveBeenCalled();
         });
 
-        it("records nothing and releases nothing once abandoned by PAYMENT_PENDING, and emits it again on the next tick", async () => {
+        it("marks nothing and releases nothing once abandoned by PAYMENT_PENDING, and emits the record unchanged on the next tick", async () => {
             const run = live();
             const h = harness(() => (run.abandoned = true));
             await watching(h, HASH, INDEX);
@@ -1138,10 +1388,13 @@ describe("buildInvoiceStep", () => {
             h.storage.ops.length = 0;
             h.node.result(invoiceResult(HASH, "Received")).result(invoiceResult(HASH, "Received"));
             await h.step(run);
-            expect(writes(h.storage)).toEqual([]);
+            expect(writes(h.storage)).toEqual([RECORD_PREFIX + HASH, INDEX_KEY]);
             expect(release).not.toHaveBeenCalled();
+            h.storage.ops.length = 0;
+            h.clock.nowMs = NOW_MS + 5000;
             await h.step(live());
-            expect(h.events.map((event) => event.type)).toEqual(["PAYMENT_PENDING", "PAYMENT_PENDING"]);
+            expect(h.events).toStrictEqual([pendingEvent(HASH), pendingEvent(HASH)]);
+            expect(writes(h.storage)).not.toContain(RECORD_PREFIX + HASH);
             expect(await invoicesOf(h)).toStrictEqual({ [HASH]: { status: "Received" } });
         });
 
@@ -1150,11 +1403,14 @@ describe("buildInvoiceStep", () => {
             const run = live();
             await watching(h, HASH, INDEX);
             const read = h.policy.readHoldInvoice.bind(h.policy);
-            jest.spyOn(h.policy, "readHoldInvoice").mockImplementationOnce(async (paymentHash) => {
-                const record = await read(paymentHash);
-                run.abandoned = true;
-                return record;
-            });
+            // The arrival's read first, then the release's.
+            jest.spyOn(h.policy, "readHoldInvoice")
+                .mockImplementationOnce(read)
+                .mockImplementationOnce(async (paymentHash) => {
+                    const record = await read(paymentHash);
+                    run.abandoned = true;
+                    return record;
+                });
             const release = jest.spyOn(h.policy, "markHoldInvoiceReleased");
             h.node.result(invoiceResult(HASH, "Received"));
             await h.step(run);
@@ -1167,11 +1423,14 @@ describe("buildInvoiceStep", () => {
             const run = live();
             await watchingReleased(h, HASH, INDEX);
             const read = h.policy.readHoldInvoice.bind(h.policy);
-            jest.spyOn(h.policy, "readHoldInvoice").mockImplementationOnce(async (paymentHash) => {
-                const record = await read(paymentHash);
-                run.abandoned = true;
-                return record;
-            });
+            // The arrival's read first, then the release's.
+            jest.spyOn(h.policy, "readHoldInvoice")
+                .mockImplementationOnce(read)
+                .mockImplementationOnce(async (paymentHash) => {
+                    const record = await read(paymentHash);
+                    run.abandoned = true;
+                    return record;
+                });
             h.node.result(invoiceResult(HASH, "Received"));
             await h.step(run);
             expect(h.node.calls()).toEqual([getInvoiceCall(HASH)]);
@@ -1209,20 +1468,22 @@ describe("buildInvoiceStep", () => {
             expect(h.pollNow).not.toHaveBeenCalled();
         });
 
-        it.each<[string, string, (h: Harness, paymentHash: string, invoiceIndex: number) => Promise<void>]>([
-            ["PAYMENT_RECEIVED", "Paid", watchingReleased],
-            ["PAYMENT_EXPIRED", "Expired", watching],
-            ["PAYMENT_CANCELLED", "Cancelled", watching],
-        ])("keeps watching once abandoned by %s, and emits it again on the next tick", async (type, status, watch) => {
+        it.each<[string, string, (h: Harness, paymentHash: string, invoiceIndex: number) => Promise<void>, string[]]>([
+            ["PAYMENT_RECEIVED", "Paid", watchingReleased, [RECORD_PREFIX + HASH, INDEX_KEY]],
+            ["PAYMENT_EXPIRED", "Expired", watching, []],
+            ["PAYMENT_CANCELLED", "Cancelled", watching, []],
+        ])("keeps watching once abandoned by %s, and emits it again on the next tick", async (type, status, watch, written) => {
             const run = live();
             const h = harness(() => (run.abandoned = true));
             await watch(h, HASH, INDEX);
             h.storage.ops.length = 0;
             h.node.result(invoiceResult(HASH, status)).result(invoiceResult(HASH, status));
             await h.step(run);
-            expect(writes(h.storage)).toEqual([]);
+            expect(writes(h.storage)).toEqual(written);
+            h.clock.nowMs = NOW_MS + 5000;
             await h.step(live());
             expect(h.events.map((event) => event.type)).toEqual([type, type]);
+            expect(h.events[1]).toStrictEqual(h.events[0]);
             expect(await invoicesOf(h)).toStrictEqual({});
         });
 

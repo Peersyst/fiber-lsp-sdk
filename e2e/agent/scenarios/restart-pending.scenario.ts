@@ -5,7 +5,15 @@ import { readScenarioEnv } from "./utils/scenario-env";
 import { requestParam, SUBMIT_CHANNEL_SIGNATURE_METHOD } from "./utils/faulty-fetch";
 import type { FaultyFetchRequest } from "./utils/faulty-fetch";
 import { ensurePublicChannels } from "./utils/public-channels";
-import { INVOICE_AMOUNT_SHANNONS, isSdkEvent, OPEN_STEPS, RECEIVED_STEPS, ScenarioDevice, signingSteps } from "./utils/scenario-device";
+import {
+    INVOICE_AMOUNT_SHANNONS,
+    isSdkEvent,
+    OPEN_STEPS,
+    RECEIVED_STEPS,
+    ScenarioDevice,
+    signingSteps,
+    untimedRecord,
+} from "./utils/scenario-device";
 import { EVENT_TIMEOUT_MS, waitUntil } from "./utils/wait";
 
 type SubmittedSignature = { channelId: string; requestId: string; partialSignature: string; nextMaterial: unknown };
@@ -113,7 +121,26 @@ test("a restarted device serves the request whose signature never reached the no
         );
         assert.deepEqual(resubmitted, lostSignature, "the restarted device served other bytes");
 
-        await device.waitForPaymentReceived(invoice.paymentHashHex);
+        const received = await device.waitForPaymentReceived(invoice.paymentHashHex);
+        assert.deepEqual(
+            untimedRecord(received.payment),
+            {
+                paymentHashHex: invoice.paymentHashHex,
+                direction: "receive",
+                status: "completed",
+                amountShannons: INVOICE_AMOUNT_SHANNONS,
+                invoice: invoice.invoice,
+                description: "restart with a pending request",
+                maxFeeShannons: null,
+                feeShannons: "0",
+                failedReason: null,
+                createdAtMs: 0,
+                settledAtMs: 0,
+            },
+            "PAYMENT_RECEIVED's record",
+        );
+        // One history over the same store.
+        assert.deepEqual(await restarted.getPayment(invoice.paymentHashHex), received.payment, "the restarted facade's record");
         await node1.waitForPaymentStatus(invoice.paymentHashHex, "Success");
         assert.equal((await node2.getInvoice(invoice.paymentHashHex, device.accessToken)).status, "Paid");
         // The lost signature was never announced, so the restarted facade announces the payment's every step.

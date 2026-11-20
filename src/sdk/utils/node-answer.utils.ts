@@ -12,6 +12,27 @@ export function isFiberRefusal(error: unknown, answer: { code: number; message: 
 }
 
 /**
+ * Tells whether a call failed with one of fiber's `format!` answers, matched whole.
+ * @param error What the call threw.
+ * @param code The answers' code.
+ * @param templates The answers' texts, `{}` where fiber writes a number.
+ * @returns Whether it is one of those answers.
+ */
+export function isFiberRefusalByTemplate(error: unknown, code: number, templates: readonly string[]): error is RpcError {
+    return error instanceof RpcError && error.code === code && templates.some((template) => templatePattern(template).test(error.message));
+}
+
+/**
+ * Builds the pattern of a fiber text: its literal parts escaped, each `{}` one or more decimal digits.
+ * @param template The text, `{}` where fiber writes a number.
+ * @returns The pattern, anchored at both ends.
+ */
+function templatePattern(template: string): RegExp {
+    const literal = template.split("{}").map((part) => part.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"));
+    return new RegExp(`^${literal.join("[0-9]+")}$`);
+}
+
+/**
  * Writes a hash as fiber's messages write a `Hash256`, both in its Debug and its Display form (`primitives.rs:358-369`).
  * @param hashHex The hash, lowercase hex.
  * @returns `Hash256(0x…)`.

@@ -24,6 +24,7 @@ import type {
 import type { HoldInvoicePreimages, SignerDispatch, SignerRefusal, TenantIdentity } from "../signer";
 import type { ActivityTracker } from "./activity";
 import type { IndexAllocator } from "./allocator";
+import type { PaymentHistory } from "./payment-history";
 import type { DeviceChannelList } from "./device-channels";
 import type { PendingOpeningStore } from "./pending-opening";
 import type { ActivityPoller } from "./poller";
@@ -32,11 +33,14 @@ import type {
     ACTIVITY_RECORD_VERSION,
     ALLOCATION_KINDS,
     DEVICE_CHANNELS_RECORD_VERSION,
+    PAYMENT_HISTORY_RECORD_VERSION,
     PENDING_OPENING_RECORD_VERSION,
     SDK_CHANNEL_STATES,
     SDK_ERROR_CODES,
     SDK_EVENT_TYPES,
     SDK_NETWORK_NAMES,
+    SDK_PAYMENT_DIRECTIONS,
+    SDK_PAYMENT_RECORD_STATUSES,
 } from "./sdk.constants";
 import type { SdkError } from "./sdk.error";
 
@@ -129,21 +133,26 @@ type WatchtowerSigningEventPayload = {
 type SdkEventPayloads = {
     CHANNEL_READY: { channelId: string };
     CHANNEL_CLOSED: { channelId: string };
-    PAYMENT_SENT: { paymentHashHex: string };
+    /**
+     * `feeShannons` is the fee fiber charged.
+     */
+    PAYMENT_SENT: { paymentHashHex: string; feeShannons: string; payment: SdkPaymentRecord };
     /**
      * `reason` is fiber's `failed_error`, verbatim, or the SDK's own when the node never ran the send or gave none.
      */
-    PAYMENT_FAILED: { paymentHashHex: string; reason: string };
-    PAYMENT_PENDING: { paymentHashHex: string };
-    PAYMENT_RECEIVED: { paymentHashHex: string };
+    PAYMENT_FAILED: { paymentHashHex: string; reason: string; payment: SdkPaymentRecord };
+    PAYMENT_PENDING: { paymentHashHex: string; payment: SdkPaymentRecord };
+    PAYMENT_RECEIVED: { paymentHashHex: string; payment: SdkPaymentRecord };
     /**
-     * Ended unpaid, its preimage never released: fiber expired it, or it is past its expiry with no TLC of it left.
+     * Ended unpaid, its preimage never released: fiber expired it, or it is past its expiry with no TLC of it left. `payment`
+     * is `null` unless a payment of it had arrived.
      */
-    PAYMENT_EXPIRED: { paymentHashHex: string };
+    PAYMENT_EXPIRED: { paymentHashHex: string; payment: SdkPaymentRecord | null };
     /**
-     * Ended unpaid, its preimage never released: fiber cancelled it, whoever asked.
+     * Ended unpaid, its preimage never released: fiber cancelled it, whoever asked. `payment` is `null` unless a payment of
+     * it had arrived.
      */
-    PAYMENT_CANCELLED: { paymentHashHex: string };
+    PAYMENT_CANCELLED: { paymentHashHex: string; payment: SdkPaymentRecord | null };
     SIGNING: SigningEventPayload;
     WATCHTOWER_SIGNING: WatchtowerSigningEventPayload;
     ERROR: { error: SdkError };
@@ -177,6 +186,71 @@ export type ActivityRecord = {
     channels: Record<string, ActivityEntry<"channel">>;
     payments: Record<string, ActivityEntry<"payment">>;
     invoices: Record<string, ActivityEntry<"invoice">>;
+};
+
+export type SdkPaymentDirection = (typeof SDK_PAYMENT_DIRECTIONS)[number];
+
+/**
+ * `completed` is final; a `failed` send may still turn `completed` (fiber's false `Failed`) or `pending` (a retry).
+ */
+export type SdkPaymentRecordStatus = (typeof SDK_PAYMENT_RECORD_STATUSES)[number];
+
+export type SdkPaymentRecord = {
+    /**
+     * `0x`-prefixed lowercase hex, as the events carry it.
+     */
+    paymentHashHex: string;
+    direction: SdkPaymentDirection;
+    status: SdkPaymentRecordStatus;
+    amountShannons: string;
+    invoice: string;
+    description: string | null;
+    /**
+     * The fee budget a send was given; `null` for a receive.
+     */
+    maxFeeShannons: string | null;
+    /**
+     * The fee fiber charged, once a send completed; `"0"` for a completed receive, `null` before.
+     */
+    feeShannons: string | null;
+    /**
+     * Fiber's `failed_error` or the device's reason, while the payment is `failed`.
+     */
+    failedReason: string | null;
+    /**
+     * When a send was handed to the node, or when a receive's payment arrived; ms since the epoch.
+     */
+    createdAtMs: number;
+    /**
+     * When it reached `completed` or `failed`; `null` while `pending`.
+     */
+    settledAtMs: number | null;
+};
+
+export type StoredPaymentRecord = { version: typeof PAYMENT_HISTORY_RECORD_VERSION } & SdkPaymentRecord;
+
+export type PaymentHistoryIndexEntry = {
+    /**
+     * Lowercase hex, unprefixed.
+     */
+    paymentHash: string;
+    createdAtMs: number;
+};
+
+export type PaymentHistoryIndex = {
+    version: typeof PAYMENT_HISTORY_RECORD_VERSION;
+    /**
+     * Newest first, ties by hash.
+     */
+    entries: PaymentHistoryIndexEntry[];
+};
+
+export type SdkPaymentListOptions = {
+    /**
+     * 20 by default.
+     */
+    limit?: number;
+    offset?: number;
 };
 
 export type PendingOpening = {
@@ -321,7 +395,38 @@ export type SdkPayment = {
     maxFeeShannons: string;
 };
 
-export type SdkPayableInvoice = { paymentHash: Uint8Array; amountShannons: string; payeePublicKey: Uint8Array };
+export type SdkFeeEstimate = {
+    /**
+     * `0x`-prefixed lowercase hex, as the events carry it.
+     */
+    paymentHashHex: string;
+    amountShannons: string;
+    /**
+     * Through the LSP as trampoline, the whole budget (the LSP keeps what its route leaves); to the LSP itself, the route's fee.
+     */
+    feeShannons: string;
+};
+
+export type SdkPayableInvoice = {
+    paymentHash: Uint8Array;
+    amountShannons: string;
+    payeePublicKey: Uint8Array;
+    description: string | null;
+    /**
+     * Milliseconds since the epoch, as fiber counts it; `null` when the invoice never expires.
+     */
+    expiresAtMs: bigint | null;
+};
+
+export type SdkPayableInvoiceDetails = {
+    /**
+     * `0x`-prefixed lowercase hex, as the events carry it.
+     */
+    paymentHashHex: string;
+    amountShannons: string;
+    description: string | null;
+    expiresAtMs: bigint | null;
+};
 
 /**
  * The host's to pick: the SDK draws no randomness and reads no clock for a registration.
@@ -382,6 +487,7 @@ export type SdkContext = {
     dispatch: SignerDispatch;
     allocator: IndexAllocator;
     activity: ActivityTracker;
+    history: PaymentHistory;
     channels: DeviceChannelList;
     openings: PendingOpeningStore;
     poller: ActivityPoller;

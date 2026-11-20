@@ -7,6 +7,7 @@ export * from "./network.utils";
 export * from "./node-answer.utils";
 export * from "./opening-check.utils";
 export * from "./payment-check.utils";
+export * from "./payment-history.utils";
 export * from "./poll-step.utils";
 export * from "./request-id.utils";
 export * from "./runtime-timer.utils";

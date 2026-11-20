@@ -32,7 +32,7 @@ import {
     encodeSubmitChannelSignatureParams,
     encodeSubmitWatchtowerSignatureParams,
 } from "./signing";
-import { decodeRegisterTenantResult, encodeRegisterTenantParams } from "./tenants";
+import { decodeLspNodeStatus, decodeRegisterTenantResult, encodeRegisterTenantParams } from "./tenants";
 import type {
     AbandonChannelParams,
     RpcChannel,
@@ -40,6 +40,7 @@ import type {
     RpcListedChannelState,
     FiberRpcClientOptions,
     ListChannelsParams,
+    LspNodeStatus,
     NewInvoiceParams,
     NewInvoiceResult,
     OpenChannelWithExternalFundingParams,
@@ -302,6 +303,14 @@ export class FiberRpcClient {
      */
     async registerTenant(params: RegisterTenantParams): Promise<RegisterTenantResult> {
         return this.call("lsp_register_tenant", encodeRegisterTenantParams(params), decodeRegisterTenantResult);
+    }
+
+    /**
+     * Reads the hosted LSP's status, under the operator's token.
+     * @returns The node's public key, tenant store root and tenant counts.
+     */
+    async getLspStatus(): Promise<LspNodeStatus> {
+        return this.call("lsp_get_status", null, decodeLspNodeStatus);
     }
 
     /**
