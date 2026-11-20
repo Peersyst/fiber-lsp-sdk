@@ -16,6 +16,10 @@ describe("encodeRpcRequest", () => {
             `{"jsonrpc":"2.0","id":1,"method":"abandon_channel","params":[{"channel_id":"0x${"11".repeat(32)}"}]}`,
         );
     });
+
+    it("writes an empty positional array for a method without params", () => {
+        expect(encodeRpcRequest(2, "lsp_get_status", null)).toBe('{"jsonrpc":"2.0","id":2,"method":"lsp_get_status","params":[]}');
+    });
 });
 
 describe("decodeRpcResponse", () => {

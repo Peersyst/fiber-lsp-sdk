@@ -1,4 +1,11 @@
-import { COMPACT_ECDSA_SIGNATURE_LENGTH, COMPRESSED_POINT_LENGTH, HASH256_LENGTH, UINT64_MAX, isHexBytes } from "../common";
+import {
+    COMPACT_ECDSA_SIGNATURE_LENGTH,
+    COMPRESSED_POINT_LENGTH,
+    HASH256_LENGTH,
+    UINT64_MAX,
+    isCompressedPoint,
+    isHexBytes,
+} from "../common";
 import type { WireField } from "../wire";
 import {
     decodeBareHexBytes,
@@ -7,6 +14,7 @@ import {
     decodeNonEmptyString,
     decodeOrNull,
     decodeScriptOrNull,
+    decodeString,
     decodeUintHex,
     encodeBareHexBytes,
     encodeHexBytes,
@@ -18,6 +26,8 @@ import {
 } from "../wire";
 import { RPC_TENANT_RUNTIME_STATUSES } from "./rpc.constants";
 import type {
+    LspNodeStatus,
+    LspNodeStatusWire,
     LspTenantChannel,
     LspTenantChannelWire,
     LspTenantStatus,
@@ -50,6 +60,32 @@ export function encodeRegisterTenantParams(params: RegisterTenantParams): Regist
 export function decodeRegisterTenantResult(field: WireField): RegisterTenantResult {
     const at = readObject<RegisterTenantResultWire>(field);
     return { tenant: decodeLspTenantStatus(at("tenant")), accessToken: decodeNonEmptyString(at("access_token")) };
+}
+
+/**
+ * Reads the result of `lsp_get_status`.
+ * @param field The result field.
+ * @returns The node's public key, tenant store root and tenant counts.
+ */
+export function decodeLspNodeStatus(field: WireField): LspNodeStatus {
+    const at = readObject<LspNodeStatusWire>(field);
+    return {
+        publicNodeId: decodeBarePoint(at("public_node_id")),
+        tenantStoreRoot: decodeString(at("tenant_store_root")),
+        registeredTenants: decodeUintHex(at("registered_tenants"), UINT64_MAX),
+        activeTenants: decodeUintHex(at("active_tenants"), UINT64_MAX),
+    };
+}
+
+/**
+ * Reads a bare-hex public key, refusing bytes that are not a point.
+ * @param field Field to read.
+ * @returns The compressed point.
+ */
+function decodeBarePoint(field: WireField): Uint8Array {
+    const key = decodeBareHexBytes(field, COMPRESSED_POINT_LENGTH);
+    if (!isCompressedPoint(key)) malformedWireField(field, "must be a compressed point on secp256k1");
+    return key;
 }
 
 /**

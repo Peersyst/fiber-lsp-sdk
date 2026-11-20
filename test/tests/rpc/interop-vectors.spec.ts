@@ -45,10 +45,11 @@ describe("rpc interop vectors", () => {
         expect(vectors.jsonrpsee_version).toBe("0.25.1");
     });
 
-    it("holds params and results for every method, under distinct case names", () => {
+    it("holds params and results for every method, under distinct case names, and no params for the one without", () => {
         for (const method of RPC_METHODS) {
             const { params, results } = vectors.methods[method];
-            expect(params.length).toBeGreaterThan(0);
+            if (method === "lsp_get_status") expect(params).toHaveLength(0);
+            else expect(params.length).toBeGreaterThan(0);
             expect(results.length).toBeGreaterThan(0);
             expect(new Set(params.map((entry) => entry.name)).size).toBe(params.length);
             expect(new Set(results.map((entry) => entry.name)).size).toBe(results.length);
@@ -280,6 +281,14 @@ describe("rpc interop vectors", () => {
             expect(tenants.some((tenant) => tenant.root_signer_pubkey !== null && tenant.channels.length > 0)).toBe(true);
         });
 
+        it("cover a node status without tenants, one with fewer active than registered, and the largest counters", () => {
+            const statuses = vectors.methods.lsp_get_status.results.map((entry) => entry.values);
+            const counts = statuses.map((entry): [bigint, bigint] => [BigInt(entry.registered_tenants), BigInt(entry.active_tenants)]);
+            expect(counts).toContainEqual([0n, 0n]);
+            expect(counts.some(([registered, active]) => active > 0n && active < registered)).toBe(true);
+            expect(counts).toContainEqual([UINT64_MAX, UINT64_MAX]);
+        });
+
         it("cover a tenant's channel online and offline, in CKB and in a UDT", () => {
             expect(new Set(tenantChannels.map((channel) => channel.online))).toEqual(new Set([true, false]));
             expect(tenantChannels.some((channel) => channel.funding_udt_type_script === null)).toBe(true);
@@ -301,11 +310,17 @@ describe("rpc interop vectors", () => {
     });
 
     describe("params the client encodes", () => {
-        const written: Partial<Record<RpcMethod, { name: string; params: RpcParamsWire }[]>> = {};
+        const written: Partial<Record<RpcMethod, { name: string; params: RpcParamsWire | null }[]>> = {};
 
         for (const method of RPC_METHODS) {
-            const encode = RPC_PARAMS_ENCODERS[method] as (values: unknown) => RpcParamsWire;
+            const encode = RPC_PARAMS_ENCODERS[method] as (values: unknown) => RpcParamsWire | null;
             const cases: RpcCaseVector<unknown>[] = vectors.methods[method].params;
+            if (cases.length === 0) {
+                it(`writes no params for ${method}, which takes none`, () => {
+                    expect(encode(undefined)).toBeNull();
+                });
+                continue;
+            }
             it.each(cases.map((entry) => [method, entry.name, entry] as const))("write %s / %s as fiber's serde does", (_, name, entry) => {
                 const params = encode(entry.values);
                 expect(withoutNulls(params)).toEqual(withoutNulls(entry.json));

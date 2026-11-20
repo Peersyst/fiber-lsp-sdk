@@ -2,7 +2,7 @@ import { inspect } from "node:util";
 import { hexToBytes } from "@noble/hashes/utils.js";
 import type { FetchInit, IFetchLike, RegisterTenantParams } from "../../../src/rpc";
 import { RpcError, RpcResponseError, RpcTransportError } from "../../../src/rpc";
-import { LspOperatorClient } from "../../../src/sdk";
+import { LspOperatorClient, SdkError } from "../../../src/sdk";
 import type { LspOperatorClientOptions, SdkTenantRegistration } from "../../../src/sdk";
 import { WireError } from "../../../src/wire";
 import { FetchMock, rpcResultAnswer } from "../../mocks/rpc";
@@ -10,11 +10,11 @@ import { caseOf, loadInteropVectors } from "../../utils/interop-vectors";
 import { refusalOf } from "../../utils/refusal";
 import { rejection } from "../../utils/rejection";
 import { answering, refusing } from "../../utils/rpc-answers";
-import { toRegisterTenantParams } from "../../utils/rpc-typed";
+import { toLspNodeStatus, toRegisterTenantParams } from "../../utils/rpc-typed";
 import { loadRpcVectors } from "../../utils/rpc-vectors";
 import { withRuntime } from "../../utils/with-runtime";
 
-const { lsp_register_tenant: register } = loadRpcVectors().methods;
+const { lsp_register_tenant: register, lsp_get_status: lspStatus } = loadRpcVectors().methods;
 const registry = loadInteropVectors().tenant_registry;
 
 const RPC_URL = "http://lsp.example:8227";
@@ -30,6 +30,8 @@ const SIGNED_BODY =
     '"signed_at":"0x191dd9dec00",' +
     '"signature":"68af9e0b5ab50ae2932e92016acbce692d2101d902b718f3e4d37f31dfb5df99709727b3febfb61c5cceeb2c71f0a77cb4be281b4323724f5c2b29d88f6cba52"' +
     "}]}";
+
+const STATUS_BODY = '{"jsonrpc":"2.0","id":1,"method":"lsp_get_status","params":[]}';
 
 const SIGNED = caseOf(register.params, "signed payload");
 const COLD = caseOf(register.results, "cold tenant without a channel").json as { tenant: Record<string, unknown>; access_token: string };
@@ -291,16 +293,40 @@ describe("LspOperatorClient", () => {
             expect(mock.last.init.body).toBe(SIGNED_BODY);
         });
 
-        it("surfaces the node's refusal as an RpcError", async () => {
-            const error = await rejection(
-                clientOf(refusing(-32000, "tenant registration request was already consumed")).registerTenant(signedRegistration()),
-            );
+        it.each<[string, string]>([
+            ["registration_consumed", "tenant registration request was already consumed"],
+            ["registration_invalid", "invalid RootSigner registration proof: signature failed verification"],
+            ["registration_invalid", "invalid RootSigner registration proof: malformed signature"],
+            ["registration_invalid", "invalid RootSigner registration proof: tenant registration signed_at is too far in the future"],
+            ["registration_invalid", "invalid RootSigner registration proof: tenant registration signed_at is too old"],
+        ])("surfaces the node's refusal as %s: %s", async (code, message) => {
+            const error = await rejection(clientOf(refusing(-32000, message)).registerTenant(signedRegistration()));
+            expect(error).toBeInstanceOf(SdkError);
+            expect(error).toMatchObject({ name: "SdkError", code, message: `the node refuses the registration: ${message}` });
+            const cause = (error as SdkError).cause;
+            expect(cause).toBeInstanceOf(RpcError);
+            expect(cause).toMatchObject({ method: "lsp_register_tenant", code: -32000, message });
+        });
+
+        it.each<[string, number, string]>([
+            ["the consumed text under another code", -32603, "tenant registration request was already consumed"],
+            ["the consumed text one character off", -32000, "tenant registration request was already consumeD"],
+            ["the consumed text with a trailing period", -32000, "tenant registration request was already consumed."],
+            ["a prefix of the consumed text", -32000, "tenant registration request was already"],
+            ["the consumed text inside another", -32000, "error: tenant registration request was already consumed"],
+            ["an invalid-proof text under another code", -32603, "invalid RootSigner registration proof: signature failed verification"],
+            ["an invalid-proof text one character off", -32000, "invalid RootSigner registration proof: signature failed verificatioN"],
+            ["an invalid-proof text with a trailing space", -32000, "invalid RootSigner registration proof: malformed signature "],
+            ["the invalid-proof prefix only", -32000, "invalid RootSigner registration proof: "],
+            ["the invalid-proof prefix with another reason", -32000, "invalid RootSigner registration proof: unknown reason"],
+            ["a timestamp reason without the prefix", -32000, "tenant registration signed_at is too old"],
+            ["the proof targeting another node", -32000, "tenant registration proof targets another LSP node"],
+            ["a refused token", -32999, "Unauthorized"],
+        ])("passes %s through as an unclassified RpcError", async (_, code, message) => {
+            const error = await rejection(clientOf(refusing(code, message)).registerTenant(signedRegistration()));
             expect(error).toBeInstanceOf(RpcError);
-            expect(error).toMatchObject({
-                method: "lsp_register_tenant",
-                code: -32000,
-                message: "tenant registration request was already consumed",
-            });
+            expect(error).not.toBeInstanceOf(SdkError);
+            expect(error).toMatchObject({ method: "lsp_register_tenant", code, message });
         });
 
         it("surfaces a fetch that throws as an RpcTransportError carrying the cause", async () => {
@@ -400,6 +426,77 @@ describe("LspOperatorClient", () => {
             expect(error).toBeInstanceOf(expected.constructor);
             expect(error).toHaveProperty("message", expected.message);
             expect(mock.requests).toHaveLength(0);
+        });
+    });
+
+    describe("getStatus", () => {
+        it.each(lspStatus.results.map((entry) => [entry.name, entry] as const))(
+            "posts lsp_get_status with the operator's token and no params, and reads the %s",
+            async (_, entry) => {
+                const mock = answering(entry.json);
+                await expect(clientOf(mock).getStatus()).resolves.toStrictEqual(toLspNodeStatus(entry.values));
+                expect(mock.requests).toHaveLength(1);
+                expect(mock.last.url).toBe(RPC_URL);
+                expect(mock.last.init).toEqual({
+                    method: "POST",
+                    headers: { "content-type": "application/json", authorization: `Bearer ${OPERATOR_TOKEN}` },
+                    body: STATUS_BODY,
+                });
+            },
+        );
+
+        it("answers the node's status as it is, without checking its key against anything", async () => {
+            const json = caseOf(lspStatus.results, "registered tenants, some active").json as object;
+            const otherNode = `02${"79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798"}`;
+            await expect(clientOf(answering({ ...json, public_node_id: otherNode })).getStatus()).resolves.toStrictEqual({
+                publicNodeId: hexToBytes(otherNode),
+                tenantStoreRoot: "/var/lib/fiber/tenants",
+                registeredTenants: 3n,
+                activeTenants: 1n,
+            });
+        });
+
+        it.each<[string, Record<string, unknown>, string]>([
+            ["a node key that is not a point", { public_node_id: `02${"00".repeat(32)}` }, "response.result.public_node_id"],
+            ["no node key", { public_node_id: undefined }, "response.result.public_node_id"],
+            ["no store root", { tenant_store_root: undefined }, "response.result.tenant_store_root"],
+            ["a count that is not hex", { registered_tenants: 3 }, "response.result.registered_tenants"],
+            ["no active count", { active_tenants: undefined }, "response.result.active_tenants"],
+        ])("refuses a status with %s as an RpcResponseError", async (_, change, path) => {
+            const json = caseOf(lspStatus.results, "no tenant").json as object;
+            const error = await rejection(clientOf(answering({ ...json, ...change })).getStatus());
+            expect(error).toBeInstanceOf(RpcResponseError);
+            expect(error).toMatchObject({ name: "RpcResponseError", method: "lsp_get_status", path });
+        });
+
+        it("refuses a null result as an RpcResponseError", async () => {
+            const error = await rejection(clientOf(answering(null)).getStatus());
+            expect(error).toBeInstanceOf(RpcResponseError);
+            expect(error).toMatchObject({ method: "lsp_get_status", path: "response.result", reason: "must be an object" });
+        });
+
+        it.each<[number, string]>([
+            [-32999, "Unauthorized"],
+            [-32000, "tenant registration request was already consumed"],
+        ])("surfaces the node's refusal %s as an RpcError, never classified", async (code, message) => {
+            const error = await rejection(clientOf(refusing(code, message)).getStatus());
+            expect(error).toBeInstanceOf(RpcError);
+            expect(error).not.toBeInstanceOf(SdkError);
+            expect(error).toMatchObject({ method: "lsp_get_status", code, message });
+        });
+
+        it("surfaces a fetch that throws as an RpcTransportError carrying the cause", async () => {
+            const cause = new Error("connection refused");
+            const error = await rejection(clientOf(new FetchMock().answer({ rejection: cause })).getStatus());
+            expect(error).toBeInstanceOf(RpcTransportError);
+            expect(error).toMatchObject({ method: "lsp_get_status", message: "lsp_get_status: the request failed", status: undefined });
+            expect((error as RpcTransportError).cause).toBe(cause);
+        });
+
+        it("surfaces a status out of 2xx as an RpcTransportError", async () => {
+            const error = await rejection(clientOf(new FetchMock().answer({ status: 503, body: "" })).getStatus());
+            expect(error).toBeInstanceOf(RpcTransportError);
+            expect(error).toMatchObject({ method: "lsp_get_status", message: "lsp_get_status: HTTP status 503", status: 503 });
         });
     });
 });

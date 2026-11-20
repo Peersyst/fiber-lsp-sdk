@@ -4,14 +4,14 @@ import { JSON_RPC_VERSION, RPC_RESPONSE_PATH } from "./rpc.constants";
 import type { RpcErrorObjectWire, RpcMethod, RpcParamsWire, RpcRequestWire, RpcResponse, RpcResponseWire } from "./rpc.types";
 
 /**
- * Writes a call as fiber reads it, the params as the only item of a positional array.
+ * Writes a call as fiber reads it: the params as the only item of a positional array, empty without params.
  * @param id Id the response must answer.
  * @param method Method to call.
- * @param params The method's params, in wire form.
+ * @param params The method's params, in wire form, or `null` for none.
  * @returns The JSON text.
  */
-export function encodeRpcRequest(id: number, method: RpcMethod, params: RpcParamsWire): string {
-    const request: RpcRequestWire = { jsonrpc: JSON_RPC_VERSION, id, method, params: [params] };
+export function encodeRpcRequest(id: number, method: RpcMethod, params: RpcParamsWire | null): string {
+    const request: RpcRequestWire = { jsonrpc: JSON_RPC_VERSION, id, method, params: params === null ? [] : [params] };
     return JSON.stringify(request);
 }
 

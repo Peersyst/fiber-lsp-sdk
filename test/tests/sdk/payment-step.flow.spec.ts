@@ -1,9 +1,9 @@
 import { bytesToHex, hexToBytes } from "@noble/hashes/utils.js";
 import type { UnsignedInvoice } from "../../../src/invoice";
-import { encodeInvoice } from "../../../src/invoice";
+import { decodeInvoice, encodeInvoice } from "../../../src/invoice";
 import { PolicyEngine, SignerStore } from "../../../src/policy";
 import { RpcError, RpcTransportError } from "../../../src/rpc";
-import type { SdkChannelInfo, SdkEvent, SdkPayment } from "../../../src/sdk";
+import type { SdkChannelInfo, SdkErrorCode, SdkEvent, SdkPayment, SdkPaymentRecord } from "../../../src/sdk";
 import { ActivityTracker, FiberLspSdk, SDK_PAYMENT_NEVER_SENT_REASON, SdkError } from "../../../src/sdk";
 import { TimerMock } from "../../mocks/common";
 import { InMemorySignerStorage } from "../../mocks/policy";
@@ -47,6 +47,9 @@ const EXPIRES_AT_MS = 1_791_370_800_000;
 
 // Fiber's default cap, 5 per mille of the amount, which the device asks by default.
 const DEFAULT_MAX_FEE = "5000000";
+
+// Fiber's floor for AMOUNT through one trampoline, ceil(1000000000 * 1000 / 1000000).
+const MINIMAL_FEE = "1000000";
 
 // The amount and the default fee: the debit intent's maximum, and what the hop to the LSP carries.
 const BUDGET = "1005000000";
@@ -242,10 +245,42 @@ async function watchedPayments(h: PaymentFlow): Promise<string[]> {
     return Object.keys((await new ActivityTracker(new SignerStore(h.storage)).read()).payments);
 }
 
+function sendRecord(invoice: string, maxFeeShannons: string, fields: Partial<SdkPaymentRecord> = {}): SdkPaymentRecord {
+    return {
+        paymentHashHex: PAYMENT_HASH,
+        direction: "send",
+        status: "pending",
+        amountShannons: AMOUNT,
+        invoice,
+        description: null,
+        maxFeeShannons,
+        feeShannons: null,
+        failedReason: null,
+        createdAtMs: NOW_MS,
+        settledAtMs: null,
+        ...fields,
+    };
+}
+
+function sentPayments(h: PaymentFlow): SdkPaymentRecord[] {
+    return h.events.flatMap((event) => (event.type === "PAYMENT_SENT" ? [event.payment] : []));
+}
+
 // Past `transferred`: the peer fulfils and its round is signed, the payment ending on the last signature's tick.
 async function paidThrough(h: PaymentFlow): Promise<void> {
     h.node.fulfil(PAYMENT_HASH.slice(2), PREIMAGE);
     await tick(h);
+}
+
+// `toEqual` compares an error's message alone.
+function expectSendFailure(error: unknown, code: SdkErrorCode, cause: RpcError | RpcTransportError): void {
+    expect(error).toBeInstanceOf(SdkError);
+    expect((error as SdkError).code).toBe(code);
+    expect((error as SdkError).cause).toBeInstanceOf(cause.constructor);
+    expect((error as SdkError).cause).toEqual(cause);
+    expect((error as SdkError).cause).toMatchObject(
+        cause instanceof RpcError ? { method: cause.method, code: cause.code } : { method: cause.method },
+    );
 }
 
 describe("payments over the tenant node", () => {
@@ -284,15 +319,161 @@ describe("payments over the tenant node", () => {
         expect(await h.sdk.listChannels()).toEqual([
             { ...LISTED, localBalanceShannons: "60995000000", remoteBalanceShannons: "19505000000" },
         ]);
+        const completed = sendRecord(PAYEE_INVOICE_STRING, DEFAULT_MAX_FEE, {
+            status: "completed",
+            feeShannons: DEFAULT_MAX_FEE,
+            settledAtMs: NOW_MS,
+        });
+        expect(sentPayments(h)).toStrictEqual([completed]);
+        expect(await h.sdk.getPayment(PAYMENT_HASH)).toStrictEqual(completed);
         const again = h.node.calls.length;
         const error = await rejection(h.sdk.transfer(PAYEE_INVOICE_STRING));
         expect(error).toBeInstanceOf(SdkError);
         expect(error).toMatchObject({
             code: "payment_charged",
-            message: `the device refuses the payment: a payment under ${PAYMENT_HASH.slice(2)} has already been charged, it cannot be authorised again`,
+            message: `the device refuses the payment: the one under ${PAYMENT_HASH} already completed`,
         });
         expect(methods(h, again)).toEqual([]);
         expect(await watchedPayments(h)).toEqual([]);
+        expect(await h.sdk.getPayment(PAYMENT_HASH)).toStrictEqual(completed);
+    });
+
+    it("estimates the whole budget as the fee through the LSP, transfer's default without options", async () => {
+        const h = await opened();
+        const from = h.node.calls.length;
+        await expect(h.sdk.estimateTransferFee(PAYEE_INVOICE_STRING)).resolves.toStrictEqual({
+            paymentHashHex: PAYMENT_HASH,
+            amountShannons: AMOUNT,
+            feeShannons: DEFAULT_MAX_FEE,
+        });
+        expect(h.node.calls.slice(from)).toEqual([
+            {
+                method: "send_payment",
+                params: {
+                    invoice: PAYEE_INVOICE_STRING,
+                    max_fee_amount: "0x4c4b40",
+                    dry_run: true,
+                    trampoline_hops: [bytesToHex(LSP_PUBKEY)],
+                },
+            },
+        ]);
+        expect(await h.sdk.getPayment(PAYMENT_HASH)).toBeNull();
+    });
+
+    it("refuses an estimate one shannon under fiber's floor as fee_budget_too_low, as transfer does", async () => {
+        const h = await opened();
+        const error = await rejection(h.sdk.estimateTransferFee(PAYEE_INVOICE_STRING, { maxFeeShannons: "999999" }));
+        expectSendFailure(
+            error,
+            "fee_budget_too_low",
+            new RpcError(
+                "send_payment",
+                -32000,
+                "Send payment error: Failed to build route, Graph other error: max_fee_amount is too low for trampoline routing: recommend_minimal_fee=1000000, maximal_fee=10000000 current_fee=999999",
+            ),
+        );
+        expect(await watchedPayments(h)).toEqual([]);
+    });
+
+    it("estimates the fee under the floor as budget, pays it, tells it in PAYMENT_SENT and reads it back by the hash", async () => {
+        const h = await opened();
+        const from = h.node.calls.length;
+        expect(await h.sdk.getPayment(PAYMENT_HASH)).toBeNull();
+        const estimate = await h.sdk.estimateTransferFee(PAYEE_INVOICE_STRING, { maxFeeShannons: MINIMAL_FEE });
+        expect(estimate).toStrictEqual({ paymentHashHex: PAYMENT_HASH, amountShannons: AMOUNT, feeShannons: MINIMAL_FEE });
+        expect(h.node.calls.slice(from)).toEqual([
+            {
+                method: "send_payment",
+                params: {
+                    invoice: PAYEE_INVOICE_STRING,
+                    max_fee_amount: "0xf4240",
+                    dry_run: true,
+                    trampoline_hops: [bytesToHex(LSP_PUBKEY)],
+                },
+            },
+        ]);
+        // The dry run left no session, signature or intent.
+        expect(await h.sdk.getPayment(PAYMENT_HASH)).toBeNull();
+        expect(h.node.served.length).toBe(2);
+        expect(await intentOf(h)).toBeNull();
+        expect(await watchedPayments(h)).toEqual([]);
+        await transferred(h, PAYEE_INVOICE_STRING, estimate.feeShannons);
+        expect(await h.sdk.getPayment(PAYMENT_HASH)).toStrictEqual(sendRecord(PAYEE_INVOICE_STRING, MINIMAL_FEE));
+        await paidThrough(h);
+        const completed = sendRecord(PAYEE_INVOICE_STRING, MINIMAL_FEE, {
+            status: "completed",
+            feeShannons: MINIMAL_FEE,
+            settledAtMs: NOW_MS,
+        });
+        expect(h.events.filter((event) => event.type === "PAYMENT_SENT")).toEqual([
+            { type: "PAYMENT_SENT", paymentHashHex: PAYMENT_HASH, feeShannons: MINIMAL_FEE, payment: completed },
+        ]);
+        expect(await h.sdk.getPayment(PAYMENT_HASH)).toStrictEqual(completed);
+    });
+
+    it("has the node's dry run take the floor and refuse one shannon under it, leaving no session", async () => {
+        const h = await opened();
+        const dryRun = (maxFee: string): Promise<unknown> =>
+            post(h.node, {
+                jsonrpc: "2.0",
+                id: 1,
+                method: "send_payment",
+                params: [
+                    { invoice: PAYEE_INVOICE_STRING, max_fee_amount: maxFee, dry_run: true, trampoline_hops: [bytesToHex(LSP_PUBKEY)] },
+                ],
+            });
+        expect(asRecord(await dryRun("0xf4240"), "answer").result).toMatchObject({ status: "Created", fee: "0xf4240" });
+        expect(asRecord(await dryRun("0xf423f"), "answer").error).toEqual({
+            code: -32000,
+            message:
+                "Send payment error: Failed to build route, Graph other error: max_fee_amount is too low for trampoline routing: recommend_minimal_fee=1000000, maximal_fee=10000000 current_fee=999999",
+        });
+        expect(await h.sdk.getPayment(PAYMENT_HASH)).toBeNull();
+    });
+
+    it("refuses a budget one shannon under the floor as fee_budget_too_low, with fiber's recommendation", async () => {
+        const h = await opened();
+        const error = await rejection(h.sdk.transfer(PAYEE_INVOICE_STRING, { maxFeeShannons: "999999" }));
+        expectSendFailure(
+            error,
+            "fee_budget_too_low",
+            new RpcError(
+                "send_payment",
+                -32000,
+                "Send payment error: Failed to build route, Graph other error: max_fee_amount is too low for trampoline routing: recommend_minimal_fee=1000000, maximal_fee=10000000 current_fee=999999",
+            ),
+        );
+        expect(await watchedPayments(h)).toEqual([]);
+    });
+
+    it("refuses an estimate under a hash the node holds a session of, as fiber does, leaving the send as it was", async () => {
+        const h = await opened();
+        await transferred(h, PAYEE_INVOICE_STRING);
+        const before = await paymentOf(h);
+        const error = await rejection(h.sdk.estimateTransferFee(PAYEE_INVOICE_STRING));
+        expectSendFailure(
+            error,
+            "payment_session_exists",
+            new RpcError(
+                "send_payment",
+                -32000,
+                `Payment session already exists, stop start new payment actor for Hash256(${PAYMENT_HASH})`,
+            ),
+        );
+        expect(await paymentOf(h)).toEqual(before);
+        expect(await watchedPayments(h)).toEqual([PAYMENT_HASH.slice(2)]);
+        await paidThrough(h);
+        expect(eventsOf(h)).toEqual([...SEND_SIGNINGS, ...FULFIL_SIGNINGS, "PAYMENT_SENT payment"]);
+    });
+
+    it("refuses an estimate beyond the balance as insufficient_balance, leaving no session behind", async () => {
+        const h = await opened();
+        const error = await rejection(h.sdk.estimateTransferFee(BEYOND_BALANCE_INVOICE_STRING));
+        expect(error).toBeInstanceOf(SdkError);
+        expect(error).toMatchObject({ code: "insufficient_balance" });
+        expect((error as SdkError).cause).toBeInstanceOf(RpcError);
+        const hash = `0x${bytesToHex(decodeInvoice(BEYOND_BALANCE_INVOICE_STRING).paymentHash)}`;
+        expect(await h.sdk.getPayment(hash)).toBeNull();
     });
 
     it("signs a whole payment with the app open on the tick the call asks for and the one tick that finds the peer's fulfil", async () => {
@@ -318,8 +499,14 @@ describe("payments over the tenant node", () => {
         const error = await rejection(h.sdk.transfer(BEYOND_BALANCE_INVOICE_STRING));
         const failure =
             "Send payment error: Failed to build route, Insufficient balance: max outbound liquidity 62000000000 is insufficient, required amount: 62500000000";
-        expect(error).toBeInstanceOf(RpcError);
-        expect(error).toMatchObject({ method: "send_payment", code: -32000, message: failure });
+        expectSendFailure(error, "insufficient_balance", new RpcError("send_payment", -32000, failure));
+        const refused = sendRecord(BEYOND_BALANCE_INVOICE_STRING, "312500000", {
+            amountShannons: "62500000000",
+            status: "failed",
+            failedReason: `the node refuses the payment: ${failure}`,
+            settledAtMs: NOW_MS,
+        });
+        expect(await h.sdk.getPayment(PAYMENT_HASH)).toStrictEqual(refused);
         await tick(h);
         expect(methods(h, from)).toEqual(["send_payment", ...IDLE_TICK]);
         expect(eventsOf(h)).toEqual([]);
@@ -337,7 +524,13 @@ describe("payments over the tenant node", () => {
         expect(await h.sdk.listChannels()).toEqual([
             { ...LISTED, localBalanceShannons: "63000000000", remoteBalanceShannons: "17500000000" },
         ]);
+        // The refused send and the receive share the device's millisecond, so the hash orders them.
+        expect((await h.sdk.listPayments()).map(({ direction, status }) => `${direction} ${status}`)).toEqual([
+            "send failed",
+            "receive completed",
+        ]);
         h.events.length = 0;
+        h.clock.deviceMs = NOW_MS + 1;
         // Fiber sends a failed session again, under a new one.
         expect(await transferred(h, BEYOND_BALANCE_INVOICE_STRING)).toEqual({
             paymentHashHex: PAYMENT_HASH,
@@ -364,6 +557,17 @@ describe("payments over the tenant node", () => {
         ]);
         expect(await paymentOf(h)).toMatchObject({ status: "Success", failed_error: null, fee: "0x12a05f20" });
         expect(await intentOf(h)).toMatchObject({ open: false, channelIndexes: [OPENING_INDEX] });
+        // The retry went back to pending under the new clock, to the front of the list, and completed with fiber's fee.
+        const retried = sendRecord(BEYOND_BALANCE_INVOICE_STRING, "312500000", {
+            amountShannons: "62500000000",
+            status: "completed",
+            feeShannons: "312500000",
+            createdAtMs: NOW_MS + 1,
+            settledAtMs: NOW_MS + 1,
+        });
+        expect(sentPayments(h)).toStrictEqual([retried]);
+        expect((await h.sdk.listPayments())[0]).toStrictEqual(retried);
+        expect(await h.sdk.listPayments()).toHaveLength(2);
         expect(await h.sdk.listChannels()).toEqual([
             { ...LISTED, localBalanceShannons: "187500000", remoteBalanceShannons: "80312500000" },
         ]);
@@ -402,8 +606,7 @@ describe("payments over the tenant node", () => {
         h.node.dropNextAnswer("send_payment");
         const from = h.node.calls.length;
         const error = await rejection(h.sdk.transfer(PAYEE_INVOICE_STRING));
-        expect(error).toBeInstanceOf(RpcTransportError);
-        expect(error).toMatchObject({ message: "send_payment: the request failed" });
+        expectSendFailure(error, "payment_unresolved", new RpcTransportError("send_payment", "the request failed"));
         expect(await intentOf(h)).toMatchObject({ maxShannons: BUDGET, open: true });
         expect(await watchedPayments(h)).toEqual([PAYMENT_HASH.slice(2)]);
         const again = await rejection(h.sdk.transfer(PAYEE_INVOICE_STRING));
@@ -427,8 +630,7 @@ describe("payments over the tenant node", () => {
         h.node.dropNextCall("send_payment");
         const from = h.node.calls.length;
         const error = await rejection(h.sdk.transfer(PAYEE_INVOICE_STRING));
-        expect(error).toBeInstanceOf(RpcTransportError);
-        expect(error).toMatchObject({ message: "send_payment: the request failed" });
+        expectSendFailure(error, "payment_unresolved", new RpcTransportError("send_payment", "the request failed"));
         await tick(h, 2);
         expect(methods(h, from)).toEqual(["send_payment", ...IDLE_TICK, "get_payment", ...IDLE_TICK]);
         expect(requests(h)).toEqual([]);
@@ -536,8 +738,7 @@ describe("payments over the tenant node", () => {
         // A trampoline asks at least 1 per mille of the amount, rounded up, and offers ten times that as its most.
         const failure =
             "Send payment error: Failed to build route, Graph other error: max_fee_amount is too low for trampoline routing: recommend_minimal_fee=1000000, maximal_fee=10000000 current_fee=0";
-        expect(error).toBeInstanceOf(RpcError);
-        expect(error).toMatchObject({ method: "send_payment", code: -32000, message: failure });
+        expectSendFailure(error, "fee_budget_too_low", new RpcError("send_payment", -32000, failure));
         expect(await paymentOf(h)).toMatchObject({ status: "Failed", failed_error: failure, fee: "0x0" });
         expect(await intentOf(h)).toMatchObject({ maxShannons: AMOUNT, open: false, channelIndexes: [] });
         expect(await watchedPayments(h)).toEqual([]);
@@ -551,12 +752,11 @@ describe("payments over the tenant node", () => {
         h.clock.deviceMs = EXPIRES_AT_MS - 1;
         h.clock.nodeMs = EXPIRES_AT_MS + 1;
         const error = await rejection(h.sdk.transfer(PAYEE_INVOICE_STRING));
-        expect(error).toBeInstanceOf(RpcError);
-        expect(error).toMatchObject({
-            method: "send_payment",
-            code: -32000,
-            message: 'InvalidParameter: Failed to validate payment request: "invoice is expired"',
-        });
+        expectSendFailure(
+            error,
+            "payment_rejected",
+            new RpcError("send_payment", -32000, 'InvalidParameter: Failed to validate payment request: "invoice is expired"'),
+        );
         expect(await post(h.node, { jsonrpc: "2.0", id: 1, method: "get_payment", params: [{ payment_hash: PAYMENT_HASH }] })).toEqual({
             jsonrpc: "2.0",
             id: 1,
@@ -592,8 +792,7 @@ describe("payments over the tenant node", () => {
         const error = await rejection(h.sdk.transfer(invoice));
         const failure =
             "Send payment error: Failed to build route, Feature not enabled: allow_self_payment is not enabled, can not pay to self";
-        expect(error).toBeInstanceOf(RpcError);
-        expect(error).toMatchObject({ method: "send_payment", code: -32000, message: failure });
+        expectSendFailure(error, "payment_rejected", new RpcError("send_payment", -32000, failure));
         expect(await paymentOf(h)).toMatchObject({ status: "Failed", failed_error: failure, fee: "0x0" });
         expect(await intentOf(h)).toMatchObject({ open: false, channelIndexes: [] });
         expect(await watchedPayments(h)).toEqual([]);
@@ -606,43 +805,46 @@ describe("payments over the tenant node", () => {
             60_000,
             `InvalidParameter: Payment session already exists: Hash256(${PAYMENT_HASH}) with payment session status: Inflight`,
         ],
-    ])("refuses the retry of a send that landed late, %s, as in flight, and reports how the session ends", async (_, laterMs, existing) => {
-        const h = await opened();
-        h.node.dropNextCall("send_payment");
-        expect(await rejection(h.sdk.transfer(PAYEE_INVOICE_STRING))).toBeInstanceOf(RpcTransportError);
-        await tick(h);
-        expect(eventsOf(h)).toEqual([`PAYMENT_FAILED payment: ${SDK_PAYMENT_NEVER_SENT_REASON}`]);
-        expect(await intentOf(h)).toMatchObject({ open: false });
-        // The send reaches the node after all: the device refuses its add under the closed intent.
-        h.node.landDroppedCall();
-        await tick(h);
-        expect(eventsOf(h).slice(1)).toEqual(["SIGNING SendCommitmentSigned refused policy_refusal"]);
-        const refused = h.events.at(-1);
-        if (refused?.type !== "SIGNING" || refused.outcome !== "refused") throw new Error("the last event is no refusal");
-        expect(refused.error.message).toBe(
-            `the remote commitment draws more under ${PAYMENT_HASH.slice(2, 42)}, whose debit intent is closed`,
-        );
-        h.clock.deviceMs += laterMs;
-        h.clock.nodeMs += laterMs;
-        const from = h.node.calls.length;
-        const error = await rejection(h.sdk.transfer(PAYEE_INVOICE_STRING));
-        expect(error).toBeInstanceOf(SdkError);
-        expect(error).toMatchObject({ code: "payment_in_flight" });
-        const cause = (error as SdkError).cause;
-        expect(cause).toBeInstanceOf(RpcError);
-        expect(cause).toMatchObject({ method: "send_payment", code: -32000, message: existing });
-        expect(methods(h, from)).toEqual(["send_payment"]);
-        // The retry reopened the intent the node's session needs.
-        expect(await intentOf(h)).toMatchObject({ maxShannons: BUDGET, open: true });
-        expect(await watchedPayments(h)).toEqual([PAYMENT_HASH.slice(2)]);
-        h.events.length = 0;
-        await tick(h, 4);
-        h.node.fulfil(PAYMENT_HASH.slice(2), PREIMAGE);
-        await tick(h, 4);
-        expect(requests(h)).toEqual([...SEND_ROUND, ...FULFIL_ROUND]);
-        // The PAYMENT_FAILED before named a send the node had not run yet.
-        expect(eventsOf(h)).toEqual([...SEND_SIGNINGS, ...FULFIL_SIGNINGS, "PAYMENT_SENT payment"]);
-        expect(await intentOf(h)).toMatchObject({ open: false });
-        expect(await watchedPayments(h)).toEqual([]);
-    });
+    ])(
+        "refuses the retry of a send that landed late, %s, as a session the node holds, and reports how the session ends",
+        async (_, laterMs, existing) => {
+            const h = await opened();
+            h.node.dropNextCall("send_payment");
+            expect(await rejection(h.sdk.transfer(PAYEE_INVOICE_STRING))).toMatchObject({ code: "payment_unresolved" });
+            await tick(h);
+            expect(eventsOf(h)).toEqual([`PAYMENT_FAILED payment: ${SDK_PAYMENT_NEVER_SENT_REASON}`]);
+            expect(await intentOf(h)).toMatchObject({ open: false });
+            // The send reaches the node after all: the device refuses its add under the closed intent.
+            h.node.landDroppedCall();
+            await tick(h);
+            expect(eventsOf(h).slice(1)).toEqual(["SIGNING SendCommitmentSigned refused policy_refusal"]);
+            const refused = h.events.at(-1);
+            if (refused?.type !== "SIGNING" || refused.outcome !== "refused") throw new Error("the last event is no refusal");
+            expect(refused.error.message).toBe(
+                `the remote commitment draws more under ${PAYMENT_HASH.slice(2, 42)}, whose debit intent is closed`,
+            );
+            h.clock.deviceMs += laterMs;
+            h.clock.nodeMs += laterMs;
+            const from = h.node.calls.length;
+            const error = await rejection(h.sdk.transfer(PAYEE_INVOICE_STRING));
+            expect(error).toBeInstanceOf(SdkError);
+            expect(error).toMatchObject({ code: "payment_session_exists" });
+            const cause = (error as SdkError).cause;
+            expect(cause).toBeInstanceOf(RpcError);
+            expect(cause).toMatchObject({ method: "send_payment", code: -32000, message: existing });
+            expect(methods(h, from)).toEqual(["send_payment"]);
+            // The retry reopened the intent the node's session needs.
+            expect(await intentOf(h)).toMatchObject({ maxShannons: BUDGET, open: true });
+            expect(await watchedPayments(h)).toEqual([PAYMENT_HASH.slice(2)]);
+            h.events.length = 0;
+            await tick(h, 4);
+            h.node.fulfil(PAYMENT_HASH.slice(2), PREIMAGE);
+            await tick(h, 4);
+            expect(requests(h)).toEqual([...SEND_ROUND, ...FULFIL_ROUND]);
+            // The PAYMENT_FAILED before named a send the node had not run yet.
+            expect(eventsOf(h)).toEqual([...SEND_SIGNINGS, ...FULFIL_SIGNINGS, "PAYMENT_SENT payment"]);
+            expect(await intentOf(h)).toMatchObject({ open: false });
+            expect(await watchedPayments(h)).toEqual([]);
+        },
+    );
 });

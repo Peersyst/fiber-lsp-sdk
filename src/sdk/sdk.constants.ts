@@ -1,7 +1,8 @@
 import { COMMITMENT_LOCK_MAINNET, COMMITMENT_LOCK_TESTNET, FUNDING_LOCK_MAINNET, FUNDING_LOCK_TESTNET } from "../digest";
 import { STORAGE_KEY_NAMESPACE } from "../policy";
 import { RPC_CALL_FAILED_CODE, RPC_PAYMENT_STATUSES } from "../rpc";
-import type { SdkNetworkConfig, SdkNetworkName } from "./sdk.types";
+import type { InvoiceCurrency } from "../invoice";
+import type { SdkErrorCode, SdkNetworkConfig, SdkNetworkName } from "./sdk.types";
 
 export const SDK_NETWORK_NAMES = ["mainnet", "testnet"] as const;
 
@@ -27,6 +28,14 @@ export const SDK_NETWORK_PRESETS = {
         millisecondsPerEpoch: RELEASE_MILLISECONDS_PER_EPOCH,
     },
 } as const satisfies Record<SdkNetworkName, SdkNetworkConfig>;
+
+/**
+ * Frozen: the presets stay unpublished, so a host cannot rewrite what the SDK reads.
+ */
+export const SDK_NETWORK_INVOICE_CURRENCIES: Readonly<Record<SdkNetworkName, InvoiceCurrency>> = Object.freeze({
+    mainnet: SDK_NETWORK_PRESETS.mainnet.invoiceCurrency,
+    testnet: SDK_NETWORK_PRESETS.testnet.invoiceCurrency,
+});
 
 /**
  * A tick is one `list_channels`, one read per payment and invoice in flight, one signing status per channel and one submit per signature.
@@ -66,6 +75,22 @@ export const PENDING_OPENING_RECORD_VERSION = 1;
 export const DEVICE_CHANNELS_RECORD_KEY = `${STORAGE_KEY_NAMESPACE}:device-channels`;
 
 export const DEVICE_CHANNELS_RECORD_VERSION = 1;
+
+export const PAYMENT_HISTORY_INDEX_KEY = `${STORAGE_KEY_NAMESPACE}:payment-history`;
+
+export const PAYMENT_HISTORY_RECORD_KEY_PREFIX = `${STORAGE_KEY_NAMESPACE}:payment-history:`;
+
+export const PAYMENT_HISTORY_RECORD_VERSION = 1;
+
+export const DEFAULT_SDK_PAYMENT_PAGE_LIMIT = 20;
+
+export const SDK_PAYMENT_DIRECTIONS = ["send", "receive"] as const;
+
+export const SDK_PAYMENT_RECORD_STATUSES = ["pending", "completed", "failed"] as const;
+
+export const SDK_RECEIVE_EXPIRED_REASON = "the invoice expired";
+
+export const SDK_RECEIVE_CANCELLED_REASON = "the invoice was cancelled";
 
 /**
  * `stale` is fiber's channel restored from an old database, audited with the peer before it resumes.
@@ -136,6 +161,14 @@ export const SDK_ERROR_CODES = [
     "close_fee_too_high",
     "unknown_invoice",
     "invoice_released",
+    "insufficient_balance",
+    "no_route",
+    "fee_budget_too_low",
+    "payment_rejected",
+    "payment_session_exists",
+    "payment_unresolved",
+    "registration_consumed",
+    "registration_invalid",
 ] as const;
 
 /**
@@ -210,3 +243,56 @@ export const SDK_PAYMENT_SESSION_EXISTS_ERRORS = [
 export const SDK_INVOICE_UNPAYABLE = "the invoice cannot be paid";
 
 export const SDK_PAYMENT_REFUSED = "the device refuses the payment";
+
+// `send_payment`'s route failure, `Error::SendPaymentError` around `PathFindError` (`errors.rs:60-61`, `fiber/payment.rs:1401-1408`).
+const ROUTE_FAILURE = "Send payment error: Failed to build route, ";
+
+/**
+ * Fiber's `send_payment` answers that prove the send left nothing, by facade code, each `{}` a decimal number. A tenant's send
+ * has no `trampoline_context`, which only the LSP's forwarding sets (`lsp/mod.rs:77-93`), so its route failures are never
+ * collapsed to `TemporaryNodeFailure` (`fiber/payment.rs:1401-1406`).
+ */
+export const SDK_PAYMENT_REFUSAL_TEMPLATES = {
+    // The device's outbound liquidity, single path or MPP, and a hop past it (`fiber/graph.rs:505-506, 1335-1350, 1491-1497`).
+    insufficient_balance: [
+        `${ROUTE_FAILURE}Insufficient balance: max outbound liquidity {} is insufficient, required amount: {}`,
+        `${ROUTE_FAILURE}Insufficient balance: total outbound liquidity {} is insufficient, required amount: {}`,
+        `${ROUTE_FAILURE}Insufficient balance: route hop amount {} exceeds outbound liquidity {}`,
+    ],
+    // No path, a hop's minimum TLC, a channel of the route too small (`fiber/graph.rs:497, 505-508, 1483-1489`), too few MPP
+    // routes (`fiber/payment.rs:1355, 1515`).
+    no_route: [
+        `${ROUTE_FAILURE}PathFind error: no path found`,
+        `${ROUTE_FAILURE}Path find failed for min_tlc_value error: {}`,
+        `${ROUTE_FAILURE}Insufficient balance: route hop amount {} exceeds channel capacity {}`,
+        "Send payment error: Failed to build enough routes for MPP payment",
+    ],
+    // The trampoline's floor (`fiber/graph.rs:509-510, 1592-1595, 1642-1645, 1669-1672, 1684-1687`) and a direct route's fee
+    // (`fiber/payment.rs:1484-1490`).
+    fee_budget_too_low: [
+        `${ROUTE_FAILURE}Graph other error: max_fee_amount is too low for trampoline routing: recommend_minimal_fee={}, maximal_fee={} current_fee={}`,
+        `${ROUTE_FAILURE}Graph other error: max_fee_amount is too low for trampoline routing: first_hop_fee={} current_fee={}`,
+        `${ROUTE_FAILURE}Graph other error: max_fee_amount is too low for trampoline routing: fee for a trampoline hop is zero`,
+        "Send payment error: max_fee_amount is too low for selected route",
+    ],
+} as const satisfies Partial<Record<SdkErrorCode, readonly string[]>>;
+
+/**
+ * Fiber's `lsp_register_tenant` answer for a `request_id` already spent (`lsp/registry.rs:13`).
+ */
+export const SDK_REGISTRATION_CONSUMED_ERROR = {
+    code: RPC_CALL_FAILED_CODE,
+    message: "tenant registration request was already consumed",
+} as const;
+
+/**
+ * Fiber's `lsp_register_tenant` answers for a proof that does not verify (`lsp/service.rs:431-438`): secp256k1 0.30's
+ * `Error` Display for a signature that fails or does not parse, then `validate_signed_at` (`fiber-types/src/hosted_lsp.rs:115-124`).
+ * "targets another LSP node" never reaches the RPC, which builds the payload from the node's own id (`rpc/lsp.rs:89-95`).
+ */
+export const SDK_REGISTRATION_INVALID_ERRORS = [
+    "signature failed verification",
+    "malformed signature",
+    "tenant registration signed_at is too far in the future",
+    "tenant registration signed_at is too old",
+].map((reason) => ({ code: RPC_CALL_FAILED_CODE, message: `invalid RootSigner registration proof: ${reason}` }));

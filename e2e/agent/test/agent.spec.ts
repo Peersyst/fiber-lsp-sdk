@@ -512,7 +512,7 @@ describe("Agent", () => {
                     .map((entry) => entry.error),
                 [
                     "lsp_register_tenant: response.result.tenant.tenant_id is not the tenant of the registered root signer",
-                    REGISTRATION_REQUEST_CONSUMED,
+                    `the node refuses the registration: ${REGISTRATION_REQUEST_CONSUMED}`,
                 ],
             );
         });

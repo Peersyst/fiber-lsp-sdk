@@ -18,6 +18,7 @@ import { HoldInvoicePreimages, SignerDispatch, TenantIdentity } from "../signer"
 import { ActivityTracker } from "./activity";
 import { DeviceChannelList } from "./device-channels";
 import { IndexAllocator } from "./allocator";
+import { getSdkBalance } from "./balance-query";
 import { closeSdkChannel, forceCloseSdkChannel } from "./channel-closing";
 import { readSdkChannelEvidence } from "./channel-evidence";
 import { listSdkChannels } from "./channel-listing";
@@ -26,6 +27,9 @@ import { buildChannelStep } from "./channel-step";
 import { cancelSdkInvoice } from "./invoice-cancelling";
 import { createSdkInvoice } from "./invoice-creation";
 import { buildInvoiceStep } from "./invoice-step";
+import { estimateSdkTransferFee } from "./fee-estimating";
+import { PaymentHistory } from "./payment-history";
+import { getSdkPayment, listSdkPayments } from "./payment-query";
 import { transferSdkPayment } from "./payment-sending";
 import { buildPaymentStep } from "./payment-step";
 import { PendingOpeningStore } from "./pending-opening";
@@ -43,7 +47,10 @@ import type {
     SdkEventListener,
     SdkInvoice,
     SdkInvoiceOptions,
+    SdkFeeEstimate,
     SdkPayment,
+    SdkPaymentListOptions,
+    SdkPaymentRecord,
     SdkSignFundingInputs,
     SdkTenantRegistration,
     SdkTenantRegistrationRequest,
@@ -87,6 +94,7 @@ export class FiberLspSdk {
         const emit = this.listeners.emit.bind(this.listeners);
         const rpc = new FiberRpcClient({ url: options.rpcUrl, token: options.biscuitToken, fetch: options.fetch });
         const activity = new ActivityTracker(store);
+        const history = new PaymentHistory(store);
         const channels = new DeviceChannelList(store);
         const openings = new PendingOpeningStore(store);
         const preimages = new HoldInvoicePreimages(masterSeed);
@@ -106,12 +114,13 @@ export class FiberLspSdk {
                 policy,
                 preimages,
                 activity,
+                history,
                 millisecondsPerEpoch: network.millisecondsPerEpoch,
                 now,
                 emit,
                 pollNow,
             }),
-            buildPaymentStep({ rpc, policy, activity, sending, reading, emit }),
+            buildPaymentStep({ rpc, policy, activity, history, now, sending, reading, emit }),
         ];
         this.context = {
             network,
@@ -125,6 +134,7 @@ export class FiberLspSdk {
             dispatch,
             allocator: new IndexAllocator(store, now),
             activity,
+            history,
             channels,
             openings,
             poller: new ActivityPoller({ timer, intervalMs: pollIntervalMs, stepTimeoutMs: POLL_STEP_TIMEOUT_MS, steps, emit }),
@@ -257,6 +267,14 @@ export class FiberLspSdk {
     }
 
     /**
+     * Reads what this device can spend: its ready channels' local balances, each less its offered TLCs and none below zero.
+     * @returns The balance, in decimal shannons.
+     */
+    getBalance(): Promise<string> {
+        return getSdkBalance(this.context.rpc, this.context.store);
+    }
+
+    /**
      * Creates a hold invoice only this device can settle, checking the node's string against the request.
      * @param amountShannons What the payer pays, in decimal shannons.
      * @param options The description, and the expiry in whole seconds, one hour by default.
@@ -283,6 +301,34 @@ export class FiberLspSdk {
      */
     transfer(encodedInvoice: string, options?: SdkTransferOptions): Promise<SdkPayment> {
         return transferSdkPayment(this.context, encodedInvoice, options);
+    }
+
+    /**
+     * Finds the fee a `transfer` of the invoice under the same options is charged, by a dry run that sends nothing.
+     * @param encodedInvoice The invoice string.
+     * @param options The fee budget, as `transfer` takes it.
+     * @returns The payment hash, amount and fee.
+     */
+    estimateTransferFee(encodedInvoice: string, options?: SdkTransferOptions): Promise<SdkFeeEstimate> {
+        return estimateSdkTransferFee(this.context, encodedInvoice, options);
+    }
+
+    /**
+     * Reads one payment of the history: a send from its `transfer` on, a receive from its payment's arrival on.
+     * @param paymentHashHex The payment hash, `0x`-prefixed lowercase hex, as the events carry it.
+     * @returns A copy of the record, or `null` when the history holds none.
+     */
+    getPayment(paymentHashHex: string): Promise<SdkPaymentRecord | null> {
+        return getSdkPayment(this.context, paymentHashHex);
+    }
+
+    /**
+     * Reads a page of the history, newest first; an invoice nobody paid is never in it.
+     * @param options The page's size, 20 by default, and the records skipped before it.
+     * @returns Copies of the records.
+     */
+    listPayments(options?: SdkPaymentListOptions): Promise<SdkPaymentRecord[]> {
+        return listSdkPayments(this.context, options);
     }
 
     /**

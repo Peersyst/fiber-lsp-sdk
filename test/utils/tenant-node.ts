@@ -1846,10 +1846,10 @@ export class InMemoryTenantNode {
     // (`fiber/network.rs:3568-3586`), the payment actor's slot (`:5681-5699`) and store (`fiber/payment.rs:2198-2226`), the session
     // (`:2228-2251`), its route (`graph.rs:1299-1365`) and the add, which the node sends without waiting for its result
     // (`network.rs:5095-5097`): the answer says `Created`, the session is `Inflight` once the add lands (`payment.rs:1873-1880`).
+    // A dry run passes the same checks and builds the route on a session never stored, sending nothing (`payment.rs:2228-2233`).
     private sendPaymentByRpc(params: unknown): RpcAnswer {
         const request = readParams<NodeSendPaymentParamsWire, PaymentRequest>(params, readPaymentRequest);
         if (request instanceof WireError) return invalidParams(params, request);
-        if (request.dryRun === true) throw new Error("the double serves no dry run");
         // Fiber's conversion refuses a hop off the curve before the network actor (`rpc/payment.rs:250-259`); the SDK never sends one.
         request.trampolineHops?.forEach((hop, index) => assertCompressedPoint(`trampoline_hops[${index}]`, hop));
         const data = this.paymentDataOf(request);
@@ -1877,6 +1877,7 @@ export class InMemoryTenantNode {
             sentShannons: null,
             preimage: null,
         };
+        if (request.dryRun === true) return this.dryRunPayment(payment, data);
         this.payments.set(key, payment);
         const refusal = this.routeRefusal(data);
         if (refusal !== null) {
@@ -1903,6 +1904,15 @@ export class InMemoryTenantNode {
         const answer = { result: paymentWire(payment) };
         payment.status = "Inflight";
         return answer;
+    }
+
+    // The dry run's answer: the route's refusal as the send's, with no row failed, or the unstored session with the fee its
+    // route would pay (`payment.rs:643-646`, `fiber-types/src/payment.rs:994-1006`).
+    private dryRunPayment(payment: NodePayment, data: PaymentData): RpcAnswer {
+        const refusal = this.routeRefusal(data);
+        if (refusal !== null) return failed(`Send payment error: Failed to build route, ${refusal}`);
+        const sentShannons = data.amountShannons + (data.trampolineHops === null ? 0n : data.maxFeeShannons);
+        return { result: paymentWire({ ...payment, sentShannons }) };
     }
 
     // `SendPaymentData::new` and its builder's `validate` (`fiber/payment.rs:383-576`, `:224-336`), their checks in order: a refusal

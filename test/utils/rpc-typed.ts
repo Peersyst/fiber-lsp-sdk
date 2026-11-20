@@ -4,6 +4,7 @@ import type { InvoiceCurrency } from "../../src/invoice";
 import type {
     ListChannelsParams,
     LspTenantChannel,
+    LspNodeStatus,
     LspTenantStatus,
     NewInvoiceParams,
     NewInvoiceResult,
@@ -62,6 +63,7 @@ import type {
     InvoiceResultVector,
     ListChannelsParamsVector,
     LspTenantChannelVector,
+    LspNodeStatusVector,
     LspTenantStatusVector,
     NewInvoiceParamsVector,
     OpenChannelParamsVector,
@@ -273,6 +275,15 @@ export function toRegisterTenantResult(vector: RegisterTenantResultVector): Regi
     return { tenant: toLspTenantStatus(vector.tenant), accessToken: vector.access_token };
 }
 
+export function toLspNodeStatus(vector: LspNodeStatusVector): LspNodeStatus {
+    return {
+        publicNodeId: hexToBytes(vector.public_node_id),
+        tenantStoreRoot: vector.tenant_store_root,
+        registeredTenants: BigInt(vector.registered_tenants),
+        activeTenants: BigInt(vector.active_tenants),
+    };
+}
+
 export function toListChannelsParams(vector: ListChannelsParamsVector): ListChannelsParams {
     if (vector.include_closed && vector.only_pending) throw new Error("fiber refuses both filters at once");
     if (vector.include_closed) return { filter: "include_closed" };
@@ -352,7 +363,7 @@ export function toRpcPayment(vector: PaymentVector): RpcPayment {
 }
 
 // Total by type: a method without an encoder does not compile.
-export const RPC_PARAMS_ENCODERS: { [Method in RpcMethod]: (values: RpcVectorShapes[Method]["params"]) => RpcParamsWire } = {
+export const RPC_PARAMS_ENCODERS: { [Method in RpcMethod]: (values: RpcVectorShapes[Method]["params"]) => RpcParamsWire | null } = {
     open_channel_with_external_funding: (values) =>
         isTenantOpenParams(values)
             ? encodeOpenTenantChannelParams(toOpenTenantChannelParams(values))
@@ -372,6 +383,7 @@ export const RPC_PARAMS_ENCODERS: { [Method in RpcMethod]: (values: RpcVectorSha
     get_watchtower_signing_status: (values) => encodeRpcChannelIdParams(toRpcChannelIdParams(values)),
     submit_watchtower_signature: (values) => encodeSubmitWatchtowerSignatureParams(toSubmitWatchtowerSignatureParams(values)),
     lsp_register_tenant: (values) => encodeRegisterTenantParams(toRegisterTenantParams(values)),
+    lsp_get_status: () => null,
 };
 
 // Mirror of the harness's `without_nulls`: fiber reads an absent option and a `null` as one.

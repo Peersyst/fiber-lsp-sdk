@@ -37,6 +37,14 @@ describe("SdkError", () => {
             "close_fee_too_high",
             "unknown_invoice",
             "invoice_released",
+            "insufficient_balance",
+            "no_route",
+            "fee_budget_too_low",
+            "payment_rejected",
+            "payment_session_exists",
+            "payment_unresolved",
+            "registration_consumed",
+            "registration_invalid",
         ]);
     });
 });

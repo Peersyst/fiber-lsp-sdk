@@ -122,32 +122,36 @@ double and the flows"). Before that, answering the peer's `commitment_signed` or
 bounded only by the TLC's safety deadline (below). In a round the peer started, a device back 21 s after its
 revocation finished the round, and one back past the latest close (45 s on the devnet, 102 s against release nodes on
 testnet) lost its channel, closed uncooperatively with the payment left unresolved. A device in the foreground at the
-default five-second poll signs one step per channel per tick, and the next one at once after a hold invoice's release,
+default two-second poll signs one step per channel per tick, and the next one at once after a hold invoice's release,
 which polls again.
 
 ## Events
 
 `onEvent(listener)` subscribes to every event and returns the function that unsubscribes. Eleven events exist:
 
-| Event                | Payload                    | When                                                                                 |
-| -------------------- | -------------------------- | ------------------------------------------------------------------------------------ |
-| `CHANNEL_READY`      | `channelId`                | A channel the device opened is ready; read by the poller's channel step              |
-| `CHANNEL_CLOSED`     | `channelId`                | A channel the device watched is closed, under any flag, an aborted opening included  |
-| `PAYMENT_SENT`       | `paymentHashHex`           | A payment the device sent succeeded; read by the poller's payment step               |
-| `PAYMENT_FAILED`     | `paymentHashHex`, `reason` | A payment the device sent failed, or never ran; read by the poller's payment step    |
-| `PAYMENT_PENDING`    | `paymentHashHex`           | An invoice of the device has a payment held on it; read by the poller's invoice step |
-| `PAYMENT_RECEIVED`   | `paymentHashHex`           | An invoice of the device was paid with the preimage it released                      |
-| `PAYMENT_EXPIRED`    | `paymentHashHex`           | An invoice of the device expired unpaid, its preimage never released                 |
-| `PAYMENT_CANCELLED`  | `paymentHashHex`           | An invoice of the device was cancelled, its preimage never released                  |
-| `SIGNING`            | see below                  | A signing request was answered or refused by the poller's signing step               |
-| `WATCHTOWER_SIGNING` | see below                  | A watchtower spend was signed or refused by the poller's watchtower step             |
-| `ERROR`              | `error`                    | A failed poll step, or the failure of one channel, invoice or payment inside a step  |
+| Event                | Payload                                    | When                                                                                 |
+| -------------------- | ------------------------------------------ | ------------------------------------------------------------------------------------ |
+| `CHANNEL_READY`      | `channelId`                                | A channel the device opened is ready; read by the poller's channel step              |
+| `CHANNEL_CLOSED`     | `channelId`                                | A channel the device watched is closed, under any flag, an aborted opening included  |
+| `PAYMENT_SENT`       | `paymentHashHex`, `feeShannons`, `payment` | A payment the device sent succeeded; read by the poller's payment step               |
+| `PAYMENT_FAILED`     | `paymentHashHex`, `reason`, `payment`      | A payment the device sent failed, or never ran; read by the poller's payment step    |
+| `PAYMENT_PENDING`    | `paymentHashHex`, `payment`                | An invoice of the device has a payment held on it; read by the poller's invoice step |
+| `PAYMENT_RECEIVED`   | `paymentHashHex`, `payment`                | An invoice of the device was paid with the preimage it released                      |
+| `PAYMENT_EXPIRED`    | `paymentHashHex`, `payment`                | An invoice of the device expired unpaid, its preimage never released                 |
+| `PAYMENT_CANCELLED`  | `paymentHashHex`, `payment`                | An invoice of the device was cancelled, its preimage never released                  |
+| `SIGNING`            | see below                                  | A signing request was answered or refused by the poller's signing step               |
+| `WATCHTOWER_SIGNING` | see below                                  | A watchtower spend was signed or refused by the poller's watchtower step             |
+| `ERROR`              | `error`                                    | A failed poll step, or the failure of one channel, invoice or payment inside a step  |
+
+`payment` is the payment's record in the history once the event moved it ([The payment history](#the-payment-history)).
+On `PAYMENT_EXPIRED` and `PAYMENT_CANCELLED` it is `null` unless a payment of the invoice had arrived.
 
 The four payment events of an invoice name it by its payment hash as `createInvoice` returned it, `0x` lowercase hex, and
 are the invoice step's ([The invoice step](#the-invoice-step) says when each goes out). The two events of a payment sent
 name it by the payment hash as `transfer` returned it, in the same form, and are the payment step's
 ([The payment step](#the-payment-step)); `reason` is fiber's `failed_error` verbatim, or the SDK's own text when fiber
-gave none or the node never ran the send. The eight activity events are **at least once**: the poller emits the event
+gave none or the node never ran the send; `feeShannons` is the fee fiber reports the payment paid (`get_payment`'s
+`fee`), decimal shannons, which under trampoline is the whole budget sent ([Estimating the fee](#estimating-the-fee)). The eight activity events are **at least once**: the poller emits the event
 and then records, in the activity list below, the status it was emitted for, or drops the entry when the event is final,
 so a crash between the two repeats it on the next tick. A payment's two events are both final: a payment's entry is
 never marked, only dropped once its event went out. A host deduplicates on the event's type and id. `ERROR` is neither
@@ -201,22 +205,30 @@ Every failure of the device's own is one `SdkError`, with a `code` a wallet can 
 underneath as its `cause`; a host's programming error, such as an option out of range, is a `TypeError` or a
 `RangeError`:
 
-| Code                 | When                                                                                                                                         | Cause                                |
-| -------------------- | -------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------ |
-| `poll_failed`        | A step of a poll tick, or one channel, invoice or payment of a step, failed                                                                  | What failed                          |
-| `clock_before_floor` | An index was asked of a clock reading before the allocation floor                                                                            | None                                 |
-| `unknown_channel`    | An operation named a channel this device never registered                                                                                    | None                                 |
-| `opening_rejected`   | The node's answer to an opening is not what the device asked; the message names the field                                                    | None                                 |
-| `opening_conflict`   | The node's answer contradicts the device's record: a registration or a pin the policy refuses                                                | The policy's error                   |
-| `funding_tx_altered` | The signed funding tx is not the one the opening froze, or the channel pins no funding cell to compare to                                    | The pin's conflict, or none          |
-| `invoice_rejected`   | The node's invoice string is not the invoice the device asked for; the message names the field                                               | The decoder's, or none               |
-| `invoice_unpayable`  | An invoice `transfer` was handed is not one the device pays, or its hash is a twin of another payment's                                      | The decoder's, the policy's, or none |
-| `payment_in_flight`  | A payment under the hash is not reported yet: being sent, being read, watched, open, or held by the node                                     | The policy's, the node's, or none    |
-| `payment_charged`    | A payment under the hash was charged a TLC, so it may have been made, and is never sent again                                                | The policy's error                   |
-| `own_invoice`        | The invoice is one of this device's own hold invoices                                                                                        | The policy's error                   |
-| `close_fee_too_high` | The device's fee on a close, at the host's rate or the pinned commitment fee rate, is more than the 1 CKB the policy lets a close's fee take | None                                 |
-| `unknown_invoice`    | `cancelInvoice` named a hash this device recorded no invoice of                                                                              | The policy's error                   |
-| `invoice_released`   | `cancelInvoice` named an invoice whose preimage the device released                                                                          | The policy's error                   |
+| Code                     | When                                                                                                                                         | Cause                                |
+| ------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------ |
+| `poll_failed`            | A step of a poll tick, or one channel, invoice or payment of a step, failed                                                                  | What failed                          |
+| `clock_before_floor`     | An index was asked of a clock reading before the allocation floor                                                                            | None                                 |
+| `unknown_channel`        | An operation named a channel this device never registered                                                                                    | None                                 |
+| `opening_rejected`       | The node's answer to an opening is not what the device asked; the message names the field                                                    | None                                 |
+| `opening_conflict`       | The node's answer contradicts the device's record: a registration or a pin the policy refuses                                                | The policy's error                   |
+| `funding_tx_altered`     | The signed funding tx is not the one the opening froze, or the channel pins no funding cell to compare to                                    | The pin's conflict, or none          |
+| `invoice_rejected`       | The node's invoice string is not the invoice the device asked for; the message names the field                                               | The decoder's, or none               |
+| `invoice_unpayable`      | An invoice `transfer` was handed is not one the device pays, or its hash is a twin of another payment's                                      | The decoder's, the policy's, or none |
+| `payment_in_flight`      | A payment under the hash is not reported yet: being sent, being read, watched or open                                                        | The policy's, or none                |
+| `payment_charged`        | A payment under the hash was charged a TLC, so it may have been made, and is never sent again                                                | The policy's error                   |
+| `own_invoice`            | The invoice is one of this device's own hold invoices                                                                                        | The policy's error                   |
+| `close_fee_too_high`     | The device's fee on a close, at the host's rate or the pinned commitment fee rate, is more than the 1 CKB the policy lets a close's fee take | None                                 |
+| `unknown_invoice`        | `cancelInvoice` named a hash this device recorded no invoice of                                                                              | The policy's error                   |
+| `invoice_released`       | `cancelInvoice` named an invoice whose preimage the device released                                                                          | The policy's error                   |
+| `insufficient_balance`   | The node refused a payment or its estimate for want of the device's outbound liquidity                                                       | The node's `RpcError`                |
+| `no_route`               | The node found no route for a payment or its estimate                                                                                        | The node's `RpcError`                |
+| `fee_budget_too_low`     | The node refused a payment's fee budget as below what the route needs                                                                        | The node's `RpcError`                |
+| `payment_rejected`       | The node refused a payment or its estimate with any other answer                                                                             | The node's `RpcError`                |
+| `payment_session_exists` | The node already holds a session under the payment's hash                                                                                    | The node's `RpcError`                |
+| `payment_unresolved`     | A payment's send, or its estimate, failed without a refusal: the outcome is unknown                                                          | What the call threw                  |
+| `registration_consumed`  | `LspOperatorClient` was refused a registration whose request id the node has seen                                                            | The node's `RpcError`                |
+| `registration_invalid`   | `LspOperatorClient` was refused a registration whose proof the node did not accept                                                           | The node's `RpcError`                |
 
 A message says what failed and then the cause's own words. The codes grow with the operations; a wrong argument is a
 `TypeError` or a `RangeError` naming the field, as everywhere in the SDK, since it is the host's programming error and
@@ -226,9 +238,9 @@ not a condition of the device's. The amount of an opening is the policy's to bou
 
 What is not a condition of the device's comes through as its own error, unwrapped: the node's answers, through the rpc
 client's three errors ([rpc.md](./rpc.md)), on an opening, a submission, a listing, an invoice's creation, a payment's
-send and a close, but for the node's answers that a session under the hash already exists (`payment_in_flight`, the
-`RpcError` its
-cause); the
+read and a close; a payment's send and its estimate are the exception, every failure of the call an `SdkError` by what it
+proves ([How the send ends](#how-the-send-ends)), and so are the two refusals of a registration `LspOperatorClient` names
+([the operator's side](#the-operators-side)); the
 policy's own refusal of an invoice record it cannot take; the host's own effects, a storage
 that throws or a record or alias it holds that the store refuses to read, wherever one is read, `channelEvidence`
 included; on an opening, whatever the host's signer throws; and on a submission, a signed tx that does not read as a
@@ -477,7 +489,7 @@ for it, so the bytes of fiber's payload and its forms on the wire live in the SD
   global when absent, read at construction) and refuses, with a `TypeError` naming it, options that are not an object, a
   `rpcUrl` that is absent, not a string or empty, an `operatorToken` an authorization header cannot carry and a `fetch`
   that is not a function. The inner rpc client sits in a private field of the class, so the operator's token appears in no
-  serialization or inspection of the client. Its one method, `registerTenant(registration)`, refuses, before anything is
+  serialization or inspection of the client. Its first method, `registerTenant(registration)`, refuses, before anything is
   sent, a `registration` that is not an object (a `TypeError`, "registration must be an object") and a malformed field
   under the paths `verifyTenantRegistration` gives (`registration.rootSignerPubkey`, `registration.requestId`,
   `registration.signedAtMs` as a `RangeError`, `registration.signature`), through the one guard of the signer module the
@@ -485,9 +497,24 @@ for it, so the bytes of fiber's payload and its forms on the wire live in the SD
   `LspRegisteredTenant` (`{ tenantId, accessToken }`) once the answered `tenant.tenant_id` is the tenant of the key it
   registered, as fiber's own client checks (`finish_registration`); another tenant is an `RpcResponseError` on
   `response.result.tenant.tenant_id`. The id is computed from the key read before the call, so a registration changed
-  meanwhile changes neither. A failed call is an `RpcTransportError`, the node's refusal an `RpcError` and a malformed
-  answer an `RpcResponseError` ([rpc.md](./rpc.md)). It verifies neither the signature nor the window: the backend does,
-  with the two above, and the node verifies both again.
+  meanwhile changes neither. Two of the node's refusals are the client's own, each an `SdkError` with the `RpcError` as
+  its cause and a message opening "the node refuses the registration": fiber's "tenant registration request was already
+  consumed" (`lsp/registry.rs:13`), a `requestId` the node has seen, is `registration_consumed`, so the backend asks the
+  device for a fresh one; "invalid RootSigner registration proof: …" with one of its four reasons, a signature that fails
+  verification or does not parse (secp256k1's own words) and a `signedAtMs` too far in the future or too old
+  (`lsp/service.rs:431-438`, `fiber-types/src/hosted_lsp.rs:115-124`), is `registration_invalid`. Each is matched by its code, `-32000`, and its whole
+  message (`SDK_REGISTRATION_CONSUMED_ERROR`, `SDK_REGISTRATION_INVALID_ERRORS`). Fiber's "tenant registration proof
+  targets another LSP node" is not among them: the node builds the payload it verifies from its own id
+  (`rpc/lsp.rs:89-95`), so a proof for another LSP fails as a signature that does not verify. Any other refusal is the
+  `RpcError` itself, a failed call an `RpcTransportError` and a malformed answer an `RpcResponseError` ([rpc.md](./rpc.md)).
+  It verifies neither the signature nor the window: the backend does, with the two above, and the node verifies both
+  again.
+- `getStatus()` reads the node's `lsp_get_status` under the operator's token and returns `LspNodeStatus`, `{ publicNodeId,
+tenantStoreRoot, registeredTenants, activeTenants }`: the LSP's public key, 33 bytes, the folder of its tenant store as
+  fiber prints it, and its two tenant counts as `bigint`s ([rpc.md](./rpc.md)). It is for the backend's startup check: the
+  `lspPubkey` the backend and its devices are configured with must be `publicNodeId`, the key fiber builds every
+  registration's payload from, or every registration fails. The client holds no key of its own to compare it to, so the
+  comparison is the backend's; the method's failures are the rpc client's three errors.
 
 ## Opening a channel
 
@@ -681,6 +708,15 @@ the client does not know is refused by its listing ([rpc.md](./rpc.md)) rather t
 not listed, since fiber deleted it: `CHANNEL_CLOSED` is what reported it. The node's errors and the store's pass through
 unwrapped, and nothing is written.
 
+### The balance
+
+`getBalance()` reads the same listing and returns what this device can spend, in decimal shannons: the sum, over the
+`ready` channels with `hasRecord`, of each one's `localBalanceShannons` less its `offeredTlcBalanceShannons`, a channel
+whose offered TLCs reach its local balance counting as zero rather than against the others. Only a ready channel can
+send, and only one this device registered can it sign for; fiber keeps an offered TLC inside the local balance until it
+is fulfilled, so it is taken out. The sum is a `bigint` until it is written, so no amount is rounded. It is a pure read:
+nothing is written, watched or emitted, and the listing's errors pass through unwrapped.
+
 ## A channel's evidence
 
 `channelEvidence(channelId)` reads, from the device's own store, what the record keeps of a channel for a wallet to show
@@ -792,7 +828,8 @@ they just signed. It reads the activity list and, when no invoice is watched, ca
 
 - **`Open`**: nothing, and the invoice stays watched. Fiber itself answers an `Open` invoice past its expiry as `Expired`.
 - **`Received`**: fiber's word that a payment of the invoice is committed in both of the tenant's commitments
-  (`channel.rs:1337-1366`). `PAYMENT_PENDING` goes out the first time, then the status is recorded, and the release is
+  (`channel.rs:1337-1366`). The first time, the receive is recorded `pending` in the history (the amount the hold invoice
+  record keeps, the node's string and its description), `PAYMENT_PENDING` goes out, then the status is marked, and the release is
   tried on every tick the invoice stays `Received`:
   1. The record is read (`readHoldInvoice`).
   2. A record marked cancelled and not released is cancelled again on the node, nothing else done and no tick asked: fiber
@@ -809,9 +846,10 @@ they just signed. It reads the activity list and, when no invoice is watched, ca
      its channels and the ticks the poller takes to sign the fulfil before fiber would fail the TLC.
   6. Once marked, `settle_invoice` hands the node the preimage. Fiber stores it, gives it to its watchtower and queues the
      fulfil, whose requests the device then signs, so the step asks the poller for a tick at once (`pollNow`).
-- **`Paid`**: fiber's word that the fulfil was applied. `PAYMENT_RECEIVED`, then the invoice is no longer watched.
-- **`Expired`**: `PAYMENT_EXPIRED`, then the invoice is no longer watched.
-- **`Cancelled`**: `PAYMENT_CANCELLED`, then the invoice is no longer watched. It is fiber's word whoever cancelled: the
+- **`Paid`**: fiber's word that the fulfil was applied. The record `completed`, created if `Received` was never seen,
+  `PAYMENT_RECEIVED`, then the invoice is no longer watched.
+- **`Expired`**: the record `failed` if a payment had arrived, `PAYMENT_EXPIRED`, then the invoice is no longer watched.
+- **`Cancelled`**: the record `failed` if a payment had arrived, `PAYMENT_CANCELLED`, then the invoice is no longer watched. It is fiber's word whoever cancelled: the
   host's `cancelInvoice` (below) or whoever else holds the tenant's token.
 
 A release that waits, `not_held`, `expiry_too_close` or `offered_in_flight`, is no failure: no event, and the release is
@@ -880,7 +918,9 @@ only writer of `Cancelled` is `fiber/network.rs:5038`.
 amountShannons, maxFeeShannons }`: the payment hash in `0x` lowercase hex, the form the two events carry, the invoice's
 amount, and the fee budget sent. The options, `SdkTransferOptions`, are `{ maxFeeShannons? }`. It settles once the node
 took the payment; how the payment ends is the payment step's to report, as `PAYMENT_SENT` or `PAYMENT_FAILED`
-([The payment step](#the-payment-step)).
+([The payment step](#the-payment-step)). Before it, `estimateTransferFee(encodedInvoice, options?)` finds the fee the
+same `transfer` is charged ([Estimating the fee](#estimating-the-fee)); after it, `getPayment(paymentHashHex)` reads its
+record in the history ([The payment history](#the-payment-history)).
 
 ### The check of the invoice
 
@@ -904,6 +944,13 @@ That is all a payment needs: no hint, feature or hash algorithm is asked of the 
 ([The check of the string](#the-check-of-the-string)), so any node's invoice passes. Nothing is written or sent before
 every check passed.
 
+A host runs the same checks before it shows an invoice, with `readSdkPayableInvoice(encodedInvoice, network, nowMs?)`, a
+pure function over a network's name (`mainnet` or `testnet`) and the host's clock, `Date.now()` by default. It hands back
+`SdkPayableInvoiceDetails`, `{ paymentHashHex, amountShannons, description, expiresAtMs }`, the hash in the form the events
+carry, the description or `null`, the expiry in milliseconds or `null` for an invoice that never runs out; every refusal is
+the `invoice_unpayable` above, and an argument out of its form a `TypeError` or `RangeError` naming it. So the host never
+copies the rules of what the device pays.
+
 ### The fee budget
 
 `maxFeeShannons` is the most the payment may pay in fees. Left out, it is fiber's own default, 0.5% of the amount rounded
@@ -914,8 +961,8 @@ trampoline the first hop carries the amount plus the whole fee fiber settles on 
 budget. Fiber takes `min(max_fee_amount, 0.5%)` whatever the host asks (`payment.rs:450-456`), so a budget above 0.5% is
 approved as asked and spent no further than fiber's cap: the intent is then loose, never short. `max_fee_rate` is not
 sent. Under trampoline fiber also refuses a budget below `ceil(amount / 1000)`, what the trampoline asks for forwarding
-("max_fee_amount is too low for trampoline routing"), so such a budget, 0 included, fails the route as the node's
-`RpcError` (below); the LSP's own invoice, paid directly, needs no fee. An amount and a fee that add up past a u128 are a
+("max_fee_amount is too low for trampoline routing"), so such a budget, 0 included, fails the route as
+`fee_budget_too_low` (below); the LSP's own invoice, paid directly, needs no fee. An amount and a fee that add up past a u128 are a
 `RangeError` before anything is written.
 
 ### The trampoline
@@ -939,35 +986,42 @@ the instance: after a crash they are empty, and the step's next read resolves wh
 
 Once the checks passed:
 
-1. The hash is held in `sending`.
+1. The hash is held in `sending`, and a hash whose record in the history is `completed` is refused as `payment_charged`,
+   nothing written.
 2. The hash is watched, through `watchIfAbsent`: a hash still watched is a payment not yet reported, refused as
    `payment_in_flight`, nothing written. It is watched before the intent is recorded, so no failure in between leaves an
    open intent that no step closes, which would lock the hash for good.
 3. `recordDebitIntent` records the budget in the policy, before the node hears of the payment ([policy.md](./policy.md)).
    An open intent under the hash is refused whatever its maximum, so a second `transfer` never reaches the node while the
    first is unreported.
-4. `send_payment` with the invoice, the fee budget as `max_fee_amount`, `dry_run: false` and the hops.
-5. The hash leaves `sending`, and once the node took the payment the poller is asked for a tick at once (`pollNow`), whose
+4. The send is recorded `pending` in the history, so a watch never outlives its record. A store that refuses the write
+   closes the intent and forgets the watch, and its error comes through as it is.
+5. `send_payment` with the invoice, the fee budget as `max_fee_amount`, `dry_run: false` and the hops.
+6. The hash leaves `sending`, and once the node took the payment the poller is asked for a tick at once (`pollNow`), whose
    payment step reads it.
 
 ### How the send ends
 
-| Exit                                                     | Error                                                        | The intent   | The watch                  |
-| -------------------------------------------------------- | ------------------------------------------------------------ | ------------ | -------------------------- |
-| An argument or the clock                                 | `TypeError` or `RangeError`, by its name                     | None written | None                       |
-| The invoice check                                        | `invoice_unpayable`, the decoder's refusal or none its cause | None written | None                       |
-| The amount and the fee past a u128                       | `RangeError`                                                 | None written | None                       |
-| A hash being sent, read or still watched                 | `payment_in_flight`, no cause                                | Untouched    | Untouched                  |
-| An open intent (`intent_open`)                           | `payment_in_flight`                                          | Kept open    | Kept, for the step         |
-| A charged intent (`intent_charged`)                      | `payment_charged`                                            | Untouched    | Dropped                    |
-| A hold invoice's hash (`own_invoice`)                    | `own_invoice`                                                | None written | Dropped                    |
-| A twin's hash (`hash_twin`)                              | `invoice_unpayable`                                          | None written | Dropped                    |
-| The intent's storage                                     | Its own                                                      | As written   | Kept, for the step         |
-| The node's answer that a session under the hash exists   | `payment_in_flight`, the `RpcError` its cause                | Kept open    | Kept, for the step         |
-| Fiber's lost actor reply                                 | The `RpcError`, unwrapped                                    | Kept open    | Kept, for the step         |
-| Any other refusal of the node                            | The `RpcError`, unwrapped                                    | Closed       | Dropped                    |
-| A transport failure, or an answer the client cannot read | `RpcTransportError` or `RpcResponseError`                    | Kept open    | Kept, for the step         |
-| Success                                                  | None: `SdkPayment`                                           | Kept open    | Kept, and a tick asked for |
+| Exit                                                                                    | Error                                                        | The intent   | The watch                  |
+| --------------------------------------------------------------------------------------- | ------------------------------------------------------------ | ------------ | -------------------------- |
+| An argument or the clock                                                                | `TypeError` or `RangeError`, by its name                     | None written | None                       |
+| The invoice check                                                                       | `invoice_unpayable`, the decoder's refusal or none its cause | None written | None                       |
+| The amount and the fee past a u128                                                      | `RangeError`                                                 | None written | None                       |
+| A hash being sent, read or still watched                                                | `payment_in_flight`, no cause                                | Untouched    | Untouched                  |
+| An open intent (`intent_open`)                                                          | `payment_in_flight`                                          | Kept open    | Kept, for the step         |
+| A charged intent (`intent_charged`)                                                     | `payment_charged`                                            | Untouched    | Dropped                    |
+| A hold invoice's hash (`own_invoice`)                                                   | `own_invoice`                                                | None written | Dropped                    |
+| A twin's hash (`hash_twin`)                                                             | `invoice_unpayable`                                          | None written | Dropped                    |
+| The intent's storage                                                                    | Its own                                                      | As written   | Kept, for the step         |
+| The history's storage, at the pending record, which it then fails                       | Its own                                                      | Closed       | Dropped                    |
+| The history's storage, at the pending record, failing it too                            | Its own                                                      | Kept open    | Kept, for the step         |
+| The node's answer that a session under the hash exists                                  | `payment_session_exists`, the `RpcError` its cause           | Kept open    | Kept, for the step         |
+| Fiber's lost actor reply                                                                | `payment_unresolved`, the `RpcError` its cause               | Kept open    | Kept, for the step         |
+| A refusal for want of liquidity, a route or a fee                                       | `insufficient_balance`, `no_route` or `fee_budget_too_low`   | Closed       | Dropped                    |
+| Any other refusal of the node                                                           | `payment_rejected`, the `RpcError` its cause                 | Closed       | Dropped                    |
+| The history's storage, at failing the record of a refusal                               | Its own                                                      | Kept open    | Kept, for the step         |
+| A transport failure, an answer the client cannot read, or anything else the call throws | `payment_unresolved`, what it threw its cause                | Kept open    | Kept, for the step         |
+| Success                                                                                 | None: `SdkPayment`                                           | Kept open    | Kept, and a tick asked for |
 
 The policy's four refusals are `SdkError`s with the `DebitIntentError` as their cause, the message opening with "the device
 refuses the payment", or "the invoice cannot be paid" for a twin. `payment_charged` is no proof of payment: the policy
@@ -976,10 +1030,30 @@ whose 20 bytes a TLC's witness binds are already another payment's intent or hol
 on another payment's record: the invoice is one the device cannot pay. An open intent the call finds unwatched keeps the
 watch it just added, so the step's `get_payment` closes it; the other three drop it.
 
-Any refusal of the node's ran nothing under the intent, so it is closed, the hash is no longer watched, and the
-`RpcError` comes through unwrapped, as on an opening. A route failure (no balance, no path, a fee below the trampoline's
-floor, a payment to the tenant's own node, whose key the device cannot tell from a payee's) leaves a `Failed` row on the
-node that nobody watches: the error is its report, and no event follows. A retry of the same invoice records the intent
+Whether the payment is still watched is the code's to say, so a host never reads the node's words. Three codes leave it
+watched, with its intent open, and one of the two events follows from the step: `payment_in_flight`, `payment_session_exists`
+and `payment_unresolved`. Every other code of `transfer`, and every `TypeError` or `RangeError`, proves nothing left
+under the call: no event follows, and the invoice may be paid again. The one exception is the host's own storage, whose
+error comes through as itself wherever it is met, the watch, the intent, the record or the close after a refusal; the
+table says what each leaves, and a record it leaves pending is failed by the step.
+
+Any refusal of the node's ran nothing under the intent, so it is closed and the hash is no longer watched. The refusal is
+an `SdkError` with the `RpcError` as its cause and a message opening "the node refuses the payment"; its code is the first
+of `SDK_PAYMENT_REFUSAL_TEMPLATES` whose text the message is, each matched by its code, `-32000`, and its whole message,
+with a decimal number wherever fiber writes one:
+
+| Code                   | Fiber's answer (`Send payment error: Failed to build route, ` before each, but the last of each row)                                                                                                                                                                                                            |
+| ---------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `insufficient_balance` | "Insufficient balance: max outbound liquidity N is insufficient, required amount: N", its "total outbound liquidity" form for MPP, and "Insufficient balance: route hop amount N exceeds outbound liquidity N" (`graph.rs:505-506, 1335-1350, 1491-1497`)                                                       |
+| `no_route`             | "PathFind error: no path found", "Path find failed for min_tlc_value error: N", "Insufficient balance: route hop amount N exceeds channel capacity N" (`graph.rs:497, 505-508, 1483-1489`), and "Send payment error: Failed to build enough routes for MPP payment" (`payment.rs:1355, 1515`)                   |
+| `fee_budget_too_low`   | The three "Graph other error: max_fee_amount is too low for trampoline routing: …" forms, the floor, the first hop's fee and a hop's zero fee (`graph.rs:509-510, 1592-1595, 1642-1645, 1669-1672, 1684-1687`), and "Send payment error: max_fee_amount is too low for selected route" (`payment.rs:1484-1490`) |
+
+Any other answer of the node's, a near twin of these included, is `payment_rejected`: a text not matched exactly is
+never given a guessed code. A tenant's route failures reach the RPC as written: only the LSP's forwarding carries a
+`trampoline_context` (`lsp/mod.rs:77-93`), the one case fiber collapses them to `TemporaryNodeFailure`
+(`payment.rs:1401-1406`). A route failure (no balance, no path, a fee below the trampoline's floor, a payment to the
+tenant's own node, whose key the device cannot tell from a payee's) leaves a `Failed` row on the node that nobody
+watches: the error is its report, and no event follows. A retry of the same invoice records the intent
 again with its new budget, since the policy reopens a closed intent nothing was charged to. A close or a forget that fails
 comes through as the storage's own error instead, the rest left to the step, which reads the `Failed` row or fiber's "not
 found" and ends the payment.
@@ -991,13 +1065,14 @@ already exists, stop start new payment actor for `Hash256(0x…)`" while the pay
 `Hash256(0x…)` has attempts that are in flight state, can not retry" for a failed one with an attempt still out
 (`:2217-2221`). Each is matched by its code, `-32000`, and its whole message around this very hash, in fiber's `Hash256`
 form: the node runs a payment under it, so the intent and the watch are kept for the step to report, and the refusal is
-`payment_in_flight`. The same texts under another hash or another code, and the stored session's under `Failed`, which
+`payment_session_exists`. The same texts under another hash or another code, and the stored session's under `Failed`, which
 fiber sends again, are plain refusals.
 
 Fiber writes an actor that dropped its reply with the same `-32000` as a refusal, "Messaging failed because channel is
 closed" (`SDK_ACTOR_REPLY_LOST_ERROR`, `rpc/utils.rs:112-121`): the call was delivered and may have run, so it is an
-unknown outcome like a transport failure or an answer the client cannot read. The three keep the intent and the watch, the
-error comes through as itself, and one of the two events follows from the step. No failure asks for a tick.
+unknown outcome like a transport failure, an answer the client cannot read or anything else the call throws. All are
+`payment_unresolved`, with what was thrown as the cause and a message opening "the payment's outcome is unknown": they
+keep the intent and the watch, and one of the two events follows from the step. No failure asks for a tick.
 
 ### The payment step
 
@@ -1010,13 +1085,16 @@ its way, and read on the next tick; any other is held in `reading` and asked `ge
   itself `Created`, since the node does not wait for the add (`network.rs:5095-5097`), and the payment is `Inflight` once
   the add is out, before the device has signed it (`channel.rs:4541-4568`): a payment whose TLC the device refuses stays
   `Inflight`, and watched.
-- **`Success`**: the intent closed, if there is one, `PAYMENT_SENT`, then the payment no longer watched.
-- **`Failed`**: the intent closed, `PAYMENT_FAILED` with fiber's `failed_error` verbatim, an empty one included, or
+- **`Success`**: the intent closed, if there is one, the record `completed` with fiber's `fee`, `PAYMENT_SENT` with it as
+  `feeShannons`, then the payment no longer watched.
+- **`Failed`**: the intent closed, the record `failed`, `PAYMENT_FAILED` with fiber's `failed_error` verbatim, an empty one included, or
   `SDK_PAYMENT_UNEXPLAINED_FAILURE_REASON` when fiber gives none, then the payment no longer watched.
 - **Not found**: fiber's "InvalidParameter: Payment session not found: `Hash256(0x…)`" for this very hash, under `-32000`
   (`SDK_PAYMENT_NOT_FOUND_ERROR`, `network.rs:5591-5606`), says the node holds no session of it: the send never ran. The
-  intent closed, if there is one, `PAYMENT_FAILED` with `SDK_PAYMENT_NEVER_SENT_REASON`, then the payment no longer watched.
-  A request that reaches the node late finds the intent closed and its add refused: the safe side.
+  intent closed, if there is one, the record `failed`, `PAYMENT_FAILED` with `SDK_PAYMENT_NEVER_SENT_REASON`, then the
+  payment no longer watched. A request that reaches the node late finds the intent closed and its add refused: the safe
+  side. A watch with no record stopped before the record was written, so before the node heard of it: it is closed with
+  no event; a record missing while the node holds a session is a `poll_failed`.
 - **Anything else**, another refusal, one that only looks like the not found, a status the client does not know or a call
   that fails: a `poll_failed` naming the payment, which stays watched and is read again on the next tick.
 
@@ -1032,6 +1110,66 @@ A node that lies about a payment costs no more than the budget the user approved
 closes the intent, which only stops growth: the TLCs already shown stay signable until they resolve, and nothing beyond
 them is signed. A false `Created` or `Inflight` keeps the intent open, within its budget. The events report what the node
 says, which is no proof: the preimage fiber keeps for a paid payment is not read.
+
+### Estimating the fee
+
+`estimateTransferFee(encodedInvoice, options?)` returns `SdkFeeEstimate`, `{ paymentHashHex, amountShannons, feeShannons }`:
+`feeShannons` is the fee a `transfer` of the invoice under the same options is charged. It takes the invoice and the options
+through `transfer`'s own preparation, the same reading of the string, the options and the clock, the same check of the
+invoice with the same errors, the same budget (the one given, or fiber's 0.5% by default) and the same hops, and then asks
+the node `send_payment` with `dry_run: true`. Fiber runs the route finding on a session it never stores and answers without
+sending an attempt or a TLC (`payment.rs:2205-2234`), so nothing is signed; the device holds no hash, records no intent,
+watches nothing and asks for no tick. The estimate is the dry run's `fee`, as fiber answers it.
+
+Under trampoline, every payee but the LSP itself, that fee is the whole budget: fiber hands it to the first trampoline
+(`graph.rs:1648-1755`), and the LSP, forwarding, takes its own channel's fee rate out of it, pays the route to the payee
+with the rest and keeps what the route leaves (`payment.rs:1541-1576`). So a trampoline payment is charged exactly its
+budget, and the estimate is the price the host shows. A budget below fiber's floor, `estimate_trampoline_fee(amount, 1,
+hops)` (`graph.rs:1759-1781`), `ceil(amount / 1000)` for the one hop the device sends through, is refused by the dry run
+as `fee_budget_too_low`; one at the floor or above it that does not cover the LSP's rate and its route to the payee is
+sent, fails at the LSP and ends in `PAYMENT_FAILED`, nothing charged. To the LSP itself, paid directly, the estimate is the
+route's fee the dry run answers, which may change before the send.
+
+Its failures are `transfer`'s codes ([How the send ends](#how-the-send-ends)), through the same classification, with no
+watch behind any: a refusal for want of liquidity, a route or a fee, `payment_session_exists` for a hash the node already
+runs (fiber checks it before the dry run), `payment_rejected`, and `payment_unresolved` for a transport failure, an
+answer the client cannot read or one for another hash, after which no event follows. An amount whose fee would pass a
+u128 is a `RangeError` before anything is sent, as fiber's checked product would refuse it.
+
+### The payment history
+
+The SDK keeps the history in the host's storage: one record per payment hash, `fiber-lsp-sdk:payment-history:<hash>`, and
+an index of the hashes newest first, `fiber-lsp-sdk:payment-history`. The storage cannot delete, and nothing is deleted:
+an invoice nobody paid never enters. The record is written before its index entry, so a stop in between leaves a record
+out of the index until its next write, never an entry without a record; a corrupt record or index is a `TypeError`, as
+every record of the store.
+
+`SdkPaymentRecord` is `{ paymentHashHex, direction, status, amountShannons, invoice, description, maxFeeShannons,
+feeShannons, failedReason, createdAtMs, settledAtMs }`. `direction` is one of `SDK_PAYMENT_DIRECTIONS`, `send` or
+`receive`; `status` one of `SDK_PAYMENT_RECORD_STATUSES`, `pending`, `completed` or `failed`. `maxFeeShannons` is a send's
+budget, `null` for a receive; `feeShannons` fiber's fee once a send completed, `"0"` for a completed receive, `null`
+before; `failedReason` fiber's `failed_error`, the device's reason or the node's refusal while `failed`. `createdAtMs` is
+when a send was handed to the node or a receive's payment arrived, `settledAtMs` when it reached `completed` or `failed`.
+
+| Moment                                                          | The record                                                     |
+| --------------------------------------------------------------- | -------------------------------------------------------------- |
+| `transfer`, its intent approved, before `send_payment`          | A `pending` send, replacing a `failed` one, first in the index |
+| The node refuses it (a code that proves nothing left)           | `failed`, with the refusal's message                           |
+| The SDK refuses it (arguments, invoice, own invoice, in flight) | None                                                           |
+| The payment step's `Success`                                    | `completed`, with fiber's fee; also from `failed`              |
+| The payment step's `Failed` or not found                        | `failed`, with the reason                                      |
+| The invoice step's `Received`                                   | A `pending` receive: the recorded amount, the node's string    |
+| The invoice step's `Paid`                                       | `completed`, created if `Received` was never seen              |
+| The invoice step's `Expired` or `Cancelled`                     | `failed`, when a payment had arrived; otherwise none           |
+
+`completed` is final. A send's `failed` turns `completed` (fiber's `Failed` may still turn `Success`) or `pending` (a
+retry); a receive's `failed` stays. Each step writes the record before the event, which carries it, and the event before
+the activity mark, so an event re-delivered after a stop finds the record already moved.
+
+`getPayment(paymentHashHex)` reads one record, for a hash in `0x` lowercase hex, the form the events carry, or `null` when
+the history holds none; a hash that is not 32 bytes of hex is a `TypeError`. `listPayments(options?)` reads a page newest
+first; `SdkPaymentListOptions` are `{ limit?, offset? }`, 20 and 0 by default, each an integer from 0 to
+`Number.MAX_SAFE_INTEGER` or a `RangeError`. Both hand back copies.
 
 ## Closing a channel
 
@@ -1176,19 +1314,27 @@ the event type list, the network names and the default poll interval, the nonce 
 forms (`SdkChannelOpening`, `SdkSignFundingInputs`, and the rpc client's `TenantChannelOpeningContext` the opening hands
 back), the listing's (`SdkChannelInfo`, `SdkChannelState`, `SDK_CHANNEL_STATES`), the evidence
 (`SdkChannelEvidence`), the invoice's (`SdkInvoice`, `SdkInvoiceOptions`, which `createInvoice` takes and returns through
-the class), the payment's (`SdkPayment`, `SdkTransferOptions`, which `transfer` takes and returns), the close's
+the class), the payment's (`SdkPayment`, `SdkTransferOptions`, which `transfer` takes and returns, `SdkFeeEstimate`,
+which `estimateTransferFee` returns, the history's (`SdkPaymentRecord` with `SdkPaymentDirection`,
+`SdkPaymentRecordStatus`, `SDK_PAYMENT_DIRECTIONS` and `SDK_PAYMENT_RECORD_STATUSES`, which `getPayment`, `listPayments`
+and the payment events return, and `SdkPaymentListOptions`, which `listPayments` takes)), the invoice currency of each network (`SDK_NETWORK_INVOICE_CURRENCIES`, frozen, since the presets
+the facade reads stay unpublished), `computeSdkInvoiceExpiryMs`, `readSdkPayableInvoice` with
+`SdkPayableInvoiceDetails`, the close's
 (`SdkCloseOptions`,
 which `closeChannel` takes), and what `SIGNING` and `WATCHTOWER_SIGNING` name (`SigningEventOutcome`,
 `ChannelSigningTransition`, `WatchtowerKeyPurpose`, `SignerRefusal`); the operator's side ([The operator's
-side](#the-operators-side)): `LspOperatorClient` with `LspOperatorClientOptions` and `LspRegisteredTenant`, the registration's
+side](#the-operators-side)): `LspOperatorClient` with `LspOperatorClientOptions`, `LspRegisteredTenant` and the rpc
+client's `LspNodeStatus` that `getStatus` returns, the registration's
 params `RegisterTenantParams`, `computeTenantId`, `verifyTenantRegistration` and the window's two constants,
 `TENANT_REGISTRY_MAX_SIGNED_AT_AGE_MS` and `TENANT_REGISTRY_MAX_SIGNED_AT_FUTURE_SKEW_MS`; the injection interfaces of the modules behind it,
 `ISignerStorage`, `IAsyncSignerStorage`, `ITimer`, `IFetchLike` and their event and response types; the rpc client's
-three with the `RpcMethod` they name, which a wallet meets as causes; `decodeInvoice` with the invoice types and
-`InvoiceError`, since a wallet has to show what it is about to pay; and the chain's types the options and the operations
+three with the `RpcMethod` they name, which a wallet meets as causes, and fiber's two codes a wallet reads on them,
+`RPC_CALL_FAILED_CODE` and `RPC_UNAUTHORIZED_CODE`; `decodeInvoice`, `encodeInvoice` and `findInvoiceAttribute` with
+the invoice types and `InvoiceError`, since a wallet has to show what it is about to pay ([invoice.md](./invoice.md));
+`isCompressedPoint`, the check of a key the options take; and the chain's types the options and the operations
 take and return, `Script` with its template and hash type, and `Transaction` with `CellDep`, `CellInput`, `CellOutput`,
 `DepType` and `OutPoint`. Nothing else of the modules: the store, the engine, the dispatch and the rpc client are reached
-through the facade alone, or, for the operator's one call, through `LspOperatorClient`.
+through the facade alone, or, for the operator's two calls, through `LspOperatorClient`.
 
 ## What the facade deliberately does not do
 
@@ -1209,53 +1355,57 @@ through the facade alone, or, for the operator's one call, through `LspOperatorC
   was lost is read back by the payment step, and a `transfer` of a hash not yet reported is refused.
 - **No public poll.** The extra tick is the operations' to ask for; whether a wallet's pull-to-refresh gets a method is
   for the API review.
-- **No history.** The facade reports what it is tracking; past payments are the node's.
 
 ## Where it lives
 
-| File                                     | Contents                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
-| ---------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `src/sdk/fiber-lsp-sdk.ts`               | `FiberLspSdk`: the options checked, the wiring, `connect`, `disconnect`, the events, the registration, the token, the opening's three methods, the listing, the evidence, `createInvoice`, `cancelInvoice`, `transfer`, `closeChannel`, `forceCloseChannel`, `setWatchtowerApproval`                                                                                                                                                                                      |
-| `src/sdk/lsp-operator-client.ts`         | `LspOperatorClient`: the operator's client of the node, the options and the registration checked, `lsp_register_tenant`, the answered tenant held to the key's, the token in a private field                                                                                                                                                                                                                                                                              |
-| `src/sdk/channel-opening.ts`             | `prepareSdkChannelOpen`, `submitSdkFundingTx` and `openSdkChannel`: the arguments, the request, the resume, the check's verdict, the pins, the refusals and the drop, the submission's checks                                                                                                                                                                                                                                                                             |
-| `src/sdk/utils/opening-check.utils.ts`   | `checkTenantOpening`: the node's answer held to what was asked, each failure `opening_rejected`                                                                                                                                                                                                                                                                                                                                                                           |
-| `src/sdk/pending-opening.ts`             | `PendingOpeningStore`: the pending opening's record, read, matched, written, named and dropped; `assertUserLockCellDeps`                                                                                                                                                                                                                                                                                                                                                  |
-| `src/sdk/channel-step.ts`                | `buildChannelStep`: the watched channels settled from both listings, `CHANNEL_READY`, `CHANNEL_CLOSED`                                                                                                                                                                                                                                                                                                                                                                    |
-| `src/sdk/channel-listing.ts`             | `listSdkChannels`: the node's channels as a wallet shows them, the five states, `hasRecord`                                                                                                                                                                                                                                                                                                                                                                               |
-| `src/sdk/invoice-creation.ts`            | `createSdkInvoice`: the arguments, the index, the record, `new_invoice`, the clock, the check and the watch                                                                                                                                                                                                                                                                                                                                                               |
-| `src/sdk/utils/invoice-check.utils.ts`   | `checkTenantInvoice`: the node's string held to what was asked, each failure `invoice_rejected`                                                                                                                                                                                                                                                                                                                                                                           |
-| `src/sdk/invoice-cancelling.ts`          | `cancelSdkInvoice`: the hash checked, the mark, `cancel_invoice`, fiber's already-cancelled answer as done, `unknown_invoice`, `invoice_released`, `pollNow`; `cancelInvoiceOnNode`, which the invoice step repeats                                                                                                                                                                                                                                                       |
-| `src/sdk/invoice-step.ts`                | `buildInvoiceStep`: each status answered, the index held to the hash, the release and its margin, the settlement, the cancel repeated, `pollNow`, `PAYMENT_PENDING`, `PAYMENT_RECEIVED`, `PAYMENT_EXPIRED`, `PAYMENT_CANCELLED`                                                                                                                                                                                                                                           |
-| `src/sdk/payment-sending.ts`             | `transferSdkPayment`: the arguments, the default fee and the budget, the hashes being sent, the watch, the intent and its refusals, `send_payment` with the hops, each way the send ends, `pollNow`                                                                                                                                                                                                                                                                       |
-| `src/sdk/utils/payment-check.utils.ts`   | `checkPayableInvoice`: an invoice held to what the device pays, each failure `invoice_unpayable`                                                                                                                                                                                                                                                                                                                                                                          |
-| `src/sdk/payment-step.ts`                | `buildPaymentStep`: the hashes being sent skipped and the ones read held, each status answered, fiber's not found, the watch checked again, the close before `PAYMENT_SENT` and `PAYMENT_FAILED`, the forget                                                                                                                                                                                                                                                              |
-| `src/sdk/channel-closing.ts`             | `closeSdkChannel`: the arguments, the record, the device's fee over both pinned close scripts and `close_fee_too_high`, `shutdown_channel` with the device's script, `pollNow` once the node took it; `forceCloseSdkChannel`, `shutdown_channel` with `force` alone, no record read                                                                                                                                                                                       |
-| `src/sdk/utils/node-answer.utils.ts`     | Fiber's answers recognized by their code and whole message (`isFiberRefusal`), or around a hash in its `Hash256` form (`isFiberRefusalUnderHash`, `formatFiberHash256`); the refusal of an answer about another hash (`assertSdkAnsweredHash`)                                                                                                                                                                                                                            |
-| `src/sdk/utils/clock.utils.ts`           | `readSdkClock`: the host's clock read once, without a receiver, and checked                                                                                                                                                                                                                                                                                                                                                                                               |
-| `src/sdk/utils/invoice-expiry.utils.ts`  | `computeSdkInvoiceExpiryMs`: when an invoice runs out, as fiber's `is_expired` counts it, which the invoice step and the payment's check share                                                                                                                                                                                                                                                                                                                            |
-| `src/sdk/channel-evidence.ts`            | `readSdkChannelRecord`, a registered channel's record or `unknown_channel`, which the submission reads too; `readSdkChannelEvidence`: the record projected onto its evidence                                                                                                                                                                                                                                                                                              |
-| `src/sdk/sdk.types.ts`                   | The options, the network, the events, the error codes, the registration's forms, the operator's client's options and result, the opening's and the listing's, the pending opening, the evidence, the invoice's, the payment's and the payable invoice, the close's options, the activity record, the device's channels record, the context with the device's channels and its two sets of hashes                                                                          |
-| `src/sdk/sdk.constants.ts`               | The network presets, the poll interval, the allocation floor, the storage keys, the event, error and state lists, the opening's output index and defaults, the watchtower step's unwatched answer, the invoice's expiry, final delta and timestamp tolerance, the release's slack, fiber's already-paid answer; the default fee rate and its denominator, fiber's not found, session-exists and lost-reply answers, the payment's two reasons and the two refusals' words |
-| `src/sdk/sdk.error.ts`                   | `SdkError`                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
-| `src/sdk/allocator.ts`                   | `IndexAllocator`: the channel and invoice indexes from the clock, the last one persisted                                                                                                                                                                                                                                                                                                                                                                                  |
-| `src/sdk/activity.ts`                    | `ActivityTracker`: the persisted list of what is watched, `watchIfAbsent`, and the status each event was emitted for                                                                                                                                                                                                                                                                                                                                                      |
-| `src/sdk/device-channels.ts`             | `DeviceChannelList`: the persisted list of the channels the device opened, added at the opening, dropped by the watchtower step                                                                                                                                                                                                                                                                                                                                           |
-| `src/sdk/poller.ts`                      | `ActivityPoller`: the tick, its steps and their runs and deadline, the interval, `start`, `stop`                                                                                                                                                                                                                                                                                                                                                                          |
-| `src/sdk/signing-step.ts`                | `buildChannelSigningStep`: the watched channels polled, the status read, the dispatch, the submission, `SIGNING`, a refusal told once per request and code                                                                                                                                                                                                                                                                                                                |
-| `src/sdk/watchtower-step.ts`             | `buildWatchtowerSigningStep`: the device's channels polled, the unwatched answer and the drop, the dispatch, the submission, the mark, `WATCHTOWER_SIGNING`                                                                                                                                                                                                                                                                                                               |
-| `src/sdk/utils/poll-step.utils.ts`       | What the steps share under their run: each channel, invoice or payment in turn (`answerEachPolled`), the guarded event, the `poll_failed` report, the refusal of another channel's status                                                                                                                                                                                                                                                                                 |
-| `src/sdk/utils/request-id.utils.ts`      | `encodeSdkRequestId`, a request id as both signing events carry it                                                                                                                                                                                                                                                                                                                                                                                                        |
-| `src/sdk/utils/runtime-timer.utils.ts`   | The timer over the runtime's `setTimeout` and `clearTimeout`                                                                                                                                                                                                                                                                                                                                                                                                              |
-| `src/sdk/utils/network.utils.ts`         | The network option resolved to its five values                                                                                                                                                                                                                                                                                                                                                                                                                            |
-| `src/sdk/utils/activity-record.utils.ts` | The activity record's guard, ids and statuses per kind                                                                                                                                                                                                                                                                                                                                                                                                                    |
-| `src/sdk/utils/failure.utils.ts`         | An `SdkError`'s message from what failed and its cause; the guarded emit and the `poll_failed` report                                                                                                                                                                                                                                                                                                                                                                     |
-| `src/policy/signer-store.ts`             | `getRecord` and `updateRecord`, the store's records of another module's format, used by the allocator, the activity and the pending opening                                                                                                                                                                                                                                                                                                                               |
-| `src/common/utils/assert.utils.ts`       | `assertTimerDelayMs`, `assertScriptTemplate`, `assertCompressedPoint`, `assertFunction`, `assertCellDep`, `assertCellDeps` and `assertPositiveDecimalShannons`                                                                                                                                                                                                                                                                                                            |
-| `src/common/utils/copy.utils.ts`         | The copies of a script, a template, an out point, a cell dep and a transaction, which the network and the opening take                                                                                                                                                                                                                                                                                                                                                    |
-| `src/common/utils/molecule.utils.ts`     | `decodeMoleculeScript`, a molecule `Script` read back strictly, the exact inverse of `moleculeScript`, which the close reads both pinned close scripts with and the pending opening its stored user lock                                                                                                                                                                                                                                                                  |
-| `src/common/utils/validate.utils.ts`     | `isCompressedPoint`, shared with the invoice codec; `isPositiveDecimalShannons`, shared with the policy's invoice record                                                                                                                                                                                                                                                                                                                                                  |
-| `src/common/timer-slot.ts`               | `TimerSlot`: the one armed callback the poller holds                                                                                                                                                                                                                                                                                                                                                                                                                      |
-| `src/common/listener-set.ts`             | `ListenerSet`: the events' fan-out                                                                                                                                                                                                                                                                                                                                                                                                                                        |
+| File                                     | Contents                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
+| ---------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `src/sdk/fiber-lsp-sdk.ts`               | `FiberLspSdk`: the options checked, the wiring, `connect`, `disconnect`, the events, the registration, the token, the opening's three methods, the listing, the balance, the evidence, `createInvoice`, `cancelInvoice`, `transfer`, `estimateTransferFee`, `getPayment`, `listPayments`, `closeChannel`, `forceCloseChannel`, `setWatchtowerApproval`                                                                                                                                                                                                                                                                                        |
+| `src/sdk/lsp-operator-client.ts`         | `LspOperatorClient`: the operator's client of the node, the options and the registration checked, `lsp_register_tenant`, the answered tenant held to the key's, its two refusals classified, `lsp_get_status`, the token in a private field                                                                                                                                                                                                                                                                                                                                                                                                   |
+| `src/sdk/channel-opening.ts`             | `prepareSdkChannelOpen`, `submitSdkFundingTx` and `openSdkChannel`: the arguments, the request, the resume, the check's verdict, the pins, the refusals and the drop, the submission's checks                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
+| `src/sdk/utils/opening-check.utils.ts`   | `checkTenantOpening`: the node's answer held to what was asked, each failure `opening_rejected`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
+| `src/sdk/pending-opening.ts`             | `PendingOpeningStore`: the pending opening's record, read, matched, written, named and dropped; `assertUserLockCellDeps`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
+| `src/sdk/channel-step.ts`                | `buildChannelStep`: the watched channels settled from both listings, `CHANNEL_READY`, `CHANNEL_CLOSED`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
+| `src/sdk/channel-listing.ts`             | `listSdkChannels`: the node's channels as a wallet shows them, the five states, `hasRecord`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
+| `src/sdk/balance-query.ts`               | `getSdkBalance`: the ready channels this device registered, each local balance less its offered TLCs and floored at zero, summed                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
+| `src/sdk/invoice-creation.ts`            | `createSdkInvoice`: the arguments, the index, the record, `new_invoice`, the clock, the check and the watch                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
+| `src/sdk/utils/invoice-check.utils.ts`   | `checkTenantInvoice`: the node's string held to what was asked, each failure `invoice_rejected`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
+| `src/sdk/invoice-cancelling.ts`          | `cancelSdkInvoice`: the hash checked, the mark, `cancel_invoice`, fiber's already-cancelled answer as done, `unknown_invoice`, `invoice_released`, `pollNow`; `cancelInvoiceOnNode`, which the invoice step repeats                                                                                                                                                                                                                                                                                                                                                                                                                           |
+| `src/sdk/invoice-step.ts`                | `buildInvoiceStep`: each status answered, the index held to the hash, the release and its margin, the settlement, the cancel repeated, `pollNow`, the receive's record before each event, `PAYMENT_PENDING`, `PAYMENT_RECEIVED`, `PAYMENT_EXPIRED`, `PAYMENT_CANCELLED`                                                                                                                                                                                                                                                                                                                                                                       |
+| `src/sdk/payment-sending.ts`             | `transferSdkPayment`: the hashes being sent, a completed record refused, the watch, the intent and its refusals, the pending record, `send_payment` with the hops, each way the send ends, `pollNow`; `prepareSdkTransfer`, the arguments, the invoice, the default fee, the budget and the hops, which the estimate shares; `classifySdkPaymentFailure`, a failed `send_payment` as its code                                                                                                                                                                                                                                                 |
+| `src/sdk/utils/payment-check.utils.ts`   | `checkPayableInvoice`: an invoice held to what the device pays, each failure `invoice_unpayable`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
+| `src/sdk/fee-estimating.ts`              | `estimateSdkTransferFee`: `transfer`'s preparation, the dry run under its budget and its failures classified                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
+| `src/sdk/payment-query.ts`               | `getSdkPayment`: the hash checked, the history's record copied; `listSdkPayments`: the page's options, the records copied; `readSdkPayment`, the payment step's `get_payment`, fiber's not found as `null`                                                                                                                                                                                                                                                                                                                                                                                                                                    |
+| `src/sdk/payment-history.ts`             | `PaymentHistory`: a record per hash and the index newest first, read, paged and written record first                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
+| `src/sdk/utils/payment-history.utils.ts` | The record's and the index's guards, the index's order, the pending send, the arrived receive, the settlement's transitions, the host's copy                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
+| `src/sdk/payment-step.ts`                | `buildPaymentStep`: the hashes being sent skipped and the ones read held, each status answered, fiber's not found, the watch checked again, the close and the record before `PAYMENT_SENT` and `PAYMENT_FAILED`, a watch without a record, the forget                                                                                                                                                                                                                                                                                                                                                                                         |
+| `src/sdk/channel-closing.ts`             | `closeSdkChannel`: the arguments, the record, the device's fee over both pinned close scripts and `close_fee_too_high`, `shutdown_channel` with the device's script, `pollNow` once the node took it; `forceCloseSdkChannel`, `shutdown_channel` with `force` alone, no record read                                                                                                                                                                                                                                                                                                                                                           |
+| `src/sdk/utils/node-answer.utils.ts`     | Fiber's answers recognized by their code and whole message (`isFiberRefusal`), or around a hash in its `Hash256` form (`isFiberRefusalUnderHash`, `formatFiberHash256`), or by a text whose `{}` are decimal numbers (`isFiberRefusalByTemplate`); the refusal of an answer about another hash (`assertSdkAnsweredHash`)                                                                                                                                                                                                                                                                                                                      |
+| `src/sdk/utils/clock.utils.ts`           | `readSdkClock`: the host's clock read once, without a receiver, and checked                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
+| `src/sdk/utils/invoice-expiry.utils.ts`  | `computeSdkInvoiceExpiryMs`: when an invoice runs out, as fiber's `is_expired` counts it, which the invoice step and the payment's check share                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
+| `src/sdk/channel-evidence.ts`            | `readSdkChannelRecord`, a registered channel's record or `unknown_channel`, which the submission reads too; `readSdkChannelEvidence`: the record projected onto its evidence                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
+| `src/sdk/sdk.types.ts`                   | The options, the network, the events, the error codes, the registration's forms, the operator's client's options and result, the opening's and the listing's, the pending opening, the evidence, the invoice's, the payment's, its estimate, its state and the payable invoice, the prepared transfer, the close's options, the activity record, the device's channels record, the context with the device's channels and its two sets of hashes                                                                                                                                                                                              |
+| `src/sdk/sdk.constants.ts`               | The network presets, the poll interval, the allocation floor, the storage keys, the event, error and state lists, the opening's output index and defaults, the watchtower step's unwatched answer, the invoice's expiry, final delta and timestamp tolerance, the release's slack, fiber's already-paid answer; the default fee rate and its denominator, fiber's not found, session-exists and lost-reply answers, the payment's two reasons and the two refusals' words; fiber's payment refusals by code, its trampoline fee rate and denominator, the payment statuses, the networks' invoice currencies, the registration's two refusals |
+| `src/sdk/sdk.error.ts`                   | `SdkError`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
+| `src/sdk/allocator.ts`                   | `IndexAllocator`: the channel and invoice indexes from the clock, the last one persisted                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
+| `src/sdk/activity.ts`                    | `ActivityTracker`: the persisted list of what is watched, `watchIfAbsent`, and the status each event was emitted for                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
+| `src/sdk/device-channels.ts`             | `DeviceChannelList`: the persisted list of the channels the device opened, added at the opening, dropped by the watchtower step                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
+| `src/sdk/poller.ts`                      | `ActivityPoller`: the tick, its steps and their runs and deadline, the interval, `start`, `stop`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
+| `src/sdk/signing-step.ts`                | `buildChannelSigningStep`: the watched channels polled, the status read, the dispatch, the submission, `SIGNING`, a refusal told once per request and code                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
+| `src/sdk/watchtower-step.ts`             | `buildWatchtowerSigningStep`: the device's channels polled, the unwatched answer and the drop, the dispatch, the submission, the mark, `WATCHTOWER_SIGNING`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
+| `src/sdk/utils/poll-step.utils.ts`       | What the steps share under their run: each channel, invoice or payment in turn (`answerEachPolled`), the guarded event, the `poll_failed` report, the refusal of another channel's status                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
+| `src/sdk/utils/request-id.utils.ts`      | `encodeSdkRequestId`, a request id as both signing events carry it                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
+| `src/sdk/utils/runtime-timer.utils.ts`   | The timer over the runtime's `setTimeout` and `clearTimeout`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
+| `src/sdk/utils/network.utils.ts`         | The network option resolved to its five values                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
+| `src/sdk/utils/activity-record.utils.ts` | The activity record's guard, ids and statuses per kind                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
+| `src/sdk/utils/failure.utils.ts`         | An `SdkError`'s message from what failed and its cause; the guarded emit and the `poll_failed` report                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
+| `src/policy/signer-store.ts`             | `getRecord` and `updateRecord`, the store's records of another module's format, used by the allocator, the activity and the pending opening                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
+| `src/common/utils/assert.utils.ts`       | `assertTimerDelayMs`, `assertScriptTemplate`, `assertCompressedPoint`, `assertFunction`, `assertCellDep`, `assertCellDeps` and `assertPositiveDecimalShannons`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
+| `src/common/utils/copy.utils.ts`         | The copies of a script, a template, an out point, a cell dep and a transaction, which the network and the opening take                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
+| `src/common/utils/molecule.utils.ts`     | `decodeMoleculeScript`, a molecule `Script` read back strictly, the exact inverse of `moleculeScript`, which the close reads both pinned close scripts with and the pending opening its stored user lock                                                                                                                                                                                                                                                                                                                                                                                                                                      |
+| `src/common/utils/validate.utils.ts`     | `isCompressedPoint`, shared with the invoice codec; `isPositiveDecimalShannons`, shared with the policy's invoice record                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
+| `src/common/timer-slot.ts`               | `TimerSlot`: the one armed callback the poller holds                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
+| `src/common/listener-set.ts`             | `ListenerSet`: the events' fan-out                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
 
 ## What the tests guarantee
 
@@ -1290,7 +1440,7 @@ in-memory storage and a `fetch` double. Beyond a happy path per feature:
   channel as `unknown_channel`; the one-call opening through the host's signer, which is handed a copy of the frozen tx and whose witnesses
   are the only thing of its answer that reaches the node; the cell deps passed from both entry
   points, and cell deps that are not a list and a missing signer refused with nothing written or sent; the listing with
-  `hasRecord`; and the channel step polled before the signing steps, announcing the opened channel ready and dropping
+  `hasRecord`; the balance over it, counting only the ready channels this device registered; and the channel step polled before the signing steps, announcing the opened channel ready and dropping
   its pending opening.
 - **The invoice through the facade**: a hold invoice of the seed's preimage hash under the network's currency, checked,
   recorded and watched; the string held to the facade's own LSP key and network; an amount of zero refused with
@@ -1385,13 +1535,34 @@ concurrent transfers let through; the hash held from before its watch until the 
 released, a hash being read or sent by another call refused touching no storage, nothing held for a refused invoice, and a
 tick between the watch and the answer kept off the hash. Each refusal of the intent with its watch kept or dropped, a twin
 of another intent and of a hold invoice refused as `invoice_unpayable` with `readDebitIntent` reading nothing. The node's
-answer: a refusal through unwrapped, the intent closed and the hash unwatched, and a retry reopening the intent with its new
-budget; a transport failure, an unreadable answer, fiber's lost actor reply and any other failure through with the intent
-open and the hash watched; each of the five texts of fiber's three session-exists answers `payment_in_flight` with the
-`RpcError` as cause, and
-the look-alikes (another hash, the `Failed` status, the hash in another form, another code) plain refusals; a route failure
+answer: each of fiber's refusal texts as its code, with numbers of every size, and its near twins as `payment_rejected`,
+the `RpcError` as cause, the intent closed and the hash unwatched, and a retry reopening the intent with its new budget; a
+transport failure, an unreadable answer, fiber's lost actor reply and any other failure, a thrown non-error included, as
+`payment_unresolved` with what was thrown as cause, the intent open and the hash watched; each of the five texts of
+fiber's three session-exists answers `payment_session_exists` with the `RpcError` as cause, and the look-alikes (another hash, the `Failed` status, the hash in another form, another code) plain refusals; a route failure
 reporting nothing to a tick in its middle, and a retry refused while a tick reads the failed first try. A storage failure at
 the watch, the intent, the close and the forget, each leaving what the step resolves.
+
+`fee-estimating.spec.ts` pins the estimate over the scripted node: the dry run's exact wire under `transfer`'s default
+budget and under the budget given, with the hops, the dry run's fee answered as fiber writes it, the LSP as payee asked
+directly; `transfer`'s argument, option and invoice refusals, an amount and a budget at fiber's u128 and one past it a
+`RangeError` before any call; each failure as its code; and no storage, intent, watch, held hash or tick behind any outcome.
+`payment-query.spec.ts` pins `getPayment` and `listPayments` over the history: the record without its version, `null`
+for a hash it holds none of, a copy the host may change, a corrupt record thrown, each malformed hash a `TypeError`; a
+page newest first, ties by hash, 20 by default, its edges (offset past the end, a limit of 0, the last partial page),
+each malformed option refused by its name, an entry whose record is missing thrown; and the step's `get_payment`, the
+hash as fiber writes it, fiber's not found for this very hash as `null` and its look-alikes thrown, an answer for another
+hash thrown.
+
+`payment-history.spec.ts` pins the store: the keys; a record read back, from a previous instance and through an
+asynchronous storage, and refused when not JSON, not a record or under another hash's key; the record written before
+the index, no write when the updater hands back what it was given, a record a stop left out of the index placed on its
+next write, an entry moved when the creation time changes, a delete, another hash's record or a corrupt one refused with
+nothing written, a corrupt index thrown after the record, and concurrent updates of one hash serialized; the pages
+newest first, reading only their own records. `payment-history.utils.spec.ts` pins one refusal per field of the record
+and of the index, each field held to its status and direction, the index's order and uniqueness, the placement, the
+pending send and the arrived receive, every allowed transition and every refused one (`completed` final, a receive's
+`failed` kept, a send's `failed` turned `completed`), and the host's copy.
 
 `payment-step.spec.ts` pins the step over the scripted node and the real policy and activity: nothing called with nothing
 watched, with only channels and invoices, or once the last payment was sent; `Created` and `Inflight` emitting and writing
@@ -1430,8 +1601,10 @@ fiber's clock reads expired two milliseconds ahead of the device's; and a paymen
 up to 20 seconds each (`jest.setTimeout`), since a full run under load has taken one past jest's five.
 
 The payments, `transfer` with its check, the default fee, the trampoline, the two sets of hashes, the order and each exit,
-the payment step, `watchIfAbsent`, `readSdkClock` and the expiry the invoice step shares, and the fifth step's wiring, were
-broken the same way (`test/tests/sdk`, its flow specs included, still 100% on all four metrics); their rows are in the table
+the payment step, `watchIfAbsent`, `readSdkClock` and the expiry the invoice step shares, the fifth step's wiring, the
+classification of `transfer`'s failures and the watch each code keeps, `estimateTransferFee` under `transfer`'s budget,
+the step's read of a payment, `PAYMENT_SENT`'s fee, the networks' invoice currencies and the operator client's two refusals and `getStatus`,
+were broken the same way (`test/tests/sdk`, its flow specs included, still 100% on all four metrics); their rows are in the table
 below, with the facade's.
 
 Coverage of the module is 100% on all four metrics, and the assertions were checked by breaking the code on purpose:
@@ -1460,6 +1633,8 @@ Coverage of the module is 100% on all four metrics, and the assertions were chec
 | The budget leaves out the fee                                               | 51                |
 | A signed request's id is announced bare                                     | 41                |
 | The payment is a dry run                                                    | 40                |
+| A classified refusal carries no cause                                       | 39                |
+| Every failed send stays watched                                             | 38                |
 | The payment stays watched at the end                                        | 35                |
 | Success is not announced                                                    | 31                |
 | The hash stays held after the call                                          | 30                |
@@ -1470,17 +1645,25 @@ Coverage of the module is 100% on all four metrics, and the assertions were chec
 | The next tick is armed a millisecond after the tick, not after the interval | 24                |
 | The intent stays open at the end                                            | 22                |
 | A refusal's request id is dropped                                           | 21                |
+| An unmatched refusal is reported as no_route                                | 21                |
 | A refusal's code is reported as malformed                                   | 20                |
 | A node refusal keeps the intent open                                        | 19                |
 | A node refusal keeps the watch                                              | 18                |
 | A node refusal is swallowed                                                 | 17                |
+| Any read failure is read as not found                                       | 15                |
+| A transport failure is classified as a refusal                              | 14                |
+| Fiber's not found is thrown                                                 | 14                |
 | Failed is not announced                                                     | 13                |
 | The intent is recorded before the watch                                     | 13                |
+| An unresolved payment is left unwatched                                     | 13                |
 | No extra tick after a send                                                  | 12                |
 | The clock is not checked                                                    | 12                |
+| PAYMENT_SENT carries no fee                                                 | 12                |
+| The dry run's failures are not classified                                   | 12                |
 | The cell deps bound is one lower                                            | 11                |
 | A step's deadline outlives the step                                         | 11                |
 | An unknown outcome is treated as a refusal                                  | 11                |
+| A session already held is reported as unresolved                            | 11                |
 | A development chain's cell deps count is not checked                        | 10                |
 | The channels are answered in reverse order                                  | 9                 |
 | The fee budget is not checked                                               | 9                 |
@@ -1488,17 +1671,22 @@ Coverage of the module is 100% on all four metrics, and the assertions were chec
 | The intent is closed when none exists                                       | 9                 |
 | Not found is a poll failure                                                 | 9                 |
 | An id is not checked before the write                                       | 9                 |
+| The estimate sends the payment for real                                     | 9                 |
+| The facade's estimate answers nothing                                       | 9                 |
 | The event comes before the close                                            | 8                 |
 | Fiber's failure text is replaced                                            | 8                 |
-| A never-sent payment reads as sent                                          | 8                 |
 | A refused intent keeps the watch                                            | 8                 |
 | An unchanged record is written anyway                                       | 8                 |
 | The token is not passed to the rpc client                                   | 8                 |
 | A channel the policy never registered is polled too                         | 8                 |
+| A template's number matches any text                                        | 8                 |
+| The estimate ignores the options                                            | 8                 |
 | A stop() leaves the interval armed                                          | 7                 |
 | A decode failure is another code                                            | 7                 |
 | A start() after a stop() waits on the stopped tick                          | 7                 |
 | disconnect() leaves the poller running                                      | 7                 |
+| A session already held is left unwatched                                    | 7                 |
+| Every payee is reached through the LSP as trampoline                        | 7                 |
 | Another currency is paid                                                    | 6                 |
 | watchIfAbsent overwrites an entry                                           | 6                 |
 | A step that never settles holds the loop                                    | 6                 |
@@ -1509,6 +1697,9 @@ Coverage of the module is 100% on all four metrics, and the assertions were chec
 | The interval is armed after a stop()                                        | 5                 |
 | Not found for any hash ends the payment                                     | 5                 |
 | The LSP's own invoice goes through trampoline                               | 5                 |
+| The read's answered hash is not checked                                     | 5                 |
+| The registration's refusals are not classified                              | 5                 |
+| The estimate's hash has no 0x prefix                                        | 5                 |
 | watchIfAbsent reports added always                                          | 4                 |
 | A corrupt stored last index is read as valid                                | 4                 |
 | A poll interval of 0 is accepted                                            | 4                 |
@@ -1521,6 +1712,9 @@ Coverage of the module is 100% on all four metrics, and the assertions were chec
 | A pollNow() during a tick is forgotten                                      | 4                 |
 | Another payment's answer is taken                                           | 4                 |
 | A development chain's code hash is held by reference                        | 4                 |
+| An invalid proof is not classified                                          | 4                 |
+| The max liquidity text is misworded                                         | 4                 |
+| getStatus answers nothing                                                   | 4                 |
 | pollNow() ticks when stopped                                                | 3                 |
 | A failed step is reported under another code                                | 3                 |
 | A clock before the floor is accepted                                        | 3                 |
@@ -1532,6 +1726,9 @@ Coverage of the module is 100% on all four metrics, and the assertions were chec
 | A null token is sent as `Bearer null`                                       | 3                 |
 | The presets' currencies are swapped                                         | 3                 |
 | A dispatch fault is reported to nobody                                      | 3                 |
+| A template's literal is read as a regex                                     | 3                 |
+| The estimate answers the budget, not the dry run's fee                      | 3                 |
+| The facade's estimate drops the options                                     | 3                 |
 | A fractional clock is accepted                                              | 2                 |
 | A host cancel that throws escapes stop() or pollNow()                       | 2                 |
 | Marking something not watched creates it                                    | 2                 |
@@ -1547,6 +1744,10 @@ Coverage of the module is 100% on all four metrics, and the assertions were chec
 | The LSP key is held by reference                                            | 2                 |
 | The poller reports to nobody                                                | 2                 |
 | intent_charged reads as in flight                                           | 2                 |
+| A failed verification is not read as an invalid proof                       | 2                 |
+| A template ignores the error's code                                         | 2                 |
+| A template matches as a prefix                                              | 2                 |
+| Fiber's lost reply is classified as a refusal                               | 2                 |
 | A stopped tick clears the flag of the fresh one                             | 1                 |
 | A null effect falls back to the runtime's default                           | 1                 |
 | mark() drops an entry's unknown fields                                      | 1                 |
@@ -1574,6 +1775,13 @@ Coverage of the module is 100% on all four metrics, and the assertions were chec
 | A storage failure of the intent is a refusal                                | 1                 |
 | An abandoned run still closes                                               | 1                 |
 | intent_open drops the watch too                                             | 1                 |
+| A consumed registration is reported as invalid                              | 1                 |
+| Created is read as sent                                                     | 1                 |
+| Testnet's invoice currency is mainnet's                                     | 1                 |
+| The MPP text is filed under insufficient_balance                            | 1                 |
+| The invoice currencies are not frozen                                       | 1                 |
+| The dry run's answered hash is not checked                                  | 1                 |
+| The estimate is asked through the LSP to every payee                        | 1                 |
 
 The `TimerSlot` the poller holds lives in `common` (`src/common/timer-slot.ts`), at 100% on all four metrics, and was swept
 against `test/tests/common`. The two rows the facade's `disconnect()` once had, a throwing cancel escaping it and the
@@ -2497,7 +2705,11 @@ as `0x` hex), a numbered request per call of one client, the vector's registrati
 signer registered and its tenant answered; the answer read as the rpc client reads it, a tenant of another id an
 `RpcResponseError` on `response.result.tenant.tenant_id` after the call ran, the node's refusal an `RpcError`, a `fetch`
 that throws, a status out of 2xx and a body that cannot be read an `RpcTransportError` carrying the cause, and a malformed
-answer an `RpcResponseError`. The tenant check holds the id of the key as it was read before the call, so a key put in the
+answer an `RpcResponseError`; fiber's consumed and four invalid-proof texts as `registration_consumed` and
+`registration_invalid` with the `RpcError` as cause, and their near twins (another code, a character off, a prefix, the
+text inside another, "targets another LSP node") plain `RpcError`s; `getStatus` as one POST of `lsp_get_status` with
+`params: []` under the operator's token, each vector's answer read, a malformed one an `RpcResponseError` naming the
+field and a refusal or a failed call the rpc client's own. The tenant check holds the id of the key as it was read before the call, so a key put in the
 registration meanwhile, or the bytes sent overwritten, change neither it nor the call, and each member of the registration
 is read once. Refused with the option's name, before any call: options that are not an object, a `rpcUrl` absent, not a
 string or empty, an `operatorToken` absent, of another type, empty or with a character an authorization header cannot
@@ -2524,3 +2736,113 @@ The operator's client, `LspOperatorClient` (its options, the registration read o
 | The expected id is computed from the key read again          | 1                 |
 | The inner client, and its token, also sit in a public field  | 1                 |
 | The registration is sent as the host's object, read again    | 1                 |
+
+The balance, `getSdkBalance` (the ready channels this device registered, each local balance less its offered TLCs and floored at zero, summed as a `bigint`), broken the same way (`test/tests/sdk/balance-query.spec.ts`, `balance-query.ts` at 100% on all four metrics):
+
+| Mutation                                       | Tests that failed |
+| ---------------------------------------------- | ----------------- |
+| The balance is returned as a bigint            | 16                |
+| The sum starts at one                          | 16                |
+| A channel in any state counts                  | 9                 |
+| The offered TLCs are not taken out             | 4                 |
+| A channel this device never registered counts  | 2                 |
+| Only the last channel is kept                  | 2                 |
+| A channel below zero counts against the others | 1                 |
+| The sum goes through a native number           | 1                 |
+
+The payment history, `PaymentHistory` and its guards (the record and the index, each field and each status's shape, the
+order newest first, the entry placed after its record), the transitions, `getPayment` and `listPayments` with their
+arguments, the writes of `transfer` (the pending record before the send, failed on a refusal, and the storage's own
+failures, which keep the watch when they leave a record pending) and of the payment and invoice steps, with the record
+in every event, broken the same way (`test/tests/sdk`, its flow specs included, still 100% on all four metrics):
+
+| Mutation                                               | Tests that failed |
+| ------------------------------------------------------ | ----------------- |
+| The host reads the stored record itself                | 98                |
+| A receive's record is a send's                         | 89                |
+| The index and the records share a key                  | 81                |
+| An arrival is not recorded                             | 69                |
+| The pending record keeps no budget                     | 57                |
+| A failure keeps no reason                              | 56                |
+| The pending record is written after the send           | 54                |
+| The step's outcome is not recorded                     | 53                |
+| getPayment reads the hash with its 0x                  | 44                |
+| A record is never placed in the index                  | 40                |
+| PAYMENT_PENDING carries no record                      | 40                |
+| A refused send is settled as completed                 | 35                |
+| The event carries no record                            | 35                |
+| A refusal's record is never failed                     | 32                |
+| A refusal's record keeps the node's bare text          | 31                |
+| The index is oldest first                              | 30                |
+| A page starts one record later                         | 29                |
+| getPayment hands back the stored record                | 29                |
+| The index is written before the record                 | 27                |
+| A receive completes with a fee                         | 19                |
+| A settlement keeps no time                             | 18                |
+| A completion keeps the budget as the fee               | 15                |
+| An index's entries are not checked                     | 13                |
+| Ties go by hash descending                             | 13                |
+| A moved entry stays at its old place too               | 10                |
+| getPayment's hash is not checked                       | 10                |
+| A page holds one record more                           | 9                 |
+| A settled record's time is not checked                 | 9                 |
+| A page's records are the stored ones                   | 9                 |
+| A paid invoice never arrived gets no record            | 9                 |
+| The history's hash is not checked                      | 8                 |
+| No record still places an entry                        | 7                 |
+| A record's hash is not checked                         | 7                 |
+| The facade's payment read drops the hash               | 7                 |
+| A send's fee budget is not checked                     | 6                 |
+| A completed send's fee is not checked                  | 6                 |
+| A receive arriving again is recreated                  | 6                 |
+| The limit is not checked                               | 6                 |
+| An expired invoice nobody paid gets a record           | 6                 |
+| A record's creation time is not checked                | 5                 |
+| A pending record may carry a fee                       | 5                 |
+| An entry in place is written again                     | 5                 |
+| A retry keeps the old record                           | 5                 |
+| The offset is not checked                              | 5                 |
+| A failed pending write keeps its intent                | 5                 |
+| An expiry is not recorded                              | 5                 |
+| An expiry's event carries no record                    | 5                 |
+| A payment record of another version is read            | 4                 |
+| A receive's fee budget is not checked                  | 4                 |
+| A pending record may carry a reason                    | 4                 |
+| A pending record may carry a settlement time           | 4                 |
+| A failed record may carry a fee                        | 4                 |
+| A failed record needs no reason                        | 4                 |
+| A completed record may carry a reason                  | 4                 |
+| An index of another version is read                    | 4                 |
+| An index out of order is read                          | 4                 |
+| An entry's hash is not checked                         | 4                 |
+| The facade's history list answers nothing              | 4                 |
+| An entry's creation time is not checked                | 3                 |
+| A completed record is moved                            | 3                 |
+| A failed send never turns completed                    | 3                 |
+| A completion keeps the failure's reason                | 3                 |
+| Options that are not an object are read                | 3                 |
+| A completed record is sent again                       | 3                 |
+| A failed pending write leaves its record pending       | 3                 |
+| A record is read at another hash's key                 | 2                 |
+| An entry without a record is skipped                   | 2                 |
+| A record's direction is not checked                    | 2                 |
+| A zero amount is read                                  | 2                 |
+| A description of any type is read                      | 2                 |
+| An index listing a hash twice is read                  | 2                 |
+| A record already there is settled again                | 2                 |
+| The offset defaults to one                             | 2                 |
+| The default page holds 21                              | 2                 |
+| A completed record's retry is in flight                | 2                 |
+| A missing record is ignored for a sent payment         | 2                 |
+| Not found is a sent payment                            | 2                 |
+| A record's status is not checked                       | 1                 |
+| An empty invoice is read                               | 1                 |
+| A completed receive may carry a fee                    | 1                 |
+| A failed receive turns completed                       | 1                 |
+| No options read the whole history                      | 1                 |
+| A pending write overwrites a completed record          | 1                 |
+| A pending write failing twice closes the intent anyway | 1                 |
+| A refusal failing its record is swallowed              | 1                 |
+| An event is announced although the record did not move | 1                 |
+| PAYMENT_RECEIVED with no record is announced anyway    | 1                 |
+| An expiry and a cancel share a reason                  | 1                 |

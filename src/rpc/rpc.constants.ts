@@ -15,6 +15,7 @@ export const RPC_METHODS = [
     "get_watchtower_signing_status",
     "submit_watchtower_signature",
     "lsp_register_tenant",
+    "lsp_get_status",
 ] as const;
 
 /**

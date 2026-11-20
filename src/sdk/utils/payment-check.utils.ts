@@ -11,7 +11,7 @@ import { computeSdkInvoiceExpiryMs } from "./invoice-expiry.utils";
  * @param encodedInvoice The invoice string.
  * @param currency The network's invoice currency.
  * @param nowMs The host's clock.
- * @returns The payment hash, the amount and the payee's key.
+ * @returns The payment hash, amount, payee's key, description and expiry.
  */
 export function checkPayableInvoice(encodedInvoice: string, currency: InvoiceCurrency, nowMs: number): SdkPayableInvoice {
     const invoice = decodePayableInvoice(encodedInvoice);
@@ -27,7 +27,8 @@ export function checkPayableInvoice(encodedInvoice: string, currency: InvoiceCur
     if (expiresAtMs !== null && expiresAtMs <= BigInt(nowMs)) {
         refuseInvoice("expiryTime", `ran out at ${expiresAtMs}, the device's clock reading ${nowMs}`);
     }
-    return { paymentHash: invoice.paymentHash, amountShannons, payeePublicKey: payee.publicKey };
+    const description = findInvoiceAttribute(invoice, "description")?.text ?? null;
+    return { paymentHash: invoice.paymentHash, amountShannons, payeePublicKey: payee.publicKey, description, expiresAtMs };
 }
 
 /**

@@ -4,8 +4,28 @@ import { InvoiceError, encodeInvoice } from "../../../src/invoice";
 import { DebitIntentError, PolicyEngine, SignerStore } from "../../../src/policy";
 import { FiberRpcClient, RpcError, RpcResponseError, RpcTransportError } from "../../../src/rpc";
 import type { IFetchLike } from "../../../src/rpc";
-import type { SdkEvent, SdkNetworkConfig, SdkPaymentSendingContext, SdkTransferOptions } from "../../../src/sdk";
-import { ActivityPoller, ActivityTracker, SDK_NETWORK_PRESETS, SdkError, buildPaymentStep, transferSdkPayment } from "../../../src/sdk";
+import type {
+    SdkErrorCode,
+    SdkEvent,
+    SdkNetworkConfig,
+    SdkPaymentRecord,
+    SdkPaymentSendingContext,
+    SdkTransferOptions,
+    StoredPaymentRecord,
+} from "../../../src/sdk";
+import {
+    ActivityPoller,
+    ActivityTracker,
+    PaymentHistory,
+    SDK_NETWORK_PRESETS,
+    SdkError,
+    buildPaymentStep,
+    classifySdkPaymentFailure,
+    getSdkPayment,
+    listSdkPayments,
+    prepareSdkTransfer,
+    transferSdkPayment,
+} from "../../../src/sdk";
 import { TimerMock } from "../../mocks/common";
 import { InMemorySignerStorage } from "../../mocks/policy";
 import type { SentCall } from "../../mocks/rpc";
@@ -39,6 +59,8 @@ const NOW_MS = 1_791_367_260_000;
 
 const ACTIVITY_KEY = "fiber-lsp-sdk:activity";
 const INTENT_KEY = `fiber-lsp-sdk:intent:${PAYMENT_HASH.slice(0, 40)}`;
+const RECORD_KEY = `fiber-lsp-sdk:payment-history:${PAYMENT_HASH}`;
+const INDEX_KEY = "fiber-lsp-sdk:payment-history";
 
 // Fiber's refusal of a send it finds no route for, which leaves a `Failed` row.
 const ROUTE_FAILURE = "Send payment error: Failed to build route, PathFind error: no path found";
@@ -113,6 +135,7 @@ function harness(network: SdkNetworkConfig = SDK_NETWORK_PRESETS.testnet, lspPub
         rpc: new FiberRpcClient({ url: URL, fetch: node.fetch }),
         policy: new PolicyEngine(store),
         activity: new ActivityTracker(store),
+        history: new PaymentHistory(store),
         poller,
         sending: new Set<string>(),
         reading: new Set<string>(),
@@ -139,6 +162,38 @@ function paymentAnswer(paymentHash: string, status: string, failedError: string 
     return { ...SENT_ANSWER, payment_hash: `0x${paymentHash}`, status, failed_error: failedError };
 }
 
+// `maxFeeShannons` is fiber's default budget for INVOICE.
+function pendingStored(fields: Partial<StoredPaymentRecord> = {}): StoredPaymentRecord {
+    return {
+        version: 1,
+        paymentHashHex: `0x${PAYMENT_HASH}`,
+        direction: "send",
+        status: "pending",
+        amountShannons: AMOUNT,
+        invoice: stringOf(),
+        description: null,
+        maxFeeShannons: "1250000",
+        feeShannons: null,
+        failedReason: null,
+        createdAtMs: NOW_MS,
+        settledAtMs: null,
+        ...fields,
+    };
+}
+
+function failedStored(reason: string, fields: Partial<StoredPaymentRecord> = {}): StoredPaymentRecord {
+    return pendingStored({ status: "failed", failedReason: reason, settledAtMs: NOW_MS, ...fields });
+}
+
+function readOf({ version, ...record }: StoredPaymentRecord): SdkPaymentRecord {
+    expect(version).toBe(1);
+    return record;
+}
+
+async function seedRecord(h: Harness, record: StoredPaymentRecord): Promise<void> {
+    await h.context.history.update(record.paymentHashHex.slice(2), () => record);
+}
+
 // `toEqual` compares an error's message alone: its class and its code are held besides.
 function expectSdkError(error: unknown, expected: SdkError): void {
     expect(error).toBeInstanceOf(SdkError);
@@ -155,6 +210,8 @@ function stepOf(h: Harness, events: SdkEvent[], onEmit: (event: SdkEvent) => voi
         rpc: h.context.rpc,
         policy: h.context.policy,
         activity: h.context.activity,
+        history: h.context.history,
+        now: h.now,
         sending: h.context.sending,
         reading: h.context.reading,
         emit: (event) => {
@@ -199,6 +256,18 @@ function hookCalls(h: Harness, hooks: [string, () => Promise<void>][]): void {
     h.context.rpc = new FiberRpcClient({ url: URL, fetch });
 }
 
+// Each key's writes fail once, after the given number pass.
+function failingWrites(h: Harness, failures: [string, number][]): void {
+    const set = h.storage.set.bind(h.storage);
+    const seen = new Map<string, number>();
+    jest.spyOn(h.storage, "set").mockImplementation((at, value) => {
+        const count = seen.get(at) ?? 0;
+        seen.set(at, count + 1);
+        if (failures.some(([key, after]) => key === at && count === after)) throw new Error("storage offline");
+        set(at, value);
+    });
+}
+
 function failingWrite(h: Harness, key: string, after = 0): void {
     const set = h.storage.set.bind(h.storage);
     let seen = 0;
@@ -233,13 +302,21 @@ describe("transferSdkPayment", () => {
             seen = {
                 activity: storedAt(h.storage, ACTIVITY_KEY),
                 intent: storedAt(h.storage, INTENT_KEY),
+                record: storedAt(h.storage, RECORD_KEY),
+                index: storedAt(h.storage, INDEX_KEY),
                 polls: h.pollNow.mock.calls.length,
             };
         });
         h.node.result(SENT_ANSWER);
         await transferSdkPayment(h.context, stringOf());
-        expect(seen).toEqual({ activity: watching(PAYMENT_HASH), intent: INTENT, polls: 0 });
-        expect(writes(h.storage)).toEqual([ACTIVITY_KEY, INTENT_KEY]);
+        expect(seen).toEqual({
+            activity: watching(PAYMENT_HASH),
+            intent: INTENT,
+            record: pendingStored(),
+            index: { version: 1, entries: [{ paymentHash: PAYMENT_HASH, createdAtMs: NOW_MS }] },
+            polls: 0,
+        });
+        expect(writes(h.storage)).toEqual([ACTIVITY_KEY, INTENT_KEY, RECORD_KEY, INDEX_KEY]);
     });
 
     it("asks the poller for a tick once the node took the payment, keeping the intent and the watch for its step", async () => {
@@ -415,17 +492,32 @@ describe("transferSdkPayment", () => {
     });
 
     describe("the clock", () => {
-        it("is read once, before anything is written, and without a receiver", async () => {
+        it("is read before anything is written, then once for the pending record, each without a receiver", async () => {
             const h = harness();
             const receivers: unknown[] = [];
+            const writtenBefore: string[][] = [];
             h.now.mockImplementation(function (this: unknown): number {
                 receivers.push(this);
-                expect(h.storage.ops).toEqual([]);
-                return NOW_MS;
+                writtenBefore.push(writes(h.storage));
+                return NOW_MS + receivers.length - 1;
             });
             h.node.result(SENT_ANSWER);
             await transferSdkPayment(h.context, stringOf());
-            expect(receivers).toEqual([undefined]);
+            expect(receivers).toEqual([undefined, undefined]);
+            expect(writtenBefore).toEqual([[], [ACTIVITY_KEY, INTENT_KEY]]);
+            expect(storedAt(h.storage, RECORD_KEY)).toEqual(pendingStored({ createdAtMs: NOW_MS + 1 }));
+        });
+
+        it("closes the intent and drops the watch when its reading for the pending record is refused, sending nothing", async () => {
+            const h = harness();
+            h.now.mockReturnValueOnce(NOW_MS).mockReturnValueOnce(-1);
+            expect(await rejection(transferSdkPayment(h.context, stringOf()))).toEqual(
+                new RangeError("now() must be an integer between 0 and 9007199254740991, got -1"),
+            );
+            expect(storedAt(h.storage, INTENT_KEY)).toEqual({ ...INTENT, open: false });
+            expect(storedAt(h.storage, ACTIVITY_KEY)).toEqual(watching());
+            expect(storedAt(h.storage, RECORD_KEY)).toBeUndefined();
+            expect(h.node.calls()).toEqual([]);
         });
 
         it.each<[string, unknown]>([
@@ -485,6 +577,7 @@ describe("transferSdkPayment", () => {
             const error = await rejection(transferSdkPayment(h.context, stringOf(), { maxFeeShannons: "1000" }));
             expectSdkError(error, inFlight());
             expect(writes(h.storage)).toEqual([]);
+            expect(storedAt(h.storage, RECORD_KEY)).toEqual(pendingStored());
             expect(h.node.calls()).toEqual([sendCall()]);
             expect(storedAt(h.storage, INTENT_KEY)).toEqual(INTENT);
             expect(storedAt(h.storage, ACTIVITY_KEY)).toEqual(watching(PAYMENT_HASH));
@@ -501,7 +594,14 @@ describe("transferSdkPayment", () => {
             });
             h.node.result(paymentAnswer(PAYMENT_HASH, "Failed", ROUTE_FAILURE));
             await step(live());
-            expect(events).toEqual([{ type: "PAYMENT_FAILED", paymentHashHex: `0x${PAYMENT_HASH}`, reason: ROUTE_FAILURE }]);
+            expect(events).toEqual([
+                {
+                    type: "PAYMENT_FAILED",
+                    paymentHashHex: `0x${PAYMENT_HASH}`,
+                    reason: ROUTE_FAILURE,
+                    payment: readOf(failedStored(ROUTE_FAILURE)),
+                },
+            ]);
             expectSdkError(await retried, inFlight());
             expect(storedAt(h.storage, ACTIVITY_KEY)).toEqual(watching());
             expect(storedAt(h.storage, INTENT_KEY)).toEqual({ ...INTENT, open: false });
@@ -526,7 +626,7 @@ describe("transferSdkPayment", () => {
             expect(outcomes.map((outcome) => outcome.status)).toEqual(["fulfilled", "rejected"]);
             expectSdkError((outcomes[1] as PromiseRejectedResult).reason, inFlight());
             expect(h.node.calls()).toEqual([sendCall()]);
-            expect(writes(h.storage)).toEqual([ACTIVITY_KEY, INTENT_KEY]);
+            expect(writes(h.storage)).toEqual([ACTIVITY_KEY, INTENT_KEY, RECORD_KEY, INDEX_KEY]);
             expect(storedAt(h.storage, INTENT_KEY)).toEqual(INTENT);
         });
 
@@ -629,7 +729,14 @@ describe("transferSdkPayment", () => {
                 getPaymentCall(OTHER_HASH),
                 getPaymentCall(PAYMENT_HASH),
             ]);
-            expect(events).toEqual([{ type: "PAYMENT_SENT", paymentHashHex: `0x${PAYMENT_HASH}` }]);
+            expect(events).toEqual([
+                {
+                    type: "PAYMENT_SENT",
+                    paymentHashHex: `0x${PAYMENT_HASH}`,
+                    feeShannons: "1250000",
+                    payment: readOf(pendingStored({ status: "completed", feeShannons: "1250000", settledAtMs: NOW_MS })),
+                },
+            ]);
             expect(storedAt(h.storage, INTENT_KEY)).toEqual({ ...INTENT, open: false });
             expect(storedAt(h.storage, ACTIVITY_KEY)).toEqual(watching(OTHER_HASH));
         });
@@ -649,6 +756,7 @@ describe("transferSdkPayment", () => {
             expect(h.node.calls()).toEqual([]);
             expect(storedAt(h.storage, INTENT_KEY)).toEqual({ ...INTENT, maxShannons: "1000" });
             expect(storedAt(h.storage, ACTIVITY_KEY)).toEqual(watching(PAYMENT_HASH));
+            expect(storedAt(h.storage, RECORD_KEY)).toBeUndefined();
         });
 
         it("refuses a charged intent as payment_charged, its watch dropped", async () => {
@@ -663,6 +771,7 @@ describe("transferSdkPayment", () => {
             expect((error as SdkError).cause).toBe(cause);
             expect(h.node.calls()).toEqual([]);
             expect(storedAt(h.storage, ACTIVITY_KEY)).toEqual(watching());
+            expect(storedAt(h.storage, RECORD_KEY)).toBeUndefined();
         });
 
         it("refuses the hash of a hold invoice of the device as own_invoice, its watch dropped", async () => {
@@ -677,6 +786,7 @@ describe("transferSdkPayment", () => {
             expect(h.node.calls()).toEqual([]);
             expect(storedAt(h.storage, INTENT_KEY)).toBeUndefined();
             expect(storedAt(h.storage, ACTIVITY_KEY)).toEqual(watching());
+            expect(storedAt(h.storage, RECORD_KEY)).toBeUndefined();
         });
 
         it.each<[string, (h: Harness) => Promise<void>]>([
@@ -698,20 +808,117 @@ describe("transferSdkPayment", () => {
             expect(h.node.calls()).toEqual([]);
             expect(storedAt(h.storage, ACTIVITY_KEY)).toEqual(watching());
             expect(await h.context.policy.readDebitIntent(PAYMENT_HASH)).toBeNull();
+            expect(storedAt(h.storage, RECORD_KEY)).toBeUndefined();
         });
     });
 
     describe("the node's answer", () => {
-        it("lets the node's refusal through unwrapped, the intent closed and the hash no longer watched", async () => {
+        it.each<[string, SdkErrorCode, string]>([
+            [
+                "a single path short of outbound liquidity",
+                "insufficient_balance",
+                "Send payment error: Failed to build route, Insufficient balance: max outbound liquidity 0 is insufficient, required amount: 250000000",
+            ],
+            [
+                "every path together short of outbound liquidity",
+                "insufficient_balance",
+                "Send payment error: Failed to build route, Insufficient balance: total outbound liquidity 249999999 is insufficient, required amount: 340282366920938463463374607431768211455",
+            ],
+            [
+                "a hop past its outbound liquidity",
+                "insufficient_balance",
+                "Send payment error: Failed to build route, Insufficient balance: route hop amount 251250000 exceeds outbound liquidity 7",
+            ],
+            ["no path", "no_route", ROUTE_FAILURE],
+            [
+                "a hop's minimum TLC",
+                "no_route",
+                "Send payment error: Failed to build route, Path find failed for min_tlc_value error: 1000",
+            ],
+            [
+                "a hop past its channel's capacity",
+                "no_route",
+                "Send payment error: Failed to build route, Insufficient balance: route hop amount 251250000 exceeds channel capacity 100000000",
+            ],
+            ["too few MPP routes", "no_route", "Send payment error: Failed to build enough routes for MPP payment"],
+            [
+                "a budget below the trampoline's floor",
+                "fee_budget_too_low",
+                "Send payment error: Failed to build route, Graph other error: max_fee_amount is too low for trampoline routing: recommend_minimal_fee=250000, maximal_fee=2500000 current_fee=0",
+            ],
+            [
+                "a budget below the first hop's fee",
+                "fee_budget_too_low",
+                "Send payment error: Failed to build route, Graph other error: max_fee_amount is too low for trampoline routing: first_hop_fee=12 current_fee=11",
+            ],
+            [
+                "a budget leaving a trampoline hop no fee",
+                "fee_budget_too_low",
+                "Send payment error: Failed to build route, Graph other error: max_fee_amount is too low for trampoline routing: fee for a trampoline hop is zero",
+            ],
+            [
+                "a budget below a direct route's fee",
+                "fee_budget_too_low",
+                "Send payment error: max_fee_amount is too low for selected route",
+            ],
+        ])("refuses fiber's answer to %s as %s, the intent closed and the hash no longer watched", async (_, code, text) => {
             const h = harness();
-            h.node.error(-32000, ROUTE_FAILURE);
+            h.node.error(-32000, text);
             const error = await rejection(transferSdkPayment(h.context, stringOf()));
-            expect(error).toBeInstanceOf(RpcError);
-            expect(error).toMatchObject({ method: "send_payment", code: -32000, message: ROUTE_FAILURE });
+            expectSdkError(error, new SdkError(code, `the node refuses the payment: ${text}`));
+            expect((error as SdkError).cause).toBeInstanceOf(RpcError);
+            expect((error as SdkError).cause).toMatchObject({ method: "send_payment", code: -32000, message: text });
             expect(storedAt(h.storage, INTENT_KEY)).toEqual({ ...INTENT, open: false });
             expect(storedAt(h.storage, ACTIVITY_KEY)).toEqual(watching());
+            expect(storedAt(h.storage, RECORD_KEY)).toEqual(failedStored(`the node refuses the payment: ${text}`));
             expect(h.pollNow).not.toHaveBeenCalled();
         });
+
+        it.each<[string, number, string]>([
+            [
+                "a number written signed",
+                -32000,
+                "Send payment error: Failed to build route, Insufficient balance: max outbound liquidity -1 is insufficient, required amount: 250000000",
+            ],
+            [
+                "a number written as a fraction",
+                -32000,
+                "Send payment error: Failed to build route, Insufficient balance: route hop amount 2.5 exceeds outbound liquidity 7",
+            ],
+            [
+                "a number missing",
+                -32000,
+                "Send payment error: Failed to build route, Insufficient balance: total outbound liquidity  is insufficient, required amount: 1",
+            ],
+            ["text past it", -32000, `${ROUTE_FAILURE} `],
+            ["its start cut", -32000, "Failed to build route, PathFind error: no path found"],
+            [
+                "the graph's own wrapper",
+                -32000,
+                "Network Graph error: Insufficient balance: max outbound liquidity 0 is insufficient, required amount: 250000000",
+            ],
+            ["another code", -32602, "Send payment error: max_fee_amount is too low for selected route"],
+            ["the trampoline's collapsed failure", -32000, "Send payment error: TemporaryNodeFailure"],
+            [
+                "an undelivered call",
+                -32000,
+                "Messaging failed to enqueue the message to the specified actor, the actor is likely terminated",
+            ],
+            ["a lost reply under another code", -32603, "Messaging failed because channel is closed"],
+            ["a lost reply's text extended", -32000, "Messaging failed because channel is closed."],
+        ])(
+            "refuses as payment_rejected fiber's answer with %s, the intent closed and the hash no longer watched",
+            async (_, code, text) => {
+                const h = harness();
+                h.node.error(code, text);
+                const error = await rejection(transferSdkPayment(h.context, stringOf()));
+                expectSdkError(error, new SdkError("payment_rejected", `the node refuses the payment: ${text}`));
+                expect((error as SdkError).cause).toMatchObject({ method: "send_payment", code, message: text });
+                expect(storedAt(h.storage, INTENT_KEY)).toEqual({ ...INTENT, open: false });
+                expect(storedAt(h.storage, ACTIVITY_KEY)).toEqual(watching());
+                expect(storedAt(h.storage, RECORD_KEY)).toEqual(failedStored(`the node refuses the payment: ${text}`));
+            },
+        );
 
         it("lets a retry after the node's refusal open the intent again, with its new budget", async () => {
             const h = harness();
@@ -727,50 +934,58 @@ describe("transferSdkPayment", () => {
         it.each([
             ["an unknown outcome", (node: ScriptedNode) => node.reject(new Error("offline")), RpcTransportError],
             ["an answer the client cannot read", (node: ScriptedNode) => node.result({}), RpcResponseError],
-        ])("lets %s through, the intent open and the hash watched for the step", async (_, answer, errorClass) => {
+        ])("refuses %s as payment_unresolved, the intent open and the hash watched for the step", async (_, answer, errorClass) => {
             const h = harness();
             answer(h.node);
-            expect(await rejection(transferSdkPayment(h.context, stringOf()))).toBeInstanceOf(errorClass);
+            const error = await rejection(transferSdkPayment(h.context, stringOf()));
+            expect(error).toBeInstanceOf(SdkError);
+            expect((error as SdkError).code).toBe("payment_unresolved");
+            expect((error as SdkError).cause).toBeInstanceOf(errorClass);
+            expect((error as SdkError).message).toBe(`the payment's outcome is unknown: ${((error as SdkError).cause as Error).message}`);
             expect(storedAt(h.storage, INTENT_KEY)).toEqual(INTENT);
             expect(storedAt(h.storage, ACTIVITY_KEY)).toEqual(watching(PAYMENT_HASH));
+            expect(storedAt(h.storage, RECORD_KEY)).toEqual(pendingStored());
             expect(h.pollNow).not.toHaveBeenCalled();
         });
 
-        it("lets fiber's lost actor reply through unwrapped, the intent open and the hash watched: the send may have run", async () => {
+        it("refuses fiber's lost actor reply as payment_unresolved, the intent open and the hash watched: the send may have run", async () => {
             const h = harness();
             h.node.error(-32000, "Messaging failed because channel is closed");
             const error = await rejection(transferSdkPayment(h.context, stringOf()));
-            expect(error).toBeInstanceOf(RpcError);
-            expect(error).toMatchObject({ method: "send_payment", code: -32000, message: "Messaging failed because channel is closed" });
+            expectSdkError(
+                error,
+                new SdkError("payment_unresolved", "the payment's outcome is unknown: Messaging failed because channel is closed"),
+            );
+            expect((error as SdkError).cause).toBeInstanceOf(RpcError);
+            expect((error as SdkError).cause).toMatchObject({
+                method: "send_payment",
+                code: -32000,
+                message: "Messaging failed because channel is closed",
+            });
             expect(storedAt(h.storage, INTENT_KEY)).toEqual(INTENT);
             expect(storedAt(h.storage, ACTIVITY_KEY)).toEqual(watching(PAYMENT_HASH));
             expect(h.pollNow).not.toHaveBeenCalled();
         });
 
-        it.each<[string, number, string]>([
-            [
-                "an undelivered call",
-                -32000,
-                "Messaging failed to enqueue the message to the specified actor, the actor is likely terminated",
-            ],
-            ["a lost reply under another code", -32603, "Messaging failed because channel is closed"],
-            ["a lost reply's text extended", -32000, "Messaging failed because channel is closed."],
-        ])("closes the intent on %s, which ran nothing", async (_, code, message) => {
-            const h = harness();
-            h.node.error(code, message);
-            expect(await rejection(transferSdkPayment(h.context, stringOf()))).toBeInstanceOf(RpcError);
-            expect(storedAt(h.storage, INTENT_KEY)).toEqual({ ...INTENT, open: false });
-            expect(storedAt(h.storage, ACTIVITY_KEY)).toEqual(watching());
-        });
-
-        it("lets any other failure of the send through, the intent open and the hash watched", async () => {
+        it("refuses any other failure of the send as payment_unresolved over it, the intent open and the hash watched", async () => {
             const h = harness();
             const failure = new TypeError("a bug");
             jest.spyOn(h.context.rpc, "sendPayment").mockRejectedValue(failure);
-            expect(await rejection(transferSdkPayment(h.context, stringOf()))).toBe(failure);
+            const error = await rejection(transferSdkPayment(h.context, stringOf()));
+            expectSdkError(error, new SdkError("payment_unresolved", "the payment's outcome is unknown: a bug"));
+            expect((error as SdkError).cause).toBe(failure);
             expect(storedAt(h.storage, INTENT_KEY)).toEqual(INTENT);
             expect(storedAt(h.storage, ACTIVITY_KEY)).toEqual(watching(PAYMENT_HASH));
             expect(h.pollNow).not.toHaveBeenCalled();
+        });
+
+        it("refuses a thrown value that is no error as payment_unresolved with the bare reason, holding the value as its cause", async () => {
+            const h = harness();
+            jest.spyOn(h.context.rpc, "sendPayment").mockRejectedValue("a string");
+            const error = await rejection(transferSdkPayment(h.context, stringOf()));
+            expectSdkError(error, new SdkError("payment_unresolved", "the payment's outcome is unknown"));
+            expect((error as SdkError).cause).toBe("a string");
+            expect(storedAt(h.storage, ACTIVITY_KEY)).toEqual(watching(PAYMENT_HASH));
         });
 
         it.each<[string, string]>([
@@ -795,19 +1010,20 @@ describe("transferSdkPayment", () => {
                 `InvalidParameter: Payment session Hash256(0x${PAYMENT_HASH}) has attempts that are in flight state, can not retry`,
             ],
         ])(
-            "refuses as payment_in_flight fiber's answer to %s under the hash, the intent and the watch kept for the step",
+            "refuses as payment_session_exists fiber's answer to %s under the hash, the intent and the watch kept for the step",
             async (_, text) => {
                 const h = harness();
                 h.node.error(-32000, text);
                 const error = await rejection(transferSdkPayment(h.context, stringOf()));
                 expectSdkError(
                     error,
-                    new SdkError("payment_in_flight", `the node already holds a payment under 0x${PAYMENT_HASH}: ${text}`),
+                    new SdkError("payment_session_exists", `the node already holds a payment under 0x${PAYMENT_HASH}: ${text}`),
                 );
                 expect((error as SdkError).cause).toBeInstanceOf(RpcError);
                 expect((error as SdkError).cause).toMatchObject({ method: "send_payment", code: -32000, message: text });
                 expect(storedAt(h.storage, INTENT_KEY)).toEqual(INTENT);
                 expect(storedAt(h.storage, ACTIVITY_KEY)).toEqual(watching(PAYMENT_HASH));
+                expect(storedAt(h.storage, RECORD_KEY)).toEqual(pendingStored());
                 expect(h.pollNow).not.toHaveBeenCalled();
             },
         );
@@ -839,15 +1055,19 @@ describe("transferSdkPayment", () => {
                 `Payment session already exists, stop start new payment actor for 0x${PAYMENT_HASH}`,
             ],
             ["another code", -32602, `Payment session already exists, stop start new payment actor for Hash256(0x${PAYMENT_HASH})`],
-        ])("takes as a plain refusal a text like those but naming %s, the intent closed and the hash unwatched", async (_, code, text) => {
-            const h = harness();
-            h.node.error(code, text);
-            const error = await rejection(transferSdkPayment(h.context, stringOf()));
-            expect(error).toBeInstanceOf(RpcError);
-            expect(error).toMatchObject({ code, message: text });
-            expect(storedAt(h.storage, INTENT_KEY)).toEqual({ ...INTENT, open: false });
-            expect(storedAt(h.storage, ACTIVITY_KEY)).toEqual(watching());
-        });
+        ])(
+            "refuses as payment_rejected a text like those but naming %s, the intent closed and the hash unwatched",
+            async (_, code, text) => {
+                const h = harness();
+                h.node.error(code, text);
+                const error = await rejection(transferSdkPayment(h.context, stringOf()));
+                expectSdkError(error, new SdkError("payment_rejected", `the node refuses the payment: ${text}`));
+                expect((error as SdkError).cause).toMatchObject({ code, message: text });
+                expect(storedAt(h.storage, INTENT_KEY)).toEqual({ ...INTENT, open: false });
+                expect(storedAt(h.storage, ACTIVITY_KEY)).toEqual(watching());
+                expect(storedAt(h.storage, RECORD_KEY)).toEqual(failedStored(`the node refuses the payment: ${text}`));
+            },
+        );
 
         it("reports nothing of a route failure to a tick that lands in the middle of it", async () => {
             const h = harness();
@@ -869,7 +1089,7 @@ describe("transferSdkPayment", () => {
             h.node.error(-32000, ROUTE_FAILURE);
             h.node.result(paymentAnswer(OTHER_HASH, "Inflight"));
             h.node.result(paymentAnswer(PAYMENT_HASH, "Failed", ROUTE_FAILURE));
-            expect(await rejection(transferSdkPayment(h.context, stringOf()))).toMatchObject({ message: ROUTE_FAILURE });
+            expect(await rejection(transferSdkPayment(h.context, stringOf()))).toMatchObject({ code: "no_route" });
             otherRead.open();
             await tick;
             expect(h.node.calls()).toEqual([sendCall(), getPaymentCall(OTHER_HASH), getPaymentCall(PAYMENT_HASH)]);
@@ -929,6 +1149,114 @@ describe("transferSdkPayment", () => {
         });
     });
 
+    describe("the history", () => {
+        it("refuses a hash whose record completed as payment_charged, watching, approving and sending nothing", async () => {
+            const h = harness();
+            const completed = pendingStored({ status: "completed", feeShannons: "1000", settledAtMs: NOW_MS - 1, createdAtMs: NOW_MS - 9 });
+            await seedRecord(h, completed);
+            h.storage.ops.length = 0;
+            const error = await rejection(transferSdkPayment(h.context, stringOf()));
+            expectSdkError(
+                error,
+                new SdkError("payment_charged", `the device refuses the payment: the one under 0x${PAYMENT_HASH} already completed`),
+            );
+            expect(writes(h.storage)).toEqual([]);
+            expect(storedAt(h.storage, RECORD_KEY)).toEqual(completed);
+            expect(h.node.calls()).toEqual([]);
+            expect(h.pollNow).not.toHaveBeenCalled();
+            expect([...h.context.sending]).toEqual([]);
+        });
+
+        it.each<[string, Partial<StoredPaymentRecord>]>([
+            ["pending", {}],
+            ["failed", { status: "failed", failedReason: ROUTE_FAILURE, settledAtMs: NOW_MS - 1 }],
+        ])("sends again a hash whose record is %s, the record pending from the new send on", async (_, fields) => {
+            const h = harness();
+            await seedRecord(h, pendingStored({ createdAtMs: NOW_MS - 9, maxFeeShannons: "7", ...fields }));
+            h.node.result(SENT_ANSWER);
+            await transferSdkPayment(h.context, stringOf());
+            expect(h.node.calls()).toEqual([sendCall()]);
+            expect(storedAt(h.storage, RECORD_KEY)).toEqual(pendingStored());
+        });
+
+        it("keeps the invoice's description and the host's budget in the pending record", async () => {
+            const h = harness();
+            const invoice = stringOf({ ...INVOICE, attributes: [...INVOICE.attributes, { type: "description", text: "two coffees" }] });
+            h.node.result(SENT_ANSWER);
+            await transferSdkPayment(h.context, invoice, { maxFeeShannons: "1000" });
+            expect(storedAt(h.storage, RECORD_KEY)).toEqual(pendingStored({ invoice, description: "two coffees", maxFeeShannons: "1000" }));
+            await expect(getSdkPayment(h.context, `0x${PAYMENT_HASH}`)).resolves.toStrictEqual(
+                readOf(pendingStored({ invoice, description: "two coffees", maxFeeShannons: "1000" })),
+            );
+        });
+
+        it("leaves alone a record that completed between its check and the pending write", async () => {
+            const h = harness();
+            const completed = pendingStored({ status: "completed", feeShannons: "1000", settledAtMs: NOW_MS - 1 });
+            await seedRecord(h, completed);
+            jest.spyOn(h.context.history, "read").mockResolvedValueOnce(null);
+            h.node.result(SENT_ANSWER);
+            await transferSdkPayment(h.context, stringOf());
+            expect(storedAt(h.storage, RECORD_KEY)).toEqual(completed);
+        });
+
+        it("rethrows a record it cannot read, writing and sending nothing", async () => {
+            const h = harness();
+            h.storage.map.set(RECORD_KEY, "{");
+            expect(await rejection(transferSdkPayment(h.context, stringOf()))).toEqual(
+                new TypeError(`stored value at ${RECORD_KEY} is not valid JSON`),
+            );
+            expect(writes(h.storage)).toEqual([]);
+            expect(h.node.calls()).toEqual([]);
+        });
+
+        it("puts a retry of a failed send back to pending, at the front of the list", async () => {
+            const h = harness();
+            h.node.error(-32000, ROUTE_FAILURE);
+            await rejection(transferSdkPayment(h.context, stringOf()));
+            const other = pendingStored({ paymentHashHex: `0x${OTHER_HASH}`, createdAtMs: NOW_MS + 500 });
+            await seedRecord(h, other);
+            const failed = failedStored(`the node refuses the payment: ${ROUTE_FAILURE}`);
+            await expect(listSdkPayments(h.context)).resolves.toStrictEqual([readOf(other), readOf(failed)]);
+            h.now.mockReturnValue(NOW_MS + 1000);
+            h.node.result(SENT_ANSWER);
+            await transferSdkPayment(h.context, stringOf(), { maxFeeShannons: "1000" });
+            const retried = pendingStored({ maxFeeShannons: "1000", createdAtMs: NOW_MS + 1000 });
+            expect(storedAt(h.storage, RECORD_KEY)).toEqual(retried);
+            await expect(listSdkPayments(h.context)).resolves.toStrictEqual([readOf(retried), readOf(other)]);
+        });
+
+        it("ends completed a send fiber failed falsely, once its retry succeeds", async () => {
+            const h = harness();
+            const events: SdkEvent[] = [];
+            const step = stepOf(h, events);
+            h.node.result(SENT_ANSWER).result(paymentAnswer(PAYMENT_HASH, "Failed", ROUTE_FAILURE));
+            await transferSdkPayment(h.context, stringOf());
+            await step(live());
+            expect(storedAt(h.storage, RECORD_KEY)).toEqual(failedStored(ROUTE_FAILURE));
+            h.now.mockReturnValue(NOW_MS + 1000);
+            h.node.result(SENT_ANSWER).result(paymentAnswer(PAYMENT_HASH, "Success"));
+            await transferSdkPayment(h.context, stringOf());
+            expect(storedAt(h.storage, RECORD_KEY)).toEqual(pendingStored({ createdAtMs: NOW_MS + 1000 }));
+            await step(live());
+            const completed = pendingStored({
+                status: "completed",
+                feeShannons: "1250000",
+                createdAtMs: NOW_MS + 1000,
+                settledAtMs: NOW_MS + 1000,
+            });
+            expect(storedAt(h.storage, RECORD_KEY)).toEqual(completed);
+            expect(events.map((event) => event.type)).toEqual(["PAYMENT_FAILED", "PAYMENT_SENT"]);
+            expect(events[1]).toStrictEqual({
+                type: "PAYMENT_SENT",
+                paymentHashHex: `0x${PAYMENT_HASH}`,
+                feeShannons: "1250000",
+                payment: readOf(completed),
+            });
+            await expect(getSdkPayment(h.context, `0x${PAYMENT_HASH}`)).resolves.toStrictEqual(readOf(completed));
+        });
+    });
+
     describe("a failure of the storage", () => {
         it("at the watch records and sends nothing", async () => {
             const h = harness();
@@ -946,6 +1274,111 @@ describe("transferSdkPayment", () => {
             expect(storedAt(h.storage, INTENT_KEY)).toBeUndefined();
             expect(storedAt(h.storage, ACTIVITY_KEY)).toEqual(watching(PAYMENT_HASH));
             expect(h.node.calls()).toEqual([]);
+        });
+
+        it("at the pending write of the record closes the intent and drops the watch, writing no record and sending nothing", async () => {
+            const h = harness();
+            failingWrite(h, RECORD_KEY);
+            expect(await rejection(transferSdkPayment(h.context, stringOf()))).toEqual(new Error("storage offline"));
+            expect(storedAt(h.storage, INTENT_KEY)).toEqual({ ...INTENT, open: false });
+            expect(storedAt(h.storage, ACTIVITY_KEY)).toEqual(watching());
+            expect(storedAt(h.storage, RECORD_KEY)).toBeUndefined();
+            expect(storedAt(h.storage, INDEX_KEY)).toBeUndefined();
+            expect(h.node.calls()).toEqual([]);
+            expect(h.pollNow).not.toHaveBeenCalled();
+        });
+
+        it("at the pending write of the index fails the record it left with the write's error, closing the intent and the watch", async () => {
+            const h = harness();
+            failingWrites(h, [[INDEX_KEY, 0]]);
+            expect(await rejection(transferSdkPayment(h.context, stringOf()))).toEqual(new Error("storage offline"));
+            expect(storedAt(h.storage, RECORD_KEY)).toEqual(failedStored("storage offline"));
+            expect(storedAt(h.storage, INDEX_KEY)).toEqual({ version: 1, entries: [{ paymentHash: PAYMENT_HASH, createdAtMs: NOW_MS }] });
+            await expect(listSdkPayments(h.context)).resolves.toStrictEqual([readOf(failedStored("storage offline"))]);
+            expect(storedAt(h.storage, INTENT_KEY)).toEqual({ ...INTENT, open: false });
+            expect(storedAt(h.storage, ACTIVITY_KEY)).toEqual(watching());
+            expect(h.node.calls()).toEqual([]);
+            expect(h.pollNow).not.toHaveBeenCalled();
+        });
+
+        it("fails the record left behind with a thrown value that is no error as its reason, rethrowing the value", async () => {
+            const h = harness();
+            const update = h.context.history.update.bind(h.context.history);
+            jest.spyOn(h.context.history, "update").mockImplementationOnce(async (...args) => {
+                await update(...args);
+                throw "index offline";
+            });
+            expect(await rejection(transferSdkPayment(h.context, stringOf()))).toBe("index offline");
+            expect(storedAt(h.storage, RECORD_KEY)).toEqual(failedStored("index offline"));
+            expect(storedAt(h.storage, INTENT_KEY)).toEqual({ ...INTENT, open: false });
+            expect(storedAt(h.storage, ACTIVITY_KEY)).toEqual(watching());
+        });
+
+        it("at the pending write of the index keeps the intent and the watch when failing the record fails too, for the step's not found to fail it", async () => {
+            const h = harness();
+            const failure = new Error("storage offline");
+            const set = h.storage.set.bind(h.storage);
+            let recordWrites = 0;
+            jest.spyOn(h.storage, "set").mockImplementation((key, value) => {
+                if (key === INDEX_KEY) throw failure;
+                if (key === RECORD_KEY && recordWrites++ > 0) throw new Error("storage still offline");
+                set(key, value);
+            });
+            const thrown = await rejection(transferSdkPayment(h.context, stringOf()));
+            expect(thrown).toBe(failure);
+            expect(storedAt(h.storage, RECORD_KEY)).toEqual(pendingStored());
+            expect(storedAt(h.storage, INDEX_KEY)).toBeUndefined();
+            expect(storedAt(h.storage, INTENT_KEY)).toEqual(INTENT);
+            expect(storedAt(h.storage, ACTIVITY_KEY)).toEqual(watching(PAYMENT_HASH));
+            expect(h.node.calls()).toEqual([]);
+            jest.mocked(h.storage.set).mockRestore();
+            const events: SdkEvent[] = [];
+            h.node.error(-32000, NOT_FOUND);
+            await stepOf(h, events)(live());
+            const reason = "the node holds no session of the payment: it was never sent";
+            expect(events).toEqual([
+                { type: "PAYMENT_FAILED", paymentHashHex: `0x${PAYMENT_HASH}`, reason, payment: readOf(failedStored(reason)) },
+            ]);
+            expect(storedAt(h.storage, RECORD_KEY)).toEqual(failedStored(reason));
+            expect(storedAt(h.storage, INTENT_KEY)).toEqual({ ...INTENT, open: false });
+            expect(storedAt(h.storage, ACTIVITY_KEY)).toEqual(watching());
+        });
+
+        it("at the pending write lets a retry approve and send it", async () => {
+            const h = harness();
+            failingWrite(h, RECORD_KEY);
+            await rejection(transferSdkPayment(h.context, stringOf()));
+            jest.mocked(h.storage.set).mockRestore();
+            h.node.result(SENT_ANSWER);
+            await transferSdkPayment(h.context, stringOf());
+            expect(h.node.calls()).toEqual([sendCall()]);
+            expect(storedAt(h.storage, INTENT_KEY)).toEqual(INTENT);
+            expect(storedAt(h.storage, RECORD_KEY)).toEqual(pendingStored());
+        });
+
+        it("at failing the record the node refused throws the store's error and keeps the intent open and the hash watched, for the step to fail it", async () => {
+            const h = harness();
+            failingWrite(h, RECORD_KEY, 1);
+            h.node.error(-32000, ROUTE_FAILURE);
+            expect(await rejection(transferSdkPayment(h.context, stringOf()))).toEqual(new Error("storage offline"));
+            expect(storedAt(h.storage, RECORD_KEY)).toEqual(pendingStored());
+            expect(storedAt(h.storage, INTENT_KEY)).toEqual(INTENT);
+            expect(storedAt(h.storage, ACTIVITY_KEY)).toEqual(watching(PAYMENT_HASH));
+            jest.mocked(h.storage.set).mockRestore();
+            const events: SdkEvent[] = [];
+            h.node.result(paymentAnswer(PAYMENT_HASH, "Failed", ROUTE_FAILURE));
+            await stepOf(h, events)(live());
+            expect(events).toEqual([
+                {
+                    type: "PAYMENT_FAILED",
+                    paymentHashHex: `0x${PAYMENT_HASH}`,
+                    reason: ROUTE_FAILURE,
+                    payment: readOf(failedStored(ROUTE_FAILURE)),
+                },
+            ]);
+            expect(storedAt(h.storage, RECORD_KEY)).toEqual(failedStored(ROUTE_FAILURE));
+            expect(storedAt(h.storage, INTENT_KEY)).toEqual({ ...INTENT, open: false });
+            expect(storedAt(h.storage, ACTIVITY_KEY)).toEqual(watching());
         });
 
         it("at closing the intent the node refused keeps the intent open and watched, for the step to close", async () => {
@@ -968,14 +1401,21 @@ describe("transferSdkPayment", () => {
             const events: SdkEvent[] = [];
             h.node.result(paymentAnswer(PAYMENT_HASH, "Failed", ROUTE_FAILURE));
             await stepOf(h, events)(live());
-            expect(events).toEqual([{ type: "PAYMENT_FAILED", paymentHashHex: `0x${PAYMENT_HASH}`, reason: ROUTE_FAILURE }]);
+            // The refusal's record keeps the node's text, not fiber's row.
+            const failed = failedStored(`the node refuses the payment: ${ROUTE_FAILURE}`);
+            expect(events).toEqual([
+                { type: "PAYMENT_FAILED", paymentHashHex: `0x${PAYMENT_HASH}`, reason: ROUTE_FAILURE, payment: readOf(failed) },
+            ]);
+            expect(storedAt(h.storage, RECORD_KEY)).toEqual(failed);
             expect(storedAt(h.storage, ACTIVITY_KEY)).toEqual(watching());
         });
 
-        it.each<[string, (h: Harness) => Promise<void>, (h: Harness) => void, SdkEvent]>([
+        it.each<[string, (h: Harness) => Promise<void>, (h: Harness) => void, SdkEvent[]]>([
             [
                 "a charged intent",
                 async (h) => {
+                    // Fiber's false Failed: the record failed while a TLC of the send was charged.
+                    await seedRecord(h, failedStored(ROUTE_FAILURE, { createdAtMs: NOW_MS - 1000, settledAtMs: NOW_MS - 500 }));
                     const cause = new DebitIntentError(
                         "intent_charged",
                         `a payment under ${PAYMENT_HASH} has already been charged, it cannot be authorised again`,
@@ -984,35 +1424,91 @@ describe("transferSdkPayment", () => {
                 },
                 // A charged intent is a session the node holds.
                 (h) => h.node.result(paymentAnswer(PAYMENT_HASH, "Success")),
-                { type: "PAYMENT_SENT", paymentHashHex: `0x${PAYMENT_HASH}` },
+                [
+                    {
+                        type: "PAYMENT_SENT",
+                        paymentHashHex: `0x${PAYMENT_HASH}`,
+                        feeShannons: "1250000",
+                        payment: readOf(
+                            pendingStored({ status: "completed", feeShannons: "1250000", createdAtMs: NOW_MS - 1000, settledAtMs: NOW_MS }),
+                        ),
+                    },
+                ],
             ],
+            // No record: nothing was sent, so no event.
             [
                 "an own invoice",
                 (h) => h.context.policy.recordHoldInvoice(PAYMENT_HASH, AMOUNT, "ckb-hash", 1_791_367_200_250),
                 (h) => h.node.error(-32000, NOT_FOUND),
-                {
-                    type: "PAYMENT_FAILED",
-                    paymentHashHex: `0x${PAYMENT_HASH}`,
-                    reason: "the node holds no session of the payment: it was never sent",
-                },
+                [],
             ],
-        ])(
-            "at forgetting the hash after %s keeps it watched: the step's tick reports it, at least once",
-            async (_, refuse, answer, event) => {
-                const h = harness();
-                await refuse(h);
-                failingWrite(h, ACTIVITY_KEY, 1);
-                expect(await rejection(transferSdkPayment(h.context, stringOf()))).toEqual(new Error("storage offline"));
-                expect(storedAt(h.storage, INTENT_KEY)).toBeUndefined();
-                expect(storedAt(h.storage, ACTIVITY_KEY)).toEqual(watching(PAYMENT_HASH));
-                expect(h.node.calls()).toEqual([]);
-                jest.mocked(h.storage.set).mockRestore();
-                const events: SdkEvent[] = [];
-                answer(h);
-                await stepOf(h, events)(live());
-                expect(events).toEqual([event]);
-                expect(storedAt(h.storage, ACTIVITY_KEY)).toEqual(watching());
-            },
-        );
+        ])("at forgetting the hash after %s keeps it watched: the step's tick ends it", async (_, refuse, answer, expected) => {
+            const h = harness();
+            await refuse(h);
+            failingWrite(h, ACTIVITY_KEY, 1);
+            expect(await rejection(transferSdkPayment(h.context, stringOf()))).toEqual(new Error("storage offline"));
+            expect(storedAt(h.storage, INTENT_KEY)).toBeUndefined();
+            expect(storedAt(h.storage, ACTIVITY_KEY)).toEqual(watching(PAYMENT_HASH));
+            expect(h.node.calls()).toEqual([]);
+            jest.mocked(h.storage.set).mockRestore();
+            const events: SdkEvent[] = [];
+            answer(h);
+            await stepOf(h, events)(live());
+            expect(events).toEqual(expected);
+            expect(storedAt(h.storage, ACTIVITY_KEY)).toEqual(watching());
+        });
+    });
+});
+
+describe("prepareSdkTransfer", () => {
+    it("computes what a send of another tenant's invoice is given, through the LSP as trampoline", () => {
+        const h = harness();
+        const invoice = stringOf();
+        expect(prepareSdkTransfer(h.context, invoice, undefined)).toEqual({
+            encodedInvoice: invoice,
+            paymentHashHex: PAYMENT_HASH,
+            amountShannons: AMOUNT,
+            description: null,
+            maxFeeShannons: "1250000",
+            budgetShannons: "251250000",
+            trampolineHops: [hexToBytes(LSP_PUBKEY)],
+        });
+    });
+
+    it("sends the LSP's own invoice with no hop and the host's budget", () => {
+        const h = harness();
+        expect(prepareSdkTransfer(h.context, stringOf(LSP_INVOICE, LSP_SECRET_KEY), { maxFeeShannons: "0" })).toMatchObject({
+            maxFeeShannons: "0",
+            budgetShannons: AMOUNT,
+            trampolineHops: [],
+        });
+    });
+
+    it("touches neither the storage nor the node, nor holds the hash", () => {
+        const h = harness();
+        prepareSdkTransfer(h.context, stringOf(), undefined);
+        expect(h.storage.ops).toEqual([]);
+        expect(h.node.calls()).toEqual([]);
+        expect([...h.context.sending]).toEqual([]);
+    });
+
+    it("refuses what transfer refuses before anything else", () => {
+        const h = harness();
+        expect(() => prepareSdkTransfer(h.context, stringOf(), { maxFeeShannons: "-1" })).toThrow(TypeError);
+        expect(() => prepareSdkTransfer(h.context, stringOf(), { maxFeeShannons: UINT128_MAX })).toThrow(RangeError);
+    });
+});
+
+describe("classifySdkPaymentFailure", () => {
+    it("names the hash it was given in a session's refusal, and takes another hash's as a plain refusal", () => {
+        const text = `Payment session already exists, stop start new payment actor for Hash256(0x${OTHER_HASH})`;
+        const error = new RpcError("send_payment", -32000, text);
+        expect(classifySdkPaymentFailure(error, OTHER_HASH).code).toBe("payment_session_exists");
+        expect(classifySdkPaymentFailure(error, PAYMENT_HASH).code).toBe("payment_rejected");
+    });
+
+    it("holds the call's error as the cause", () => {
+        const error = new RpcError("send_payment", -32000, ROUTE_FAILURE);
+        expect(classifySdkPaymentFailure(error, PAYMENT_HASH).cause).toBe(error);
     });
 });

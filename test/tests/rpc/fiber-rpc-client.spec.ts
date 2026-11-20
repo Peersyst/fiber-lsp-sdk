@@ -9,6 +9,7 @@ import { answering, refusing, sent } from "../../utils/rpc-answers";
 import {
     toOpenTenantChannelParams,
     toOpenTenantChannelResult,
+    toLspNodeStatus,
     toRegisterTenantParams,
     toRegisterTenantResult,
     toRpcChannelIdParams,
@@ -28,6 +29,7 @@ const {
     get_watchtower_signing_status: getWatchtowerStatus,
     submit_watchtower_signature: submitWatchtower,
     lsp_register_tenant: register,
+    lsp_get_status: lspStatus,
     open_channel_with_external_funding: open,
 } = vectors.methods;
 
@@ -573,6 +575,31 @@ describe("FiberRpcClient", () => {
             const error = await rejection(clientOf(refusing(-32000, "registration request already used")).registerTenant(params));
             expect(error).toBeInstanceOf(RpcError);
             expect(error).toMatchObject({ method: "lsp_register_tenant", code: -32000, message: "registration request already used" });
+        });
+    });
+
+    describe("the node status", () => {
+        it.each(lspStatus.results.map((entry) => [entry.name, entry] as const))(
+            "reads the %s with the operator's token and an empty params array",
+            async (_, entry) => {
+                const mock = answering(entry.json);
+                await expect(clientOf(mock, TOKEN).getLspStatus()).resolves.toEqual(toLspNodeStatus(entry.values));
+                expect(mock.last.init.body).toBe('{"jsonrpc":"2.0","id":1,"method":"lsp_get_status","params":[]}');
+                expect(mock.last.init.headers).toEqual({ "content-type": "application/json", authorization: `Bearer ${TOKEN}` });
+            },
+        );
+
+        it("names the field of a status whose node key is not a point", async () => {
+            const json = caseOf(lspStatus.results, "no tenant").json as object;
+            const error = await rejection(clientOf(answering({ ...json, public_node_id: `02${"00".repeat(32)}` }), TOKEN).getLspStatus());
+            expect(error).toBeInstanceOf(RpcResponseError);
+            expect(error).toMatchObject({ method: "lsp_get_status", path: "response.result.public_node_id" });
+        });
+
+        it("surfaces a refused token as an RpcError with the auth code", async () => {
+            const error = await rejection(clientOf(refusing(RPC_UNAUTHORIZED_CODE, "Unauthorized"), TOKEN).getLspStatus());
+            expect(error).toBeInstanceOf(RpcError);
+            expect(error).toMatchObject({ method: "lsp_get_status", code: RPC_UNAUTHORIZED_CODE, message: "Unauthorized" });
         });
     });
 

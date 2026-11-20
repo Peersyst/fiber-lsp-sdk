@@ -15,7 +15,7 @@ use fiber_json_types::{
     GetChannelSigningStatusResult, GetInvoiceParams, GetInvoiceResult, GetPaymentCommandParams,
     GetPaymentCommandResult, GetWatchtowerSigningStatusParams, GetWatchtowerSigningStatusResult, Hash256,
     HashAlgorithm, Htlc, InboundTlcStatus, InvoiceData, InvoiceParams, InvoiceResult, ListChannelsParams,
-    ListChannelsResult, LspTenantChannel, LspTenantRuntimeStatus, LspTenantStatus, NegotiatingFundingFlags,
+    ListChannelsResult, LspServiceStatus, LspTenantChannel, LspTenantRuntimeStatus, LspTenantStatus, NegotiatingFundingFlags,
     NewInvoiceParams, NextChannelSignerMaterial, OnchainKeyPurpose, OnchainSigningContent,
     OpenChannelWithExternalFundingParams, OpenChannelWithExternalFundingResult, OutboundTlcStatus,
     PaymentCustomRecords, PaymentStatus, Pubkey, RegisterLspTenantParams,
@@ -106,6 +106,7 @@ struct MethodVectors {
     get_watchtower_signing_status: MethodCases,
     submit_watchtower_signature: MethodCases,
     lsp_register_tenant: MethodCases,
+    lsp_get_status: MethodCases,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -456,6 +457,14 @@ struct TenantStatusValues {
 struct RegisterTenantResultValues {
     tenant: TenantStatusValues,
     access_token: String,
+}
+
+#[derive(Serialize)]
+struct LspStatusValues {
+    public_node_id: String,
+    tenant_store_root: String,
+    registered_tenants: String,
+    active_tenants: String,
 }
 
 fn bytes_of<const N: usize>(hex_str: &str) -> [u8; N] {
@@ -1634,6 +1643,21 @@ fn methods() -> MethodVectors {
         };
         case(name, &values, &json)
     };
+    let lsp_status = |name: &str, registered: &str, active: &str| {
+        let values = LspStatusValues {
+            public_node_id: pubkey_hex("lsp public node"),
+            tenant_store_root: "/var/lib/fiber/tenants".to_string(),
+            registered_tenants: registered.to_string(),
+            active_tenants: active.to_string(),
+        };
+        let json = LspServiceStatus {
+            public_node_id: pubkey(&values.public_node_id),
+            tenant_store_root: values.tenant_store_root.clone(),
+            registered_tenants: u64_of(&values.registered_tenants),
+            active_tenants: u64_of(&values.active_tenants),
+        };
+        case(name, &values, &json)
+    };
 
     // A lock outside the genesis defaults, with the code cell and the dep group a wallet would resolve it from.
     let wallet_lock = ScriptVector {
@@ -2125,6 +2149,15 @@ fn methods() -> MethodVectors {
                 ),
             ],
         },
+        // Fiber's method takes no params.
+        lsp_get_status: MethodCases {
+            params: vec![],
+            results: vec![
+                lsp_status("no tenant", "0", "0"),
+                lsp_status("registered tenants, some active", "3", "1"),
+                lsp_status("the largest counters", &u64::MAX.to_string(), &u64::MAX.to_string()),
+            ],
+        },
     }
 }
 
@@ -2232,6 +2265,10 @@ fn round_trip<P: DeserializeOwned + Serialize>(value: &Value) -> Result<Value, S
     Ok(serde_json::to_value(&params).unwrap())
 }
 
+fn no_params(_: &Value) -> Result<Value, String> {
+    Err("fiber's method takes no params".to_string())
+}
+
 fn method_params<'a>(methods: &'a MethodVectors, method: &str) -> Option<(&'a MethodCases, RoundTrip)> {
     Some(match method {
         "open_channel_with_external_funding" => (
@@ -2259,6 +2296,7 @@ fn method_params<'a>(methods: &'a MethodVectors, method: &str) -> Option<(&'a Me
             (&methods.submit_watchtower_signature, round_trip::<SubmitWatchtowerSignatureParams>)
         }
         "lsp_register_tenant" => (&methods.lsp_register_tenant, round_trip::<RegisterLspTenantParams>),
+        "lsp_get_status" => (&methods.lsp_get_status, no_params),
         _ => return None,
     })
 }
@@ -2405,10 +2443,18 @@ mod tests {
     }
 
     #[test]
-    fn refuses_a_method_outside_the_sixteen() {
+    fn refuses_a_method_outside_the_seventeen() {
         let mut written = identity();
         written.as_object_mut().unwrap().insert("connect_peer".to_string(), json!([]));
         assert_refused(written, "connect_peer: not a method of the vectors");
+    }
+
+    #[test]
+    fn refuses_params_for_the_method_that_takes_none() {
+        assert_refused(
+            with("/lsp_get_status", json!([{ "name": "no params", "params": {} }])),
+            "lsp_get_status: the TS side wrote",
+        );
     }
 
     #[test]

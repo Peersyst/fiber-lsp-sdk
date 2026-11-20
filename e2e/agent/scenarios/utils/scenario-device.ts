@@ -5,7 +5,16 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { bytesToHex, hexToBytes } from "@noble/hashes/utils.js";
 import { FiberLspSdk } from "@peersyst/fiber-lsp-sdk";
-import type { Script, SdkChannelOpening, SdkEvent, SdkEventType, SigningEventOutcome, Transaction } from "@peersyst/fiber-lsp-sdk";
+import type {
+    LspOperatorClient,
+    Script,
+    SdkChannelOpening,
+    SdkEvent,
+    SdkEventType,
+    SdkPaymentRecord,
+    SigningEventOutcome,
+    Transaction,
+} from "@peersyst/fiber-lsp-sdk";
 import { registerAgentTenant, SDK_STORE_FILE } from "../../src/agent";
 import { OPEN_CHANNEL_WITH_EXTERNAL_FUNDING_METHOD } from "../../src/agent.constants";
 import { loadOrCreateMasterSeed } from "../../src/agent-store";
@@ -32,6 +41,9 @@ export const INVOICE_AMOUNT_SHANNONS = "1000000";
 // As fiber's hosted tenant pays node 1 (`e2e/lsp`, steps 27 and 28).
 export const OUTBOUND_AMOUNT_SHANNONS = 100_000n;
 const OUTBOUND_INVOICE_EXPIRY_SECONDS = 3600;
+
+// Fiber's trampoline floor through the LSP: its default 1-per-mille rate, rounded up (`graph.rs:1759-1781`).
+export const OUTBOUND_MINIMUM_FEE_SHANNONS = ((OUTBOUND_AMOUNT_SHANNONS + 999n) / 1000n).toString();
 
 // As fiber's hosted watchtower e2e approves settlement (`lsp-remote-signer-watchtower`, step 09b).
 const WATCHTOWER_MAX_FEE_SHANNONS = "10000";
@@ -118,6 +130,13 @@ export function isPaymentReceived(paymentHashHex: string): (event: SdkEvent) => 
     return isSdkEvent("PAYMENT_RECEIVED", (event) => bareLowerHex(event.paymentHashHex) === bareLowerHex(paymentHashHex));
 }
 
+export function untimedRecord(record: SdkPaymentRecord | null): SdkPaymentRecord | null {
+    if (record === null) return null;
+    const { createdAtMs, settledAtMs } = record;
+    assert.ok(settledAtMs === null || settledAtMs >= createdAtMs, `0x${bareLowerHex(record.paymentHashHex)} settled before it was created`);
+    return { ...record, createdAtMs: 0, settledAtMs: settledAtMs === null ? null : 0 };
+}
+
 function isChannelClosed(channelId: string): (event: SdkEvent) => event is SdkEventOf<"CHANNEL_CLOSED"> {
     return isSdkEvent("CHANNEL_CLOSED", (event) => bareLowerHex(event.channelId) === bareLowerHex(channelId));
 }
@@ -165,6 +184,7 @@ export class ScenarioDevice {
         readonly env: ScenarioEnv,
         readonly nodes: FiberNodes,
         readonly faults: FaultyFetch,
+        readonly operator: LspOperatorClient,
         readonly tenantId: string,
         readonly accessToken: string,
         readonly storeDir: string,
@@ -202,7 +222,18 @@ export class ScenarioDevice {
             const tenant = await registerAgentTenant(sdk, operator, { now: Date.now, randomBytes });
             sdk.setBiscuitToken(tenant.accessToken);
             const rebuild = (): FiberLspSdk => build(tenant.accessToken);
-            const device = new ScenarioDevice(sdk, env, nodes, faults, tenant.tenantId, tenant.accessToken, storeDir, rebuild, capture);
+            const device = new ScenarioDevice(
+                sdk,
+                env,
+                nodes,
+                faults,
+                operator,
+                tenant.tenantId,
+                tenant.accessToken,
+                storeDir,
+                rebuild,
+                capture,
+            );
             sdk.connect();
             return device;
         } catch (error) {
@@ -268,9 +299,9 @@ export class ScenarioDevice {
         return steps.map(({ at, step }) => `${step.transition ?? "none"}:${at - first}`).join(", ");
     }
 
-    nodeOneInvoice(description: string): Promise<FiberNewInvoice> {
+    nodeOneInvoice(description: string, amountShannons: bigint = OUTBOUND_AMOUNT_SHANNONS): Promise<FiberNewInvoice> {
         return this.nodes.node1.newInvoice({
-            amountShannons: OUTBOUND_AMOUNT_SHANNONS,
+            amountShannons,
             currency: this.env.chain.invoiceCurrency,
             description,
             expirySeconds: OUTBOUND_INVOICE_EXPIRY_SECONDS,
